@@ -132,6 +132,14 @@ pub struct NativePcCooperativeSession {
 
 #[cfg(all(feature = "parallel", not(target_family = "wasm")))]
 impl NativePcCooperativeSession {
+    /// Checks the request before a host substitutes its bounded cooperative
+    /// route for an existing synchronous multiworker path. No lease is taken.
+    pub fn supports_problem(problem: &SearchProblem) -> bool {
+        problem.visible_height() > 6
+            && validate_extended_pc_backend(problem).is_ok()
+            && ExtendedPcSearchSession::is_native_cooperative_problem_eligible(problem)
+    }
+
     /// Selects the supported lane before doing any work. `Ok(None)` is
     /// inapplicable, not an empty family. The caller owns the checked memory
     /// bound for its coexisting allocations, excluding the borrowed problem
@@ -586,6 +594,8 @@ impl WasmCpuSearchBackend {
         candidates: &[StandardBoard64TilingIdentity],
         control: &ExecutionControl,
     ) -> Result<CoreExecutionResult, WasmCpuSearchError> {
+        #[cfg(test)]
+        validate_strict_prefix_scope(problem, control)?;
         if candidates.windows(2).any(|pair| pair[0] >= pair[1]) {
             return Err(WasmCpuSearchError::InvalidProblem {
                 reason: "wasm_precomputed_geometry_candidates_not_strictly_canonical",
@@ -770,7 +780,52 @@ impl WasmCpuSearchBackend {
         if control.is_cancelled() {
             return terminal(Err(WasmCpuSearchError::Cancelled), None);
         }
+        #[cfg(test)]
+        if let Err(error) = validate_strict_prefix_scope(problem, control) {
+            return terminal(Err(error), None);
+        }
         let worker_count = runtime_worker_count(problem.backend_policy().workers());
+        #[cfg(all(
+            feature = "local-search-ab",
+            feature = "parallel",
+            not(target_family = "wasm")
+        ))]
+        let strict_parallel = super::wasm_cpu::strict_parallel_prefix_requested();
+        #[cfg(all(
+            feature = "local-search-ab",
+            feature = "parallel",
+            not(target_family = "wasm")
+        ))]
+        if strict_parallel {
+            use clearra_core_domain::objective::objective_kind::ObjectiveKind;
+            use clearra_pc_graph::request::{PcCountPolicy, RequestedSearchBackend};
+
+            if worker_count < 2
+                || control.partition().count() != 1
+                || problem.output_policy() != SearchOutputPolicy::CoverageSummary
+                || problem.objective().kind() != ObjectiveKind::Unique
+                || problem.objective().execution_constraints().requested()
+                || problem.count_policy() != PcCountPolicy::CountUnique
+                || problem.backend_policy().requested_backend() != RequestedSearchBackend::Cpu
+                || problem
+                    .queue_observation_policy()
+                    .requires_observation_policy()
+                || !(1..=6).contains(&problem.compact_pc_geometry_height())
+                || !problem
+                    .exact_pieces()
+                    .is_some_and(|locks| (1..=10).contains(&locks))
+                // Explicit capture exports symbolic/bitmap evidence instead
+                // of retaining a dense per-identity queue matrix.
+                || capture.is_some() == problem.solution_probability_policy().requested()
+            {
+                return terminal(
+                    Err(WasmCpuSearchError::Unsupported {
+                        reason: "symbolic_prefix_requires_parallel_compact_cpu_coverage_summary",
+                    }),
+                    None,
+                );
+            }
+        }
         #[cfg(not(feature = "parallel"))]
         let gpu_selected = cfg!(feature = "webgpu-search") && should_use_webgpu(problem);
         #[cfg(not(feature = "parallel"))]
@@ -801,6 +856,30 @@ impl WasmCpuSearchBackend {
             Ok(session) => session,
             Err(error) => return terminal(Err(error), None),
         };
+        #[cfg(all(
+            feature = "local-search-ab",
+            feature = "parallel",
+            not(target_family = "wasm")
+        ))]
+        if strict_parallel && !matches!(&session.inner, WasmSearchSessionInner::Cpu(_)) {
+            return terminal(
+                Err(WasmCpuSearchError::Unsupported {
+                    reason: "symbolic_prefix_requires_compact_cpu",
+                }),
+                None,
+            );
+        }
+        #[cfg(test)]
+        if super::wasm_cpu::strict_prefix_experiment_active()
+            && !matches!(&session.inner, WasmSearchSessionInner::Cpu(_))
+        {
+            return terminal(
+                Err(WasmCpuSearchError::Unsupported {
+                    reason: "symbolic_prefix_requires_compact_cpu",
+                }),
+                None,
+            );
+        }
         #[cfg(any(test, feature = "local-search-ab"))]
         if let Some(capture) = capture {
             let WasmSearchSessionInner::Cpu(cpu) = &mut session.inner else {
@@ -832,6 +911,19 @@ impl WasmCpuSearchBackend {
                     )
                 }
             }
+        }
+        #[cfg(all(
+            feature = "local-search-ab",
+            feature = "parallel",
+            not(target_family = "wasm")
+        ))]
+        if strict_parallel {
+            return terminal(
+                Err(WasmCpuSearchError::Unsupported {
+                    reason: "symbolic_prefix_parallel_plan_did_not_admit",
+                }),
+                None,
+            );
         }
         let result = loop {
             match session.advance(4096, control) {
@@ -1079,6 +1171,37 @@ fn score_resource_test_guard() -> std::sync::MutexGuard<'static, ()> {
     SCORE_RESOURCE_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+#[cfg(test)]
+fn validate_strict_prefix_scope(
+    problem: &SearchProblem,
+    control: &ExecutionControl,
+) -> Result<(), WasmCpuSearchError> {
+    use clearra_pc_graph::request::WorkerPolicy;
+
+    if !super::wasm_cpu::strict_prefix_experiment_active() {
+        return Ok(());
+    }
+    if control.is_cancelled() {
+        return Err(WasmCpuSearchError::Cancelled);
+    }
+    // A hardware/admission cap can reduce an automatic or multiworker
+    // request to one at execution time; that is not an explicitly scoped
+    // strict experiment. Check the request before it can construct workers.
+    if problem.backend_policy().worker_policy() != WorkerPolicy::Fixed(1)
+        || control.partition().count() != 1
+    {
+        return Err(WasmCpuSearchError::Unsupported {
+            reason: "symbolic_prefix_requires_one_explicit_worker_and_partition",
+        });
+    }
+    if problem.output_policy() != SearchOutputPolicy::CoverageSummary {
+        return Err(WasmCpuSearchError::Unsupported {
+            reason: "symbolic_prefix_requires_coverage_summary",
+        });
+    }
+    Ok(())
 }
 
 #[cfg(test)]

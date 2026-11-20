@@ -27,9 +27,9 @@ use super::{
     geometry::{GeometrySearch, ParallelGeometryPlan, ParallelGeometryPreparation, TargetGroup},
     parallel_coverage::SharedCoverage,
     parallel_worker::{
-        run_branch_worker, BranchSearchOutcome, ParallelBranchQueue, ParallelBranchTask,
-        ParallelWorkerResult, RepresentativeCandidate, SharedWorkerRequest, WorkerAggregate,
-        WorkerMemoryComponents,
+        run_branch_worker, BranchSearchOutcome, BranchWorkerInputs, ParallelBranchQueue,
+        ParallelBranchTask, ParallelWorkerResult, RepresentativeCandidate, SharedWorkerRequest,
+        WorkerAggregate, WorkerMemoryComponents,
     },
     reachability::{ReachabilityMetrics, SharedReachabilityTemplates},
     standard_bag_coverage::SharedStandardBagRequest,
@@ -144,6 +144,195 @@ fn parallel_worker_count_for_candidates(candidate_count: u128, requested_workers
 #[cfg(test)]
 mod tests {
     use super::parallel_worker_count_for_candidates;
+
+    #[cfg(all(feature = "local-search-ab", not(target_family = "wasm")))]
+    #[test]
+    fn strict_parallel_prefix_p7_matches_exact_rows_and_does_not_escape_scope() {
+        use clearra_core_domain::execution_cancellation::ExecutionControl;
+        use clearra_pc_graph::request::{
+            PcCountPolicy, PcExecutionPolicy, PcQueueInput, PcScenarioBoard, PcScenarioQuery,
+            PcSolutionProbabilityPolicy, PieceWindow, RequestedSearchBackend, SupplyWindowSize,
+        };
+        use clearra_problem::{ProblemCompiler, SearchOutputPolicy};
+        use clearra_rules::profile::builtin_rules::srs_plus;
+
+        use crate::{backend::with_strict_parallel_prefix_experiment, WasmCpuSearchBackend};
+
+        let make_problem = |explicit_cap: bool, probability_policy| {
+            let mut policy = PcExecutionPolicy::mvp_default()
+                .with_requested_backend(RequestedSearchBackend::Cpu)
+                .with_allow_backend_fallback(false)
+                .with_workers(2)
+                .with_exact_legal_board_enabled(false)
+                .with_conditioned_reachability_enabled(false)
+                .with_tablebase_requested(false);
+            if explicit_cap {
+                policy = policy.with_max_memory_mib(Some(256));
+            }
+            let query = PcScenarioQuery::new(
+                PcScenarioBoard::standard_10(4, 0x3c0f_03c0f),
+                PcQueueInput::standard_7_bag(),
+                PieceWindow::new(6),
+            )
+            .with_rule(srs_plus())
+            .with_allow_hold(true)
+            .with_exact_pieces(Some(6))
+            .with_supply_window_size(SupplyWindowSize::new(7))
+            .with_count_policy(PcCountPolicy::CountUnique)
+            .with_solution_probability_policy(probability_policy)
+            .with_retained_trace_limit(0)
+            .with_execution_policy(policy);
+            ProblemCompiler::compile_scenario_pc(&query)
+                .expect("exact native P7")
+                .with_output_policy(SearchOutputPolicy::CoverageSummary)
+        };
+
+        let problem = make_problem(false, PcSolutionProbabilityPolicy::Include);
+        let control = ExecutionControl::default();
+        let run = || WasmCpuSearchBackend::execute_with_control(&problem, &control);
+
+        let baseline = run().expect("native parallel baseline");
+        assert_eq!(baseline.bool_field("cpu_parallel_execution"), Some(true));
+        assert_eq!(baseline.usize_field("workers_used"), Some(2));
+        assert_eq!(baseline.usize_field("packing_candidate_count"), Some(2260));
+        assert_eq!(baseline.solution_coverages().len(), 246);
+        assert!(baseline.usize_field("total_build_order_nodes").unwrap() > 0);
+
+        let (strict, report) = with_strict_parallel_prefix_experiment(run);
+        let strict = strict.expect("strict native parallel P7");
+        assert!(report.sealed, "{report:?}");
+        assert_eq!(report.workers, 2);
+        assert_eq!(report.executing_workers, 2);
+        assert_eq!(report.candidates, 2260);
+        assert!(report.reverse_relations > 0);
+        assert_eq!(strict.bool_field("cpu_parallel_execution"), Some(true));
+        assert_eq!(strict.usize_field("workers_used"), Some(report.workers));
+        assert_eq!(
+            strict.usize_field("parallel_active_workers"),
+            Some(report.executing_workers),
+        );
+        assert_eq!(
+            strict.usize_field("packing_candidate_count"),
+            Some(report.candidates),
+        );
+        assert_eq!(strict.usize_field("total_build_order_nodes"), Some(0));
+        assert_eq!(strict.usize_field("total_reachability_states"), Some(0));
+        assert_eq!(strict.solution_coverages(), baseline.solution_coverages());
+        assert_eq!(
+            strict.coverage_pattern_words(),
+            baseline.coverage_pattern_words()
+        );
+        assert_eq!(strict.usize_field("coverage_pattern_count"), Some(5040));
+        assert_eq!(strict.usize_field("covered_pattern_count"), Some(5040));
+
+        let warm_reference = run().expect("concrete scope restored");
+        assert_eq!(
+            warm_reference.solution_coverages(),
+            baseline.solution_coverages()
+        );
+        assert!(
+            warm_reference
+                .usize_field("total_build_order_nodes")
+                .unwrap()
+                > 0
+        );
+
+        let (refused, refused_report) = with_strict_parallel_prefix_experiment(|| {
+            WasmCpuSearchBackend::execute_with_control(
+                &make_problem(true, PcSolutionProbabilityPolicy::Include),
+                &control,
+            )
+        });
+        let error = refused.expect_err("solver cap cannot silently fall back to serial");
+        assert_eq!(
+            error.reason(),
+            "symbolic_prefix_parallel_plan_did_not_admit"
+        );
+        assert!(!refused_report.sealed);
+        assert_eq!(refused_report.workers, 0);
+
+        use crate::backend::CapturedSolutionCoverage;
+        use clearra_coverage::pattern::pattern_bitset::PatternBitSet;
+        use std::{
+            collections::BTreeMap,
+            sync::{Arc, Mutex},
+        };
+
+        let capture_problem = make_problem(false, PcSolutionProbabilityPolicy::Omit);
+        let capture_arm = || {
+            let rows = Arc::new(Mutex::new(BTreeMap::new()));
+            let sink_rows = Arc::clone(&rows);
+            let result = WasmCpuSearchBackend::execute_with_solution_coverage_capture(
+                &capture_problem,
+                &control,
+                move |identity, fragment| {
+                    let CapturedSolutionCoverage::Bitmap(bits) = fragment else {
+                        return Err("p7_requires_an_explicit_bitmap");
+                    };
+                    sink_rows
+                        .lock()
+                        .map_err(|_| "p7_sink_poisoned")?
+                        .entry(identity)
+                        .or_insert_with(|| PatternBitSet::new(bits.pattern_count()))
+                        .union_with(bits)
+                        .map_err(|_| "p7_sink_universe_mismatch")
+                },
+            );
+            (result, rows)
+        };
+        let (reference_capture, reference_rows) = capture_arm();
+        let reference_capture = reference_capture.expect("ordinary no-replay capture");
+        let ((strict_capture, strict_rows), capture_report) =
+            with_strict_parallel_prefix_experiment(capture_arm);
+        let strict_capture = strict_capture.expect("strict no-replay capture");
+        assert!(capture_report.sealed, "{capture_report:?}");
+        assert_eq!(capture_report.candidates, report.candidates);
+        assert_eq!(capture_report.executing_workers, 2);
+        assert_eq!(
+            strict_capture.usize_field("total_build_order_nodes"),
+            Some(0)
+        );
+        assert_eq!(
+            strict_capture.usize_field("total_reachability_states"),
+            Some(0)
+        );
+        let identities = baseline
+            .solution_coverages()
+            .iter()
+            .map(|row| row.identity())
+            .collect::<Vec<_>>();
+        for terminal in [&reference_capture, &strict_capture] {
+            assert_eq!(terminal.normalized_solution_identities(), identities);
+            assert!(terminal.path_steps().is_empty());
+            assert!(terminal.solution_coverages().is_empty());
+            assert_eq!(
+                terminal.coverage_pattern_words(),
+                baseline.coverage_pattern_words()
+            );
+        }
+        let reference_rows = reference_rows.lock().unwrap();
+        let strict_rows = strict_rows.lock().unwrap();
+        assert_eq!(*reference_rows, *strict_rows);
+        assert_eq!(strict_rows.len(), identities.len());
+        for row in baseline.solution_coverages() {
+            assert_eq!(
+                strict_rows.get(&row.identity()),
+                Some(row.covered_patterns())
+            );
+        }
+        let (failed_capture, failed_report) = with_strict_parallel_prefix_experiment(|| {
+            WasmCpuSearchBackend::execute_with_solution_coverage_capture(
+                &capture_problem,
+                &control,
+                |_, _| Err("p7_intentional_sink_failure"),
+            )
+        });
+        assert!(failed_capture.is_err());
+        assert!(!failed_report.sealed);
+        eprintln!(
+            "STRICT_PARALLEL_P7 workers=2 candidates=2260 identities=246 original_queues=5040"
+        );
+    }
 
     #[test]
     fn actual_candidate_work_clamps_only_workers_that_cannot_receive_a_branch() {
@@ -276,14 +465,15 @@ fn execute_plan(
             "wasm_piece_source_not_materialized",
         ))?
         .pattern_count();
-    let shared_coverage = Arc::new(SharedCoverage::new(pattern_count));
     // Lazy immutable request tables are shared; language/decision IDs, mutable
     // memo/frontier and graph scratch remain private to each worker.
     let shared_standard_bag = (problem.objective().kind()
         != clearra_core_domain::objective::objective_kind::ObjectiveKind::Tiling)
         .then(|| Arc::new(SharedStandardBagRequest::default()));
+    #[cfg(all(feature = "local-search-ab", not(target_family = "wasm")))]
+    let strict_prefix = super::symbolic_prefix_parallel::claim_strict_parallel_prefix()?;
     let shared_request = SharedWorkerRequest {
-        standard_bag: shared_standard_bag.clone(),
+        standard_bag: shared_standard_bag,
         reachability: Arc::new(SharedReachabilityTemplates::new(
             catalog.width(),
             catalog.height(),
@@ -293,9 +483,28 @@ fn execute_plan(
         solution_coverage_capture,
         #[cfg(feature = "local-search-ab")]
         operation_masks: super::buildup::claim_operation_mask_experiment()?,
+        #[cfg(all(feature = "local-search-ab", not(target_family = "wasm")))]
+        strict_prefix,
     };
+    #[cfg(all(feature = "local-search-ab", not(target_family = "wasm")))]
+    if shared_request.strict_prefix.is_some()
+        && (shared_request.operation_masks.is_some()
+            || problem.output_policy() != clearra_problem::SearchOutputPolicy::CoverageSummary)
+    {
+        return Err(WasmExactSearchError::InvalidProblem(
+            "wasm_strict_parallel_prefix_requires_isolated_coverage_summary",
+        ));
+    }
     let branch_count = plan.searches.len();
-    let queue = Arc::new(ParallelBranchQueue::new(branch_tasks(plan.searches)));
+    let inputs = Arc::new(BranchWorkerInputs {
+        problem,
+        catalog,
+        targets: plan.targets,
+        control,
+        queue: ParallelBranchQueue::new(branch_tasks(plan.searches)),
+        coverage: SharedCoverage::new(pattern_count),
+        request: shared_request,
+    });
     let (sender, receiver) = mpsc::channel();
 
     #[cfg(all(feature = "local-search-ab", target_os = "linux"))]
@@ -304,7 +513,7 @@ fn execute_plan(
     if let Some(probe) = &memory_probe {
         probe.begin_verify(
             workers_used,
-            catalog.retained_bytes(),
+            inputs.catalog.retained_bytes(),
             CoordinatorStorage::Verifying {
                 target_index_bytes: plan.group_pattern_index_bytes,
                 solution_family_bytes: plan.shared_family_bytes,
@@ -315,13 +524,7 @@ fn execute_plan(
     }
 
     for _worker_index in 1..workers_used {
-        let worker_problem = Arc::clone(&problem);
-        let worker_catalog = Arc::clone(&catalog);
-        let worker_targets = Arc::clone(&plan.targets);
-        let worker_control = control.clone();
-        let worker_queue = Arc::clone(&queue);
-        let worker_coverage = Arc::clone(&shared_coverage);
-        let worker_request = shared_request.clone();
+        let worker_inputs = Arc::clone(&inputs);
         let worker_sender = sender.clone();
         #[cfg(all(feature = "local-search-ab", target_os = "linux"))]
         let worker_memory = memory_probe.clone();
@@ -330,13 +533,7 @@ fn execute_plan(
             let result = catch_unwind(AssertUnwindSafe(|| {
                 profile.measure(|| {
                     run_branch_worker(
-                        &worker_problem,
-                        &worker_catalog,
-                        &worker_targets,
-                        &worker_control,
-                        &worker_queue,
-                        &worker_coverage,
-                        worker_request,
+                        &worker_inputs,
                         #[cfg(all(feature = "local-search-ab", target_os = "linux"))]
                         worker_memory.as_deref().map(|probe| (probe, _worker_index)),
                     )
@@ -345,7 +542,7 @@ fn execute_plan(
             .map_err(|_| WasmExactSearchError::InvalidProblem("wasm_parallel_worker_panicked"))
             .and_then(|result| result);
             if result.is_err() {
-                worker_queue.abort();
+                worker_inputs.queue.abort();
             }
             let _ = worker_sender.send(result);
         })
@@ -354,18 +551,12 @@ fn execute_plan(
     drop(sender);
 
     let caller_result = run_branch_worker(
-        &problem,
-        &catalog,
-        &plan.targets,
-        &control,
-        &queue,
-        &shared_coverage,
-        shared_request.clone(),
+        &inputs,
         #[cfg(all(feature = "local-search-ab", target_os = "linux"))]
         memory_probe.as_deref().map(|probe| (probe, 0)),
     );
     if caller_result.is_err() {
-        queue.abort();
+        inputs.queue.abort();
     }
     let mut results = Vec::with_capacity(workers_used);
     results.push(caller_result);
@@ -384,28 +575,45 @@ fn execute_plan(
         probe.coordinator(CoordinatorStorage::Merging);
     }
     let mut outcome = merge_results(
-        &problem,
-        &catalog,
-        &plan.targets,
-        &control,
-        &shared_coverage,
-        &shared_request,
+        &inputs.problem,
+        &inputs.catalog,
+        &inputs.targets,
+        &inputs.control,
+        &inputs.coverage,
+        &inputs.request,
         worker_results,
         plan.group_pattern_index_bytes,
         plan.shared_family_bytes,
         workers_used,
         branch_count,
     )?;
+    #[cfg(all(feature = "local-search-ab", not(target_family = "wasm")))]
+    if let Some(request) = &inputs.request.strict_prefix {
+        if inputs.control.is_cancelled() {
+            return Err(WasmExactSearchError::Cancelled);
+        }
+        if !outcome.count_complete
+            || outcome.truncated_reason.is_some()
+            || !outcome.representative_path.is_empty()
+        {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "wasm_strict_parallel_prefix_terminal_incomplete",
+            ));
+        }
+        request.seal(outcome.workers_used, outcome.packing_candidate_count)?;
+    }
     // The execution owner is authoritative for the single immutable payload;
     // no worker-count multiplier and no sum of overlapping exit snapshots.
     outcome
         .worker_memory_components
-        .shared_standard_bag_request_bytes = shared_standard_bag
+        .shared_standard_bag_request_bytes = inputs
+        .request
+        .standard_bag
         .as_ref()
         .map_or(0, |request| request.retained_bytes());
     outcome
         .worker_memory_components
-        .shared_reachability_template_bytes = shared_request.reachability.retained_bytes();
+        .shared_reachability_template_bytes = inputs.request.reachability.retained_bytes();
     #[cfg(all(feature = "local-search-ab", target_os = "linux"))]
     if let Some(probe) = &memory_probe {
         probe.coordinator(CoordinatorStorage::Finalizing);

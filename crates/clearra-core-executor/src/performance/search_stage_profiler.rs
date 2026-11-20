@@ -142,6 +142,45 @@ pub(crate) enum ExecutorSearchStage {
     FinesseProductDp,
     FinesseAggregation,
     FinesseWitness,
+    #[cfg(any(
+        test,
+        all(
+            feature = "local-search-ab",
+            feature = "parallel",
+            not(target_family = "wasm")
+        )
+    ))]
+    StrictPrefixUpper,
+    #[cfg(any(
+        test,
+        all(
+            feature = "local-search-ab",
+            feature = "parallel",
+            not(target_family = "wasm")
+        )
+    ))]
+    StrictPrefixReverse,
+    #[cfg(any(
+        test,
+        all(
+            feature = "local-search-ab",
+            feature = "parallel",
+            not(target_family = "wasm")
+        )
+    ))]
+    StrictPrefixLanguage,
+    #[cfg(all(
+        feature = "local-search-ab",
+        feature = "parallel",
+        not(target_family = "wasm")
+    ))]
+    StrictReferenceLanguage,
+    #[cfg(all(
+        feature = "local-search-ab",
+        feature = "parallel",
+        not(target_family = "wasm")
+    ))]
+    StrictStandardBagProduct,
     #[cfg_attr(
         not(all(feature = "parallel", not(target_family = "wasm"))),
         allow(dead_code)
@@ -224,6 +263,45 @@ impl ExecutorSearchStage {
         Self::FinesseProductDp,
         Self::FinesseAggregation,
         Self::FinesseWitness,
+        #[cfg(any(
+            test,
+            all(
+                feature = "local-search-ab",
+                feature = "parallel",
+                not(target_family = "wasm")
+            )
+        ))]
+        Self::StrictPrefixUpper,
+        #[cfg(any(
+            test,
+            all(
+                feature = "local-search-ab",
+                feature = "parallel",
+                not(target_family = "wasm")
+            )
+        ))]
+        Self::StrictPrefixReverse,
+        #[cfg(any(
+            test,
+            all(
+                feature = "local-search-ab",
+                feature = "parallel",
+                not(target_family = "wasm")
+            )
+        ))]
+        Self::StrictPrefixLanguage,
+        #[cfg(all(
+            feature = "local-search-ab",
+            feature = "parallel",
+            not(target_family = "wasm")
+        ))]
+        Self::StrictReferenceLanguage,
+        #[cfg(all(
+            feature = "local-search-ab",
+            feature = "parallel",
+            not(target_family = "wasm")
+        ))]
+        Self::StrictStandardBagProduct,
         Self::ExtendedPcCandidateVerifyAndReduce,
     ];
 
@@ -302,6 +380,45 @@ impl ExecutorSearchStage {
             Self::ExtendedPcCandidateVerifyAndReduce => {
                 "rust.extended_pc.candidate_verify_and_reduce"
             }
+            #[cfg(any(
+                test,
+                all(
+                    feature = "local-search-ab",
+                    feature = "parallel",
+                    not(target_family = "wasm")
+                )
+            ))]
+            Self::StrictPrefixUpper => "wasm.candidate.strict_prefix.upper",
+            #[cfg(any(
+                test,
+                all(
+                    feature = "local-search-ab",
+                    feature = "parallel",
+                    not(target_family = "wasm")
+                )
+            ))]
+            Self::StrictPrefixReverse => "wasm.candidate.strict_prefix.reverse",
+            #[cfg(any(
+                test,
+                all(
+                    feature = "local-search-ab",
+                    feature = "parallel",
+                    not(target_family = "wasm")
+                )
+            ))]
+            Self::StrictPrefixLanguage => "wasm.candidate.strict_prefix.language",
+            #[cfg(all(
+                feature = "local-search-ab",
+                feature = "parallel",
+                not(target_family = "wasm")
+            ))]
+            Self::StrictReferenceLanguage => "wasm.candidate.strict_reference.language",
+            #[cfg(all(
+                feature = "local-search-ab",
+                feature = "parallel",
+                not(target_family = "wasm")
+            ))]
+            Self::StrictStandardBagProduct => "wasm.candidate.strict.standard_bag_product",
         }
     }
 }
@@ -610,10 +727,7 @@ impl ExecutorSearchProfileSession {
     }
 
     pub fn finish(mut self) -> Vec<ExecutorSearchProfileStage> {
-        self.active = false;
-        let profile = ACTIVE_PROFILE
-            .with(|slot| slot.borrow_mut().take())
-            .unwrap_or_default();
+        let profile = self.take_profile();
         let totals = profile.totals;
         #[cfg(not(target_family = "wasm"))]
         let totals = {
@@ -626,6 +740,35 @@ impl ExecutorSearchProfileSession {
             }
             totals
         };
+        Self::stage_rows(totals)
+    }
+
+    /// Return the submitting thread and pooled worker aggregates separately.
+    /// The submitting thread may also run a native worker. Neither list is
+    /// exclusive wall time: different spans can overlap or be nested.
+    #[cfg(all(feature = "local-search-ab", not(target_family = "wasm")))]
+    pub fn finish_partitioned(
+        mut self,
+    ) -> (
+        Vec<ExecutorSearchProfileStage>,
+        Vec<ExecutorSearchProfileStage>,
+    ) {
+        let profile = self.take_profile();
+        let workers = profile.worker_totals.map_or(
+            [StageTotals::default(); ExecutorSearchStage::COUNT],
+            |totals| *totals.lock().expect("worker profile totals"),
+        );
+        (Self::stage_rows(profile.totals), Self::stage_rows(workers))
+    }
+
+    fn take_profile(&mut self) -> ThreadSearchProfile {
+        self.active = false;
+        ACTIVE_PROFILE
+            .with(|slot| slot.borrow_mut().take())
+            .unwrap_or_default()
+    }
+
+    fn stage_rows(totals: SearchStageTotals) -> Vec<ExecutorSearchProfileStage> {
         ExecutorSearchStage::ALL
             .into_iter()
             .zip(totals)
@@ -700,6 +843,25 @@ mod tests {
         });
         assert_eq!(stage(&stages).invocation_count, 5);
         assert_eq!(stage(&stages).work_item_count, 27);
+    }
+
+    #[cfg(feature = "local-search-ab")]
+    #[test]
+    fn diagnostic_profile_distinguishes_caller_from_pool_worker_work() {
+        let session = ExecutorSearchProfileSession::start().expect("caller profile");
+        SearchStageSpan::begin(STAGE).finish(3);
+        let worker = WorkerSearchProfile::capture();
+        thread::scope(|scope| {
+            scope
+                .spawn(|| worker.measure(|| SearchStageSpan::begin_scaled(STAGE, 2).finish(5)))
+                .join()
+                .expect("worker job");
+        });
+        let (caller, pool) = session.finish_partitioned();
+        assert_eq!(stage(&caller).invocation_count, 1);
+        assert_eq!(stage(&caller).work_item_count, 3);
+        assert_eq!(stage(&pool).invocation_count, 2);
+        assert_eq!(stage(&pool).work_item_count, 10);
     }
 
     #[test]

@@ -47,10 +47,14 @@ test('state-major changes only product layout while both arms retain reference u
 });
 
 test('ambient product memo flags cannot contaminate a baseline or another candidate', () => {
-  const env = productMemoAbbaEnvironment({ KEEP: 'yes', CLEARRA_STANDARD_BAG_MEMO: 'compact', CLEARRA_STANDARD_BAG_PRODUCT_MEMO_LAYOUT: 'state-major' }, productMemoAbbaSelection('state-major', 'baseline'));
+  const env = productMemoAbbaEnvironment({
+    KEEP: 'yes', CLEARRA_STANDARD_BAG_MEMO: 'compact',
+    CLEARRA_STANDARD_BAG_PRODUCT_MEMO_LAYOUT: 'state-major', clearra_standard_bag_union_memo: 'compact',
+  }, productMemoAbbaSelection('state-major', 'baseline'));
   assert.equal(env.KEEP, 'yes');
   assert.equal(env.CLEARRA_STANDARD_BAG_MEMO, 'reference');
   assert.equal(env.CLEARRA_STANDARD_BAG_PRODUCT_MEMO_LAYOUT, 'flat');
+  assert.equal(Object.hasOwn(env, 'clearra_standard_bag_union_memo'), false);
 });
 
 test('selection must be echoed by the actual solver before its timing can be accepted', () => {

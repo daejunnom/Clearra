@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use clearra_core_domain::{
     execution_cancellation::{ExecutionCancellationToken, ExecutionPartition},
@@ -13,6 +13,15 @@ use clearra_problem::ProblemCompiler;
 use clearra_supply::queue::queue_pattern_expression::QueuePatternExpression;
 
 use super::*;
+
+fn failed_queue_resource_test_guard() -> MutexGuard<'static, ()> {
+    // The fixtures below share the process-wide execution lease, even
+    // though each fixture owns a different problem and result.
+    static RESOURCE_TEST_LOCK: Mutex<()> = Mutex::new(());
+    RESOURCE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 fn fixture(input: &str, example_limit: usize, policy: PcExecutionPolicy) -> Arc<SearchProblem> {
     let expression = QueuePatternExpression::parse(input, 7).expect("one-piece expression");
@@ -50,6 +59,7 @@ fn advance_to_terminal(
 
 #[test]
 fn compact_pc_failed_queue_exact_compiled_ordinals_and_fail_closed_boundaries() {
+    let _resource_guard = failed_queue_resource_test_guard();
     let policy = PcExecutionPolicy::mvp_default().with_workers(1);
     let control = ExecutionControl::default();
     assert!(matches!(
@@ -206,6 +216,7 @@ fn multi_candidate_fixture(workers: usize) -> Arc<SearchProblem> {
 #[cfg(all(feature = "parallel", not(target_family = "wasm")))]
 #[test]
 fn compact_pc_failed_queue_native_workers_keep_complete_original_coverage() {
+    let _resource_guard = failed_queue_resource_test_guard();
     let control = ExecutionControl::default();
     let run = |workers| {
         let problem = multi_candidate_fixture(workers);
@@ -248,6 +259,7 @@ fn compact_pc_failed_queue_distributed_worker_rows_require_complete_dispatch() {
         WasmCpuCandidateProducer, WasmDistributedVerifier,
     };
 
+    let _resource_guard = failed_queue_resource_test_guard();
     let problem = multi_candidate_fixture(1);
     let control = ExecutionControl::default();
     // A real worker owns a separate WASM realm and capacity ledger. Use a

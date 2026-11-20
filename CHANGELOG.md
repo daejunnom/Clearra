@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 0.9.0 - 2026-11-21
+
+- Use the Rust CPU solver in product builds and keep the C solver isolated as
+  an independent verification reference.
+- Store exact standard-bag union memo entries more compactly without changing
+  solution counts or which queues a solution covers.
+- Preserve the original field and piece limits when continuing exact PC
+  searches, and retain canonical result ordering across worker counts.
+
 ## 0.8.4 - 2026-11-03
 
 - Align native C SRS+ I-piece half-turn kicks and Rust-to-C descriptors with

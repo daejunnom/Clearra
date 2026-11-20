@@ -588,7 +588,6 @@ pub(super) struct ParallelWorkerResult {
     pub candidate_count: usize,
 }
 
-#[derive(Clone)]
 pub(super) struct SharedWorkerRequest {
     pub standard_bag: Option<Arc<SharedStandardBagRequest>>,
     pub reachability: Arc<SharedReachabilityTemplates>,
@@ -596,29 +595,91 @@ pub(super) struct SharedWorkerRequest {
     pub solution_coverage_capture: Option<SolutionCoverageCapture>,
     #[cfg(feature = "local-search-ab")]
     pub operation_masks: Option<super::buildup::OperationMaskExperiment>,
+    #[cfg(all(feature = "local-search-ab", not(target_family = "wasm")))]
+    pub strict_prefix: Option<super::symbolic_prefix_parallel::StrictParallelPrefixRequest>,
+}
+
+/// One owner for immutable inputs and the explicitly shared work/coverage
+/// queues. Pooled jobs pin this owner once; scratch remains worker-local.
+pub(super) struct BranchWorkerInputs {
+    pub problem: Arc<SearchProblem>,
+    pub catalog: Arc<GeometryCatalog>,
+    pub targets: Arc<[TargetGroup]>,
+    pub control: ExecutionControl,
+    pub queue: ParallelBranchQueue,
+    pub coverage: SharedCoverage,
+    pub request: SharedWorkerRequest,
 }
 
 pub(super) fn run_branch_worker(
-    problem: &SearchProblem,
-    catalog: &GeometryCatalog,
-    targets: &[TargetGroup],
-    control: &ExecutionControl,
-    queue: &ParallelBranchQueue,
-    shared_coverage: &SharedCoverage,
-    shared_request: SharedWorkerRequest,
+    inputs: &BranchWorkerInputs,
     #[cfg(all(feature = "local-search-ab", target_os = "linux"))] memory_probe: Option<(
         &super::parallel_memory_peak::MemoryProbe,
         usize,
     )>,
 ) -> Result<ParallelWorkerResult, WasmExactSearchError> {
+    let run = || {
+        run_branch_worker_inner(
+            inputs,
+            #[cfg(all(feature = "local-search-ab", target_os = "linux"))]
+            memory_probe,
+        )
+    };
+    #[cfg(all(feature = "local-search-ab", not(target_family = "wasm")))]
+    if let Some(request) = &inputs.request.strict_prefix {
+        use super::symbolic_prefix_orders::{
+            with_catalog_static_guards, with_legacy_upper, with_packed_upper_target,
+            with_strict_prefix_order,
+        };
+
+        let catalog_table = request.catalog_static_guards(&inputs.catalog, &inputs.control);
+        let catalog_table = match catalog_table {
+            Ok(table) => table,
+            Err(error) => {
+                inputs.queue.abort();
+                return Err(error);
+            }
+        };
+        let strict = || {
+            with_legacy_upper(request.legacy_upper(), || {
+                with_packed_upper_target(|| with_strict_prefix_order(run))
+            })
+        };
+        let (outcome, work) = match catalog_table {
+            Some(table) => with_catalog_static_guards(table, strict),
+            None => strict(),
+        };
+        let outcome = outcome?;
+        request.publish_worker(outcome.candidate_count, work)?;
+        return Ok(outcome);
+    }
+    run()
+}
+
+fn run_branch_worker_inner(
+    inputs: &BranchWorkerInputs,
+    #[cfg(all(feature = "local-search-ab", target_os = "linux"))] memory_probe: Option<(
+        &super::parallel_memory_peak::MemoryProbe,
+        usize,
+    )>,
+) -> Result<ParallelWorkerResult, WasmExactSearchError> {
+    let BranchWorkerInputs {
+        problem,
+        catalog,
+        targets,
+        control,
+        queue,
+        coverage: shared_coverage,
+        request: shared_request,
+    } = inputs;
     let mut workspace = BuildUpWorkspace::default();
     #[cfg(feature = "local-search-ab")]
     if let Some(experiment) = &shared_request.operation_masks {
         workspace.begin_operation_mask_worker(experiment);
     }
     workspace.set_shared_reachability_templates(Arc::clone(&shared_request.reachability))?;
-    if let Some(shared_standard_bag) = shared_request.standard_bag {
-        workspace.set_shared_standard_bag_request(shared_standard_bag)?;
+    if let Some(shared_standard_bag) = &shared_request.standard_bag {
+        workspace.set_shared_standard_bag_request(Arc::clone(shared_standard_bag))?;
     }
     let mut evaluator = CoverageProductEvaluator::default();
     let mut aggregate = WorkerAggregate {
@@ -967,13 +1028,16 @@ fn run_branch(
                         )?;
                     }
                 }
+                let retain_identity = retains_buildable_identity_evidence(problem);
+                #[cfg(any(test, feature = "local-search-ab"))]
+                let retain_identity = retain_identity || solution_coverage_capture.is_some();
                 aggregate.observe(
                     task.canonical_index,
                     local_ordinal,
                     candidate,
                     result,
                     solution_coverage,
-                    retains_buildable_identity_evidence(problem),
+                    retain_identity,
                     problem.output_policy().retains_representative_trace(),
                 )?;
                 local_ordinal = local_ordinal.saturating_add(1);

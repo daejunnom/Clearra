@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { join } from "node:path";
 import test from "node:test";
 
+import { evaluatePlacementGraphAdoption } from "../tools/placement-graph-adoption.mjs";
 import {
   adoptionSchedule, collectPlacementGraphAdoption, parseAdoptionArguments, validateAdoptionProof,
 } from "./run-placement-graph-adoption.mjs";
@@ -15,6 +16,7 @@ const custody = { binarySha: "a".repeat(64), managerSha: "b".repeat(64), hostFin
 const cli = ["--id", "timings-42", "--proof-id", "proof-42", "--source-sha", sourceCommit];
 const options = parseAdoptionArguments(cli);
 const minimumOptions = parseAdoptionArguments([...cli, "--experiment", "minimum-domain-cutoff"]);
+const strictOptions = parseAdoptionArguments([...cli, "--experiment", "strict-prefix"]);
 const planFor = (configured) => parseProofArguments(["--case", "p7p4", "--id", configured.proofId,
   "--source-sha", sourceCommit, "--experiment", configured.experiment.name]);
 const plan = planFor(options);
@@ -48,6 +50,7 @@ function bind(phase) {
 function report(step, receipt, output, sha) {
   const { fixture } = plan;
   const experiment = step.experiment ?? placementExperiment(DEFAULT_PLACEMENT_EXPERIMENT);
+  const strict = experiment.name === "strict-prefix";
   return {
     schema: "clearra.placement-graph-benchmark.v1", case: fixture.name, valid: true, validation_errors: [],
     binary_sha256: custody.binarySha, compiled_source_commit: sourceCommit,
@@ -75,6 +78,12 @@ function report(step, receipt, output, sha) {
       count_complete: "true", probability_complete: "true", resource_truncated: "false",
       normalized_solution_set_hash: "cts1:2fcbc950acdffa31", workers_used: "12",
       parallel_active_workers: "12", cpu_parallel_execution: "true",
+      ...(strict ? {
+        representative_pattern_id: "", representative_candidate_id: "",
+        packing_candidate_count: "30000000",
+        total_build_order_nodes: step.value === "1" ? "0" : "1000000",
+        total_reachability_states: step.value === "1" ? "0" : "2000000",
+      } : {}),
     },
     materialized_identities: {
       count: fixture.solutions, reported_total_count: fixture.solutions, covers_reported_family: true,
@@ -84,9 +93,31 @@ function report(step, receipt, output, sha) {
     solution_coverage: output === "solution-coverage" ? {
       complete: true, sha256: sha, solution_count: fixture.solutions, total_weight: fixture.queues,
       covered_weight: fixture.queues, covered_pairs: fixture.queues,
+      ...(strict ? {
+        output_bytes: step.value === "0" ? 1_860_000_000 : 1_860_000_032,
+        output_limit_bytes: 3 * 1024 ** 3,
+        spool: {
+          spill_write_limit_bytes: 5 * 1024 ** 3,
+          spill_bytes_written: step.value === "0" ? 3_500_000_000 : 3_600_000_000,
+          peak_live_spill_bytes: step.value === "0" ? 1_900_000_000 : 2_000_000_000,
+        },
+      } : {}),
     } : null,
     timing_ms: { search: step.value === "0" ? 120 : 80 },
     backend_contract: "native-host Rust", other_process_configuration: {},
+    ...(strict ? {
+      coverage_presentation: "coverage-summary-omit",
+      coverage_capture_sink: output === "global-only" ? "discard" : "exact-spool",
+      materialized_path_step_count: 0,
+      materialized_solution_coverage_count: 0,
+      materialized_solution_probability_count: 0,
+      strict_prefix: step.value === "0" ? null : {
+        sealed: true, candidates: 30000000, workers: 12, executing_workers: 12,
+        reverse_relations: 100, unresolved_lanes: 200, pruned_lanes: 42,
+        pose_work: 100, worklist_pops: 100, pose_domains: 100, ordered_kick_terms: 100,
+        peak_relation_logical_bytes: 16,
+      },
+    } : {}),
   };
 }
 
@@ -268,5 +299,98 @@ test("minimum-domain timing binds a complete same-host setup only on the unprofi
     assert.equal(denied.state, "failed");
     assert.equal(denied.decision, null);
     assert.equal(failedIo.started.length, 1);
+  }
+});
+
+test("strict-prefix runs only ABBA with full exact mapping and no timed spool", async () => {
+  const proofBundleForStrict = proofBundle(strictOptions);
+  const proof = validateAdoptionProof(strictOptions, binary, artifactRoot, custody, proofBundleForStrict);
+  const timingSchedule = adoptionSchedule(binary, proof.proofOptions.timeout, strictOptions.experiment);
+  assert.equal(timingSchedule.map((step) => step.arm).join(""), "ABBA");
+  const io = recordingIo();
+  const timing = await collectPlacementGraphAdoption(strictOptions, custody, proof, timingSchedule, io);
+  assert.equal(timing.state, "completed-adoptable", timing.error);
+  assert.equal(timing.release_authority, false);
+  assert.equal(timing.order, "ABBA");
+  assert.equal(io.started.length, 4);
+  const manifest = io.writes.get("manifest.json");
+  assert.equal(manifest.order, "ABBA");
+  assert.equal(manifest.runs.length, 4);
+  const decision = io.writes.get("decision.json");
+  assert.equal(decision.experiment, "strict-prefix");
+  assert.deepEqual(decision.blocks, [
+    { order: "AB", baseline_ms: 120, candidate_ms: 80 },
+    { order: "BA", baseline_ms: 120, candidate_ms: 80 },
+  ]);
+  assert.equal(io.writes.get("trial-2-b.json").coverage_capture_sink, "discard");
+  assert.equal(io.writes.get("mapping-candidate.json").coverage_capture_sink, "exact-spool");
+  assert.throws(() => validateAdoptionProof(strictOptions, binary, artifactRoot, custody, proofBundle()));
+  for (const tamper of [
+    (bundle) => { bundle.summary.case = "ctk3-profile-4L-P7-srsplus"; },
+    (bundle) => { bundle.comparison.report.equivalent = false; bind(bundle.comparison); },
+    (bundle) => { bundle.candidate.report.strict_prefix.sealed = false; bind(bundle.candidate); },
+    (bundle) => {
+      bundle.candidate.report.solution_coverage.spool.spill_write_limit_bytes += 1;
+      bind(bundle.candidate);
+    },
+    (bundle) => {
+      bundle.candidate.report.solution_coverage.output_bytes =
+        bundle.candidate.report.solution_coverage.output_limit_bytes + 1;
+      bind(bundle.candidate);
+    },
+  ]) {
+    const denied = proofBundle(strictOptions);
+    tamper(denied);
+    assert.throws(() => validateAdoptionProof(strictOptions, binary, artifactRoot, custody, denied));
+  }
+});
+
+test("strict ABBA requires both directions and distinguishes incomplete and extra timing samples", async () => {
+  const proof = validateAdoptionProof(strictOptions, binary, artifactRoot, custody, proofBundle(strictOptions));
+  const timingSchedule = adoptionSchedule(binary, proof.proofOptions.timeout, strictOptions.experiment);
+  const io = recordingIo((_, execution, ordinal) => {
+    // Pooled B is faster, but the B-before-A pair loses.
+    if (ordinal === 3) execution.report.timing_ms.search = 130;
+  });
+  const timing = await collectPlacementGraphAdoption(strictOptions, custody, proof, timingSchedule, io);
+  assert.equal(timing.state, "completed-not-adoptable", timing.error);
+  const decision = io.writes.get("decision.json");
+  assert.equal(decision.status, "not-adoptable");
+  assert.ok(decision.time.median_ms.candidate < decision.time.median_ms.baseline);
+  assert.equal(decision.time.improved, false);
+  assert.deepEqual(decision.blocks[1], { order: "BA", baseline_ms: 120, candidate_ms: 130 });
+
+  const manifest = io.writes.get("manifest.json");
+  const runs = manifest.runs.map(({ benchmark, supervisor }) => ({
+    benchmark: io.writes.get(benchmark), supervisor: io.writes.get(supervisor),
+  }));
+  const incomplete = evaluatePlacementGraphAdoption({ ...manifest, runs: runs.slice(0, 3) });
+  assert.equal(incomplete.status, "inconclusive");
+  assert.equal(incomplete.time, undefined);
+  assert.throws(() => evaluatePlacementGraphAdoption({ ...manifest, runs: [...runs, runs[1]] }), /ordered ABBA/u);
+
+  const extraIo = recordingIo();
+  const extra = await collectPlacementGraphAdoption(strictOptions, custody, proof,
+    [...timingSchedule, timingSchedule[1]], extraIo);
+  assert.equal(extra.state, "failed");
+  assert.match(extra.error, /fixed global-only ABBA sequence/u);
+  assert.equal(extraIo.started.length, 0);
+});
+
+test("strict-prefix timing rejects mismatched candidate custody, output mode, and fallback", async () => {
+  const proof = validateAdoptionProof(strictOptions, binary, artifactRoot, custody, proofBundle(strictOptions));
+  const timingSchedule = adoptionSchedule(binary, proof.proofOptions.timeout, strictOptions.experiment);
+  for (const tamper of [
+    (measured) => { measured.summary.total_build_order_nodes = "1"; },
+    (measured) => { measured.strict_prefix.executing_workers = 1; },
+    (measured) => { measured.coverage_capture_sink = "exact-spool"; },
+  ]) {
+    const io = recordingIo((_, execution, ordinal) => {
+      if (ordinal === 2) tamper(execution.report);
+    });
+    const timing = await collectPlacementGraphAdoption(strictOptions, custody, proof, timingSchedule, io);
+    assert.equal(timing.state, "failed");
+    assert.equal(timing.decision, null);
+    assert.equal(io.started.length, 2);
   }
 });

@@ -3708,6 +3708,7 @@ mod get_job_events {
                 .active_job
                 .as_ref()
                 .ok_or_else(|| DesktopTauriCommandError::job("desktop job handle missing"))?;
+            let cancelled_before_publication = handle.cancel_handle().is_cancelled();
             let mut events = handle.drain_events();
             let worker_finished = handle.is_finished();
             let terminal_received = events.iter().any(GuiJobEvent::is_terminal);
@@ -3736,6 +3737,14 @@ mod get_job_events {
             }
 
             for event in &mut events {
+                // Completion on the worker does not publish a response. A
+                // cancellation accepted by the bridge before this drain also
+                // discards a completion that was already in the channel.
+                if cancelled_before_publication && matches!(event, GuiJobEvent::Completed { .. }) {
+                    *event = GuiJobEvent::Cancelled {
+                        job_id: event.job_id(),
+                    };
+                }
                 if let GuiJobEvent::Completed {
                     product_page_source_owner,
                     ..
@@ -5410,6 +5419,41 @@ mod tests {
         assert_eq!(exhausted["state"], "exhausted");
 
         bridge.product_page_release();
+        assert!(bridge.product_page_get("1", "1").is_err());
+
+        let buffered_job = bridge
+            .start_job(&request)
+            .expect("start desktop parity for buffered completion cancellation");
+        let buffered_deadline = Instant::now() + Duration::from_secs(2);
+        // Let the worker finish without draining its terminal response. This
+        // puts cancellation strictly after completion but before publication.
+        while !bridge
+            .active_job
+            .as_ref()
+            .expect("active job")
+            .is_finished()
+        {
+            assert!(
+                Instant::now() < buffered_deadline,
+                "desktop parity did not buffer completion"
+            );
+            std::thread::yield_now();
+        }
+        bridge
+            .cancel_job(buffered_job)
+            .expect("cancel buffered desktop parity completion");
+        let terminal = bridge
+            .drain_job_events(buffered_job)
+            .expect("drain cancelled buffered completion")
+            .into_iter()
+            .filter(GuiJobEvent::is_terminal)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            terminal,
+            vec![GuiJobEvent::Cancelled {
+                job_id: crate::GuiJobId::new(buffered_job),
+            }]
+        );
         assert!(bridge.product_page_get("1", "1").is_err());
     }
 

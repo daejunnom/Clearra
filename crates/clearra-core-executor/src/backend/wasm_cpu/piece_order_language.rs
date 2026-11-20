@@ -5,6 +5,17 @@ use clearra_core_domain::piece::piece_kind::PieceKind;
 
 use super::{buildup::BuildOrderGraph, mix_digest, WasmExactSearchError};
 
+#[cfg(any(
+    test,
+    all(
+        feature = "local-search-ab",
+        feature = "parallel",
+        not(target_family = "wasm")
+    )
+))]
+#[path = "closed_prefix_frontier.rs"]
+mod closed_prefix_frontier;
+
 const EMPTY_REFERENCE: u32 = u32::MAX;
 const INITIAL_BUCKET_COUNT: usize = 1024;
 const COMPACT_PIECE_RANGE_EDGE_LIMIT: usize = u8::MAX as usize;
@@ -77,6 +88,24 @@ pub(super) struct PieceOrderLanguageCache {
     seen_once: HashMap<CoverageCacheKey, ()>,
     coverage_hits: usize,
     coverage_misses: usize,
+    #[cfg(any(
+        test,
+        all(
+            feature = "local-search-ab",
+            feature = "parallel",
+            not(target_family = "wasm")
+        )
+    ))]
+    prefix_frontier: closed_prefix_frontier::PrefixFrontierScratch,
+    #[cfg(any(
+        test,
+        all(
+            feature = "local-search-ab",
+            feature = "parallel",
+            not(target_family = "wasm")
+        )
+    ))]
+    prefix_frontier_compilations: usize,
 }
 
 pub(super) enum CoverageCacheLookup {
@@ -531,6 +560,159 @@ impl PieceOrderLanguageCache {
         Ok(Certified(result(Some(references[0]))))
     }
 
+    /// Intern the Boolean words supported by a strict prefix relation. Both
+    /// directions have already been closed by word-level composition: these
+    /// are the live prefixes reachable from zero, not a traversal frontier.
+    #[cfg(any(
+        test,
+        all(
+            feature = "local-search-ab",
+            feature = "parallel",
+            not(target_family = "wasm")
+        )
+    ))]
+    pub(super) fn compile_closed_prefix_language(
+        &mut self,
+        pieces: &[PieceKind],
+        permitted_parents: &[[u64; super::symbolic_prefix_domain::MAX_PREFIX_WORDS]],
+        active: &[u64; super::symbolic_prefix_domain::MAX_PREFIX_WORDS],
+        inspected_edges: &mut usize,
+    ) -> Result<Option<u32>, WasmExactSearchError> {
+        self.compile_closed_prefix_language_with_mode(
+            pieces,
+            permitted_parents,
+            active,
+            inspected_edges,
+            None,
+        )
+    }
+
+    #[cfg(any(
+        test,
+        all(
+            feature = "local-search-ab",
+            feature = "parallel",
+            not(target_family = "wasm")
+        )
+    ))]
+    pub(super) fn frontier_compilations(&self) -> usize {
+        self.prefix_frontier_compilations
+    }
+
+    #[cfg(any(
+        test,
+        all(
+            feature = "local-search-ab",
+            feature = "parallel",
+            not(target_family = "wasm")
+        )
+    ))]
+    fn compile_closed_prefix_language_with_mode(
+        &mut self,
+        pieces: &[PieceKind],
+        permitted_parents: &[[u64; super::symbolic_prefix_domain::MAX_PREFIX_WORDS]],
+        active: &[u64; super::symbolic_prefix_domain::MAX_PREFIX_WORDS],
+        inspected_edges: &mut usize,
+        // None selects the process experiment mode; Some(0) forces the
+        // reference, while a small positive bound tests exact fallback.
+        explicit_frontier_budget: Option<usize>,
+    ) -> Result<Option<u32>, WasmExactSearchError> {
+        use super::symbolic_prefix_domain::{PrefixDomain, MAX_PREFIX_WORDS};
+
+        let invalid = || {
+            WasmExactSearchError::InvalidProblem("wasm_symbolic_prefix_language_bound_inconsistent")
+        };
+        let domain = PrefixDomain::new(pieces.len()).ok_or_else(invalid)?;
+        if pieces.len() != permitted_parents.len() {
+            return Err(invalid());
+        }
+        if active.iter().all(|&word| word == 0) {
+            return Ok(None);
+        }
+        let full = domain.terminal();
+        let last = full / 64;
+        let terminal_bit = 1_u64 << (full % 64);
+        let last_valid = domain.nonterminal_lanes(last) | terminal_bit;
+        if active[0] & 1 == 0
+            || active[last] & terminal_bit == 0
+            || active[last] & !last_valid != 0
+            || active[last + 1..].iter().any(|&word| word != 0)
+        {
+            return Err(invalid());
+        }
+        let frontier_budget = if let Some(budget) = explicit_frontier_budget {
+            budget
+        } else if closed_prefix_frontier::experiment_enabled()? {
+            closed_prefix_frontier::MAX_FRONTIER_STATES
+        } else {
+            0
+        };
+        if frontier_budget != 0 {
+            let mut frontier = std::mem::take(&mut self.prefix_frontier);
+            let root = frontier.compile(
+                self,
+                pieces,
+                permitted_parents,
+                active,
+                full,
+                frontier_budget,
+                inspected_edges,
+            );
+            self.prefix_frontier = frontier;
+            if let Some(root) = root? {
+                self.prefix_frontier_compilations =
+                    self.prefix_frontier_compilations.saturating_add(1);
+                return Ok(Some(root));
+            }
+        }
+        self.ensure_buckets();
+        self.edge_scratch.clear();
+        self.edge_scratch.try_reserve(pieces.len()).map_err(|_| {
+            WasmExactSearchError::InvalidProblem(
+                "wasm_symbolic_prefix_language_scratch_unavailable",
+            )
+        })?;
+        let mut classes = [EMPTY_REFERENCE; MAX_PREFIX_WORDS * 64];
+        for (word, &active_word) in active[..=last].iter().enumerate().rev() {
+            let mut uncompiled = active_word;
+            while uncompiled != 0 {
+                let lane = (u64::BITS - 1 - uncompiled.leading_zeros()) as usize;
+                let subset = word * 64 + lane;
+                let bit = 1_u64 << lane;
+                uncompiled ^= bit;
+                self.edge_scratch.clear();
+                for (operation, (&piece, parent)) in
+                    pieces.iter().zip(permitted_parents).enumerate()
+                {
+                    if parent[word] & bit == 0 {
+                        continue;
+                    }
+                    *inspected_edges += 1;
+                    let child = subset | (1 << operation);
+                    if child == subset {
+                        return Err(invalid());
+                    }
+                    let class = classes[child];
+                    if class != EMPTY_REFERENCE {
+                        self.edge_scratch.push(
+                            CanonicalPieceEdge::new(class, piece_code(piece))
+                                .ok_or_else(invalid)?,
+                        );
+                    }
+                }
+                let accepting = subset == full;
+                if !accepting && self.edge_scratch.is_empty() {
+                    return Err(invalid());
+                }
+                self.edge_scratch.sort_unstable();
+                self.edge_scratch.dedup();
+                let depth = self.remaining_depth(accepting)?;
+                classes[subset] = self.intern_node(accepting, depth)?;
+            }
+        }
+        Ok(Some(classes[0]))
+    }
+
     /// Consume an exact BFS operation-mask traversal, without repeating any
     /// physical query. The owner performed terminal acceptance and emitted a
     /// bit only for an already verified operation. Unvisited entries in the
@@ -820,7 +1002,7 @@ impl PieceOrderLanguageCache {
     }
 
     pub fn retained_bytes(&self) -> usize {
-        self.nodes.capacity() * core::mem::size_of::<CanonicalPieceNode>()
+        let base = self.nodes.capacity() * core::mem::size_of::<CanonicalPieceNode>()
             + self.edges.capacity() * core::mem::size_of::<CanonicalPieceEdge>()
             + self.piece_range_ends.capacity() * core::mem::size_of::<[u8; 7]>()
             + self.bucket_heads.capacity() * core::mem::size_of::<u32>()
@@ -833,7 +1015,17 @@ impl PieceOrderLanguageCache {
                 .coverage
                 .values()
                 .map(|words| words.len() * core::mem::size_of::<u64>())
-                .sum::<usize>()
+                .sum::<usize>();
+        #[cfg(any(
+            test,
+            all(
+                feature = "local-search-ab",
+                feature = "parallel",
+                not(target_family = "wasm")
+            )
+        ))]
+        let base = base + self.prefix_frontier.retained_bytes();
+        base
     }
 
     pub fn local_live_bytes(&self) -> usize {
@@ -1433,6 +1625,133 @@ mod tests {
         let mut output = BTreeSet::new();
         visit(cache, root, &mut Vec::new(), &mut output);
         output
+    }
+
+    fn prefix_path_masks<const N: usize>(
+        paths: &[[usize; N]],
+    ) -> (
+        [[u64; super::super::symbolic_prefix_domain::MAX_PREFIX_WORDS]; N],
+        [u64; super::super::symbolic_prefix_domain::MAX_PREFIX_WORDS],
+    ) {
+        use super::super::symbolic_prefix_domain::MAX_PREFIX_WORDS;
+        let mut parents = [[0; MAX_PREFIX_WORDS]; N];
+        let mut active = [0; MAX_PREFIX_WORDS];
+        active[0] = 1;
+        for path in paths {
+            let mut subset = 0;
+            for &operation in path {
+                assert_eq!(subset & (1 << operation), 0);
+                parents[operation][subset / 64] |= 1 << (subset % 64);
+                subset |= 1 << operation;
+                active[subset / 64] |= 1 << (subset % 64);
+            }
+            assert_eq!(subset, (1 << N) - 1);
+        }
+        (parents, active)
+    }
+
+    #[test]
+    fn closed_prefix_frontier_unions_incomparable_same_kind_successors_and_falls_back() {
+        use PieceKind::{I, O};
+
+        let pieces = [I, I, O];
+        // Both I copies are admissible first, with different suffixes. A
+        // second concrete IOI trail makes the union overlap as well.
+        let (parents, active) = prefix_path_masks(&[[0, 2, 1], [1, 0, 2], [1, 2, 0]]);
+        let expected = BTreeSet::from([vec![1, 1, 2], vec![1, 2, 1]]);
+        for (budget, expected_children, expected_frontiers) in [(0, 2, 0), (256, 1, 1), (1, 2, 0)] {
+            let mut cache = PieceOrderLanguageCache::default();
+            let root = cache
+                .compile_closed_prefix_language_with_mode(
+                    &pieces,
+                    &parents,
+                    &active,
+                    &mut 0,
+                    Some(budget),
+                )
+                .unwrap()
+                .unwrap();
+            assert_eq!(words(&cache, root), expected);
+            assert_eq!(cache.node(root).unwrap().remaining_depth, 3);
+            assert_eq!(
+                cache.edges_for_piece(root, 1).unwrap().len(),
+                expected_children
+            );
+            assert_eq!(cache.frontier_compilations(), expected_frontiers);
+        }
+    }
+
+    #[test]
+    fn closed_prefix_frontier_retains_all_sixteen_variants_across_words() {
+        use PieceKind::{I, J, L, O, S, T};
+
+        // Interleave the pairs across the operation-mask word boundary.
+        let pieces = [I, J, L, O, T, S, I, J, L, O];
+        let mut paths = Vec::new();
+        for chosen in 0..16 {
+            let mut path = [0; 10];
+            for pair in 0..4 {
+                let use_second = chosen & (1 << pair) != 0;
+                path[pair] = if use_second { 6 + pair } else { pair };
+                path[6 + pair] = if use_second { pair } else { 6 + pair };
+            }
+            // A distinction that a kind-count-only merger cannot recover.
+            (path[4], path[5]) = if chosen == 15 { (5, 4) } else { (4, 5) };
+            paths.push(path);
+        }
+        let (parents, active) = prefix_path_masks(&paths);
+        let expected: BTreeSet<_> = paths
+            .iter()
+            .map(|path| {
+                path.iter()
+                    .map(|&id| super::piece_code(pieces[id]))
+                    .collect()
+            })
+            .collect();
+        assert_eq!(expected.len(), 2);
+        let mut cache = PieceOrderLanguageCache::default();
+        for budget in [0, 256, 2] {
+            let root = cache
+                .compile_closed_prefix_language_with_mode(
+                    &pieces,
+                    &parents,
+                    &active,
+                    &mut 0,
+                    Some(budget),
+                )
+                .unwrap()
+                .unwrap();
+            assert_eq!(words(&cache, root), expected);
+        }
+        assert_eq!(cache.frontier_compilations(), 1);
+    }
+
+    #[test]
+    fn closed_prefix_frontier_falls_back_for_unsupported_multiplicities() {
+        use PieceKind::{I, O};
+
+        for pieces in [[I, O, PieceKind::L, PieceKind::T], [I, I, I, O]] {
+            let (parents, active) = prefix_path_masks(&[[0, 1, 2, 3]]);
+            let mut cache = PieceOrderLanguageCache::default();
+            let root = cache
+                .compile_closed_prefix_language_with_mode(
+                    &pieces,
+                    &parents,
+                    &active,
+                    &mut 0,
+                    Some(256),
+                )
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                words(&cache, root),
+                BTreeSet::from([pieces
+                    .into_iter()
+                    .map(super::piece_code)
+                    .collect::<Vec<_>>()])
+            );
+            assert_eq!(cache.frontier_compilations(), 0);
+        }
     }
 
     fn explicit_poset_words(pieces: &[PieceKind], predecessors: &[u16]) -> BTreeSet<Vec<u8>> {

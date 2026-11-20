@@ -551,11 +551,7 @@ fn adaptive_first_check_len(max_source_depth: u8, storage: ExactU64MemoStorage) 
         * 128
         * 8
         * core::mem::size_of::<Option<StateMajorRow>>();
-    let flat_slot_bytes = match storage {
-        ExactU64MemoStorage::Reference => core::mem::size_of::<(u64, u32)>(),
-        #[cfg(any(feature = "local-search-ab", test))]
-        ExactU64MemoStorage::Compact => 12,
-    };
+    let flat_slot_bytes = storage.slot_payload_bytes();
     let savings_per_entry = flat_slot_bytes.saturating_sub(core::mem::size_of::<(u32, u32)>());
     // Do not even allocate a row directory until twice its cost can amortize.
     // Works with pointer-width-dependent row sizes on native and WASM alike.

@@ -24,7 +24,7 @@ use clearra_forward_search::{
     ForwardSearchAdvance, ForwardSearchError, ForwardSearchReport, ForwardSearchSession,
 };
 use clearra_host_contract::{AppCommandKind, BackendReport, ResourceBudget};
-use clearra_pc_graph::request::{OpeningPcSearchQuery, PcExecutionPolicy};
+use clearra_pc_graph::request::OpeningPcSearchQuery;
 use clearra_problem::{
     BuildProbabilityAggregation, BuildProbabilityField, BuildProbabilityFinesseRequest,
     BuildSolutionProbabilityPolicy, FiniteScenarioPcCompileBudget, FiniteScenarioPcCompileError,
@@ -45,7 +45,7 @@ use crate::{
     commands::{
         build_probability_app_command::{BuildProbabilityAppCommand, BuildProbabilityResultMode},
         build_v2_app_command::BuildV2AppRequest,
-        continue_app_command::CooperativeContinueResult,
+        continue_app_command::{ContinueKind, CooperativeContinueResult},
         core_execution_error_response,
         path_app_command::path_response,
         scenario_app_command::{FullHeightScenarioInputReplay, ScenarioAppCommand},
@@ -453,6 +453,12 @@ fn try_start_native_cooperative_pc(
             render_contract: None,
             replay,
         } => replay.checked_retained_capacity_bytes(),
+        CooperativeSearchResponseKind::LocalContinue(projection) => {
+            let Some(bytes) = projection.checked_native_retained_capacity_bytes() else {
+                return Ok(None);
+            };
+            Some(bytes)
+        }
         _ => return Ok(None),
     };
     let external = (|| {
@@ -1020,7 +1026,62 @@ impl AppContext {
                 finite_caller_generation: None,
             };
         }
-        self.start_cooperative_execution_inner(request)
+        self.start_cooperative_execution_inner(request, None)
+    }
+
+    /// Drive the admitted native Continue lane for a synchronous host (the
+    /// CLI). A request outside the lane keeps its original direct App path.
+    #[cfg(all(feature = "parallel", not(target_family = "wasm")))]
+    pub fn run_preferring_native_cooperative_continue(
+        &self,
+        request: AppRequest,
+        control: &ExecutionControl,
+    ) -> AppResponse {
+        let prepared = match request.command() {
+            AppCommand::Continue(command)
+                if self
+                    .services()
+                    .core_executor()
+                    .supports_cooperative_wasm_search()
+                    && request.product_capability_contract().is_none()
+                    && request.resource_budget().max_memory_mib().is_none()
+                    && control.partition().count() == 1
+                    && !control.is_cancelled() =>
+            {
+                command
+                    .compile_cooperative(true)
+                    .filter(|(problem, _)| problem.backend_policy().workers() > 1)
+            }
+            _ => None,
+        };
+        let Some(prepared) = prepared else {
+            return self.run_with_execution_control(request, control);
+        };
+        // Keep only the output flag; the sliced App owns the exact output
+        // policy already admitted by the search. Failures have no render model.
+        let include_render_model = request.output_policy().include_render_model();
+        let command_kind = request.command().kind();
+        control.report_progress("validation", 0, Some(1));
+        let mut execution = self.start_cooperative_execution_inner(request, Some(prepared));
+        control.report_progress("validation", 1, Some(1));
+        let error = loop {
+            match execution.advance(1024, control) {
+                CooperativeAppAdvance::Pending | CooperativeAppAdvance::Progress => {}
+                CooperativeAppAdvance::Completed(response) => return response,
+                CooperativeAppAdvance::CompletedGoverned(_) => {
+                    break CoreExecutionError::RuntimeUnavailable {
+                        component: "native_cooperative_continue_unexpected_governed_completion",
+                    };
+                }
+                CooperativeAppAdvance::Cancelled => break CoreExecutionError::Cancelled,
+                CooperativeAppAdvance::FailedFinite(error) => break error,
+            }
+        };
+        self.finalize_response(
+            core_execution_error_response(error),
+            command_kind,
+            &AppOutputPolicy::new(include_render_model),
+        )
     }
 
     pub fn start_finite_cooperative_execution(
@@ -1327,7 +1388,11 @@ impl AppContext {
         })
     }
 
-    fn start_cooperative_execution_inner(&self, request: AppRequest) -> CooperativeAppExecution {
+    fn start_cooperative_execution_inner(
+        &self,
+        request: AppRequest,
+        prepared: Option<(clearra_problem::SearchProblem, ContinueKind)>,
+    ) -> CooperativeAppExecution {
         let execution_parts = match request.into_execution_parts() {
             Ok(execution_parts) => execution_parts,
             Err(rejection) => {
@@ -1349,19 +1414,15 @@ impl AppContext {
             .services()
             .core_executor()
             .supports_cooperative_wasm_search();
-        // The tokens carry no execution-policy override. On a multiworker
-        // host keep the native parallel driver instead of replacing it with
-        // a serial cooperative session.
-        let prepared_continue = match &execution_parts.0 {
-            AppCommand::Continue(command)
-                if cooperative_backend
-                    && execution_parts.5.is_none()
-                    && PcExecutionPolicy::mvp_default().workers() == 1 =>
-            {
-                command.compile_cooperative()
+        // Tokens carry no execution-policy override. An ineligible native
+        // multiworker request keeps its synchronous path; do not replace it
+        // with a one-worker cooperative session.
+        let prepared_continue = prepared.or_else(|| match &execution_parts.0 {
+            AppCommand::Continue(command) if cooperative_backend && execution_parts.5.is_none() => {
+                command.compile_cooperative(execution_parts.2.max_memory_mib().is_none())
             }
             _ => None,
-        };
+        });
         let core_search = prepared_continue.is_some()
             || matches!(
                 &execution_parts.0,
@@ -3086,6 +3147,9 @@ impl CooperativeAppExecution {
                         #[cfg(all(feature = "parallel", not(target_family = "wasm")))]
                         Ok(CooperativeBackendAdvance::CompletedNativePc(result)) => {
                             control.report_progress("postprocess", 0, Some(1));
+                            if control.is_cancelled() {
+                                return CooperativeAppAdvance::Cancelled;
+                            }
                             self.state = CooperativeExecutionState::NativePcPostprocess(Box::new(
                                 CooperativeNativePcPostprocessExecution {
                                     result,
@@ -3289,6 +3353,13 @@ impl CooperativeAppExecution {
             }
             #[cfg(all(feature = "parallel", not(target_family = "wasm")))]
             CooperativeExecutionState::NativePcPostprocess(postprocess) => {
+                if control.is_cancelled() {
+                    return CooperativeAppAdvance::Cancelled;
+                }
+                if work_budget == 0 {
+                    self.state = CooperativeExecutionState::NativePcPostprocess(postprocess);
+                    return CooperativeAppAdvance::Pending;
+                }
                 let CooperativeNativePcPostprocessExecution {
                     result,
                     response_kind,

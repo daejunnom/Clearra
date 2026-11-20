@@ -12,7 +12,7 @@ use crate::{
     },
     typed_document_utility_cli::prepare_native_typed_utility,
 };
-use clearra_app::{io::AppFilePolicy, AppContext, AppStatus};
+use clearra_app::{io::AppFilePolicy, AppContext, AppRequest, AppResponse, AppStatus};
 use clearra_i18n::LanguageId;
 
 const TILING_ONLY_WARNING: &str = "WARNING: Tiling-only search skips BuildUp and probability calculation. Results may include solutions that cannot be built.";
@@ -223,10 +223,10 @@ pub(crate) fn route_invocation(invocation: ParsedCliInvocation) -> CliOutput {
                 }
             }
         } else {
-            context.run(request)
+            run_local_product_request(&context, request)
         };
         #[cfg(not(feature = "online-pc4-tablebase"))]
-        let response = context.run(request);
+        let response = run_local_product_request(&context, request);
         if let Some(plan) = typed_document_plan.as_ref() {
             if response.status() == AppStatus::Success {
                 return render_typed_document_utility_success(&response, plan, render_format);
@@ -323,6 +323,20 @@ pub(crate) fn route_invocation(invocation: ParsedCliInvocation) -> CliOutput {
         output.localized_for(language)
     } else {
         output
+    }
+}
+
+fn run_local_product_request(context: &AppContext, request: AppRequest) -> AppResponse {
+    #[cfg(all(feature = "wasm-cpu-runtime", not(target_family = "wasm")))]
+    {
+        context.run_preferring_native_cooperative_continue(
+            request,
+            &clearra_core_domain::execution_cancellation::ExecutionControl::default(),
+        )
+    }
+    #[cfg(not(all(feature = "wasm-cpu-runtime", not(target_family = "wasm"))))]
+    {
+        context.run(request)
     }
 }
 

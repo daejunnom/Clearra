@@ -45,7 +45,11 @@ export function productMemoAbbaSelection(candidate, arm) {
 }
 
 export function productMemoAbbaEnvironment(inherited, selection) {
-  return { ...inherited,
+  // This historical lane selects product/union storage through a single
+  // knob; an inherited union-only experiment must not override either arm.
+  const sanitized = Object.fromEntries(Object.entries(inherited).filter(([name]) =>
+    name.toUpperCase() !== 'CLEARRA_STANDARD_BAG_UNION_MEMO'));
+  return { ...sanitized,
     CLEARRA_STANDARD_BAG_MEMO: selection.storage,
     CLEARRA_STANDARD_BAG_PRODUCT_MEMO_LAYOUT: selection.layout };
 }

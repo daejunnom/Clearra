@@ -7,16 +7,18 @@ import test from 'node:test';
 // Exercise the real helpers with no WSL, systemd, builds, or host writes.
 const guest = readFileSync(new URL('./clearra-wsl-guest.sh', import.meta.url), 'utf8')
   .replaceAll('\r\n', '\n');
+const storage = readFileSync(new URL('./clearra-wsl-source-storage.sh', import.meta.url), 'utf8')
+  .replaceAll('\r\n', '\n');
 const bash = process.platform === 'win32'
   ? join(process.env.ProgramFiles || 'C:/Program Files', 'Git', 'bin', 'bash.exe')
   : 'bash';
 
-function helper(name) {
-  const start = guest.indexOf(`\n${name}() {\n`) + 1;
+function helper(name, script = guest) {
+  const start = script.indexOf(`\n${name}() {\n`) + 1;
   assert.ok(start > 0, `missing Bash helper: ${name}`);
-  const end = guest.indexOf('\n}', start);
+  const end = script.indexOf('\n}', start);
   assert.ok(end > start, `invalid Bash helper: ${name}`);
-  return guest.slice(start, end + 2);
+  return script.slice(start, end + 2);
 }
 
 function check(t, code) {
@@ -83,6 +85,32 @@ require_empty_benchmark_output /mnt/z/clearra-test-missing-directory-98df0aa8
 `);
 });
 
+test('a source slot cannot be retired before the exact owner and drained cgroup are established', t => {
+  check(t, `
+set -euo pipefail
+${helper('retire_clearra_wsl_source_slot', storage)}
+slot=/__clearra_no_such_test_source_slot__/Clearra/wsl/runtime-source
+owner=fenced
+mounts=clear
+removals=0
+verify_clearra_wsl_source_slot() { [[ "$1 $2 $3" == "$slot verified 7:21" && "$owner" == fenced ]]; }
+require_unmounted_source_tree() { [[ "$1" == "$slot" && "$mounts" == clear ]]; }
+rm() {
+    [[ "$*" == "-rf --one-file-system -- $slot" ]] || return 47
+    removals=$((removals + 1))
+}
+if retire_clearra_wsl_source_slot "$slot" verified 7:21 false; then exit 41; fi
+if retire_clearra_wsl_source_slot "$slot" wrong 7:21 true; then exit 42; fi
+if retire_clearra_wsl_source_slot "$slot" verified 7:99 true; then exit 43; fi
+mounts=nested
+if retire_clearra_wsl_source_slot "$slot" verified 7:21 true; then exit 44; fi
+mounts=clear
+[[ "$removals" == 0 ]]
+retire_clearra_wsl_source_slot "$slot" verified 7:21 true
+[[ "$removals" == 1 ]]
+`);
+});
+
 test('sync receipt counts archive members, not the lines or bytes in their paths', t => {
   const countProgram = helper('count_source_archive_files').split('\n').slice(2, -2).join('\n');
   const result = spawnSync(process.platform === 'win32' ? 'python' : 'python3', ['-'], {
@@ -120,6 +148,25 @@ for members in invalid_members:
         pass
     else:
         raise AssertionError("invalid archive was counted")
+
+# Exercise the logical byte limit without allocating a huge fixture.
+huge = tarfile.TarInfo("large-tracked-file")
+huge.size = 256 * 1024 * 1024 + 1
+original_open = tarfile.open
+class OversizedArchive:
+    def __enter__(self):
+        return [huge]
+    def __exit__(self, *args):
+        pass
+tarfile.open = lambda *args, **kwargs: OversizedArchive()
+try:
+    count_files(None)
+except ValueError as error:
+    assert "bounded source-slot capacity" in str(error)
+else:
+    raise AssertionError("oversized archive accepted")
+finally:
+    tarfile.open = original_open
 `,
     windowsHide: true,
   });

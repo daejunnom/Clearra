@@ -33,6 +33,9 @@ const MAX_COVER_NODES_PER_CASE: usize = 2_000_000;
 const MAX_CANDIDATES_PER_CASE: usize = 250_000;
 const MAX_ORDERED_SUBSET_STATES_PER_CASE: usize = 8_000_000;
 
+#[path = "p7_exact_family_oracle_tests.rs"]
+mod p7_exact_family_oracle_tests;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct CompletionFixtureCase {
     source_case: String,

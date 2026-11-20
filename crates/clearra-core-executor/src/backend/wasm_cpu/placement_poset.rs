@@ -556,6 +556,45 @@ pub(super) fn compile_with_movement_guard(
 }
 
 impl CandidateGeometry {
+    #[cfg(any(
+        test,
+        all(
+            feature = "local-search-ab",
+            feature = "parallel",
+            not(target_family = "wasm")
+        )
+    ))]
+    pub(super) fn for_symbolic_prefix(
+        catalog: &GeometryCatalog,
+        candidate: &GeometryCandidate,
+    ) -> Option<Self> {
+        Self::compile(catalog, candidate)
+    }
+
+    #[cfg(any(
+        test,
+        all(
+            feature = "local-search-ab",
+            feature = "parallel",
+            not(target_family = "wasm")
+        )
+    ))]
+    pub(super) fn symbolic_clear_groups(&self) -> impl Iterator<Item = (u16, u16)> + '_ {
+        self.clear_conditions.groups()
+    }
+
+    #[cfg(any(
+        test,
+        all(
+            feature = "local-search-ab",
+            feature = "parallel",
+            not(target_family = "wasm")
+        )
+    ))]
+    pub(super) fn symbolic_frame(&self, deleted: u16) -> (u64, [u64; MAX_BOARD64_PIECES]) {
+        self.project_frame(deleted)
+    }
+
     /// Start only with small Boolean candidates with a geometric support
     /// disjunction, either initially or after a clear induced by just one
     /// concrete operation. This admission does not prove a physical move.

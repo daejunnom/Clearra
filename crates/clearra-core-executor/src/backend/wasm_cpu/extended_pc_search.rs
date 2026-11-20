@@ -303,11 +303,16 @@ impl ExtendedPcSearchSession {
     }
 
     #[cfg(all(feature = "parallel", not(target_family = "wasm")))]
+    pub(crate) fn is_native_cooperative_problem_eligible(problem: &SearchProblem) -> bool {
+        native_cooperative::Driver::is_problem_eligible(problem)
+    }
+
+    #[cfg(all(feature = "parallel", not(target_family = "wasm")))]
     pub(crate) fn try_new_native_cooperative(
         problem: &SearchProblem,
         checked_external_retained_bytes: u128,
     ) -> Result<Option<Self>, WasmExactSearchError> {
-        if !native_cooperative::Driver::is_problem_eligible(problem) {
+        if !Self::is_native_cooperative_problem_eligible(problem) {
             return Ok(None);
         }
         let field = Self::validated_family_field(problem)?;

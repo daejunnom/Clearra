@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+source "${BASH_SOURCE[0]%/*}/clearra-wsl-source-storage.sh"
 
 finite_cgroup_limits_match() {
     local actual_memory="$1" actual_swap="$2" actual_tasks="$3" expected_memory="$4" expected_tasks="$5"
@@ -83,6 +84,7 @@ import tarfile
 
 def count_files(source):
     names = set()
+    logical_bytes = 0
     with tarfile.open(fileobj=source, mode="r|gz") as archive:
         for member in archive:
             path = PurePosixPath(member.name)
@@ -92,7 +94,10 @@ def count_files(source):
                     or path.is_absolute() or ".." in path.parts or path in names):
                 raise ValueError("not a unique regular-file source archive")
             names.add(path)
-    if not (0 < len(names) <= 2147483647):
+            logical_bytes += member.size
+            if len(names) > 100_000 or logical_bytes > 256 * 1024 * 1024:
+                raise ValueError("source archive exceeds the bounded source-slot capacity")
+    if not names:
         raise ValueError("source archive file count is outside the receipt range")
     return len(names)
 
@@ -220,22 +225,6 @@ def retirement_target(plan, live_lease, current_after, incoming_after):
 PY
 }
 
-require_unmounted_source_tree() {
-    python3 - "$1" <<'PY'
-from pathlib import PurePosixPath
-import re
-import sys
-
-root = PurePosixPath(sys.argv[1])
-with open("/proc/self/mountinfo", encoding="utf-8", errors="surrogateescape") as mounts:
-    for line in mounts:
-        encoded = line.split(" ", 5)[4]
-        mount = re.sub(r"\\([0-7]{3})", lambda part: chr(int(part[1], 8)), encoded)
-        if PurePosixPath(mount).is_relative_to(root):
-            raise SystemExit("Managed WSL source tree has a nested or root mount")
-PY
-}
-
 sync_source() (
     # A command substitution normally clears errexit. Keep digest/copy/tar
     # failures terminal inside this private extraction transaction too.
@@ -245,7 +234,26 @@ sync_source() (
     local mode="$3"
     [[ "$archive" == /mnt/?/* && -f "$archive" && ! -L "$archive" ]] || exit 2
     [[ "$digest" =~ ^[0-9a-f]{64}$ ]] || exit 2
-    local base="$HOME/.local/share/Clearra/workspaces/$digest"
+    local root base
+    root="$(clearra_wsl_source_root)"
+    if [[ "$mode" == receipt ]]; then
+        base="$root/workspaces/$digest"
+        # Explicit sync returns a reusable path. Keep existing copies until
+        # the user reviews them; refuse a fifth generation rather than
+        # silently evict a workspace with unmanaged external readers.
+        if [[ ! -d "$base" ]]; then
+            local slots
+            shopt -s nullglob
+            slots=("$root"/workspaces/*)
+            (( ${#slots[@]} < 4 )) || {
+                printf 'Clearra WSL retained source limit reached; review existing sync-workspace copies\n' >&2
+                exit 2
+            }
+        fi
+    else
+        base="${CLEARRA_WSL_SOURCE_SLOT:?Missing runtime source slot}"
+        verify_clearra_wsl_source_slot "$base" "$lease_dir" "${CLEARRA_WSL_SOURCE_IDENTITY:?Missing runtime source owner}" || exit 2
+    fi
     local source="$base/source"
     local owner="$base/.clearra-source-owner" inner_owner=".clearra-wsl-extracted-source"
     [[ "$HOME" == /* && "$HOME" != / && -O "$HOME" &&
@@ -253,11 +261,9 @@ sync_source() (
     umask 077
     mkdir -p -- "$base"
     [[ -O "$base" && "$(stat -f -c %T -- "$base")" == ext2/ext3 ]] || exit 2
-    local scratch file_count old_identity old_owner new_record publish_ok=0
+    local scratch file_count old_identity old_owner new_record
     scratch="$(mktemp -d -- "$base/.incoming.XXXXXXXX")"
     cleanup_source_staging() {
-        # If replacing the prepared source failed, do not erase its backup.
-        [[ ! -e "$scratch/previous" || "$publish_ok" == 1 ]] || return
         require_unmounted_source_tree "$scratch" || return
         rm -rf --one-file-system -- "$scratch"
     }
@@ -270,9 +276,10 @@ sync_source() (
     new_record="clearra.wsl-source.v2:$digest:$(stat -c '%d:%i' -- "$scratch/source"):${scratch##*/}"
     (set -o noclobber; printf '%s\n' "$new_record" >"$scratch/new-owner")
     (set -o noclobber; printf '%s\n' "$new_record" >"$scratch/source/$inner_owner")
-    # The host lease prevents other managed readers from replacing this
-    # source. Never retire an unproven directory or a same-device bind mount.
+    # The explicit sync path may have external readers. Compare a repeated
+    # request with its freshly verified archive, but never refresh in place.
     if [[ -e "$source" ]]; then
+        [[ "$mode" == receipt ]] || exit 2
         [[ -d "$source" && -O "$source" && ! -L "$source" ]] || exit 2
         [[ -f "$owner" && ! -L "$owner" && -O "$owner" &&
            -f "$source/$inner_owner" && ! -L "$source/$inner_owner" && -O "$source/$inner_owner" ]] || exit 2
@@ -281,21 +288,23 @@ sync_source() (
         [[ "$old_owner" == "clearra.wsl-source.v2:$digest:$old_identity:.incoming."* &&
            "$(<"$source/$inner_owner")" == "$old_owner" ]] || exit 2
         require_unmounted_source_tree "$source"
+        local unsafe
+        unsafe="$(find "$source" ! -type d \( ! -type f -o -links +1 \) -exec printf x \; -quit)"
+        [[ -z "$unsafe" ]] || exit 2
+        unsafe="$(find "$source" -mindepth 2 -name "$inner_owner" -exec printf x \; -quit)"
+        [[ -z "$unsafe" ]] || exit 2
+        diff --brief --recursive --no-dereference --exclude="$inner_owner" -- "$source" "$scratch/source" >/dev/null || {
+            printf 'Clearra WSL synchronized source differs; existing files retained\n' >&2
+            exit 2
+        }
         [[ "$(stat -c '%d:%i' -- "$source")" == "$old_identity" ]] || exit 2
-        mv -T -- "$source" "$scratch/previous"
-        [[ "$(stat -c '%d:%i' -- "$scratch/previous")" == "$old_identity" ]] || exit 2
     else
         [[ ! -e "$owner" && ! -L "$owner" ]] || exit 2
-    fi
-    if ! mv -nT -- "$scratch/source" "$source" || [[ -e "$scratch/source" ]]; then
-        if [[ ! -e "$source" && -d "$scratch/previous" ]]; then
-            mv -nT -- "$scratch/previous" "$source"
+        if ! mv -nT -- "$scratch/source" "$source" || [[ -e "$scratch/source" ]]; then
+            exit 2
         fi
-        exit 2
+        mv -T -- "$scratch/new-owner" "$owner"
     fi
-    # If owner publication fails, leave the previous source retained.
-    mv -T -- "$scratch/new-owner" "$owner"
-    publish_ok=1
     if [[ "$mode" == receipt ]]; then
         [[ "$source" != *[[:cntrl:]]* ]] || exit 2
         printf 'clearra_wsl_source_receipt_v2=%s\t%s\t%s\t%s\n' "$distribution" "$source" "$digest" "$file_count"

@@ -213,6 +213,566 @@ fn language_words(cache: &PieceOrderLanguageCache, root: u32) -> BTreeSet<Vec<Pi
 }
 
 #[test]
+fn symbolic_prefix_matches_all_concrete_edges_and_words_without_buildup() {
+    use super::symbolic_prefix_domain::PrefixDomain;
+    use super::symbolic_prefix_orders::{
+        compile_frame_domains, occupancy_planes, with_packed_upper_target, with_target_reverse,
+        with_upper_bound, SymbolicPrefixOrders, SymbolicPrefixRefusal, SymbolicPrefixWork,
+    };
+    use PieceKind::{I, J, L, O, T};
+
+    let o = 3 | (3 << 10);
+    for (height, placements) in [
+        (2, &[(O, o), (O, o << 2)][..]),
+        (3, &[(I, 0x01e0_0000), (J, 0xe020), (T, 0x1c02)][..]),
+        (
+            4,
+            &[
+                (I, 0x07_8000_0000),
+                (T, 0x1c02),
+                (O, 0x6018),
+                (J, 0x60_0802_0000),
+                (L, 0x08_0380_0000),
+            ][..],
+        ),
+        (
+            4,
+            &[
+                (O, o),
+                (O, o << 2),
+                (O, o << 4),
+                (O, o << 20),
+                (O, o << 22),
+                (O, o << 24),
+            ][..],
+        ),
+    ] {
+        let (catalog, candidate) = fixture(height, placements);
+        let pieces: Vec<_> = candidate
+            .row_ids()
+            .iter()
+            .map(|&row| catalog.skeleton(row).piece)
+            .collect();
+        let geometry =
+            placement_poset::CandidateGeometry::for_symbolic_prefix(&catalog, &candidate).unwrap();
+        let mut projection_work = SymbolicPrefixWork::default();
+        let domain = PrefixDomain::new(pieces.len()).unwrap();
+        let owners = domain.word_owners(0);
+        let active = domain.nonterminal_lanes(0);
+        let frames = compile_frame_domains(&geometry, &owners, active, &mut projection_work);
+        // Qualification reuses the entire first partition. Restricting it
+        // must agree with a fresh partition for any surviving lanes.
+        for selected in [0, active, active & 0x5555_5555_5555_5555] {
+            let restricted =
+                compile_frame_domains(&geometry, &owners, selected, &mut projection_work);
+            assert_eq!(restricted, frames.map(|lanes| lanes & selected));
+        }
+        let mut checked = 0_u64;
+        for (frame, lanes) in frames
+            .into_iter()
+            .enumerate()
+            .filter(|(_, lanes)| *lanes != 0)
+        {
+            assert_eq!(checked & lanes, 0, "a prefix must own exactly one frame");
+            checked |= lanes;
+            let (initial, placements) = geometry.symbolic_frame(frame as u16);
+            let planes = occupancy_planes(
+                initial,
+                &placements[..pieces.len()],
+                &owners,
+                lanes,
+                &mut projection_work,
+            );
+            let mut prefixes = lanes;
+            while prefixes != 0 {
+                let prefix = prefixes.trailing_zeros() as usize;
+                prefixes &= prefixes - 1;
+                let board = planes.iter().enumerate().fold(0, |board, (cell, word)| {
+                    board | (((word >> prefix) & 1) << cell)
+                });
+                assert_eq!(
+                    (board, frame as u16),
+                    subset_state(&catalog, &candidate, prefix)
+                );
+            }
+        }
+        assert_eq!(checked, active);
+        for profile in [
+            KickTableProfileId::Srs90,
+            KickTableProfileId::SrsPlus,
+            KickTableProfileId::SrsX,
+            KickTableProfileId::Jstris180,
+            KickTableProfileId::NoKick,
+        ] {
+            let oracle = physical_transitions(&catalog, &candidate, profile);
+            for reverse in [false, true] {
+                let mut work = SymbolicPrefixWork::default();
+                let control = ExecutionControl::default();
+                let compile = || {
+                    SymbolicPrefixOrders::compile(
+                        &catalog, &candidate, profile, &control, &mut work,
+                    )
+                    .unwrap()
+                };
+                let relation = if reverse {
+                    with_target_reverse(compile)
+                } else {
+                    let mut compile = compile;
+                    compile()
+                };
+                for (prefix, &allowed) in oracle.iter().enumerate() {
+                    for operation in 0..pieces.len() {
+                        assert_eq!(
+                            relation.local_edge_permission(prefix, operation),
+                            Some(allowed & (1 << operation) != 0),
+                            "height={height} profile={profile:?} reverse={reverse} prefix={prefix:#x} op={operation}",
+                        );
+                    }
+                }
+                let mut cache = PieceOrderLanguageCache::default();
+                let words = relation
+                    .compile_language(&mut cache, &mut work)
+                    .unwrap()
+                    .map_or_else(BTreeSet::new, |root| language_words(&cache, root));
+                assert_eq!(words, operation_words(&pieces, &oracle));
+                assert_eq!(work.represented_prefixes, (1 << pieces.len()) - 1);
+                assert!(work.concrete_guards > 0);
+                assert_eq!(
+                    work.pose.completed_relations as usize,
+                    work.frame_kind_groups + work.target_operations
+                );
+                if profile == KickTableProfileId::Srs90 {
+                    eprintln!(
+                        "strict prefix, {height}L, {} pieces, reverse={reverse}: {work:?}",
+                        pieces.len()
+                    );
+                }
+            }
+            let mut bounded_work = SymbolicPrefixWork::default();
+            let bounded = with_target_reverse(|| {
+                with_upper_bound(|| {
+                    SymbolicPrefixOrders::compile(
+                        &catalog,
+                        &candidate,
+                        profile,
+                        &ExecutionControl::default(),
+                        &mut bounded_work,
+                    )
+                })
+            })
+            .unwrap();
+            assert_eq!(bounded.local_edge_permission(0, 0), None);
+            let mut cache = PieceOrderLanguageCache::default();
+            let bounded_words = bounded
+                .compile_language(&mut cache, &mut bounded_work)
+                .unwrap()
+                .map_or_else(BTreeSet::new, |root| language_words(&cache, root));
+            assert_eq!(bounded_words, operation_words(&pieces, &oracle));
+            let mut packed_work = SymbolicPrefixWork::default();
+            let packed = with_packed_upper_target(|| {
+                SymbolicPrefixOrders::compile(
+                    &catalog,
+                    &candidate,
+                    profile,
+                    &ExecutionControl::default(),
+                    &mut packed_work,
+                )
+            })
+            .unwrap();
+            assert_eq!(packed.local_edge_permission(0, 0), None);
+            let mut cache = PieceOrderLanguageCache::default();
+            let packed_words = packed
+                .compile_language(&mut cache, &mut packed_work)
+                .unwrap()
+                .map_or_else(BTreeSet::new, |root| language_words(&cache, root));
+            assert_eq!(packed_words, bounded_words);
+            let cancelled = ExecutionControl::default();
+            cancelled.cancellation.handle().cancel();
+            let mut refused = SymbolicPrefixWork::default();
+            assert!(matches!(
+                SymbolicPrefixOrders::compile(
+                    &catalog,
+                    &candidate,
+                    profile,
+                    &cancelled,
+                    &mut refused
+                ),
+                Err(SymbolicPrefixRefusal::Cancelled),
+            ));
+            assert_eq!(refused.represented_prefixes, 0);
+        }
+    }
+    let eleven_os = [
+        (O, o),
+        (O, o << 2),
+        (O, o << 4),
+        (O, o << 6),
+        (O, o << 8),
+        (O, o << 20),
+        (O, o << 22),
+        (O, o << 24),
+        (O, o << 26),
+        (O, o << 28),
+        (O, o << 40),
+    ];
+    let (catalog, candidate) = fixture(6, &eleven_os);
+    let mut work = SymbolicPrefixWork::default();
+    assert!(matches!(
+        SymbolicPrefixOrders::compile(
+            &catalog,
+            &candidate,
+            KickTableProfileId::Srs90,
+            &ExecutionControl::default(),
+            &mut work,
+        ),
+        Err(SymbolicPrefixRefusal::Unsupported),
+    ));
+    assert_eq!(work.represented_prefixes, 0);
+}
+
+#[test]
+fn symbolic_prefix_jstris_p7p4_one_canonical_identity_preserves_exact_queues() {
+    use clearra_core_domain::solution::normalized_tiling_solution::{
+        PiecePlacementMask, StandardBoard64TilingIdentity,
+    };
+    use clearra_rules::profile::builtin_rules::jstris_180;
+    use PieceKind::{I, J, L, O, S, T, Z};
+
+    let _guard = product_guard();
+    // Constructed empty-origin tiling with a no-hold hard-drop witness
+    // IOTZSLJZTI from two bags. Field identities admit every other exact
+    // order and hold action, not just that witness.
+    let placements = [
+        (I, 0xf),
+        (I, 0xf0),
+        (O, 0xc0300),
+        (T, 0x201c00),
+        (Z, 0xc06000),
+        (Z, 0x1006008000),
+        (S, 0x18030000),
+        (L, 0x1c0100000),
+        (T, 0xe01000000),
+        (J, 0xe020000000),
+    ];
+    let identity = StandardBoard64TilingIdentity::from_placements(
+        0,
+        placements.map(|(piece, cells)| PiecePlacementMask::new(piece, cells)),
+    )
+    .unwrap();
+    let problem = ProblemCompiler::compile_scenario_pc(
+        &PcScenarioQuery::new(
+            PcScenarioBoard::standard_10(4, 0),
+            PcQueueInput::standard_7_bag(),
+            PieceWindow::new(10),
+        )
+        .with_rule(jstris_180())
+        .with_allow_hold(true)
+        .with_exact_pieces(Some(10))
+        .with_supply_window_size(SupplyWindowSize::new(11))
+        .with_count_policy(PcCountPolicy::CountUnique)
+        .with_solution_probability_policy(PcSolutionProbabilityPolicy::Include)
+        .with_retained_trace_limit(0)
+        .with_execution_policy(policy()),
+    )
+    .unwrap()
+    .with_output_policy(SearchOutputPolicy::CoverageSummary);
+    let run = || {
+        // Seed just the known canonical geometry identity, not a complete
+        // claim over the unenumerated empty-origin geometry family.
+        WasmCpuSearchBackend::execute_complete_precomputed_geometry_candidates_with_control(
+            &problem,
+            &[identity],
+            &ExecutionControl::default(),
+        )
+        .unwrap()
+    };
+    let reference = run();
+    let (strict, work) = super::symbolic_prefix_orders::with_target_reverse(|| {
+        super::symbolic_prefix_orders::with_strict_prefix_order(run)
+    });
+    assert_parity(&reference, &strict);
+    let [entry] = strict.solution_coverages() else {
+        panic!("the supplied Jstris identity must be solvable");
+    };
+    assert_eq!(entry.identity(), identity);
+    assert_eq!(entry.covered_patterns().count_ones(), 113_216);
+    assert_eq!(
+        strict.usize_field("coverage_pattern_count"),
+        Some(4_233_600)
+    );
+    assert_eq!(strict.usize_field("total_build_order_nodes"), Some(0));
+    assert_eq!(strict.usize_field("total_reachability_states"), Some(0));
+    assert_eq!(
+        (work.candidates_attempted, work.candidates_certified),
+        (1, 1)
+    );
+    assert_eq!(
+        (work.assignment_words, work.represented_prefixes),
+        (16, 1023)
+    );
+    eprintln!(
+        "strict 10-lock Jstris single identity: queues={}, baseline_nodes={:?}, baseline_poses={:?}, strict={work:?}",
+        entry.covered_patterns().count_ones(),
+        reference.usize_field("total_build_order_nodes"),
+        reference.usize_field("total_reachability_states")
+    );
+    let (upper, bounded_work) = super::symbolic_prefix_orders::with_target_reverse(|| {
+        super::symbolic_prefix_orders::with_upper_bound(|| {
+            super::symbolic_prefix_orders::with_strict_prefix_order(run)
+        })
+    });
+    assert_parity(&reference, &upper);
+    assert_eq!(upper.usize_field("total_build_order_nodes"), Some(0));
+    assert_eq!(upper.usize_field("total_reachability_states"), Some(0));
+    assert_eq!(bounded_work.candidates_certified, 1);
+    assert_eq!(bounded_work.language_states, work.language_states);
+    assert_eq!(
+        bounded_work.upper_pruned_unknown_edges + bounded_work.upper_remaining_unknown_edges,
+        2360
+    );
+    assert!(
+        bounded_work.upper_pruned_unknown_edges > 0,
+        "{bounded_work:?}"
+    );
+    assert!(
+        bounded_work.pose.reached_pose_lanes < work.pose.reached_pose_lanes,
+        "{bounded_work:?}"
+    );
+    eprintln!("strict upper-bound Jstris single identity: {bounded_work:?}");
+    let (packed, packed_work) = super::symbolic_prefix_orders::with_packed_upper_target(|| {
+        super::symbolic_prefix_orders::with_strict_prefix_order(run)
+    });
+    assert_parity(&upper, &packed);
+    assert_eq!(packed.usize_field("total_build_order_nodes"), Some(0));
+    assert_eq!(packed.usize_field("total_reachability_states"), Some(0));
+    assert_eq!(packed_work.candidates_certified, 1);
+    assert_eq!(packed_work.pose.lane_boards, bounded_work.pose.lane_boards);
+    assert_eq!(packed_work.language_states, bounded_work.language_states);
+    assert!(
+        packed_work.pose.completed_relations < bounded_work.pose.completed_relations,
+        "{packed_work:?}"
+    );
+    eprintln!("strict packed upper-bound Jstris single identity: {packed_work:?}");
+}
+
+#[test]
+fn symbolic_prefix_p7_complete_candidate_and_queue_parity() {
+    use clearra_rules::profile::builtin_rules::{jstris_180, no_kick, srs, srs_plus, srs_x};
+
+    use super::symbolic_prefix_orders::{with_packed_upper_target, with_strict_prefix_order};
+
+    // CTK3 ctk3_w0kCQBjwwAMPPAD37g (not the smaller parity probe or the
+    // horizontal mirror): 16 initial cells, six locks, seven original draws.
+    const BOARD: u64 = 0x3c0f03c0f;
+    const PATTERNS: usize = 5_040;
+    let _guard = product_guard();
+    for (label, rule, hold, historic_count) in [
+        ("Jstris 180 with hold", jstris_180(), true, Some(246)),
+        ("SRS90 with hold", srs(), true, Some(245)),
+        ("SRS+ with hold", srs_plus(), true, Some(246)),
+        ("SRS-X with hold", srs_x(), true, Some(289)),
+        ("No kick with hold", no_kick(), true, Some(175)),
+        ("Jstris 180 without hold", jstris_180(), false, None),
+    ] {
+        let problem = ProblemCompiler::compile_scenario_pc(
+            &PcScenarioQuery::new(
+                PcScenarioBoard::standard_10(4, BOARD),
+                PcQueueInput::standard_7_bag(),
+                PieceWindow::new(6),
+            )
+            .with_rule(rule)
+            .with_allow_hold(hold)
+            .with_exact_pieces(Some(6))
+            .with_supply_window_size(SupplyWindowSize::new(7))
+            .with_count_policy(PcCountPolicy::CountUnique)
+            .with_solution_probability_policy(PcSolutionProbabilityPolicy::Include)
+            .with_retained_trace_limit(0)
+            .with_execution_policy(policy()),
+        )
+        .unwrap()
+        .with_output_policy(SearchOutputPolicy::CoverageSummary);
+        assert_eq!(problem.supply().hold_enabled(), hold, "{label}");
+        assert!(!hold || problem.initial_hold().hold_empty(), "{label}");
+        assert_eq!(
+            problem
+                .piece_source()
+                .materialized_universe()
+                .expect("full P7 draw universe")
+                .pattern_count(),
+            PATTERNS,
+            "{label}"
+        );
+
+        let run = || {
+            WasmCpuSearchBackend::execute_with_control(&problem, &ExecutionControl::default())
+                .unwrap_or_else(|error| panic!("{label}: {error:?}"))
+        };
+        let reference = run();
+        let (packed, work) = with_packed_upper_target(|| with_strict_prefix_order(run));
+        #[cfg(all(
+            feature = "local-search-ab",
+            feature = "parallel",
+            not(target_family = "wasm")
+        ))]
+        {
+            let (legacy, legacy_work) =
+                super::symbolic_prefix_orders::with_legacy_upper(true, || {
+                    with_packed_upper_target(|| with_strict_prefix_order(run))
+                });
+            assert_parity(&legacy, &packed);
+            assert_eq!(legacy.solution_coverages(), packed.solution_coverages());
+            assert_eq!(
+                legacy_work.upper_pruned_unknown_edges,
+                work.upper_pruned_unknown_edges
+            );
+            assert_eq!(
+                legacy_work.upper_remaining_unknown_edges,
+                work.upper_remaining_unknown_edges
+            );
+            assert_eq!(
+                legacy_work.harddrop_certificates,
+                work.harddrop_certificates
+            );
+            assert!(work.occupancy_plane_terms < legacy_work.occupancy_plane_terms);
+        }
+        let reference_rows = reference.solution_coverages();
+        let packed_rows = packed.solution_coverages();
+        assert_eq!(reference_rows.len(), packed_rows.len(), "{label}");
+        assert!(!reference_rows.is_empty(), "{label}");
+        if let Some(expected) = historic_count {
+            assert_eq!(
+                reference_rows.len(),
+                expected,
+                "{label}: historical hold-enabled PC count"
+            );
+        }
+        // CoverageSummary deliberately omits display identities and probabilities.
+        // Its exact rows retain the canonical identity sequence and the full
+        // original-ordinal bitset for each identity, not a union/hash/sample.
+        for (position, (left, right)) in reference_rows.iter().zip(packed_rows).enumerate() {
+            assert_eq!(
+                left.identity(),
+                right.identity(),
+                "{label} identity {position}"
+            );
+            assert_eq!(
+                left.identity().initial_board_mask(),
+                BOARD,
+                "{label} origin"
+            );
+            assert_eq!(
+                right.covered_patterns().pattern_count(),
+                PATTERNS,
+                "{label} queue universe"
+            );
+            assert_eq!(
+                left.covered_patterns(),
+                right.covered_patterns(),
+                "{label} ordinals for identity {position}"
+            );
+        }
+        assert_parity(&reference, &packed);
+        let candidates = reference.usize_field("packing_candidate_count").unwrap();
+        assert!(candidates >= reference_rows.len(), "{label}");
+        assert_eq!(
+            packed.usize_field("packing_candidate_count"),
+            Some(candidates),
+            "{label}"
+        );
+        assert_eq!(
+            (work.candidates_attempted, work.candidates_certified),
+            (candidates, candidates),
+            "{label}: some Geometry candidates did not use the strict verifier"
+        );
+        assert!(
+            reference.usize_field("total_build_order_nodes").unwrap() > 0,
+            "{label}"
+        );
+        assert_eq!(
+            packed.usize_field("total_build_order_nodes"),
+            Some(0),
+            "{label}"
+        );
+        assert_eq!(
+            packed.usize_field("total_reachability_states"),
+            Some(0),
+            "{label}"
+        );
+        assert_eq!(
+            packed.usize_field("coverage_pattern_count"),
+            Some(PATTERNS),
+            "{label}"
+        );
+        assert_eq!(packed.usize_field("workers_used"), Some(1), "{label}");
+        eprintln!(
+            "strict P7 {label}: candidates={candidates}, identities={}, queues={}/{PATTERNS}, identity_queue_pairs={}, packed_relations={}",
+            packed_rows.len(),
+            packed.usize_field("covered_pattern_count").unwrap(),
+            packed_rows.iter().map(|row| u64::from(row.covered_patterns().count_ones())).sum::<u64>(),
+            work.pose.completed_relations,
+        );
+    }
+}
+
+#[test]
+fn symbolic_prefix_refuses_worker_and_partition_escape_before_execution() {
+    use clearra_core_domain::execution_cancellation::ExecutionPartition;
+    use clearra_pc_graph::request::WorkerPolicy;
+
+    let problem = |execution_policy| {
+        ProblemCompiler::compile_scenario_pc(
+            &PcScenarioQuery::new(
+                PcScenarioBoard::standard_10(2, 0),
+                PcQueueInput::standard_7_bag(),
+                PieceWindow::new(5),
+            )
+            .with_exact_pieces(Some(5))
+            .with_execution_policy(execution_policy),
+        )
+        .unwrap()
+        .with_output_policy(SearchOutputPolicy::CoverageSummary)
+    };
+    let partition = ExecutionPartition::new(0, 2).expect("one of two parts");
+    let clamped = policy().with_workers(2).with_worker_hardware_limit(1);
+    assert_eq!(clamped.worker_policy(), WorkerPolicy::Fixed(2));
+    assert_eq!(clamped.workers(), 1);
+    for (policy, control) in [
+        (clamped, ExecutionControl::default()),
+        (
+            policy().with_workers(1),
+            ExecutionControl::default().with_partition(partition),
+        ),
+    ] {
+        let problem = problem(policy);
+        for precomputed in [false, true] {
+            let (result, work) = super::symbolic_prefix_orders::with_strict_prefix_order(|| {
+                if precomputed {
+                    // No candidate callback runs for an empty stream. Scope
+                    // admission must happen before that stream reports success.
+                    WasmCpuSearchBackend::execute_complete_precomputed_geometry_candidates_with_control(
+                        &problem,
+                        &[],
+                        &control,
+                    )
+                } else {
+                    WasmCpuSearchBackend::execute_with_control(&problem, &control)
+                }
+            });
+            assert!(
+                matches!(
+                    result,
+                    Err(crate::WasmCpuSearchError::Unsupported {
+                        reason: "symbolic_prefix_requires_one_explicit_worker_and_partition"
+                    })
+                ),
+                "strict experiment cannot delegate: precomputed={precomputed}, result={result:?}"
+            );
+            assert_eq!(work.candidates_attempted, 0);
+        }
+    }
+}
+
+#[test]
 fn structural_certificates_match_every_reachable_subset_and_piece_word() {
     let o = 3_u64 | (3_u64 << 10);
     let fixtures = [
@@ -1880,6 +2440,29 @@ fn conditional_joint_clear_support_or_preserves_2520_original_queues() {
     let [entry] = treatment.solution_coverages() else {
         panic!("the colored filter must select only the five concrete placements");
     };
+    for reverse in [false, true] {
+        let run = || {
+            super::symbolic_prefix_orders::with_strict_prefix_order(|| {
+                WasmCpuSearchBackend::execute_with_control(&problem, &ExecutionControl::default())
+                    .unwrap()
+            })
+        };
+        let (strict, symbolic_work) = if reverse {
+            super::symbolic_prefix_orders::with_target_reverse(run)
+        } else {
+            run()
+        };
+        assert_parity(&baseline, &strict);
+        assert_eq!(strict.usize_field("workers_used"), Some(1));
+        assert_eq!(strict.usize_field("total_build_order_nodes"), Some(0));
+        assert_eq!(strict.usize_field("total_reachability_states"), Some(0));
+        assert_eq!(symbolic_work.candidates_attempted, 1);
+        assert_eq!(symbolic_work.candidates_certified, 1);
+        eprintln!(
+            "strict reverse={reverse} versus ordinary 4L joint-clear: baseline graph_nodes={old_nodes}, primitive_poses={:?}; relation and language costs: {symbolic_work:?}",
+            baseline.usize_field("total_reachability_states"),
+        );
+    }
     assert_eq!(entry.identity(), identity);
     assert_eq!(entry.covered_patterns().count_ones() as usize, words.len());
     for ordinal in 0..universe.pattern_count() {
@@ -2074,7 +2657,7 @@ fn one_i_operation_keeps_opposite_ordered_kick_answers_for_its_two_realizations(
 }
 
 #[test]
-fn conditional_support_or_preserves_every_empty_hold_queue_ordinal() {
+fn conditional_and_strict_prefix_support_or_preserve_every_empty_hold_queue_ordinal() {
     use clearra_core_domain::solution::normalized_tiling_solution::{
         PiecePlacementMask, StandardBoard64TilingIdentity,
     };
@@ -2190,6 +2773,53 @@ fn conditional_support_or_preserves_every_empty_hold_queue_ordinal() {
     assert_parity(&baseline, &conditional);
     assert!(metrics.conditional_order.attempted_candidates > 0);
 
+    let (strict, strict_work) = super::symbolic_prefix_orders::with_strict_prefix_order(|| {
+        WasmCpuSearchBackend::execute_with_control(&problem, &ExecutionControl::default()).unwrap()
+    });
+    assert_parity(&baseline, &strict);
+    assert_eq!(strict.usize_field("workers_used"), Some(1));
+    assert_eq!(strict.usize_field("total_build_order_nodes"), Some(0));
+    assert_eq!(strict.usize_field("total_reachability_states"), Some(0));
+    assert!(baseline.usize_field("total_build_order_nodes").unwrap() > 0);
+    assert!(strict_work.candidates_attempted > 0);
+    assert_eq!(
+        strict_work.candidates_attempted,
+        strict_work.candidates_certified
+    );
+    let (strict_reverse, reverse_work) = super::symbolic_prefix_orders::with_target_reverse(|| {
+        super::symbolic_prefix_orders::with_strict_prefix_order(|| {
+            WasmCpuSearchBackend::execute_with_control(&problem, &ExecutionControl::default())
+                .unwrap()
+        })
+    });
+    assert_parity(&strict, &strict_reverse);
+    assert_eq!(
+        strict_reverse.usize_field("total_build_order_nodes"),
+        Some(0)
+    );
+    assert_eq!(
+        strict_reverse.usize_field("total_reachability_states"),
+        Some(0)
+    );
+    assert_eq!(
+        reverse_work.candidates_certified,
+        strict_work.candidates_certified
+    );
+    let (strict_upper, upper_work) = super::symbolic_prefix_orders::with_upper_bound(|| {
+        super::symbolic_prefix_orders::with_target_reverse(|| {
+            super::symbolic_prefix_orders::with_strict_prefix_order(|| {
+                WasmCpuSearchBackend::execute_with_control(&problem, &ExecutionControl::default())
+                    .unwrap()
+            })
+        })
+    });
+    assert_parity(&strict, &strict_upper);
+    assert_eq!(strict_upper.usize_field("total_build_order_nodes"), Some(0));
+    assert_eq!(
+        upper_work.candidates_certified,
+        strict_work.candidates_certified
+    );
+
     let identity = StandardBoard64TilingIdentity::from_placements(
         board,
         placements.map(|(piece, cells)| PiecePlacementMask::new(piece, cells)),
@@ -2201,20 +2831,34 @@ fn conditional_support_or_preserves_every_empty_hold_queue_ordinal() {
         .find(|coverage| coverage.identity() == identity)
         .expect("the O/T support-OR tiling is present")
         .covered_patterns();
+    let strict_coverage = strict
+        .solution_coverages()
+        .iter()
+        .find(|coverage| coverage.identity() == identity)
+        .expect("the strict verifier emits the O/T support-OR tiling")
+        .covered_patterns();
     let queues = four_draw_queues();
     let universe = problem.piece_source().materialized_universe().unwrap();
     assert_eq!(queues.len(), 840);
     assert_eq!(universe.pattern_count(), queues.len());
     let mut successes = 0;
+    let mut hold_only_successes = 0;
     for (ordinal, queue) in queues.iter().enumerate() {
         assert_eq!(universe.sequence_at(ordinal).as_ref(), queue.as_slice());
         let expected = words.iter().any(|word| plays_word(queue, None, word));
         assert_eq!(
             coverage.contains(PatternId::new(ordinal)),
             expected,
-            "original supply ordinal {ordinal} ({queue:?})"
+            "conditional original supply ordinal {ordinal} ({queue:?})"
+        );
+        assert_eq!(
+            strict_coverage.contains(PatternId::new(ordinal)),
+            expected,
+            "strict original supply ordinal {ordinal} ({queue:?})"
         );
         successes += usize::from(expected);
+        hold_only_successes += usize::from(expected && !words.contains(&queue[..3]));
     }
     assert_eq!(successes, 80);
+    assert_eq!(hold_only_successes, 64);
 }

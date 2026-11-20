@@ -2078,6 +2078,42 @@ fn verify_candidate_for_completion_mode(
             "wasm_exact_backend_requires_connected_kick_profile",
         ));
     }
+    #[cfg(any(
+        test,
+        all(
+            feature = "local-search-ab",
+            feature = "parallel",
+            not(target_family = "wasm")
+        )
+    ))]
+    if super::symbolic_prefix_orders::in_strict_prefix_order() {
+        // Strict mode is installed explicitly in this evaluating thread.
+        // Unsupported evidence must never delegate to the concrete verifier.
+        if !use_builtin_rule
+            || problem.count_policy() != PcCountPolicy::CountUnique
+            || !matches!(completion, BuildCompletion::ClearToEmpty)
+            || retain_trace
+            || finesse_requested
+            || finesse_spin_coverage_requested
+            || witness_mode.enabled()
+            || problem.objective().execution_constraints().requested()
+            || problem
+                .queue_observation_policy()
+                .requires_observation_policy()
+        {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "wasm_symbolic_prefix_unsupported_evidence",
+            ));
+        }
+        return verify_strict_prefix_order(
+            problem,
+            catalog,
+            candidate,
+            workspace,
+            control,
+            profile_scale,
+        );
+    }
     if RealizationFeasibilityWorkspace::dependency_relaxation_is_infeasible(catalog, candidate) {
         return Ok(infeasible_candidate_result(0));
     }
@@ -2172,6 +2208,99 @@ fn verify_candidate_for_completion_mode(
     );
     workspace.recycle_projection(projection);
     result
+}
+
+#[cfg(any(
+    test,
+    all(
+        feature = "local-search-ab",
+        feature = "parallel",
+        not(target_family = "wasm")
+    )
+))]
+fn verify_strict_prefix_order(
+    problem: &SearchProblem,
+    catalog: &GeometryCatalog,
+    candidate: &GeometryCandidate,
+    workspace: &mut BuildUpWorkspace,
+    control: &ExecutionControl,
+    profile_scale: u64,
+) -> Result<CandidateBuildResult, WasmExactSearchError> {
+    use super::symbolic_prefix_orders::{
+        record_strict_prefix_work, SymbolicPrefixOrders, SymbolicPrefixRefusal,
+    };
+
+    let unsupported_supply =
+        || WasmExactSearchError::InvalidProblem("wasm_symbolic_prefix_unsupported_supply");
+    let universe = problem
+        .piece_source()
+        .materialized_universe()
+        .ok_or_else(unsupported_supply)?;
+    if !StandardBagCoverage::supports(universe, problem.initial_hold()) {
+        return Err(unsupported_supply());
+    }
+    record_strict_prefix_work(|work| {
+        work.candidates_attempted += 1;
+        let orders = SymbolicPrefixOrders::compile_with_workspace(
+            catalog,
+            candidate,
+            problem.kick_profile().profile_id(),
+            control,
+            &mut workspace.reachability,
+            work,
+            profile_scale,
+        )
+        .map_err(|reason| match reason {
+            SymbolicPrefixRefusal::Cancelled => WasmExactSearchError::Cancelled,
+            SymbolicPrefixRefusal::Unsupported => {
+                WasmExactSearchError::InvalidProblem("wasm_symbolic_prefix_unsupported_candidate")
+            }
+            SymbolicPrefixRefusal::RelationLimit => {
+                WasmExactSearchError::InvalidProblem("wasm_symbolic_prefix_relation_limit")
+            }
+            SymbolicPrefixRefusal::InconsistentProjection => {
+                WasmExactSearchError::InvalidProblem("wasm_symbolic_prefix_inconsistent_projection")
+            }
+        })?;
+        let language_span =
+            SearchStageSpan::begin_scaled(ExecutorSearchStage::StrictPrefixLanguage, profile_scale);
+        let language = orders.compile_language(&mut workspace.piece_order_languages, work)?;
+        language_span.finish(1);
+        let coverage = match language {
+            Some(root) => {
+                let product_span = SearchStageSpan::begin_scaled(
+                    ExecutorSearchStage::WasmCoverageLanguageProduct,
+                    profile_scale,
+                );
+                #[cfg(all(
+                    feature = "local-search-ab",
+                    feature = "parallel",
+                    not(target_family = "wasm")
+                ))]
+                let bag_product_span = SearchStageSpan::begin_scaled(
+                    ExecutorSearchStage::StrictStandardBagProduct,
+                    profile_scale,
+                );
+                let coverage = workspace
+                    .cover_standard_bag_language(problem, root, control)?
+                    .ok_or_else(unsupported_supply)?;
+                #[cfg(all(
+                    feature = "local-search-ab",
+                    feature = "parallel",
+                    not(target_family = "wasm")
+                ))]
+                bag_product_span.finish(coverage.edge_checks as u64);
+                product_span.finish(coverage.edge_checks as u64);
+                Some(coverage)
+            }
+            None => None,
+        };
+        if control.is_cancelled() {
+            return Err(WasmExactSearchError::Cancelled);
+        }
+        work.candidates_certified += 1;
+        Ok(certified_language_result(coverage))
+    })
 }
 
 // Evidence lives only until this candidate's fallback graph is constructed.
@@ -3355,14 +3484,39 @@ fn verify_candidate_with_projection(
                 let language_id = if let Some(language_id) = canonical_language_id {
                     language_id
                 } else {
-                    match workspace.piece_order_languages.canonicalize(&graph) {
+                    #[cfg(all(
+                        feature = "local-search-ab",
+                        feature = "parallel",
+                        not(target_family = "wasm")
+                    ))]
+                    let language_span = SearchStageSpan::begin_scaled(
+                        ExecutorSearchStage::StrictReferenceLanguage,
+                        profile_scale,
+                    );
+                    let language_id = match workspace.piece_order_languages.canonicalize(&graph) {
                         Ok(language_id) => language_id,
                         Err(error) => {
                             workspace.recycle_graph(graph);
                             return Err(error);
                         }
-                    }
+                    };
+                    #[cfg(all(
+                        feature = "local-search-ab",
+                        feature = "parallel",
+                        not(target_family = "wasm")
+                    ))]
+                    language_span.finish(1);
+                    language_id
                 };
+                #[cfg(all(
+                    feature = "local-search-ab",
+                    feature = "parallel",
+                    not(target_family = "wasm")
+                ))]
+                let bag_product_span = SearchStageSpan::begin_scaled(
+                    ExecutorSearchStage::StrictStandardBagProduct,
+                    profile_scale,
+                );
                 let symbolic =
                     match workspace.cover_standard_bag_language(problem, language_id, control) {
                         Ok(symbolic) => symbolic,
@@ -3371,6 +3525,16 @@ fn verify_candidate_with_projection(
                             return Err(error);
                         }
                     };
+                #[cfg(all(
+                    feature = "local-search-ab",
+                    feature = "parallel",
+                    not(target_family = "wasm")
+                ))]
+                bag_product_span.finish(
+                    symbolic
+                        .as_ref()
+                        .map_or(0, |value| value.edge_checks as u64),
+                );
                 if let Some(symbolic) = symbolic {
                     coverage_product_states = symbolic.product_states;
                     coverage_product_edge_checks = symbolic.edge_checks;

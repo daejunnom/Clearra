@@ -6,6 +6,7 @@ on:
       - codex/v090-relation-rust-integration
       - codex/v090-relation-rust-p7p4
       - codex/v090-relation-rust-proof-operation-masks-*
+      - codex/v090-relation-rust-proof-strict-prefix-union-memo-*
       # Pre-main opt-in: only an owner-created, SHA-addressed branch can
       # request the entire proof and timing suite on one hosted runner.
       - codex/v090-relation-rust-adoption-*
@@ -271,7 +272,8 @@ jobs:
             native_and_rust_agree_on_complete_bounded_legacy_prefix_assignment_matrix --nocapture || status=1
           # These selectors share one lib-test executable. A compile failure
           # prevents all of them, but does not prevent the integration tests.
-          app_lib=(cargo test --locked -p clearra-app --features native-c-core --lib)
+          app_native=(cargo test --locked -p clearra-app --features native-c-core,parallel)
+          app_lib=("${app_native[@]}" --lib)
           if "${app_lib[@]}" --no-run; then
             for filter in legacy_cover_tests legacy_cover_rust::tests:: \
               pc_tiling_candidate_budget_preserves_failure_without_publishing setup_score_ordinals \
@@ -284,16 +286,25 @@ jobs:
           else
             status=1
           fi
-          cargo test --locked -p clearra-app --features native-c-core --test extended_pc_tiling full_height_fixed_queue_scenario_replay_reuses_the_same_rust_family || status=1
-          cargo test --locked -p clearra-app --features native-c-core --test extended_pc_tiling full_height_ordinary_scenario_uses_bounded_native_worker_waves || status=1
-          cargo test --locked -p clearra-app --features native-c-core --test extended_pc_tiling full_height_replay_direct_cooperative_and_lazy_pages_preserve_all_words || status=1
-          cargo test --locked -p clearra-app --features native-c-core --test extended_pc_tiling full_height_sr3_local_continue_is_cooperative_on_one_worker || status=1
-          cargo test --locked -p clearra-app --features native-c-core --test extended_pc_tiling full_height_scenario_continuation_restarts_at_an_accepted_path_checkpoint || status=1
-          cargo test --locked -p clearra-app --features native-c-core --test opening_continuation_parity || status=1
-          cargo test --locked -p clearra-app --features native-c-core \
+          # App's parallel feature gates these tests; native-c-core alone
+          # enables Core's worker pool but leaves the App selectors absent.
+          if [ "$(nproc)" -lt 3 ]; then
+            echo 'Native Continue qualification requires at least three logical processors'
+            status=1
+          fi
+          for test_name in full_height_fixed_queue_scenario_replay_reuses_the_same_rust_family \
+            full_height_ordinary_scenario_uses_bounded_native_worker_waves \
+            full_height_replay_direct_cooperative_and_lazy_pages_preserve_all_words \
+            full_height_sr3_local_continue_is_cooperative_on_one_worker \
+            full_height_sr3_uses_native_worker_waves_without_publishing_on_a_zero_tick \
+            full_height_scenario_continuation_restarts_at_an_accepted_path_checkpoint; do
+            "${app_native[@]}" --test extended_pc_tiling "$test_name" -- --exact || status=1
+          done
+          "${app_native[@]}" --test opening_continuation_parity || status=1
+          "${app_native[@]}" \
             --test scenario_replay_parity --test scenario_verified_kick_admission \
             --test exact_accelerator_policy --no-fail-fast || status=1
-          cargo test --locked -p clearra-app --features native-c-core --test exact_accelerator_product_execution setup_score_reuse || status=1
+          "${app_native[@]}" --test exact_accelerator_product_execution setup_score_reuse || status=1
           exit "$status"
           SH
       - name: Execute the Rust-only CLI product contract
@@ -452,13 +463,16 @@ jobs:
           !github.event.deleted && !github.event.forced &&
           github.event.before == '0000000000000000000000000000000000000000' &&
           github.event.after == github.sha &&
-          github.ref == format('refs/heads/codex/v090-relation-rust-proof-operation-masks-{0}', github.sha)
+          (
+            github.ref == format('refs/heads/codex/v090-relation-rust-proof-operation-masks-{0}', github.sha) ||
+            github.ref == format('refs/heads/codex/v090-relation-rust-proof-strict-prefix-union-memo-{0}', github.sha)
+          )
         )
       )
     runs-on: ubuntu-latest
     timeout-minutes: 125
     env:
-      PROOF_EXPERIMENT: ${{ github.ref == 'refs/heads/codex/v090-relation-rust-p7p4' && 'movement-clear' || 'operation-masks' }}
+      PROOF_EXPERIMENT: ${{ github.ref == 'refs/heads/codex/v090-relation-rust-p7p4' && 'movement-clear' || (startsWith(github.ref, 'refs/heads/codex/v090-relation-rust-proof-strict-prefix-union-memo-') && 'strict-prefix-union-memo' || 'operation-masks') }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -466,14 +480,28 @@ jobs:
           persist-credentials: false
       - name: Require the exact source and enough managed workspace storage
         run: |
+          set -eu
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           available="$(df --output=avail -B1 "$GITHUB_WORKSPACE" | tail -1 | tr -d ' ')"
           printf 'workspace_available_bytes=%s\n' "$available"
-          test "$available" -ge 35433480192 || { echo 'P7P4 capture requires 33 GiB free in its artifact volume'; exit 2; }
+          case "$PROOF_EXPERIMENT" in
+            strict-prefix-union-memo) minimum_gib=24 ;;
+            movement-clear|operation-masks) minimum_gib=33 ;;
+            *) exit 2 ;;
+          esac
+          test "$available" -ge "$((minimum_gib * 1024 * 1024 * 1024))" || {
+            echo "P7P4 capture requires ${minimum_gib} GiB free in its artifact volume"; exit 2;
+          }
       - name: Build native proof tools once
         run: |
           cargo build --locked --release -p clearra-manage
           CLEARRA_SOURCE_COMMIT="$GITHUB_SHA" cargo build --locked --release -p clearra-core-executor --features parallel,local-search-ab --example placement_graph_bench
+      - name: Compare the nonempty SRS+ P7 scope using the same proof tools
+        if: env.PROOF_EXPERIMENT == 'strict-prefix-union-memo'
+        run: |
+          node scripts/benchmark/run-placement-coverage-proof.mjs --case p7 \
+            --id "small-union-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" --source-sha "$GITHUB_SHA" \
+            --experiment "$PROOF_EXPERIMENT"
       - name: Compare all per-solution queues under separate supervised leases
         run: |
           node scripts/benchmark/run-placement-coverage-proof.mjs --case p7p4 \
@@ -483,8 +511,10 @@ jobs:
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ env.PROOF_EXPERIMENT == 'operation-masks' && 'p7p4-operation-masks-proof' || 'p7p4-proof' }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: _local/artifacts/benchmarks/placement-graph-coverage/large-${{ github.run_id }}-${{ github.run_attempt }}-proof/*.json
+          name: ${{ env.PROOF_EXPERIMENT == 'movement-clear' && 'p7p4-proof' || format('p7p4-{0}-proof', env.PROOF_EXPERIMENT) }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            _local/artifacts/benchmarks/placement-graph-coverage/large-${{ github.run_id }}-${{ github.run_attempt }}-proof/*.json
+            _local/artifacts/benchmarks/placement-graph-coverage/small-union-${{ github.run_id }}-${{ github.run_attempt }}-proof/*.json
           if-no-files-found: ignore
           retention-days: 14
 

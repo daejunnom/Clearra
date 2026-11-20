@@ -1,3 +1,5 @@
+#[cfg(all(feature = "parallel", not(target_family = "wasm")))]
+use clearra_core_executor::backend::wasm_cpu_search_backend::NativePcCooperativeSession;
 use clearra_core_executor::{
     service::pc_continuation_fields::PreparedFixedOpeningContinuation, CoreExecutionError,
     CoreExecutionResult,
@@ -31,11 +33,27 @@ impl ContinueAppCommand {
 
     /// Invalid input and errors during compilation stay on Continue's ordinary
     /// path, including its pre-execution cancellation behavior.
-    pub(crate) fn compile_cooperative(&self) -> Option<(SearchProblem, ContinueKind)> {
+    pub(crate) fn compile_cooperative(
+        &self,
+        allow_native_multiworker: bool,
+    ) -> Option<(SearchProblem, ContinueKind)> {
         let (problem, kind) = compile_continue(self.token.as_deref()?).ok()?;
-        (problem.backend_request().requested_backend() == RequestedSearchBackend::Cpu
-            && problem.backend_policy().workers() == 1)
-            .then_some((problem, kind))
+        if problem.backend_request().requested_backend() != RequestedSearchBackend::Cpu {
+            return None;
+        }
+        if problem.backend_policy().workers() == 1 {
+            return Some((problem, kind));
+        }
+        #[cfg(all(feature = "parallel", not(target_family = "wasm")))]
+        if allow_native_multiworker
+            && !matches!(kind, ContinueKind::Opening)
+            && NativePcCooperativeSession::supports_problem(&problem)
+        {
+            return Some((problem, kind));
+        }
+        #[cfg(not(all(feature = "parallel", not(target_family = "wasm"))))]
+        let _ = allow_native_multiworker;
+        None
     }
 
     pub(crate) fn into_cooperative_result(
@@ -72,7 +90,7 @@ impl RunnableAppCommand for ContinueAppCommand {
                 } else {
                     None
                 };
-                continue_response(kind, &token, opening.as_ref(), result)
+                continue_response(kind, token, opening.as_ref(), result)
             }
             Err(error) => core_execution_error_response(error),
         }
@@ -102,9 +120,19 @@ pub(crate) struct CooperativeContinueResult {
 }
 
 impl CooperativeContinueResult {
+    #[cfg(all(feature = "parallel", not(target_family = "wasm")))]
+    pub(crate) fn checked_native_retained_capacity_bytes(&self) -> Option<u128> {
+        // Only scenario tokens enter the native cooperative route. The
+        // compact opening projection has a separate boxed memory owner.
+        if matches!(self.kind, ContinueKind::Opening) || self.opening.is_some() {
+            return None;
+        }
+        Some(self.token.as_ref()?.capacity() as u128)
+    }
+
     pub(crate) fn response(self, result: CoreExecutionResult) -> AppResponse {
         match self.token {
-            Some(token) => continue_response(self.kind, &token, self.opening.as_deref(), result),
+            Some(token) => continue_response(self.kind, token, self.opening.as_deref(), result),
             None => missing_continue_token_response(),
         }
     }
@@ -172,7 +200,7 @@ fn continue_compile_error(error: impl std::fmt::Debug) -> AppResponse {
 
 fn continue_response(
     kind: ContinueKind,
-    token: &str,
+    token: String,
     opening: Option<&PreparedFixedOpeningContinuation>,
     result: CoreExecutionResult,
 ) -> AppResponse {
@@ -199,7 +227,7 @@ fn continue_response(
 fn continue_fields(
     status: &str,
     continuation_kind: &str,
-    token: &str,
+    token: String,
     result_fields: Vec<(String, String)>,
 ) -> Vec<clearra_output::model::RenderField> {
     let mut fields = vec![

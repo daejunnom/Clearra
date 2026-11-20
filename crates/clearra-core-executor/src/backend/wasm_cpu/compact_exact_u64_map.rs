@@ -1,11 +1,8 @@
-#[cfg(any(feature = "local-search-ab", test))]
-use std::{collections::HashSet, hash::Hash};
 use std::{
-    collections::{HashMap, TryReserveError},
-    hash::{BuildHasherDefault, Hasher},
+    collections::{HashMap, HashSet, TryReserveError},
+    hash::{BuildHasherDefault, Hash, Hasher},
 };
 
-#[cfg(any(feature = "local-search-ab", test))]
 const COMPACT_SLOT_PAYLOAD_BYTES: usize = 12;
 
 /// Identical hashing for the reference and compact exact memo tables. The
@@ -43,17 +40,14 @@ fn splitmix64(mut value: u64) -> u64 {
 /// precision. Fields remain naturally aligned; there are no packed/unsafe reads.
 #[derive(Clone, Copy, Debug)]
 #[repr(C)]
-#[cfg(any(feature = "local-search-ab", test))]
 struct MemoEntry {
     key_low: u32,
     key_high: u32,
     value: u32,
 }
 
-#[cfg(any(feature = "local-search-ab", test))]
 const _: () = assert!(core::mem::size_of::<MemoEntry>() == COMPACT_SLOT_PAYLOAD_BYTES);
 
-#[cfg(any(feature = "local-search-ab", test))]
 impl MemoEntry {
     const fn new(key: u64, value: u32) -> Self {
         Self {
@@ -68,29 +62,25 @@ impl MemoEntry {
     }
 }
 
-#[cfg(any(feature = "local-search-ab", test))]
 impl Hash for MemoEntry {
     fn hash<H: Hasher>(&self, state: &mut H) {
         state.write_u64(self.key());
     }
 }
 
-#[cfg(any(feature = "local-search-ab", test))]
 impl PartialEq for MemoEntry {
     fn eq(&self, other: &Self) -> bool {
         self.key_low == other.key_low && self.key_high == other.key_high
     }
 }
 
-#[cfg(any(feature = "local-search-ab", test))]
 impl Eq for MemoEntry {}
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(super) enum ExactU64MemoStorage {
-    /// Keep the current product representation until compact-storage A/B.
+    /// Default product-state memo representation; separate from union storage.
     #[default]
     Reference,
-    #[cfg(any(feature = "local-search-ab", test))]
     Compact,
 }
 
@@ -103,6 +93,35 @@ impl ExactU64MemoStorage {
         #[cfg(not(feature = "local-search-ab"))]
         {
             Ok(Self::Reference)
+        }
+    }
+
+    /// Use the lossless 12-byte slots for the product union table. Historical
+    /// comparison builds retain their explicit product/union storage controls.
+    pub fn for_union(_product_storage: Self) -> Result<Self, &'static str> {
+        #[cfg(feature = "local-search-ab")]
+        {
+            Self::from_union_environment_value(
+                _product_storage,
+                std::env::var("CLEARRA_STANDARD_BAG_UNION_MEMO"),
+            )
+        }
+        #[cfg(not(feature = "local-search-ab"))]
+        {
+            Ok(Self::Compact)
+        }
+    }
+
+    #[cfg(any(feature = "local-search-ab", test))]
+    pub(super) fn from_union_environment_value(
+        fallback: Self,
+        value: Result<String, std::env::VarError>,
+    ) -> Result<Self, &'static str> {
+        const INVALID: &str = "wasm_standard_bag_union_memo_storage_invalid";
+        match value {
+            Ok(label) => Self::from_label(Some(&label)).map_err(|_| INVALID),
+            Err(std::env::VarError::NotPresent) => Ok(fallback),
+            Err(std::env::VarError::NotUnicode(_)) => Err(INVALID),
         }
     }
 
@@ -130,13 +149,19 @@ impl ExactU64MemoStorage {
     pub const fn label(self) -> &'static str {
         match self {
             Self::Reference => "reference",
-            #[cfg(any(feature = "local-search-ab", test))]
             Self::Compact => "compact",
+        }
+    }
+
+    pub const fn slot_payload_bytes(self) -> usize {
+        match self {
+            Self::Reference => core::mem::size_of::<(u64, u32)>(),
+            Self::Compact => COMPACT_SLOT_PAYLOAD_BYTES,
         }
     }
 }
 
-/// Lossless storage-only candidate for worker-local product/union memo tables.
+/// Lossless storage for worker-local product/union memo tables.
 /// Both variants retain SwissTable growth/load semantics and useful cache
 /// entries. Unordered traversal is restricted to lossless representation copies;
 /// table placement must never define candidate or solution order.
@@ -146,7 +171,6 @@ pub(super) struct ExactU64MemoMap {
 
 enum MemoStorage {
     Reference(HashMap<u64, u32, BuildHasherDefault<ExactU64Hasher>>),
-    #[cfg(any(feature = "local-search-ab", test))]
     Compact(HashSet<MemoEntry, BuildHasherDefault<ExactU64Hasher>>),
 }
 
@@ -155,7 +179,6 @@ impl ExactU64MemoMap {
         Self {
             storage: match storage {
                 ExactU64MemoStorage::Reference => MemoStorage::Reference(HashMap::default()),
-                #[cfg(any(feature = "local-search-ab", test))]
                 ExactU64MemoStorage::Compact => MemoStorage::Compact(HashSet::default()),
             },
         }
@@ -164,7 +187,6 @@ impl ExactU64MemoMap {
     pub const fn storage(&self) -> ExactU64MemoStorage {
         match &self.storage {
             MemoStorage::Reference(_) => ExactU64MemoStorage::Reference,
-            #[cfg(any(feature = "local-search-ab", test))]
             MemoStorage::Compact(_) => ExactU64MemoStorage::Compact,
         }
     }
@@ -173,7 +195,6 @@ impl ExactU64MemoMap {
     pub fn get(&self, key: &u64) -> Option<&u32> {
         match &self.storage {
             MemoStorage::Reference(entries) => entries.get(key),
-            #[cfg(any(feature = "local-search-ab", test))]
             MemoStorage::Compact(entries) => entries
                 .get(&MemoEntry::new(*key, 0))
                 .map(|entry| &entry.value),
@@ -189,7 +210,6 @@ impl ExactU64MemoMap {
     pub fn try_reserve(&mut self, additional: usize) -> Result<(), TryReserveError> {
         match &mut self.storage {
             MemoStorage::Reference(entries) => entries.try_reserve(additional),
-            #[cfg(any(feature = "local-search-ab", test))]
             MemoStorage::Compact(entries) => entries.try_reserve(additional),
         }
     }
@@ -198,7 +218,6 @@ impl ExactU64MemoMap {
     pub fn insert(&mut self, key: u64, value: u32) -> Option<u32> {
         match &mut self.storage {
             MemoStorage::Reference(entries) => entries.insert(key, value),
-            #[cfg(any(feature = "local-search-ab", test))]
             MemoStorage::Compact(entries) => entries
                 .replace(MemoEntry::new(key, value))
                 .map(|entry| entry.value),
@@ -208,7 +227,6 @@ impl ExactU64MemoMap {
     pub fn clear(&mut self) {
         match &mut self.storage {
             MemoStorage::Reference(entries) => entries.clear(),
-            #[cfg(any(feature = "local-search-ab", test))]
             MemoStorage::Compact(entries) => entries.clear(),
         }
     }
@@ -216,7 +234,6 @@ impl ExactU64MemoMap {
     pub fn len(&self) -> usize {
         match &self.storage {
             MemoStorage::Reference(entries) => entries.len(),
-            #[cfg(any(feature = "local-search-ab", test))]
             MemoStorage::Compact(entries) => entries.len(),
         }
     }
@@ -224,7 +241,6 @@ impl ExactU64MemoMap {
     pub fn capacity(&self) -> usize {
         match &self.storage {
             MemoStorage::Reference(entries) => entries.capacity(),
-            #[cfg(any(feature = "local-search-ab", test))]
             MemoStorage::Compact(entries) => entries.capacity(),
         }
     }
@@ -241,7 +257,6 @@ impl ExactU64MemoMap {
                     visit(key, value)?;
                 }
             }
-            #[cfg(any(feature = "local-search-ab", test))]
             MemoStorage::Compact(entries) => {
                 for entry in entries {
                     visit(entry.key(), entry.value)?;
@@ -254,12 +269,8 @@ impl ExactU64MemoMap {
     /// Logical capacity payload only, not allocator/SIMD control bytes or OS
     /// peak memory. Explicitly account for the reference tuple's padding.
     pub fn retained_payload_bytes(&self) -> usize {
-        let slot_bytes = match self.storage() {
-            ExactU64MemoStorage::Reference => core::mem::size_of::<(u64, u32)>(),
-            #[cfg(any(feature = "local-search-ab", test))]
-            ExactU64MemoStorage::Compact => COMPACT_SLOT_PAYLOAD_BYTES,
-        };
-        self.capacity().saturating_mul(slot_bytes)
+        self.capacity()
+            .saturating_mul(self.storage().slot_payload_bytes())
     }
 }
 
@@ -375,6 +386,37 @@ mod tests {
             ExactU64MemoStorage::from_label(Some("compact")),
             Ok(ExactU64MemoStorage::Compact)
         );
+    }
+
+    #[test]
+    fn union_override_is_explicit_and_inherits_the_existing_storage_when_unset() {
+        use ExactU64MemoStorage::{Compact, Reference};
+        for previous in [Reference, Compact] {
+            assert_eq!(
+                ExactU64MemoStorage::from_union_environment_value(
+                    previous,
+                    Err(std::env::VarError::NotPresent)
+                ),
+                Ok(previous)
+            );
+            for (label, selected) in [("reference", Reference), ("compact", Compact)] {
+                assert_eq!(
+                    ExactU64MemoStorage::from_union_environment_value(previous, Ok(label.into())),
+                    Ok(selected)
+                );
+            }
+        }
+        for invalid in [
+            Ok(String::new()),
+            Ok("state-major".into()),
+            Ok(" compact".into()),
+            Err(std::env::VarError::NotUnicode(std::ffi::OsString::new())),
+        ] {
+            assert_eq!(
+                ExactU64MemoStorage::from_union_environment_value(Reference, invalid),
+                Err("wasm_standard_bag_union_memo_storage_invalid")
+            );
+        }
     }
 
     #[test]

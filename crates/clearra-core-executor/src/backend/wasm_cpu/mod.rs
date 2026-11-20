@@ -95,6 +95,70 @@ mod static_influence_integration_tests;
 mod structural_graph_probability_tests;
 #[cfg(any(test, feature = "local-search-ab"))]
 mod structural_order;
+#[cfg(any(
+    test,
+    all(
+        feature = "local-search-ab",
+        feature = "parallel",
+        not(target_family = "wasm")
+    )
+))]
+mod symbolic_prefix_domain;
+#[cfg(any(
+    test,
+    all(
+        feature = "local-search-ab",
+        feature = "parallel",
+        not(target_family = "wasm")
+    )
+))]
+mod symbolic_prefix_lanes;
+#[cfg(any(
+    test,
+    all(
+        feature = "local-search-ab",
+        feature = "parallel",
+        not(target_family = "wasm")
+    )
+))]
+mod symbolic_prefix_orders;
+#[cfg(all(
+    feature = "local-search-ab",
+    feature = "parallel",
+    not(target_family = "wasm")
+))]
+mod symbolic_prefix_parallel;
+#[cfg(any(
+    test,
+    all(
+        feature = "local-search-ab",
+        feature = "parallel",
+        not(target_family = "wasm")
+    )
+))]
+mod symbolic_prefix_subsumption;
+#[cfg(all(
+    feature = "local-search-ab",
+    feature = "parallel",
+    not(target_family = "wasm")
+))]
+pub use symbolic_prefix_parallel::{
+    with_catalog_guard_strict_parallel_prefix_experiment,
+    with_legacy_strict_parallel_prefix_experiment, with_strict_parallel_prefix_experiment,
+    StrictParallelPrefixReport,
+};
+#[cfg(all(
+    feature = "local-search-ab",
+    feature = "parallel",
+    not(target_family = "wasm")
+))]
+pub(super) fn strict_parallel_prefix_requested() -> bool {
+    symbolic_prefix_parallel::strict_parallel_prefix_requested()
+}
+#[cfg(test)]
+pub(super) fn strict_prefix_experiment_active() -> bool {
+    symbolic_prefix_orders::in_strict_prefix_order()
+}
 #[cfg(feature = "local-search-ab")]
 pub use buildup::{geometric_edge_reuse_experiment_totals, GeometricEdgeReuseMetrics};
 #[cfg(all(feature = "local-search-ab", feature = "parallel"))]

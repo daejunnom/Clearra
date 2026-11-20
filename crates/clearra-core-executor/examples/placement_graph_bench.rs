@@ -1,6 +1,7 @@
 //! Finite same-binary A/B entrypoint for the placement-condition experiment.
 //! Build with --release --features parallel,local-search-ab. Large runs require
 //! the repository supervisor; A/B selection is fixed by the process environment.
+//! Add wasm-stage-profiling for a separate strict-prefix diagnostic report.
 
 #[cfg(not(all(feature = "parallel", feature = "local-search-ab")))]
 fn main() {
@@ -44,7 +45,7 @@ mod run {
     };
 
     use super::solution_coverage_compare::{
-        self, CoverageComparison, CoverageUniverse, CoverageWriter,
+        self, CoverageComparison, CoverageUniverse, CoverageWriter, P7_INITIAL,
     };
     use super::solution_coverage_spool::{CoverageFragment, CoverageSpool, CoverageSpoolLimits};
 
@@ -59,25 +60,35 @@ mod run {
     };
     use clearra_core_executor::{
         backend::{
-            with_operation_mask_experiment, CapturedSolutionCoverage, GeometricEdgeReuseMetrics,
-            GeometryDomainExperimentTotals, OperationMaskExperimentReport,
+            with_catalog_guard_strict_parallel_prefix_experiment,
+            with_legacy_strict_parallel_prefix_experiment, with_operation_mask_experiment,
+            with_strict_parallel_prefix_experiment, CapturedSolutionCoverage,
+            GeometricEdgeReuseMetrics, GeometryDomainExperimentTotals,
+            OperationMaskExperimentReport, StrictParallelPrefixReport,
         },
         CoreExecutionResult, WasmCpuSearchBackend,
     };
+    #[cfg(feature = "wasm-stage-profiling")]
+    use clearra_core_executor::{ExecutorSearchProfileSession, ExecutorSearchProfileStage};
     use clearra_objectives::policy::objective_policy::ObjectivePolicy;
     use clearra_pc_graph::request::{
         OpeningPcSearchQuery, PcCountPolicy, PcExecutionPolicy, PcHoldPolicy, PcQueueInput,
         PcScenarioBoard, PcScenarioQuery, PcSolutionProbabilityPolicy, PieceWindow,
-        RequestedSearchBackend, WorkerPolicy,
+        RequestedSearchBackend, SupplyWindowSize, WorkerPolicy,
     };
-    use clearra_problem::{ProblemCompiler, SearchProblem};
-    use clearra_rules::profile::builtin_rules::{jstris_180, srs};
+    use clearra_problem::{ProblemCompiler, SearchOutputPolicy, SearchProblem};
+    use clearra_rules::profile::builtin_rules::{jstris_180, srs, srs_plus};
     use clearra_supply::queue::fixed_sequence::FixedSequence;
     use serde_json::{json, Value};
     use sha2::{Digest, Sha256};
 
     const LARGE_COUNT: usize = 456_459;
     const LARGE_HASH: &str = "cts1:2fcbc950acdffa31";
+    const P7_CANDIDATE_COUNT: usize = 2_260;
+    const GIB: u64 = 1024 * 1024 * 1024;
+    const STRICT_SPILL_WRITE_BYTES: u64 = 5 * GIB;
+    const STRICT_FINAL_OUTPUT_BYTES: u64 = 3 * GIB;
+    const LEGACY_FINAL_OUTPUT_BYTES: u64 = 8 * GIB;
     const EIGHT_I_INITIAL: u64 = 0xc030_0c03;
     const GROUNDED_O_CELLS: u64 = 0x0c03;
     const GROUNDED_O_INITIAL: u64 = 0x0f_ffff & !GROUNDED_O_CELLS;
@@ -95,6 +106,7 @@ mod run {
         EmptyTenI,
         GroundedOTwoLinesAll,
         GroundedOTwoLinesUnique,
+        P7,
         P7P4,
     }
 
@@ -106,6 +118,7 @@ mod run {
                 Self::EmptyTenI => "empty-4L-ten-I-jstris180",
                 Self::GroundedOTwoLinesAll => "grounded-o-two-lines-countall-srs90",
                 Self::GroundedOTwoLinesUnique => "grounded-o-two-lines-countunique-srs90",
+                Self::P7 => "nonempty-4L-P7-srs-plus",
                 Self::P7P4 => "empty-4L-P7P4-jstris180",
             }
         }
@@ -114,7 +127,7 @@ mod run {
             match self {
                 Self::OneI => 1,
                 Self::GroundedOTwoLinesAll | Self::GroundedOTwoLinesUnique => 2,
-                Self::NonemptyEightI | Self::EmptyTenI | Self::P7P4 => 4,
+                Self::NonemptyEightI | Self::EmptyTenI | Self::P7 | Self::P7P4 => 4,
             }
         }
 
@@ -123,6 +136,7 @@ mod run {
                 Self::OneI | Self::GroundedOTwoLinesAll | Self::GroundedOTwoLinesUnique => 1,
                 Self::NonemptyEightI => 8,
                 Self::EmptyTenI | Self::P7P4 => 10,
+                Self::P7 => 6,
             }
         }
 
@@ -133,7 +147,7 @@ mod run {
                 Self::GroundedOTwoLinesAll | Self::GroundedOTwoLinesUnique => {
                     Some(GROUNDED_O_INITIAL)
                 }
-                Self::EmptyTenI | Self::P7P4 => None,
+                Self::EmptyTenI | Self::P7 | Self::P7P4 => None,
             }
         }
 
@@ -145,13 +159,19 @@ mod run {
                 Self::GroundedOTwoLinesAll | Self::GroundedOTwoLinesUnique => {
                     ("0xff3fc", "O", 1, 1, "disabled")
                 }
+                Self::P7 => ("0x3c0f03c0f", "P7", 7, 5_040, "enabled-empty"),
                 Self::P7P4 => ("0", "P7P4", 11, 4_233_600, "enabled-empty"),
+            };
+            let rule = match self {
+                Self::P7 => "srs-plus",
+                Self::GroundedOTwoLinesAll | Self::GroundedOTwoLinesUnique => "srs90",
+                _ => "jstris-180",
             };
             json!({
                 "board": board, "height": self.height(), "placed_pieces": self.placed_pieces(),
                 "supply": supply, "supplied_pieces": supplied_pieces,
                 "original_supply_count": original_supply_count, "hold": hold,
-                "rule": if self.is_grounded_o() { "srs90" } else { "jstris-180" },
+                "rule": rule,
                 "count": if self.count_policy() == PcCountPolicy::CountAll { "all" } else { "unique" },
                 "queue_knowledge": "full-future-oracle"
             })
@@ -160,6 +180,7 @@ mod run {
         fn capture_universe(self) -> Result<CoverageUniverse, String> {
             match self {
                 Self::OneI => Ok(CoverageUniverse::SmallI),
+                Self::P7 => Ok(CoverageUniverse::P7),
                 Self::P7P4 => Ok(CoverageUniverse::P7P4),
                 Self::NonemptyEightI => Err(EIGHT_I_CAPTURE_ERROR.into()),
                 Self::EmptyTenI => Err(TEN_I_CAPTURE_ERROR.into()),
@@ -188,6 +209,7 @@ mod run {
         match args {
             [] => Ok((Fixture::P7P4, None)),
             [flag] if flag == "--small" => Ok((Fixture::OneI, None)),
+            [flag] if flag == "--p7" => Ok((Fixture::P7, None)),
             [flag] if flag == "--nonempty-eight-i" => Ok((Fixture::NonemptyEightI, None)),
             [flag] if flag == "--empty-ten-i" => Ok((Fixture::EmptyTenI, None)),
             [flag] if flag == "--grounded-o-two-lines" => Ok((Fixture::GroundedOTwoLinesAll, None)),
@@ -197,6 +219,9 @@ mod run {
             [flag, slot] if flag == "--coverage-slot" => Ok((Fixture::P7P4, Some(slot.as_str()))),
             [small, flag, slot] if small == "--small" && flag == "--coverage-slot" => {
                 Ok((Fixture::OneI, Some(slot.as_str())))
+            }
+            [p7, flag, slot] if p7 == "--p7" && flag == "--coverage-slot" => {
+                Ok((Fixture::P7, Some(slot.as_str())))
             }
             [fixture, flag, _] if fixture == "--nonempty-eight-i" && flag == "--coverage-slot" => {
                 Err(EIGHT_I_CAPTURE_ERROR.into())
@@ -211,7 +236,7 @@ mod run {
                 Err(GROUNDED_O_CAPTURE_ERROR.into())
             }
             _ => Err(
-                "usage: placement_graph_bench [[--small] [--coverage-slot SLOT] | --nonempty-eight-i | --empty-ten-i | --grounded-o-two-lines | --grounded-o-two-lines-unique | --scalar-demo | --compare FILE FILE ... | --compare-coverage FILE FILE]"
+                "usage: placement_graph_bench [[--small | --p7] [--coverage-slot SLOT] | --nonempty-eight-i | --empty-ten-i | --grounded-o-two-lines | --grounded-o-two-lines-unique | --scalar-demo | --compare FILE FILE ... | --compare-coverage FILE FILE]"
                     .into(),
             ),
         }
@@ -236,7 +261,7 @@ mod run {
                 || std::env::var("CLEARRA_RUNTIME_PROFILE").as_deref() != Ok("benchmark-search"))
         {
             return Err(
-                "P7P4, four-row I rectangles and coverage capture require the supervised benchmark-search profile".into(),
+                "P7/P7P4, four-row I rectangles and coverage capture require the supervised benchmark-search profile".into(),
             );
         }
         let mode = std::env::var("CLEARRA_PLACEMENT_DEPENDENCY").unwrap_or_else(|_| "0".into());
@@ -272,38 +297,69 @@ mod run {
         let same_tile_parent_reuse_mode = experiment_mode("CLEARRA_SAME_TILE_PARENT_REUSE")?;
         let conditional_order_mode = experiment_mode("CLEARRA_CONDITIONAL_ORDER")?;
         let terminal_identity_move_mode = experiment_mode("CLEARRA_TERMINAL_IDENTITY_MOVE")?;
-        let operation_mask_mode = match std::env::var("CLEARRA_OPERATION_MASKS") {
-            Ok(mode) if mode == "0" => Some(false),
-            Ok(mode) if mode == "1" => Some(true),
-            Err(std::env::VarError::NotPresent) => None,
-            _ => return Err("CLEARRA_OPERATION_MASKS must be 0 or 1 at process start".into()),
-        };
+        let operation_mask_mode = optional_experiment_mode("CLEARRA_OPERATION_MASKS")?;
+        let strict_prefix_mode = optional_experiment_mode("CLEARRA_STRICT_PREFIX")?;
+        let catalog_guard_mode = optional_experiment_mode("CLEARRA_STRICT_CATALOG_GUARDS")?;
+        let frontier_mode = optional_experiment_mode("CLEARRA_STRICT_LANGUAGE_FRONTIER")?;
+        let subsumption_mode = optional_experiment_mode("CLEARRA_STRICT_SUBSUMPTION")?;
+        if [catalog_guard_mode, frontier_mode, subsumption_mode].contains(&Some(true))
+            && strict_prefix_mode != Some(true)
+        {
+            return Err("strict optimization requires an enabled strict-prefix request".into());
+        }
+        let stage_diagnostic = StrictStageDiagnostic::select(
+            optional_experiment_mode("CLEARRA_STRICT_STAGE_PROFILE")? == Some(true),
+            optional_experiment_mode("CLEARRA_STRICT_STAGE_LEGACY_UPPER")? == Some(true),
+            strict_prefix_mode,
+            coverage_slot.is_some(),
+            cfg!(feature = "wasm-stage-profiling"),
+        )?;
+        if catalog_guard_mode == Some(true)
+            && stage_diagnostic == Some(StrictStageDiagnostic::LegacyUpper)
+        {
+            return Err("catalog guards and legacy upper diagnostics cannot be combined".into());
+        }
+        let other_axis_enabled = [
+            &mode,
+            &structural_mode,
+            &static_influence_mode,
+            &translation_interval_mode,
+            &movement_clear_certificates_mode,
+            &incremental_domain_mode,
+            &minimum_domain_cutoff_mode,
+            &minimum_domain_work_mode,
+            &first_kick_interval_mode,
+            &ordered_kick_interval_mode,
+            &ordered_kick_guard_reuse_mode,
+            &geometric_edge_reuse_mode,
+            &ilc_lazy_frame_mode,
+            &no_entry_components_mode,
+            &same_tile_parent_reuse_mode,
+            &conditional_order_mode,
+            &terminal_identity_move_mode,
+        ]
+        .into_iter()
+        .any(|mode| mode != "0");
         if operation_mask_mode.is_some()
             && (fixture != Fixture::P7P4
                 || !valid_experiment_source(option_env!("CLEARRA_SOURCE_COMMIT"))
-                || [
-                    &mode,
-                    &structural_mode,
-                    &static_influence_mode,
-                    &translation_interval_mode,
-                    &movement_clear_certificates_mode,
-                    &incremental_domain_mode,
-                    &minimum_domain_cutoff_mode,
-                    &minimum_domain_work_mode,
-                    &first_kick_interval_mode,
-                    &ordered_kick_interval_mode,
-                    &ordered_kick_guard_reuse_mode,
-                    &geometric_edge_reuse_mode,
-                    &ilc_lazy_frame_mode,
-                    &no_entry_components_mode,
-                    &same_tile_parent_reuse_mode,
-                    &conditional_order_mode,
-                    &terminal_identity_move_mode,
-                ]
-                .into_iter()
-                .any(|mode| mode != "0"))
+                || other_axis_enabled
+                || strict_prefix_mode.is_some())
         {
             return Err("operation masks require a source-bound P7P4 run with all other experiment axes off".into());
+        }
+        if strict_prefix_mode.is_some()
+            && (!matches!(fixture, Fixture::P7 | Fixture::P7P4)
+                || !valid_experiment_source(option_env!("CLEARRA_SOURCE_COMMIT"))
+                || other_axis_enabled)
+        {
+            return Err(
+                "strict prefix requires a source-bound P7/P7P4 run with all other experiment axes off"
+                    .into(),
+            );
+        }
+        if fixture == Fixture::P7 && strict_prefix_mode.is_none() {
+            return Err("--p7 requires an explicit CLEARRA_STRICT_PREFIX arm".into());
         }
         if fixture.is_grounded_o()
             && [
@@ -354,6 +410,9 @@ mod run {
         }
         let binary_sha = file_sha(&std::env::current_exe().map_err(|e| e.to_string())?)?;
         let capacity = CpuCapacity::current();
+        if strict_prefix_mode.is_some() && capacity.hard_limit() < 2 {
+            return Err("strict prefix comparison requires at least two native workers".into());
+        }
         let policy = PcExecutionPolicy::mvp_default()
             .with_requested_backend(RequestedSearchBackend::Cpu)
             .with_allow_backend_fallback(false)
@@ -364,7 +423,7 @@ mod run {
             .with_conditioned_reachability_enabled(false)
             .with_tablebase_requested(false);
         let compile_started = Instant::now();
-        let problem = compile_problem(fixture, policy)?;
+        let problem = compile_problem(fixture, policy, strict_prefix_mode.is_some())?;
         if problem.count_policy() != fixture.count_policy() {
             return Err("compiled fixture changed the requested count policy".into());
         }
@@ -384,18 +443,29 @@ mod run {
                 Ok((new_capture_directory(slot)?, universe))
             })
             .transpose()?;
+        let strict_capture_budgets = strict_prefix_mode.is_some();
+        let spool_limits = if strict_capture_budgets {
+            CoverageSpoolLimits {
+                disk_bytes: STRICT_SPILL_WRITE_BYTES,
+                spill_write_bytes: Some(STRICT_SPILL_WRITE_BYTES),
+                ..CoverageSpoolLimits::default()
+            }
+        } else {
+            CoverageSpoolLimits::default()
+        };
+        #[cfg(feature = "wasm-stage-profiling")]
+        let stage_profile = stage_diagnostic
+            .map(|_| ExecutorSearchProfileSession::start())
+            .transpose()
+            .map_err(|error| format!("cannot start strict stage profile: {error:?}"))?;
         let search_started = Instant::now();
         let control = ExecutionControl::default();
         let execute = || -> Result<_, String> {
             if let Some((dir, universe)) = &capture {
                 let universe = *universe;
                 let spool = Arc::new(Mutex::new(
-                    CoverageSpool::create(
-                        &dir.join("runs"),
-                        universe,
-                        CoverageSpoolLimits::default(),
-                    )
-                    .map_err(|e| format!("coverage spool: {e}"))?,
+                    CoverageSpool::create(&dir.join("runs"), universe, spool_limits)
+                        .map_err(|e| format!("coverage spool: {e}"))?,
                 ));
                 let owner = Arc::clone(&spool);
                 let failure = Arc::new(Mutex::new(None::<String>));
@@ -410,8 +480,13 @@ mod run {
                                     CoverageFragment::from_bitset(universe, bits)
                                         .map_err(|e| e.to_string())?
                                 }
-                                CapturedSolutionCoverage::P7P4(blocks) => {
+                                CapturedSolutionCoverage::P7P4(blocks)
+                                    if universe == CoverageUniverse::P7P4 =>
+                                {
                                     CoverageFragment::from_p7p4_blocks(blocks)
+                                }
+                                CapturedSolutionCoverage::P7P4(_) => {
+                                    return Err("unexpected P7P4 blocks in short capture".into());
                                 }
                             };
                             let key = NormalizedTilingSolutionKey::from_standard_board64_identity(
@@ -445,6 +520,16 @@ mod run {
                     .into_inner()
                     .map_err(|_| "coverage spool lock poisoned")?;
                 Ok((result, Some(spool)))
+            } else if strict_prefix_mode.is_some() {
+                // Capture activates the same complete ordinal path and identity
+                // custody as the proof arm. Timing arms do not serialize rows.
+                WasmCpuSearchBackend::execute_with_solution_coverage_capture(
+                    &problem,
+                    &control,
+                    |_, _| Ok(()),
+                )
+                .map(|result| (result, None))
+                .map_err(|e| format!("strict prefix timing execution failed: {e:?}"))
             } else {
                 Ok((
                     WasmCpuSearchBackend::execute_with_control(&problem, &control)
@@ -453,15 +538,28 @@ mod run {
                 ))
             }
         };
-        let (outcome, operation_masks) = match operation_mask_mode {
-            Some(enabled) => {
-                let (outcome, report) = with_operation_mask_experiment(enabled, execute);
-                (outcome, Some((enabled, report)))
-            }
-            None => (execute(), None),
-        };
+        let (outcome, operation_masks, strict_prefix) =
+            match (operation_mask_mode, strict_prefix_mode) {
+                (Some(enabled), None) => {
+                    let (outcome, report) = with_operation_mask_experiment(enabled, execute);
+                    (outcome, Some((enabled, report)), None)
+                }
+                (None, Some(true)) => {
+                    let (outcome, report) = if catalog_guard_mode == Some(true) {
+                        with_catalog_guard_strict_parallel_prefix_experiment(execute)
+                    } else if stage_diagnostic == Some(StrictStageDiagnostic::LegacyUpper) {
+                        with_legacy_strict_parallel_prefix_experiment(execute)
+                    } else {
+                        with_strict_parallel_prefix_experiment(execute)
+                    };
+                    (outcome, None, Some(report))
+                }
+                _ => (execute(), None, None),
+            };
         let (result, spool) = outcome?;
         let search_ms = search_started.elapsed().as_secs_f64() * 1000.0;
+        #[cfg(feature = "wasm-stage-profiling")]
+        let profiled_stages = stage_profile.map(ExecutorSearchProfileSession::finish_partitioned);
         let structural_totals =
             clearra_core_executor::backend::structural_order_experiment_totals();
         let geometry_domains = clearra_core_executor::backend::geometry_domain_experiment_totals();
@@ -480,6 +578,22 @@ mod run {
                 minimum_work: minimum_domain_work_mode == "1",
             },
         );
+        let union_storage = std::env::var("CLEARRA_STANDARD_BAG_UNION_MEMO").ok();
+        if let Some(requested) = &union_storage {
+            if result.field("standard_bag_union_memo_storage") != Some(requested.as_str()) {
+                errors.push("the requested union memo storage was not used".into());
+            }
+        }
+        if let Some(enabled) = strict_prefix_mode {
+            validate_strict_prefix(
+                &result,
+                fixture,
+                capacity.hard_limit(),
+                enabled,
+                strict_prefix,
+                &mut errors,
+            );
+        }
         if let Some((enabled, report)) = operation_masks {
             if let Err(message) = validate_operation_mask_evidence(
                 enabled,
@@ -510,9 +624,13 @@ mod run {
             );
         }
         let solution_coverage = match (capture, spool) {
-            (Some((dir, universe)), Some(spool)) if errors.is_empty() => {
-                finish_capture(dir, spool, universe, &result)?
-            }
+            (Some((dir, universe)), Some(spool)) if errors.is_empty() => finish_capture(
+                dir,
+                spool,
+                universe,
+                &result,
+                spool_limits.spill_write_bytes,
+            )?,
             _ => Value::Null,
         };
         let fields: Vec<_> = result.summary_field_entries().collect();
@@ -551,7 +669,9 @@ mod run {
         // Keep report sections separate so json!'s token recursion is
         // bounded independently of the full published report's field count.
         let metadata = json!({
-            "schema": "clearra.placement-graph-benchmark.v1",
+            // Neither the proof runner nor the adoption checker accepts
+            // profiled measurements as uninstrumented timing evidence.
+            "schema": StrictStageDiagnostic::schema(stage_diagnostic),
             "case": fixture.name(),
             "binary_sha256": binary_sha,
             "compiled_source_commit": option_env!("CLEARRA_SOURCE_COMMIT"),
@@ -699,11 +819,25 @@ mod run {
                 }
             }
         });
+        let mut process_configuration = json!({
+            "CLEARRA_STANDARD_BAG_MEMO": std::env::var("CLEARRA_STANDARD_BAG_MEMO").ok(),
+            "CLEARRA_STANDARD_BAG_PRODUCT_MEMO_LAYOUT": std::env::var("CLEARRA_STANDARD_BAG_PRODUCT_MEMO_LAYOUT").ok()
+        });
+        if let Some(storage) = union_storage {
+            process_configuration["CLEARRA_STANDARD_BAG_UNION_MEMO"] = json!(storage);
+        }
+        for key in [
+            "CLEARRA_STRICT_CATALOG_GUARDS",
+            "CLEARRA_STANDARD_BAG_ABSORB",
+            "CLEARRA_STRICT_LANGUAGE_FRONTIER",
+            "CLEARRA_STRICT_SUBSUMPTION",
+        ] {
+            if let Ok(value) = std::env::var(key) {
+                process_configuration[key] = json!(value);
+            }
+        }
         let evidence = json!({
-            "other_process_configuration": {
-                "CLEARRA_STANDARD_BAG_MEMO": std::env::var("CLEARRA_STANDARD_BAG_MEMO").ok(),
-                "CLEARRA_STANDARD_BAG_PRODUCT_MEMO_LAYOUT": std::env::var("CLEARRA_STANDARD_BAG_PRODUCT_MEMO_LAYOUT").ok()
-            },
+            "other_process_configuration": process_configuration,
             "backend_contract": "native-host Rust WasmCpuSearchBackend; no C core; no tablebase",
             "input": fixture.input(),
             "cpu": { "available_parallelism": std::thread::available_parallelism().map(usize::from).ok(),
@@ -738,6 +872,25 @@ mod run {
                 })
             },
         );
+        let strict_prefix_section = strict_prefix_mode.map_or_else(
+            || json!({}),
+            |enabled| {
+                json!({
+                    "strict_prefix_mode": if enabled { "1" } else { "0" },
+                    "strict_prefix": strict_prefix.map(strict_prefix_evidence),
+                    "coverage_presentation": "coverage-summary-omit",
+                    "coverage_capture_sink": if coverage_slot.is_some() { "exact-spool" } else { "discard" },
+                    "materialized_path_step_count": result.path_steps().len(),
+                })
+            },
+        );
+        #[cfg(feature = "wasm-stage-profiling")]
+        let diagnostic_section = stage_diagnostic.zip(profiled_stages).map_or_else(
+            || json!({}),
+            |(diagnostic, (caller, workers))| diagnostic.report(caller, workers),
+        );
+        #[cfg(not(feature = "wasm-stage-profiling"))]
+        let diagnostic_section = json!({});
         let output = join_report_sections([
             metadata,
             follow_on_axes,
@@ -747,6 +900,8 @@ mod run {
             memory_lifetimes,
             evidence,
             operation_mask_section,
+            strict_prefix_section,
+            diagnostic_section,
         ])?;
         println!(
             "{}",
@@ -756,6 +911,95 @@ mod run {
             return Err("completed result failed benchmark validation; see JSON evidence".into());
         }
         Ok(())
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum StrictStageDiagnostic {
+        Reference,
+        OptimizedUpper,
+        LegacyUpper,
+    }
+
+    impl StrictStageDiagnostic {
+        const fn schema(diagnostic: Option<Self>) -> &'static str {
+            match diagnostic {
+                Some(_) => "clearra.placement-graph-stage-diagnostic.v1",
+                None => "clearra.placement-graph-benchmark.v1",
+            }
+        }
+
+        fn select(
+            profile: bool,
+            legacy_upper: bool,
+            strict_arm: Option<bool>,
+            captures_coverage: bool,
+            profiler_available: bool,
+        ) -> Result<Option<Self>, String> {
+            if legacy_upper && !(profile && strict_arm == Some(true)) {
+                return Err(
+                    "CLEARRA_STRICT_STAGE_LEGACY_UPPER requires CLEARRA_STRICT_STAGE_PROFILE=1 and CLEARRA_STRICT_PREFIX=1"
+                        .into(),
+                );
+            }
+            if !profile {
+                return Ok(None);
+            }
+            let Some(arm) = strict_arm.filter(|_| !captures_coverage) else {
+                return Err(
+                    "CLEARRA_STRICT_STAGE_PROFILE requires the global-only strict-prefix experiment"
+                        .into(),
+                );
+            };
+            if !profiler_available {
+                return Err(
+                    "CLEARRA_STRICT_STAGE_PROFILE requires feature wasm-stage-profiling".into(),
+                );
+            }
+            Ok(Some(match (arm, legacy_upper) {
+                (false, _) => Self::Reference,
+                (true, true) => Self::LegacyUpper,
+                (true, false) => Self::OptimizedUpper,
+            }))
+        }
+
+        #[cfg(feature = "wasm-stage-profiling")]
+        fn report(
+            self,
+            caller: Vec<ExecutorSearchProfileStage>,
+            workers: Vec<ExecutorSearchProfileStage>,
+        ) -> Value {
+            let stages: Vec<_> = caller
+                .into_iter()
+                .zip(workers)
+                .filter(|(caller, workers)| {
+                    caller.invocation_count != 0 || workers.invocation_count != 0
+                })
+                .map(|(caller, workers)| {
+                    json!({
+                        "stage": caller.name,
+                        "caller_ns": caller.duration_ns,
+                        "pool_workers_ns": workers.duration_ns,
+                        "caller_invocations": caller.invocation_count,
+                        "pool_worker_invocations": workers.invocation_count,
+                        "caller_work_items": caller.work_item_count,
+                        "pool_worker_work_items": workers.work_item_count,
+                    })
+                })
+                .collect();
+            json!({
+                "strict_stage_profile": {
+                    "diagnostic_only": true,
+                    "timing_adoption_authority": false,
+                    "upper_strategy": match self {
+                        Self::Reference => "not-applicable",
+                        Self::OptimizedUpper => "optimized",
+                        Self::LegacyUpper => "legacy",
+                    },
+                    "scope": "sampled accumulated elapsed stage time; caller can execute a worker; stage spans may nest and must not be summed as wall time",
+                    "stages": stages,
+                },
+            })
+        }
     }
 
     fn join_report_sections(sections: impl IntoIterator<Item = Value>) -> Result<Value, String> {
@@ -787,6 +1031,15 @@ mod run {
         }
     }
 
+    fn optional_experiment_mode(name: &str) -> Result<Option<bool>, String> {
+        match std::env::var(name).as_deref() {
+            Ok("0") => Ok(Some(false)),
+            Ok("1") => Ok(Some(true)),
+            Err(std::env::VarError::NotPresent) => Ok(None),
+            _ => Err(format!("{name} must be 0 or 1 at process start")),
+        }
+    }
+
     fn valid_experiment_source(source: Option<&str>) -> bool {
         source.is_some_and(|sha| {
             sha.len() == 40
@@ -813,6 +1066,118 @@ mod run {
             "mask_bytes": report.mask_bytes,
             "graph_projection_bytes": report.graph_projection_bytes,
         })
+    }
+
+    fn strict_prefix_evidence(report: StrictParallelPrefixReport) -> Value {
+        json!({
+            "workers": report.workers,
+            "executing_workers": report.executing_workers,
+            "candidates": report.candidates,
+            "reverse_relations": report.reverse_relations,
+            "unresolved_lanes": report.unresolved_lanes,
+            "pruned_lanes": report.pruned_lanes,
+            "subsumed_lanes": report.subsumed_lanes,
+            "frontier_compilations": report.frontier_compilations,
+            "pose_work": report.pose_work,
+            "worklist_pops": report.worklist_pops,
+            "pose_domains": report.pose_domains,
+            "ordered_kick_terms": report.ordered_kick_terms,
+            "peak_relation_logical_bytes": report.peak_relation_logical_bytes,
+            "catalog_static_guard_hits": report.catalog_static_guard_hits,
+            "catalog_static_guard_bytes": report.catalog_static_guard_bytes,
+            "sealed": report.sealed,
+        })
+    }
+
+    fn validate_strict_prefix(
+        result: &CoreExecutionResult,
+        fixture: Fixture,
+        worker_cap: usize,
+        enabled: bool,
+        report: Option<StrictParallelPrefixReport>,
+        errors: &mut Vec<String>,
+    ) {
+        let universe = match fixture {
+            Fixture::P7 => CoverageUniverse::P7,
+            Fixture::P7P4 => CoverageUniverse::P7P4,
+            _ => {
+                errors.push("unsupported strict-prefix fixture".into());
+                return;
+            }
+        };
+        let workers = result.usize_field("workers_used").unwrap_or_default();
+        let active = result
+            .usize_field("parallel_active_workers")
+            .unwrap_or_default();
+        if result.bool_field("cpu_parallel_execution") != Some(true)
+            || !(2..=worker_cap).contains(&workers)
+            || !(2..=workers).contains(&active)
+        {
+            errors.push("strict prefix did not use the required native parallel topology".into());
+        }
+        let draws = if fixture == Fixture::P7 { 7 } else { 11 };
+        let queues = universe.queue_count() as usize;
+        let words = result.coverage_pattern_words();
+        let complete_words = words.len() == queues.div_ceil(64)
+            && words.iter().enumerate().all(|(index, word)| {
+                let remaining = queues - index * 64;
+                let expected = if remaining >= 64 {
+                    u64::MAX
+                } else {
+                    (1_u64 << remaining) - 1
+                };
+                *word == expected
+            });
+        if result.bool_field("coverage_calculated") != Some(true)
+            || result.usize_field("source_sequence_length") != Some(draws)
+            || result.usize_field("coverage_pattern_count") != Some(queues)
+            || result.usize_field("covered_pattern_count") != Some(queues)
+            || result
+                .field("coverage_probability")
+                .and_then(|value| value.parse::<f64>().ok())
+                != Some(1.0)
+            || !complete_words
+        {
+            errors.push("strict prefix did not cover the complete original queue universe".into());
+        }
+        if result.normalized_solution_identities().len() != universe.solution_count() as usize
+            || !result.path_steps().is_empty()
+            || !result.solution_coverages().is_empty()
+            || !result.normalized_solution_coverages().is_empty()
+            || !result.solution_probabilities().is_empty()
+        {
+            errors.push("strict prefix must retain all identities without materializing replay or presentation rows".into());
+        }
+        let candidates = result.usize_field("packing_candidate_count");
+        if candidates.is_none_or(|count| count == 0)
+            || (fixture == Fixture::P7 && candidates != Some(P7_CANDIDATE_COUNT))
+        {
+            errors.push("strict prefix candidate universe differs from the fixture".into());
+        }
+        let graph_nodes = result.usize_field("total_build_order_nodes");
+        let pose_states = result.usize_field("total_reachability_states");
+        if enabled {
+            if report.is_none_or(|work| {
+                !work.sealed
+                    || work.workers != workers
+                    || work.executing_workers != active
+                    || Some(work.candidates) != candidates
+                    || work.reverse_relations == 0
+                    || work.unresolved_lanes == 0
+            }) || graph_nodes != Some(0)
+                || pose_states != Some(0)
+            {
+                errors.push(
+                    "strict prefix worker evidence is incomplete or used the old BuildUp path"
+                        .into(),
+                );
+            }
+        } else if report.is_some()
+            || graph_nodes.is_none_or(|nodes| nodes == 0)
+            || pose_states.is_none_or(|states| states == 0)
+        {
+            errors.push("reference arm did not use concrete BuildUp".into());
+        }
     }
 
     fn validate_operation_mask_evidence(
@@ -924,7 +1289,19 @@ mod run {
         spool: CoverageSpool,
         universe: CoverageUniverse,
         result: &CoreExecutionResult,
+        spill_write_limit_bytes: Option<u64>,
     ) -> Result<Value, String> {
+        let (output_limit_bytes, output_limit_error) = if spill_write_limit_bytes.is_some() {
+            (
+                STRICT_FINAL_OUTPUT_BYTES,
+                "CLEARRA_STRICT_COVERAGE_DISK_LIMIT: final output exceeds 3 GiB",
+            )
+        } else {
+            (
+                LEGACY_FINAL_OUTPUT_BYTES,
+                "coverage output exceeded its 8 GiB quota",
+            )
+        };
         let path = dir.join("solution-coverage.clrcov");
         let file = OpenOptions::new()
             .write(true)
@@ -935,7 +1312,8 @@ mod run {
         let output = CoverageWriter::new(
             LimitedOutput {
                 inner: buffer,
-                remaining: 8 * 1024 * 1024 * 1024,
+                remaining: output_limit_bytes,
+                limit_error: output_limit_error,
             },
             universe,
         )
@@ -968,9 +1346,11 @@ mod run {
             "total_weight": universe.queue_count(), "covered_weight": summary.covered_queues,
             "covered_pairs": summary.covered_pairs, "complete": true,
             "output_bytes": fs::metadata(&path).map_err(|e| e.to_string())?.len(),
+            "output_limit_bytes": output_limit_bytes,
             "spool": {
                 "fragments_fed": spool_stats.fragments_fed,
                 "spill_bytes_written": spool_stats.spill_bytes_written,
+                "spill_write_limit_bytes": spill_write_limit_bytes,
                 "peak_live_spill_bytes": spool_stats.peak_live_spill_bytes,
                 "peak_live_run_count": spool_stats.peak_live_run_count
             }
@@ -980,12 +1360,13 @@ mod run {
     struct LimitedOutput<W> {
         inner: W,
         remaining: u64,
+        limit_error: &'static str,
     }
 
     impl<W: Write> Write for LimitedOutput<W> {
         fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
             if bytes.len() as u64 > self.remaining {
-                return Err(io::Error::other("coverage output exceeded its 8 GiB quota"));
+                return Err(io::Error::other(self.limit_error));
             }
             let written = self.inner.write(bytes)?;
             self.remaining -= written as u64;
@@ -1036,6 +1417,7 @@ mod run {
                 report["universe"] = json!(match summary.universe {
                     CoverageUniverse::P7P4 => "p7p4",
                     CoverageUniverse::SmallI => "small-i",
+                    CoverageUniverse::P7 => "p7",
                     #[cfg(test)]
                     CoverageUniverse::Tiny => "synthetic",
                 });
@@ -1072,8 +1454,24 @@ mod run {
     fn compile_problem(
         fixture: Fixture,
         policy: PcExecutionPolicy,
+        coverage_summary: bool,
     ) -> Result<SearchProblem, String> {
-        if let Some(board) = fixture.fixed_board() {
+        let compiled = if fixture == Fixture::P7 {
+            let query = PcScenarioQuery::new(
+                PcScenarioBoard::standard_10(fixture.height(), P7_INITIAL),
+                PcQueueInput::standard_7_bag(),
+                PieceWindow::new(fixture.placed_pieces()),
+            )
+            .with_rule(srs_plus())
+            .with_allow_hold(true)
+            .with_exact_pieces(Some(fixture.placed_pieces()))
+            .with_supply_window_size(SupplyWindowSize::new(7))
+            .with_count_policy(PcCountPolicy::CountUnique)
+            .with_solution_probability_policy(PcSolutionProbabilityPolicy::Omit)
+            .with_retained_trace_limit(0)
+            .with_execution_policy(policy);
+            ProblemCompiler::compile_scenario_pc(&query)
+        } else if let Some(board) = fixture.fixed_board() {
             let pieces = fixture.placed_pieces();
             let piece = if fixture.is_grounded_o() {
                 PieceKind::O
@@ -1103,29 +1501,35 @@ mod run {
                     query.with_solution_probability_policy(PcSolutionProbabilityPolicy::Include);
             }
             ProblemCompiler::compile_scenario_pc(&query)
-                .map_err(|e| format!("{} compile: {e:?}", fixture.name()))
         } else {
-            let (queue, hold, label) = if fixture == Fixture::EmptyTenI {
+            let (queue, hold) = if fixture == Fixture::EmptyTenI {
                 (
                     PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::I; 10])),
                     PcHoldPolicy::Disabled,
-                    fixture.name(),
                 )
             } else {
-                (
-                    PcQueueInput::standard_7_bag(),
-                    PcHoldPolicy::EnabledEmpty,
-                    "P7P4",
-                )
+                (PcQueueInput::standard_7_bag(), PcHoldPolicy::EnabledEmpty)
             };
-            let query = OpeningPcSearchQuery::new(PcTarget::four_lines())
+            let mut query = OpeningPcSearchQuery::new(PcTarget::four_lines())
                 .with_rule(jstris_180())
                 .with_queue(queue)
                 .with_hold_policy(hold)
                 .with_objective(ObjectivePolicy::unique())
                 .with_execution_policy(policy);
+            if coverage_summary {
+                query = query.with_solution_probability_policy(PcSolutionProbabilityPolicy::Omit);
+            }
             ProblemCompiler::compile_opening_pc(&query)
-                .map_err(|e| format!("{label} compile: {e:?}"))
+        };
+        let compiled = compiled.map_err(|e| format!("{} compile: {e:?}", fixture.name()))?;
+        if coverage_summary {
+            let compiled = compiled.with_output_policy(SearchOutputPolicy::CoverageSummary);
+            if compiled.solution_probability_policy() != PcSolutionProbabilityPolicy::Omit {
+                return Err("strict prefix requires the CoverageSummary+Omit projection".into());
+            }
+            Ok(compiled)
+        } else {
+            Ok(compiled)
         }
     }
 
@@ -1297,6 +1701,7 @@ mod run {
             Fixture::OneI | Fixture::GroundedOTwoLinesAll | Fixture::GroundedOTwoLinesUnique => 1,
             Fixture::NonemptyEightI => 7,
             Fixture::EmptyTenI => 14,
+            Fixture::P7 => CoverageUniverse::P7.solution_count() as usize,
             Fixture::P7P4 => LARGE_COUNT,
         };
         if result.usize_field("normalized_unique_solution_count") != Some(expected_count) {
@@ -1979,6 +2384,40 @@ mod run {
         use super::*;
 
         #[test]
+        fn strict_stage_diagnostics_cannot_claim_unprofiled_or_exact_output() {
+            use StrictStageDiagnostic::{LegacyUpper, OptimizedUpper, Reference};
+            let select = StrictStageDiagnostic::select;
+            assert_eq!(select(false, false, Some(true), true, false), Ok(None));
+            assert_eq!(
+                select(true, false, Some(false), false, true),
+                Ok(Some(Reference))
+            );
+            assert_eq!(
+                select(true, false, Some(true), false, true),
+                Ok(Some(OptimizedUpper))
+            );
+            assert_eq!(
+                select(true, true, Some(true), false, true),
+                Ok(Some(LegacyUpper))
+            );
+            for (profile, legacy, arm, capture, available) in [
+                (true, false, None, false, true),
+                (true, false, Some(true), true, true),
+                (true, false, Some(false), false, false),
+                (false, true, Some(true), false, true),
+                (true, true, Some(false), false, true),
+            ] {
+                assert!(select(profile, legacy, arm, capture, available).is_err());
+            }
+            for diagnostic in [Reference, OptimizedUpper, LegacyUpper] {
+                assert_ne!(
+                    StrictStageDiagnostic::schema(Some(diagnostic)),
+                    StrictStageDiagnostic::schema(None),
+                );
+            }
+        }
+
+        #[test]
         fn report_sections_preserve_flat_keys_and_reject_collisions() {
             let report = join_report_sections([
                 json!({"schema": "fixture"}),
@@ -2005,6 +2444,7 @@ mod run {
             };
             assert_eq!(parse(&[]).unwrap(), (Fixture::P7P4, None));
             assert_eq!(parse(&["--small"]).unwrap(), (Fixture::OneI, None));
+            assert_eq!(parse(&["--p7"]).unwrap(), (Fixture::P7, None));
             assert_eq!(
                 parse(&["--nonempty-eight-i"]).unwrap(),
                 (Fixture::NonemptyEightI, None)
@@ -2032,6 +2472,11 @@ mod run {
                 (Fixture::OneI, Some("sample".to_owned()))
             );
             assert_eq!(
+                parse(&["--p7", "--coverage-slot", "sample"]).unwrap(),
+                (Fixture::P7, Some("sample".to_owned()))
+            );
+            assert_eq!(Fixture::P7.capture_universe(), Ok(CoverageUniverse::P7));
+            assert_eq!(
                 parse(&["--nonempty-eight-i", "--coverage-slot", "sample"]).unwrap_err(),
                 EIGHT_I_CAPTURE_ERROR
             );
@@ -2052,7 +2497,8 @@ mod run {
                 (Fixture::GroundedOTwoLinesAll, PcCountPolicy::CountAll),
                 (Fixture::GroundedOTwoLinesUnique, PcCountPolicy::CountUnique),
             ] {
-                let problem = compile_problem(fixture, PcExecutionPolicy::mvp_default()).unwrap();
+                let problem =
+                    compile_problem(fixture, PcExecutionPolicy::mvp_default(), false).unwrap();
                 assert_eq!(problem.count_policy(), count);
                 assert!(problem.solution_probability_policy().requested());
                 assert!(!problem.supply().hold_enabled());
@@ -2060,6 +2506,24 @@ mod run {
                 assert_eq!(universe.pattern_count(), 1);
                 assert_eq!(universe.sequence_at(0).as_ref(), &[PieceKind::O]);
             }
+        }
+
+        #[test]
+        fn strict_p7_compiles_the_original_uniform_supply_without_replay() {
+            let problem =
+                compile_problem(Fixture::P7, PcExecutionPolicy::mvp_default(), true).unwrap();
+            assert_eq!(problem.output_policy(), SearchOutputPolicy::CoverageSummary);
+            assert_eq!(problem.count_policy(), PcCountPolicy::CountUnique);
+            assert_eq!(
+                problem.solution_probability_policy(),
+                PcSolutionProbabilityPolicy::Omit
+            );
+            assert!(problem.supply().hold_enabled());
+            let universe = problem.piece_source().materialized_universe().unwrap();
+            assert!(universe.complete());
+            assert_eq!(universe.pattern_count(), 5_040);
+            assert_eq!(universe.sequence_at(0).len(), 7);
+            assert_eq!(universe.sequence_at(5_039).len(), 7);
         }
 
         #[test]

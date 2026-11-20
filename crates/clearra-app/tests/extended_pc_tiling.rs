@@ -745,6 +745,170 @@ fn full_height_sr3_local_continue_is_cooperative_on_one_worker() {
 }
 
 #[test]
+#[cfg(all(feature = "parallel", not(target_family = "wasm")))]
+fn full_height_sr3_uses_native_worker_waves_without_publishing_on_a_zero_tick() {
+    use clearra_app::{AppRenderModel, ContinueAppCommand};
+    use clearra_core_domain::runtime_cpu_capacity::CpuCapacity;
+    use clearra_pc_graph::request::PcContinuationTokenCodec;
+    use clearra_supply::QueueObservationPolicy;
+    use std::{env, process::Command};
+
+    const TEST: &str = "full_height_sr3_uses_native_worker_waves_without_publishing_on_a_zero_tick";
+    const CHILD: &str = "CLEARRA_TEST_SR3_NATIVE_WAVES_CHILD";
+    if env::var_os(CHILD).is_none() {
+        if CpuCapacity::current().hard_limit() < 3 {
+            eprintln!("three logical processors are required to check two native Continue workers");
+            return;
+        }
+        let output = Command::new(env::current_exe().unwrap())
+            .args(["--exact", TEST, "--nocapture"])
+            .env(CHILD, "1")
+            .env("CLEARRA_EXPECTED_VCPUS", "3")
+            .output()
+            .expect("isolated native Continue regression");
+        assert!(
+            output.status.success()
+                && String::from_utf8_lossy(&output.stdout)
+                    .lines()
+                    .any(|line| line == "clearra_native_continue=complete"),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    assert_eq!(PcExecutionPolicy::mvp_default().workers(), 2);
+
+    // The split fixture has multiple candidate ordinals. Neither a
+    // no-Geometry handoff nor a single degenerate verification is a worker
+    // wave proof.
+    let mut holes = Board256Mask::EMPTY;
+    for row in 0..7_u16 {
+        let start = if row < 3 { 0 } else { 6 };
+        for col in start..start + 4 {
+            holes = holes.union(Board256Mask::singleton(row * 10 + col).unwrap());
+        }
+    }
+    let initial = Board256Mask::all_cells(70).unwrap().without(holes);
+    let query = PcScenarioQuery::new(
+        PcScenarioBoard::standard_10_from_words(7, initial.words()).unwrap(),
+        PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::I; 7])),
+        PieceWindow::new(7),
+    )
+    .with_exact_pieces(Some(7))
+    .with_allow_hold(false)
+    .with_count_policy(PcCountPolicy::CountAll);
+    let make_request = |query: &PcScenarioQuery| {
+        let token = PcContinuationTokenCodec::encode_scenario_replay(query).unwrap();
+        assert!(token.starts_with("sr3:"));
+        AppRequest::new(AppCommand::Continue(ContinueAppCommand::new(Some(token))))
+    };
+    let request = make_request(&query);
+    let context = AppContext::rust_cpu_product();
+    let direct = context.run(request.clone());
+    assert_eq!(direct.status(), AppStatus::Success, "{direct:?}");
+    let mut execution = context.start_cooperative_execution(request.clone());
+    let control = ExecutionControl::default();
+    assert!(matches!(
+        execution.advance(0, &control),
+        CooperativeAppAdvance::Pending
+    ));
+    assert!(matches!(
+        execution.advance(1, &control),
+        CooperativeAppAdvance::Pending
+    ));
+    let actual = (0..16384)
+        .find_map(|_| match execution.advance(4, &control) {
+            CooperativeAppAdvance::Pending => None,
+            CooperativeAppAdvance::Progress => {
+                // The terminal result is still carrying its original lease.
+                assert!(matches!(
+                    execution.advance(0, &control),
+                    CooperativeAppAdvance::Pending
+                ));
+                match execution.advance(1, &control) {
+                    CooperativeAppAdvance::Completed(response) => Some(response),
+                    other => panic!("native publication requires one work unit: {other:?}"),
+                }
+            }
+            other => panic!("expected terminal worker-wave handoff: {other:?}"),
+        })
+        .expect("native Continue completed");
+    assert_eq!(actual.status(), AppStatus::Success, "{actual:?}");
+    let (Some(AppRenderModel::Continue(expected)), Some(AppRenderModel::Continue(actual))) =
+        (direct.render_model(), actual.render_model())
+    else {
+        panic!("both paths must use the existing Continue message");
+    };
+    let field = |fields: &[clearra_output::model::RenderField], key: &str| {
+        fields
+            .iter()
+            .find(|field| field.key() == key)
+            .unwrap()
+            .value()
+            .as_text()
+    };
+    for key in [
+        "input_continuation_token",
+        "count_complete",
+        "coverage_pattern_count",
+        "covered_pattern_count",
+        "build_variant_count",
+        "normalized_solution_set_hash",
+        "workers_used",
+        "cpu_parallel_execution",
+    ] {
+        assert_eq!(
+            field(actual.fields(), key),
+            field(expected.fields(), key),
+            "{key}"
+        );
+    }
+    assert_eq!(field(actual.fields(), "workers_used"), "2");
+    assert_eq!(field(actual.fields(), "cpu_parallel_execution"), "true");
+    let host = context.run_preferring_native_cooperative_continue(request.clone(), &control);
+    assert_eq!(host.status(), AppStatus::Success, "{host:?}");
+    let Some(AppRenderModel::Continue(host)) = host.render_model() else {
+        panic!("native CLI driver must use the existing Continue message");
+    };
+    assert_eq!(
+        field(host.fields(), "normalized_solution_set_hash"),
+        field(expected.fields(), "normalized_solution_set_hash")
+    );
+    assert_eq!(field(host.fields(), "workers_used"), "2");
+    assert_cancelled_at_postprocess_publication(&context, request);
+
+    // Different evidence level: no bounded substitution on the two-worker
+    // host, so the existing synchronous result is still used.
+    let observed =
+        make_request(&query.with_queue_observation_policy(QueueObservationPolicy::VisibleSeven));
+    let host_fallback =
+        context.run_preferring_native_cooperative_continue(observed.clone(), &control);
+    let mut fallback = context.start_cooperative_execution(observed);
+    let CooperativeAppAdvance::Completed(response) = fallback.advance(1, &control) else {
+        panic!("observation policy must retain its existing immediate route");
+    };
+    assert_eq!(response.status(), AppStatus::Success, "{response:?}");
+    let (Some(AppRenderModel::Continue(host_fallback)), Some(AppRenderModel::Continue(response))) =
+        (host_fallback.render_model(), response.render_model())
+    else {
+        panic!("both fallback entrypoints must retain the Continue response");
+    };
+    for key in [
+        "input_continuation_token",
+        "normalized_solution_set_hash",
+        "queue_knowledge",
+    ] {
+        assert_eq!(
+            field(host_fallback.fields(), key),
+            field(response.fields(), key),
+            "{key}"
+        );
+    }
+    println!("clearra_native_continue=complete");
+}
+
+#[test]
 fn full_height_scenario_continuation_restarts_at_an_accepted_path_checkpoint() {
     use clearra_app::{AppRenderModel, ContinueAppCommand, PcPathIngressOrigin};
     use clearra_pc_graph::request::{PcContinuationToken, PcContinuationTokenCodec};

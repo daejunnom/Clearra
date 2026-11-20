@@ -26,6 +26,8 @@ const MAP_ENTRY_ALLOWANCE: usize = 256;
 pub(super) struct CoverageSpoolLimits {
     pub(super) memory_bytes: usize,
     pub(super) disk_bytes: u64,
+    /// Counts all spill writes, including files later reclaimed during merge.
+    pub(super) spill_write_bytes: Option<u64>,
     pub(super) max_runs: usize,
     pub(super) merge_fan_in: usize,
 }
@@ -35,6 +37,7 @@ impl Default for CoverageSpoolLimits {
         Self {
             memory_bytes: 64 * 1024 * 1024,
             disk_bytes: 16 * 1024 * 1024 * 1024,
+            spill_write_bytes: None,
             max_runs: 4096,
             merge_fan_in: 16,
         }
@@ -282,6 +285,7 @@ impl CoverageSpool {
         let row_ceiling = payload_ceiling + MAX_KEY + MAP_ENTRY_ALLOWANCE;
         if limits.memory_bytes < row_ceiling
             || limits.disk_bytes == 0
+            || limits.spill_write_bytes == Some(0)
             || limits.max_runs == 0
             || !(2..=64).contains(&limits.merge_fan_in)
         {
@@ -391,6 +395,7 @@ impl CoverageSpool {
                     file,
                     used: &mut self.disk_bytes,
                     limit: self.limits.disk_bytes,
+                    write_limit: self.limits.spill_write_bytes,
                     stats: &mut self.stats,
                 },
             ),
@@ -515,12 +520,26 @@ struct BudgetedFile<'a> {
     file: File,
     used: &'a mut u64,
     limit: u64,
+    write_limit: Option<u64>,
     stats: &'a mut CoverageSpoolStats,
 }
 
 impl Write for BudgetedFile<'_> {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        if bytes.len() as u64 > self.limit - *self.used {
+        let len = bytes.len() as u64;
+        if let Some(limit) = self.write_limit {
+            if len > limit.saturating_sub(self.stats.spill_bytes_written) {
+                return Err(quota(
+                    "CLEARRA_STRICT_COVERAGE_DISK_LIMIT: cumulative spill bytes exceed the limit",
+                ));
+            }
+        }
+        if len > self.limit - *self.used {
+            if self.write_limit.is_some() {
+                return Err(quota(
+                    "CLEARRA_STRICT_COVERAGE_DISK_LIMIT: live spill bytes exceed the limit",
+                ));
+            }
             return Err(quota("spool live file bytes exceed the limit"));
         }
         let written = self.file.write(bytes)?;
@@ -900,6 +919,32 @@ mod tests {
         let mut bytes = Vec::new();
         let writer = CoverageWriter::new(&mut bytes, universe).unwrap();
         assert!(spool.finish(writer).is_err());
+    }
+
+    #[test]
+    fn reclaimed_spills_do_not_refund_cumulative_write_budget() {
+        let dir = TestDir::new();
+        let universe = CoverageUniverse::SmallI;
+        let mut spool = dir.spool(universe, CoverageSpoolLimits::default());
+        spool
+            .push_fragment(FIXTURE_KEY, sparse(universe, &[0]))
+            .unwrap();
+        spool.flush().unwrap();
+        let written = spool.stats().spill_bytes_written;
+        let historical = std::mem::take(&mut spool.runs);
+        spool.remove_consumed_runs(historical).unwrap();
+        assert_eq!(spool.disk_bytes, 0);
+
+        spool.limits.spill_write_bytes = Some(written);
+        let error = match spool.new_run(|_| Ok(())) {
+            Ok(_) => panic!("reclaimed files cannot increase the cumulative budget"),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind(), io::ErrorKind::StorageFull);
+        assert!(error
+            .to_string()
+            .contains("CLEARRA_STRICT_COVERAGE_DISK_LIMIT"));
+        assert_eq!(spool.stats().spill_bytes_written, written);
     }
 
     #[test]

@@ -1,3 +1,12 @@
+#[cfg(any(
+    test,
+    all(
+        feature = "local-search-ab",
+        feature = "parallel",
+        not(target_family = "wasm")
+    )
+))]
+use clearra_core_domain::execution_cancellation::ExecutionControl;
 use clearra_core_domain::piece::{piece_kind::PieceKind, rotation::RotationState};
 use clearra_piece_registry::standard::tetromino_registry::standard_tetromino_registry;
 use clearra_replay::{RotationRequest, ScoringLockEvidence};
@@ -37,6 +46,45 @@ pub(super) mod static_influence;
 #[cfg(test)]
 #[path = "reachability_peer_tests.rs"]
 mod peer_tests;
+
+#[cfg(any(
+    test,
+    all(
+        feature = "local-search-ab",
+        feature = "parallel",
+        not(target_family = "wasm")
+    )
+))]
+#[path = "reachability_symbolic_prefix.rs"]
+mod symbolic_prefix;
+#[cfg(any(
+    test,
+    all(
+        feature = "local-search-ab",
+        feature = "parallel",
+        not(target_family = "wasm")
+    )
+))]
+pub(super) use symbolic_prefix::{PrefixLockRelation, PrefixPoseWork};
+#[cfg(any(
+    test,
+    all(
+        feature = "local-search-ab",
+        feature = "parallel",
+        not(target_family = "wasm")
+    )
+))]
+#[path = "reachability_symbolic_target.rs"]
+mod symbolic_target;
+#[cfg(any(
+    test,
+    all(
+        feature = "local-search-ab",
+        feature = "parallel",
+        not(target_family = "wasm")
+    )
+))]
+use symbolic_target::ReverseScratch;
 
 use super::{
     catalog::{GeometryCatalog, InstantiatedRealization},
@@ -600,6 +648,15 @@ pub(super) struct ReachabilityWorkspace {
     static_influence_cache: static_influence::StaticInfluenceCache,
     cache: ReachabilityCache,
     scratch: ReachabilityScratch,
+    #[cfg(any(
+        test,
+        all(
+            feature = "local-search-ab",
+            feature = "parallel",
+            not(target_family = "wasm")
+        )
+    ))]
+    symbolic_reverse_scratch: ReverseScratch,
     templates: [Option<Arc<ReachabilityTemplate>>; 7],
     shared_templates: Option<Arc<SharedReachabilityTemplates>>,
     template_dimensions: Option<(u8, u8)>,
@@ -676,6 +733,15 @@ impl Default for ReachabilityWorkspace {
             static_influence_cache: static_influence::StaticInfluenceCache::default(),
             cache: ReachabilityCache::default(),
             scratch: ReachabilityScratch::default(),
+            #[cfg(any(
+                test,
+                all(
+                    feature = "local-search-ab",
+                    feature = "parallel",
+                    not(target_family = "wasm")
+                )
+            ))]
+            symbolic_reverse_scratch: ReverseScratch::default(),
             templates: std::array::from_fn(|_| None),
             shared_templates: None,
             template_dimensions: None,
@@ -1774,9 +1840,28 @@ impl ReachabilityWorkspace {
         );
         #[cfg(target_family = "wasm")]
         let import_bytes = 0;
+        #[cfg(any(
+            test,
+            all(
+                feature = "local-search-ab",
+                feature = "parallel",
+                not(target_family = "wasm")
+            )
+        ))]
+        let symbolic_reverse_bytes = self.symbolic_reverse_scratch.retained_bytes();
+        #[cfg(not(any(
+            test,
+            all(
+                feature = "local-search-ab",
+                feature = "parallel",
+                not(target_family = "wasm")
+            )
+        )))]
+        let symbolic_reverse_bytes = 0;
         self.cache.retained_bytes()
             + prototype_bytes
             + import_bytes
+            + symbolic_reverse_bytes
             + self
                 .templates
                 .iter()
@@ -1799,6 +1884,72 @@ impl ReachabilityWorkspace {
                     frames.capacity() * core::mem::size_of::<Option<PreparedRelationWindows>>()
                 })
                 .sum::<usize>()
+    }
+
+    #[cfg(any(
+        test,
+        all(
+            feature = "local-search-ab",
+            feature = "parallel",
+            not(target_family = "wasm")
+        )
+    ))]
+    pub(super) fn compile_prefix_lock_relation_from_planes(
+        &mut self,
+        catalog: &GeometryCatalog,
+        piece: PieceKind,
+        occupied: &[u64; u64::BITS as usize],
+        lanes: u64,
+        control: &ExecutionControl,
+        work: &mut PrefixPoseWork,
+    ) -> Result<Option<PrefixLockRelation>, super::WasmExactSearchError> {
+        if control.is_cancelled() {
+            return Err(super::WasmExactSearchError::Cancelled);
+        }
+        symbolic_prefix::compile_prefix_lock_relation_from_planes(
+            self.template(catalog, piece),
+            occupied,
+            lanes,
+            control,
+            work,
+        )
+    }
+
+    #[cfg(any(
+        test,
+        all(
+            feature = "local-search-ab",
+            feature = "parallel",
+            not(target_family = "wasm")
+        )
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn compile_prefix_target_lanes_from_planes(
+        &mut self,
+        catalog: &GeometryCatalog,
+        piece: PieceKind,
+        occupied: &[u64; u64::BITS as usize],
+        lanes: u64,
+        locks: &[InstantiatedRealization],
+        control: &ExecutionControl,
+        work: &mut PrefixPoseWork,
+    ) -> Result<Option<u64>, super::WasmExactSearchError> {
+        if control.is_cancelled() {
+            return Err(super::WasmExactSearchError::Cancelled);
+        }
+        self.prepare_template(catalog, piece);
+        let template = self.templates[piece_index(piece)]
+            .as_deref()
+            .expect("symbolic reverse reachability initialized the template");
+        symbolic_target::compile_prefix_target_lanes_from_planes(
+            template,
+            occupied,
+            lanes,
+            locks,
+            control,
+            work,
+            &mut self.symbolic_reverse_scratch,
+        )
     }
 
     fn template(&mut self, catalog: &GeometryCatalog, piece: PieceKind) -> &ReachabilityTemplate {
@@ -2982,7 +3133,7 @@ fn compile_translation_targets_and_seeds(
 }
 
 #[inline]
-fn harddrop_path_mask(lock_mask: u64, width: u8) -> u64 {
+pub(super) fn harddrop_path_mask(lock_mask: u64, width: u8) -> u64 {
     let shift = u32::from(width);
     let mut path = lock_mask;
     path |= path << shift;

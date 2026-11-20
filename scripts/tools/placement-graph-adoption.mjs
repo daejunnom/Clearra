@@ -1,5 +1,5 @@
 // Non-publishing evaluation of already captured, same-binary benchmark evidence.
-// Input is a manifest with eight { benchmark, supervisor } file references and
+// Input is a manifest with { benchmark, supervisor } file references and
 // mapping: { comparison, reference: { benchmark, supervisor },
 // candidate: { benchmark, supervisor } }. Paths are relative to the manifest
 // directory. A censored/failed run can omit its benchmark field; it cannot
@@ -9,13 +9,18 @@ import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { pathToFileURL } from "node:url";
 import { placementExperiment, unprofiledEmptyMinimumRoute } from "../benchmark/placement-experiment-contract.mjs";
+import {
+  coverageExperiment, parseProofArguments, validatedProofArm,
+} from "../benchmark/run-placement-coverage-proof.mjs";
 
 const INPUT_SCHEMA = "clearra.placement-graph-adoption-input.v1";
 const BENCHMARK_SCHEMA = "clearra.placement-graph-benchmark.v1";
 const MAPPING_SCHEMA = "clearra.placement-graph-solution-coverage-comparison.v1";
 const RUNTIME_SCHEMA = "clearra.runtime-receipt.v2";
-const ORDER = "ABBABAAB";
+const LEGACY_TIMING_PROTOCOL = Object.freeze({ arms: "ABBABAAB", order: "ABBA+BAAB", groupSize: 4 });
+const STRICT_TIMING_PROTOCOL = Object.freeze({ arms: "ABBA", order: "ABBA", groupSize: 2 });
 const MINIMUM = placementExperiment("minimum-domain-cutoff");
+const STRICT_PREFIX = coverageExperiment("strict-prefix");
 const PROOF_SCHEMA = "clearra.placement-graph-coverage-proof.v1";
 const AXES = [
   "mode", "structural_mode", "static_influence_mode", "translation_interval_mode",
@@ -37,6 +42,15 @@ const SHA256 = /^[a-f0-9]{64}$/u;
 const SOURCE_SHA = /^[a-f0-9]{40}$/u;
 const RUN_ID = /^(\d{16,21})-[1-9]\d*$/u;
 const MAX_JSON_BYTES = 4 * 1024 * 1024;
+
+export function placementAdoptionTimingProtocol(axis) {
+  return axis === STRICT_PREFIX.axis ? STRICT_TIMING_PROTOCOL : LEGACY_TIMING_PROTOCOL;
+}
+
+function validRunCount(runs, protocol) {
+  return Array.isArray(runs) && (protocol === STRICT_TIMING_PROTOCOL
+    ? runs.length <= protocol.arms.length : runs.length === protocol.arms.length);
+}
 
 function requireThat(condition, message) {
   if (!condition) throw new Error(message);
@@ -115,7 +129,7 @@ function assertMinimumDomainCutoffRun(report, sourceCommit, label) {
   `${label}: wrong compiled source, forced CPU count or missing unprofiled empty minimum domain route`);
 }
 
-function readCompletedRun(run, label, axis, arm, outputMode, custody) {
+function readCompletedRun(run, label, axis, arm, outputMode, exact) {
   const { outcome, stampNs } = runtimeOutcome(run?.supervisor, label);
   requireThat(outcomeState(outcome) === "completed", `${label}: not an uncontended completed run`);
   let captured;
@@ -164,14 +178,19 @@ function readCompletedRun(run, label, axis, arm, outputMode, custody) {
   requireThat(typeof report.backend_contract === "string" && report.backend_contract.length > 0 &&
     report.other_process_configuration && typeof report.other_process_configuration === "object" &&
     !Array.isArray(report.other_process_configuration), `${label}: missing runtime or process configuration`);
+  const strictContract = exact?.experiment === STRICT_PREFIX
+    ? validatedProofArm(report, run.supervisor,
+      { name: label, experiment: STRICT_PREFIX, value: arm === "A" ? "0" : "1" },
+      exact.proofOptions, exact.custody.binary_sha256, outputMode)
+    : null;
   const fixedModes = {};
-  if (custody) assertMinimumDomainCutoffRun(report, custody.source_commit, label);
+  if (exact?.experiment === MINIMUM) assertMinimumDomainCutoffRun(report, exact.custody.source_commit, label);
   // Advanced APDP needs a non-empty target; the component experiment needs
   // movement-clear on both arms. Neither is an axis of this P7P4 handoff.
-  requireThat(Object.keys(report).every((key) => !key.endsWith("_mode") || key === "output_mode" ||
+  if (!strictContract) requireThat(Object.keys(report).every((key) => !key.endsWith("_mode") || key === "output_mode" ||
     AXES.includes(key) || FIXED_P7P4_AXES.includes(key) || NEUTRAL_FOLLOW_ON_AXES.includes(key)),
-  `${label}: unknown experimental axis`);
-  if (custody) {
+    `${label}: unknown experimental axis`);
+  if (exact?.experiment === MINIMUM) {
     const treated = arm === "A" ? "0" : "1";
     for (const key of [...AXES, ...FIXED_P7P4_AXES, ...NEUTRAL_FOLLOW_ON_AXES]) {
       const expected = key === axis ? treated :
@@ -179,7 +198,7 @@ function readCompletedRun(run, label, axis, arm, outputMode, custody) {
       requireThat(report[key] === expected, `${label}: wrong A/B mode or non-neutral axis ${key}`);
       if (key !== axis) fixedModes[key] = report[key];
     }
-  } else {
+  } else if (!strictContract) {
     for (const key of NEUTRAL_FOLLOW_ON_AXES) {
       requireThat(!Object.hasOwn(report, key) || report[key] === "0", `${label}: non-neutral axis ${key}`);
     }
@@ -206,6 +225,7 @@ function readCompletedRun(run, label, axis, arm, outputMode, custody) {
       case: report.case,
       input, cpu, fixedModes, backend: report.backend_contract, process: report.other_process_configuration,
       ids: ids.sha256_ordered_ctk1_v1, globalCoverage: coverage.sha256_le_v1,
+      ...(strictContract ? { strictContract } : {}),
       supervisor: {
         profile: outcome.profile,
         timeoutSeconds: outcome.timeout_seconds,
@@ -217,22 +237,22 @@ function readCompletedRun(run, label, axis, arm, outputMode, custody) {
   };
 }
 
-function verifyMinimumProofCustody(mapping, reference, candidate, custody, completed) {
+function verifyExactProofCustody(mapping, reference, candidate, { experiment, custody }, completed) {
   const proof = mapping.proof;
   const [referenceObservation, candidateObservation, comparisonObservation] =
     Array.isArray(proof?.observations) ? proof.observations : [];
   requireThat(proof?.schema === PROOF_SCHEMA && proof.state === "completed-exact-per-solution" &&
     proof.source_binding === "compile-time-and-checkout" && proof.case === reference.contract.case &&
-    proof.axis === MINIMUM.axis && proof.experiment === MINIMUM.name &&
+    proof.axis === experiment.axis && proof.experiment === experiment.name &&
     proof.source_commit === custody.source_commit && proof.binary_sha256 === custody.binary_sha256 &&
     proof.manager_sha256 === custody.manager_sha256 && proof.host_fingerprint === custody.host_fingerprint &&
     proof.release_authority === false && proof.timing_adoption_authority === false &&
     Array.isArray(proof.observations) && proof.observations.length === 3,
-  "minimum-domain proof source, binary, supervisor or host custody is missing");
+  "Exact mapping proof source, binary, supervisor or host custody is missing");
   const comparisonRun = runtimeOutcome(mapping.comparison_supervisor, "mapping comparator");
   requireThat(outcomeState(comparisonRun.outcome) === "completed" &&
     isDeepStrictEqual(JSON.parse(mapping.comparison_supervisor.stdout_tail), mapping.comparison),
-  "minimum-domain comparator is not bound to its completed supervisor receipt");
+  "Exact mapping comparator is not bound to its completed supervisor receipt");
   const runs = [reference, candidate, comparisonRun];
   const phases = ["reference", "candidate", "comparison"];
   const benchmarkExecutable = reference.outcome.command?.[0];
@@ -247,22 +267,22 @@ function verifyMinimumProofCustody(mapping, reference, candidate, custody, compl
       outcome.command[1] === (outcome === comparisonRun.outcome ? "--compare-coverage" : "--coverage-slot")) &&
     completed.every(({ outcome }) => outcome.producer === "benchmark" &&
       isDeepStrictEqual(outcome.command, [benchmarkExecutable])),
-  "minimum-domain mapping and timing do not bind the same supervised benchmark executable");
+  "Exact mapping and timing do not bind the same supervised benchmark executable");
   const chronological = [...runs, completed[0]];
   requireThat(chronological.slice(1).every(({ stampNs }, index) =>
     stampNs > chronological[index].stampNs + BigInt(chronological[index].outcome.duration_ms) * 1_000_000n),
-  "minimum-domain mapping must finish in order before the timing suite starts");
+  "Exact mapping must finish in order before the timing suite starts");
   requireThat(asPositiveInt(mapping.comparison.covered_pairs) &&
     mapping.comparison.covered_pairs >= Math.max(SOLUTIONS, QUEUES) &&
     mapping.comparison.covered_pairs <= SOLUTIONS * QUEUES &&
     mapping.comparison.covered_pairs === reference.mapping.covered_pairs &&
     mapping.comparison.covered_pairs === candidate.mapping.covered_pairs,
-  "minimum-domain exact mapping pair count does not agree across supervised receipts");
+  "Exact mapping pair count does not agree across supervised receipts");
 }
 
-function verifyMapping(mapping, axis, contract, custody, completed) {
-  const reference = readCompletedRun(mapping?.reference, "mapping reference", axis, "A", "solution-coverage", custody);
-  const candidate = readCompletedRun(mapping?.candidate, "mapping candidate", axis, "B", "solution-coverage", custody);
+function verifyMapping(mapping, axis, contract, exact, completed) {
+  const reference = readCompletedRun(mapping?.reference, "mapping reference", axis, "A", "solution-coverage", exact);
+  const candidate = readCompletedRun(mapping?.candidate, "mapping candidate", axis, "B", "solution-coverage", exact);
   const comparison = mapping?.comparison;
   requireThat(reference.outcome.run_id !== candidate.outcome.run_id &&
     isDeepStrictEqual(reference.contract, contract) && isDeepStrictEqual(candidate.contract, contract),
@@ -273,31 +293,34 @@ function verifyMapping(mapping, axis, contract, custody, completed) {
     comparison.covered_weight === QUEUES && comparison.left_sha256 === reference.mapping.sha256 &&
     comparison.right_sha256 === candidate.mapping.sha256,
   "complete per-solution comparator evidence is missing or does not bind both artifacts");
-  if (custody) verifyMinimumProofCustody(mapping, reference, candidate, custody, completed);
+  if (exact) verifyExactProofCustody(mapping, reference, candidate, exact, completed);
   return { A: reference.mapping.sha256, B: candidate.mapping.sha256 };
 }
 
 export function evaluatePlacementGraphAdoption(input) {
   const { axis, output_mode: outputMode, time_resolution_ms: resolution, runs } = input ?? {};
-  const minimum = axis === MINIMUM.axis;
-  const custody = minimum ? input.custody : null;
-  requireThat(input?.schema === INPUT_SCHEMA && (minimum || AXES.includes(axis)) && asFinitePositive(resolution) &&
-    ["global-only", "solution-coverage"].includes(outputMode) && Array.isArray(runs) && runs.length === ORDER.length,
-  "invalid adoption manifest: exactly one known axis and ordered ABBA + BAAB are required");
-  if (minimum) {
-    requireThat(input.experiment === MINIMUM.name && outputMode === "global-only" &&
+  const experiment = [MINIMUM, STRICT_PREFIX].find((candidate) => candidate.axis === axis);
+  const custody = experiment ? input.custody : null;
+  const protocol = placementAdoptionTimingProtocol(axis);
+  const { arms, order, groupSize } = protocol;
+  requireThat(input?.schema === INPUT_SCHEMA && (experiment || AXES.includes(axis)) && asFinitePositive(resolution) &&
+    ["global-only", "solution-coverage"].includes(outputMode) && validRunCount(runs, protocol) &&
+    (protocol !== STRICT_TIMING_PROTOCOL || input.order === order),
+  `invalid adoption manifest: exactly one known axis and ordered ${order} are required`);
+  if (experiment) {
+    requireThat(input.experiment === experiment.name && outputMode === "global-only" &&
       SOURCE_SHA.test(custody?.source_commit ?? "") && [custody?.binary_sha256, custody?.manager_sha256, custody?.host_fingerprint]
         .every((field) => SHA256.test(field ?? "")),
-    "minimum-domain adoption requires exact compile/run custody and global-only unprofiled timing");
+    `${experiment.name} adoption requires exact compile/run custody and global-only timing`);
   }
   const evidence = {
     schema: "clearra.placement-graph-adoption.v1", release_authority: false, axis,
-    order: "ABBA+BAAB", output_mode: outputMode, time_resolution_ms: resolution,
+    order, output_mode: outputMode, time_resolution_ms: resolution,
   };
   const observations = runs.map((run, index) => {
     const { outcome, stampNs } = runtimeOutcome(run?.supervisor, `run ${index + 1}`);
     return {
-      slot: index + 1, arm: ORDER[index], stampNs, run_id: outcome.run_id, state: outcomeState(outcome),
+      slot: index + 1, arm: arms[index], stampNs, run_id: outcome.run_id, state: outcomeState(outcome),
       reason: outcome.reason, child_termination: outcome.child_termination,
       duration_ms: outcome.duration_ms,
     };
@@ -309,34 +332,48 @@ export function evaluatePlacementGraphAdoption(input) {
   }
   evidence.observations = observations.map(({ stampNs, ...observation }) => observation);
   if (observations.some(({ state }) => state === "failed")) return { ...evidence, status: "failed" };
-  if (observations.some(({ state }) => state !== "completed")) return { ...evidence, status: "inconclusive" };
+  if (runs.length !== arms.length || observations.some(({ state }) => state !== "completed")) {
+    return { ...evidence, status: "inconclusive" };
+  }
 
+  const exact = experiment ? { experiment, custody } : null;
+  if (experiment === STRICT_PREFIX) {
+    exact.proofOptions = parseProofArguments(["--case", "p7p4", "--id", "timing-readback",
+      "--source-sha", custody.source_commit, "--experiment", experiment.name]);
+  }
   const completed = runs.map((run, index) =>
-    readCompletedRun(run, `run ${index + 1}`, axis, ORDER[index], outputMode, custody));
+    readCompletedRun(run, `run ${index + 1}`, axis, arms[index], outputMode, exact));
   const { contract, peak } = completed[0];
   requireThat(completed.every((run) => isDeepStrictEqual(run.contract, contract)),
     "binary, CPU/request/result identity, fixed axes or supervisor contracts differ");
   requireThat(completed.every((run) => run.peak.source === peak.source),
     "cannot compare different sampled/kernel peak provenance");
-  if (custody) requireThat(contract.binarySha256 === custody.binary_sha256, "minimum-domain custody binary differs");
-  const maps = verifyMapping(input.mapping, axis, contract, custody, completed);
+  if (exact) requireThat(contract.binarySha256 === custody.binary_sha256, "Exact proof custody binary differs");
+  const maps = verifyMapping(input.mapping, axis, contract, exact, completed);
   if (outputMode === "solution-coverage") {
-    requireThat(completed.every((run, index) => run.mapping.sha256 === maps[ORDER[index]]),
+    requireThat(completed.every((run, index) => run.mapping.sha256 === maps[arms[index]]),
       "measured solution-coverage artifact is not the verified canonical mapping");
   }
 
   const select = (series, arm, start, end) => series
-    .filter((_, i) => i >= start && i < end && ORDER[i] === arm);
+    .filter((_, i) => i >= start && i < end && arms[i] === arm);
   const times = completed.map(({ searchMs }) => searchMs);
   const peaks = completed.map((run) => run.peak.bytes);
-  const baselineTimes = select(times, "A", 0, ORDER.length);
-  const candidateTimes = select(times, "B", 0, ORDER.length);
-  const baselinePeaks = select(peaks, "A", 0, ORDER.length);
-  const candidatePeaks = select(peaks, "B", 0, ORDER.length);
-  const blocks = [0, 4].map((start) => ({
-    baseline_ms: median(select(times, "A", start, start + 4)),
-    candidate_ms: median(select(times, "B", start, start + 4)),
-  }));
+  const baselineTimes = select(times, "A", 0, arms.length);
+  const candidateTimes = select(times, "B", 0, arms.length);
+  const baselinePeaks = select(peaks, "A", 0, arms.length);
+  const candidatePeaks = select(peaks, "B", 0, arms.length);
+  // For strict ABBA the two groups are the AB and BA pairs, not two
+  // four-run blocks. A pooled improvement cannot mask a reversed pair.
+  const blocks = Array.from({ length: arms.length / groupSize }, (_, group) => {
+    const start = group * groupSize;
+    const end = start + groupSize;
+    return {
+      ...(protocol === STRICT_TIMING_PROTOCOL ? { order: arms.slice(start, end) } : {}),
+      baseline_ms: median(select(times, "A", start, end)),
+      candidate_ms: median(select(times, "B", start, end)),
+    };
+  });
   const timeMedian = { baseline: median(baselineTimes), candidate: median(candidateTimes) };
   const timeNoise = Math.max(mad(baselineTimes), resolution);
   const peakMedian = { baseline: median(baselinePeaks), candidate: median(candidatePeaks) };
@@ -348,7 +385,7 @@ export function evaluatePlacementGraphAdoption(input) {
     peakMax.candidate - peakMax.baseline <= peakNoise;
   return {
     ...evidence, status: timeImproved && memoryNonregressing ? "adoptable" : "not-adoptable",
-    ...(minimum ? { experiment: MINIMUM.name, custody } : {}),
+    ...(experiment ? { experiment: experiment.name, custody } : {}),
     scope: outputMode === "solution-coverage"
       ? "measured-artifacts-bound-to-exact-per-solution-comparison"
       : "global-only-timings-with-separate-exact-per-solution-qualification",
@@ -379,8 +416,9 @@ export function evaluateManifest(path) {
   requireThat(safeJsonPath(manifestPath), "manifest must not resolve to credential material");
   const root = dirname(manifestPath);
   const manifest = readJson(manifestPath);
-  requireThat(manifest?.schema === INPUT_SCHEMA && Array.isArray(manifest.runs) &&
-    manifest.runs.length === ORDER.length, "expected exactly eight manifest run references");
+  const protocol = placementAdoptionTimingProtocol(manifest?.axis);
+  requireThat(manifest?.schema === INPUT_SCHEMA && validRunCount(manifest.runs, protocol),
+    `expected a valid ${protocol.order} manifest with ${protocol.arms.length} planned run references`);
   const readReference = (name) => {
     requireThat(safeJsonPath(name) && !isAbsolute(name) && !name.split(/[/\\]/u).includes(".."),
       "evidence path must be an explicit JSON path relative to the manifest directory");
@@ -397,13 +435,13 @@ export function evaluateManifest(path) {
   const runs = manifest.runs.map((run) => loadRun(run, true));
   // Incomplete measurements are useful without mapping files. Delay mandatory
   // proof reads until there is a complete, uncontended sequence to evaluate.
-  const complete = runs.every((run, index) =>
+  const complete = runs.length === protocol.arms.length && runs.every((run, index) =>
     outcomeState(runtimeOutcome(run.supervisor, `run ${index + 1}`).outcome) === "completed");
   const mapping = complete ? {
     comparison: readReference(manifest.mapping?.comparison),
     reference: loadRun(manifest.mapping?.reference),
     candidate: loadRun(manifest.mapping?.candidate),
-    ...(manifest.axis === MINIMUM.axis ? {
+    ...([MINIMUM.axis, STRICT_PREFIX.axis].includes(manifest.axis) ? {
       proof: readReference(manifest.mapping?.proof),
       comparison_supervisor: readReference(manifest.mapping?.comparison_supervisor),
     } : {}),

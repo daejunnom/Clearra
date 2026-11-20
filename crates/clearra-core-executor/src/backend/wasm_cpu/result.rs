@@ -1911,7 +1911,21 @@ impl WasmExactSearchSession {
         &mut self,
         capture: SolutionCoverageCapture,
     ) -> Result<(), WasmExactSearchError> {
-        if !retains_buildable_identity_evidence(&self.problem)
+        let summary_capture = self.problem.output_policy() == SearchOutputPolicy::CoverageSummary;
+        // The new summary projection retains additional exact identities in
+        // the local capture session. It is not a parent-authorized output or
+        // a projection that may be switched on after the first candidate.
+        if summary_capture
+            && (self.problem_retention != SearchProblemRetention::SessionOwnedCloneUnaccounted
+                || self.finished
+                || self.packing_candidate_count != 0
+                || self.solution_coverage_capture.is_some())
+        {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "solution_coverage_summary_capture_requires_owned_unstarted_session",
+            ));
+        }
+        if (!summary_capture && !retains_buildable_identity_evidence(&self.problem))
             || !matches!(
                 self.problem.objective().kind(),
                 ObjectiveKind::All | ObjectiveKind::Unique
@@ -1932,6 +1946,17 @@ impl WasmExactSearchSession {
         }
         self.solution_coverage_capture = Some(capture);
         Ok(())
+    }
+
+    fn solution_coverage_capture_retains_identities(&self) -> bool {
+        #[cfg(any(test, feature = "local-search-ab"))]
+        {
+            self.solution_coverage_capture.is_some()
+        }
+        #[cfg(not(any(test, feature = "local-search-ab")))]
+        {
+            false
+        }
     }
 
     #[cfg(feature = "parallel")]
@@ -3553,7 +3578,9 @@ impl WasmExactSearchSession {
             if let Some(solution_coverage) = solution_coverage {
                 self.merge_solution_coverage(candidate.identity, &solution_coverage)?;
             }
-            if retains_buildable_identity_evidence(&self.problem) {
+            if retains_buildable_identity_evidence(&self.problem)
+                || self.solution_coverage_capture_retains_identities()
+            {
                 let identity = TilingIdentityEntry::new(candidate.identity);
                 if !self.buildable_identities.contains(&identity)
                     && self.buildable_identities.try_reserve(1).is_err()
@@ -4757,7 +4784,8 @@ impl WasmExactSearchSession {
         }
         let tiling_only = self.problem.objective().kind() == ObjectiveKind::Tiling;
         let canonical_tiling = self.problem.output_policy() == SearchOutputPolicy::TilingOnly;
-        let solution_set_materialized = self.problem.output_policy().retains_solution_set();
+        let solution_set_materialized = self.problem.output_policy().retains_solution_set()
+            || self.solution_coverage_capture_retains_identities();
         let tiling_solution_store = if tiling_only {
             self.take_tiling_solution_page_store()?
         } else {
@@ -6547,6 +6575,60 @@ mod tests {
         )
         .expect_err("a sink error invalidates the search");
         assert_eq!(error.reason(), "fixture-sink-failed");
+    }
+
+    #[test]
+    fn coverage_summary_retains_identity_sequence_only_for_explicit_capture() {
+        use std::sync::{Arc, Mutex};
+
+        let query = PcScenarioQuery::new(
+            PcScenarioBoard::standard_10(1, 0x3f0),
+            PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::I])),
+            PieceWindow::new(1),
+        )
+        .with_allow_hold(false)
+        .with_exact_pieces(Some(1))
+        .with_count_policy(PcCountPolicy::CountUnique)
+        .with_objective(ObjectivePolicy::unique())
+        .with_execution_policy(PcExecutionPolicy::default().with_workers(1));
+        let problem = ProblemCompiler::compile_scenario_pc(&query)
+            .expect("one-I problem")
+            .with_output_policy(clearra_problem::SearchOutputPolicy::CoverageSummary);
+        let control = ExecutionControl::default();
+        let ordinary = WasmCpuSearchBackend::execute_with_control(&problem, &control)
+            .expect("ordinary summary completes");
+        assert!(ordinary.normalized_solution_identities().is_empty());
+        assert!(ordinary.path_steps().is_empty());
+
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let rows = Arc::clone(&observed);
+        let captured = WasmCpuSearchBackend::execute_with_solution_coverage_capture(
+            &problem,
+            &control,
+            move |identity, evidence| {
+                let super::CapturedSolutionCoverage::Bitmap(bitmap) = evidence else {
+                    return Err("one-I capture requires exact bitmap evidence");
+                };
+                rows.lock()
+                    .expect("capture rows")
+                    .push((identity, bitmap.count_ones()));
+                Ok(())
+            },
+        )
+        .expect("summary capture completes without replay");
+        let observed = observed.lock().expect("observed capture rows");
+        assert_eq!(observed.len(), 1);
+        assert_eq!(observed[0].1, 1);
+        assert_eq!(captured.normalized_solution_identities(), &[observed[0].0]);
+        assert_eq!(captured.normalized_solution_keys().len(), 1);
+        assert_eq!(
+            captured.coverage_pattern_words(),
+            ordinary.coverage_pattern_words()
+        );
+        assert!(captured.path_steps().is_empty());
+        assert!(captured.solution_coverages().is_empty());
+        assert_eq!(captured.bool_field("count_complete"), Some(true));
+        assert_eq!(captured.bool_field("probability_complete"), Some(true));
     }
 
     #[test]

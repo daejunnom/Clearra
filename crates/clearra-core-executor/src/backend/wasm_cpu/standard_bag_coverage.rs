@@ -51,6 +51,19 @@ fn parse_union_memo_entry_limit(value: Option<&str>) -> Result<Option<usize>, &'
 }
 
 #[cfg(any(test, feature = "local-search-ab"))]
+fn parse_accept_absorption(
+    value: Result<String, std::env::VarError>,
+) -> Result<bool, &'static str> {
+    const INVALID: &str = "wasm_standard_bag_absorption_mode_invalid";
+    match value {
+        Ok(label) if label == "0" => Ok(false),
+        Ok(label) if label == "1" => Ok(true),
+        Err(std::env::VarError::NotPresent) => Ok(false),
+        _ => Err(INVALID),
+    }
+}
+
+#[cfg(any(test, feature = "local-search-ab"))]
 const P7P4_PREFIXES: usize = 5_040;
 #[cfg(any(test, feature = "local-search-ab"))]
 const P7P4_TAIL_BITS: usize = 840;
@@ -766,6 +779,8 @@ pub(super) struct StandardBagCoverage {
     // allocation still follows the map's growth policy and survives recycling.
     #[cfg(any(test, feature = "local-search-ab"))]
     union_memo_entry_limit: Option<usize>,
+    #[cfg(any(test, feature = "local-search-ab"))]
+    absorb_accepted_suffix: bool,
     epoch_global_root: u32,
     global_words: Vec<u64>,
     global_covered_pattern_count: usize,
@@ -842,12 +857,18 @@ impl StandardBagCoverage {
         projects_unplaced_lookahead: bool,
         tables: Arc<StandardBagRequestTables>,
     ) -> Result<Self, WasmExactSearchError> {
-        // Product builds adapt their layout to live per-worker memo cost. Only
-        // local A/B builds may force a layout or change union slot storage.
+        // Product builds adapt product-state layout and keep lossless compact
+        // union slots. Only local A/B builds may override either selection.
         let memo_storage = ExactU64MemoStorage::from_environment()
+            .map_err(WasmExactSearchError::InvalidProblem)?;
+        let union_storage = ExactU64MemoStorage::for_union(memo_storage)
             .map_err(WasmExactSearchError::InvalidProblem)?;
         let product_layout = StandardBagProductMemoLayout::from_environment()
             .map_err(WasmExactSearchError::InvalidProblem)?;
+        #[cfg(feature = "local-search-ab")]
+        let absorb_accepted_suffix =
+            parse_accept_absorption(std::env::var("CLEARRA_STANDARD_BAG_ABSORB"))
+                .map_err(WasmExactSearchError::InvalidProblem)?;
         #[cfg(feature = "local-search-ab")]
         let union_memo_entry_limit =
             match std::env::var("CLEARRA_STANDARD_BAG_UNION_MEMO_MAX_ENTRIES") {
@@ -876,11 +897,15 @@ impl StandardBagCoverage {
                 memo_storage,
                 max_source_depth,
             ),
-            union_memo: ExactU64MemoMap::new(memo_storage),
+            union_memo: ExactU64MemoMap::new(union_storage),
             #[cfg(feature = "local-search-ab")]
             union_memo_entry_limit,
             #[cfg(all(test, not(feature = "local-search-ab")))]
             union_memo_entry_limit: None,
+            #[cfg(feature = "local-search-ab")]
+            absorb_accepted_suffix,
+            #[cfg(all(test, not(feature = "local-search-ab")))]
+            absorb_accepted_suffix: false,
             epoch_global_root: REJECT,
             global_words: Vec::new(),
             global_covered_pattern_count: 0,
@@ -1448,6 +1473,11 @@ impl StandardBagCoverage {
                         control,
                     )?;
                     result = self.union(result, next)?;
+                    // The only lookahead is fixed and outside the original
+                    // ordinals. Current and Swap still cover the same source.
+                    if self.accept_is_absorbing(result) {
+                        return Ok(ACCEPT);
+                    }
                 }
                 let held_piece = PieceKind::STANDARD_TETROMINOES[usize::from(hold_code - 1)];
                 let swap_step = self
@@ -1472,6 +1502,9 @@ impl StandardBagCoverage {
                         control,
                     )?;
                     result = self.union(result, next)?;
+                    if self.accept_is_absorbing(result) {
+                        return Ok(ACCEPT);
+                    }
                 }
             } else {
                 // A fresh next bag has no concrete projected identity. It may
@@ -1508,7 +1541,7 @@ impl StandardBagCoverage {
         self.product_state_count = self.product_state_count.saturating_add(1);
 
         let mut children = [REJECT; 7];
-        for (current_index, child) in children.iter_mut().enumerate() {
+        'current_draw: for (current_index, child) in children.iter_mut().enumerate() {
             let current_bit = 1_u8 << current_index;
             if source.bag_remainder & current_bit == 0 {
                 continue;
@@ -1543,6 +1576,12 @@ impl StandardBagCoverage {
                     control,
                 )?;
                 branch = self.union(branch, next)?;
+                // ACCEPT covers every suffix for this fixed *original* draw.
+                // A different current draw has a different ordinal block.
+                if self.accept_is_absorbing(branch) {
+                    *child = ACCEPT;
+                    continue 'current_draw;
+                }
             }
             // This product unions queues, not execution histories. If current
             // equals held, Current already followed every same-kind language
@@ -1575,6 +1614,10 @@ impl StandardBagCoverage {
                         control,
                     )?;
                     branch = self.union(branch, next)?;
+                    if self.accept_is_absorbing(branch) {
+                        *child = ACCEPT;
+                        continue 'current_draw;
+                    }
                 }
             }
 
@@ -1613,6 +1656,11 @@ impl StandardBagCoverage {
                             control,
                         )?;
                         *stored_child = self.union(*stored_child, next)?;
+                        // The second original draw is also fixed here. It
+                        // cannot absorb a different desired-piece ordinal.
+                        if self.accept_is_absorbing(*stored_child) {
+                            break;
+                        }
                     }
                 }
                 let stored = self.intern_node(
@@ -1659,6 +1707,9 @@ impl StandardBagCoverage {
                         control,
                     )?;
                     branch = self.union(branch, next)?;
+                    if self.accept_is_absorbing(branch) {
+                        break;
+                    }
                 }
             }
             *child = branch;
@@ -1668,6 +1719,19 @@ impl StandardBagCoverage {
         // Admission failure only skips caching; the exact root remains valid.
         let _ = self.product_memo.try_insert(key, root);
         Ok(root)
+    }
+
+    #[inline]
+    fn accept_is_absorbing(&self, root: u32) -> bool {
+        #[cfg(any(test, feature = "local-search-ab"))]
+        {
+            root == ACCEPT && self.absorb_accepted_suffix
+        }
+        #[cfg(not(any(test, feature = "local-search-ab")))]
+        {
+            let _ = root;
+            false
+        }
     }
 
     fn intern_node(
@@ -2296,6 +2360,170 @@ mod supply_automaton_tests {
     }
 
     #[test]
+    fn accept_absorption_mode_requires_an_explicit_opt_in() {
+        use std::env::VarError;
+
+        assert_eq!(
+            parse_accept_absorption(Err(VarError::NotPresent)),
+            Ok(false)
+        );
+        assert_eq!(parse_accept_absorption(Ok("0".into())), Ok(false));
+        assert_eq!(parse_accept_absorption(Ok("1".into())), Ok(true));
+        for value in [
+            Ok("".into()),
+            Ok("true".into()),
+            Ok(" 1".into()),
+            Ok("2".into()),
+            Err(VarError::NotUnicode(std::ffi::OsString::new())),
+        ] {
+            assert_eq!(
+                parse_accept_absorption(value),
+                Err("wasm_standard_bag_absorption_mode_invalid")
+            );
+        }
+    }
+
+    #[test]
+    fn accept_absorption_preserves_ordinals_witness_and_recycled_global_union() {
+        let universe = PatternUniverseMaterializer::standard_7_bag(2, 0, 0x77)
+            .expect("full two-draw standard bag");
+        assert_eq!(universe.pattern_count(), 42);
+        let kinds = PieceKind::STANDARD_TETROMINOES;
+        let control = ExecutionControl::default();
+        let mut language = PieceOrderLanguageCache::default();
+        for held in [None, Some(kinds[0])] {
+            let initial = HoldAutomatonState::new(
+                PieceSourceId::new(0x77),
+                0,
+                held,
+                0,
+                BagState::fresh_standard_7_bag().packed_remainder_key(),
+                SupplyProvenanceId(0x77),
+            );
+            let make = |absorb| {
+                let mut coverage =
+                    StandardBagCoverage::for_universe(&universe, initial, true, false)
+                        .expect("bag coverage")
+                        .expect("supported universe");
+                coverage.absorb_accepted_suffix = absorb;
+                coverage
+            };
+            let (mut baseline, mut treatment) = (make(false), make(true));
+            let mut skipped = 0;
+            let mut expected_union = 0_u64;
+            for phase in 0..2 {
+                let accepted = [kinds[phase], kinds[phase + 2]];
+                let word = language
+                    .canonicalize(&branching_piece_language(1, phase))
+                    .expect("one-piece language");
+                let expected = (0..universe.pattern_count()).fold(0_u64, |bits, ordinal| {
+                    let queue = universe.sequence_at(ordinal);
+                    let succeeds = accepted.contains(&queue[0])
+                        || held.is_some_and(|piece| accepted.contains(&piece))
+                        || (held.is_none() && accepted.contains(&queue[1]));
+                    bits | (u64::from(succeeds) << ordinal)
+                });
+                assert_ne!(expected, 0);
+                if held.is_none() {
+                    assert_ne!(expected.count_ones(), 42);
+                }
+                expected_union |= expected;
+                let a = baseline
+                    .cover_language(&language, word, &control)
+                    .expect("baseline");
+                let b = treatment
+                    .cover_language(&language, word, &control)
+                    .expect("treatment");
+                assert!(b.edge_checks <= a.edge_checks);
+                skipped += a.edge_checks - b.edge_checks;
+                for (coverage, result) in [(&mut baseline, a), (&mut treatment, b)] {
+                    assert_eq!(result.covered_pattern_count, expected.count_ones() as usize);
+                    assert_eq!(result.witness_pattern_id, Some(expected.trailing_zeros()));
+                    assert_eq!(
+                        coverage
+                            .materialize_root(result.root)
+                            .unwrap()
+                            .to_owned_words(),
+                        vec![expected]
+                    );
+                    coverage.merge_global(result.root).expect("merge decision");
+                    coverage
+                        .flush_and_recycle_local_cache()
+                        .expect("recycle arena");
+                    assert_eq!(
+                        coverage.materialize_global().unwrap().to_owned_words(),
+                        vec![expected_union]
+                    );
+                }
+            }
+            assert!(skipped > 0, "fixture must visit an absorbed branch");
+        }
+    }
+
+    #[test]
+    fn accept_absorption_keeps_projected_terminal_lookahead_in_its_original_draw() {
+        let mut language = PieceOrderLanguageCache::default();
+        let word = language
+            .canonicalize(&branching_piece_language(1, 0))
+            .expect("one-piece language");
+        let kinds = PieceKind::STANDARD_TETROMINOES;
+        let (held, known) = (piece_code(kinds[0]), piece_code(kinds[2]));
+        let control = ExecutionControl::default();
+        let make = |sequence, absorb| {
+            let mut coverage = coverage_for_len(sequence, true);
+            coverage.absorb_accepted_suffix = absorb;
+            coverage
+        };
+
+        // A known last mino from the current bag is outside the original six
+        // draws. Both Current and Swap finish; the second proof is redundant.
+        let (mut a, mut b) = (make(6, false), make(6, true));
+        let terminal = SourceState {
+            depth: 6,
+            bag_remainder: 1_u8 << (known - 1),
+        };
+        assert_eq!(
+            a.solve(&language, word, terminal, held, &control),
+            Ok(ACCEPT)
+        );
+        assert_eq!(
+            b.solve(&language, word, terminal, held, &control),
+            Ok(ACCEPT)
+        );
+        assert_eq!((a.edge_check_count, b.edge_check_count), (2, 1));
+
+        // Neither original last draw can be skipped, but either draw already
+        // completes directly. StoreCurrent's extra lookahead cannot add an
+        // original queue once that draw's suffix has been accepted.
+        let (mut a, mut b) = (make(6, false), make(6, true));
+        let last_draw = SourceState {
+            depth: 5,
+            bag_remainder: (1_u8 << (known - 1)) | (1_u8 << (held - 1)),
+        };
+        assert_eq!(a.solve(&language, word, last_draw, 0, &control), Ok(ACCEPT));
+        assert_eq!(b.solve(&language, word, last_draw, 0, &control), Ok(ACCEPT));
+        assert_eq!((a.edge_check_count, b.edge_check_count), (4, 2));
+
+        // A fresh bag cannot place an unknown incoming piece. It may only
+        // release a matching held piece, with no new source ordinal.
+        let fresh = SourceState {
+            depth: 7,
+            bag_remainder: FULL_STANDARD_BAG,
+        };
+        let (mut a, mut b) = (make(7, false), make(7, true));
+        for coverage in [&mut a, &mut b] {
+            assert_eq!(
+                coverage.solve(&language, word, fresh, held, &control),
+                Ok(ACCEPT)
+            );
+            assert_eq!(
+                coverage.solve(&language, word, fresh, piece_code(kinds[1]), &control),
+                Ok(REJECT)
+            );
+        }
+    }
+
+    #[test]
     fn union_memo_entry_limit_is_explicit_and_defaults_to_unbounded() {
         assert_eq!(parse_union_memo_entry_limit(None), Ok(None));
         assert_eq!(parse_union_memo_entry_limit(Some("0")), Ok(Some(0)));
@@ -2316,6 +2544,99 @@ mod supply_automaton_tests {
                 Err(UNION_MEMO_LIMIT_INVALID)
             );
         }
+    }
+
+    #[test]
+    fn union_only_compact_slots_preserve_exact_roots_witnesses_and_recycling() {
+        use ExactU64MemoStorage::{Compact, Reference};
+        use PieceKind::{I, J, O, S, T, Z};
+
+        let (_, initial) = request_fixture(4);
+        let universe = PatternUniverseMaterializer::standard_7_bag(4, 0, 0x77)
+            .expect("full four-draw standard bag");
+        assert_eq!(universe.pattern_count(), 840);
+        let make = |union_storage| {
+            let mut coverage = StandardBagCoverage::for_universe(&universe, initial, true, true)
+                .expect("bag coverage")
+                .expect("supported universe");
+            // Set the same product backend and recycling policy explicitly.
+            // No process environment is modified by the two-arm test.
+            coverage.product_memo = StandardBagProductMemo::new(
+                StandardBagProductMemoLayout::Flat,
+                Reference,
+                coverage.tables.cursor_transitions.max_source_depth,
+            );
+            coverage.union_memo = ExactU64MemoMap::new(union_storage);
+            coverage.union_memo_entry_limit = None;
+            coverage
+        };
+        let (mut reference, mut treatment) = (make(Reference), make(Compact));
+        let control = ExecutionControl::default();
+        let mut language = PieceOrderLanguageCache::default();
+        let mut saw_witness = false;
+        for (epoch, prefixes) in [[I, O, T], [J, S, Z]].into_iter().enumerate() {
+            // Force the union table to contain nontrivial unordered pairs,
+            // even if all later language branches happen to be disjoint.
+            for piece in prefixes {
+                let mut children = [REJECT; 7];
+                children[usize::from(piece_code(piece) - 1)] = ACCEPT;
+                for coverage in [&mut reference, &mut treatment] {
+                    let root = coverage
+                        .intern_node(0, FULL_STANDARD_BAG, children)
+                        .expect("first-piece decision");
+                    coverage.merge_global(root).expect("merge exact decision");
+                }
+            }
+            for placed_len in [3, 4] {
+                let language_root = language
+                    .canonicalize(&branching_piece_language(placed_len, epoch))
+                    .expect("canonical piece language");
+                let a = reference
+                    .cover_language(&language, language_root, &control)
+                    .expect("reference coverage");
+                let b = treatment
+                    .cover_language(&language, language_root, &control)
+                    .expect("compact union coverage");
+                saw_witness |= a.witness_pattern_id.is_some();
+                assert_eq!(a.root, b.root);
+                assert_eq!(a.covers_any_pattern, b.covers_any_pattern);
+                assert_eq!(a.witness_pattern_id, b.witness_pattern_id);
+                assert_eq!(a.covered_pattern_count, b.covered_pattern_count);
+                assert_eq!(
+                    reference.materialize_root(a.root).expect("reference bits"),
+                    treatment.materialize_root(b.root).expect("treatment bits"),
+                );
+                reference.merge_global(a.root).expect("reference union");
+                treatment.merge_global(b.root).expect("treatment union");
+            }
+            assert_eq!(reference.local_live_bytes(), treatment.local_live_bytes());
+            let a = reference.memo_accounting();
+            let b = treatment.memo_accounting();
+            assert_eq!(a.product_storage, "reference");
+            assert_eq!(b.product_storage, a.product_storage);
+            assert_eq!(b.product_layout, a.product_layout);
+            assert_eq!(b.product_payload_bytes, a.product_payload_bytes);
+            assert_eq!(a.union_storage, "reference");
+            assert_eq!(b.union_storage, "compact");
+            assert!(a.union_entries >= 2);
+            assert_eq!(b.union_entries, a.union_entries);
+            assert_eq!(b.union_capacity, a.union_capacity);
+            assert_eq!(b.union_payload_bytes * 4, a.union_payload_bytes * 3);
+            for coverage in [&mut reference, &mut treatment] {
+                coverage.flush_and_recycle_local_cache().expect("recycle");
+                assert_eq!(coverage.union_memo.len(), 0);
+                assert_eq!(coverage.product_memo.len(), 0);
+            }
+            assert_eq!(
+                reference
+                    .materialize_global()
+                    .expect("reference global bits"),
+                treatment
+                    .materialize_global()
+                    .expect("treatment global bits"),
+            );
+        }
+        assert!(saw_witness);
     }
 
     #[test]

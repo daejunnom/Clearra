@@ -1,23 +1,23 @@
-// Sequential, local-only ABBA + BAAB after complete P7P4 mapping qualification.
+// Sequential, local-only timing after complete P7P4 mapping qualification.
 import { mkdirSync, realpathSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { isDeepStrictEqual } from "node:util";
 
-import { evaluatePlacementGraphAdoption } from "../tools/placement-graph-adoption.mjs";
+import { evaluatePlacementGraphAdoption, placementAdoptionTimingProtocol } from "../tools/placement-graph-adoption.mjs";
 import { DEFAULT_PLACEMENT_EXPERIMENT, placementExperiment } from "./placement-experiment-contract.mjs";
 import {
   acquireProofOwnership, assertExactComparison, benchmarkEnvironment, captureChild,
-  checkedCommand, classifyProofRuntime, composeRuntimeArgs, COVERAGE_ROOT, fileSha,
-  localPlacementHostFingerprint, parseBoundBenchmarkOutput, parseProofArguments, proofSchedule,
-  readOwnedPlacementJson, readSupervisorReceipt, requireOwnedFile, requirePlacementEvidenceSlot,
+  checkedCommand, classifyProofRuntime, composeRuntimeArgs, coverageExperiment, COVERAGE_ROOT, fileSha,
+  localPlacementHostFingerprint, parseBoundBenchmarkOutput, parseProofArguments, placementBenchmarkBinaries,
+  proofSchedule, readOwnedPlacementJson, readSupervisorReceipt, requirePlacementEvidenceSlot,
   stateReceiptDirectory, validatedProofArm,
 } from "./run-placement-coverage-proof.mjs";
 
-const ORDER = "ABBABAAB";
 const INPUT_SCHEMA = "clearra.placement-graph-adoption-input.v1";
 const PROOF_SCHEMA = "clearra.placement-graph-coverage-proof.v1";
 const DEFAULT_EXPERIMENT = placementExperiment(DEFAULT_PLACEMENT_EXPERIMENT);
+const STRICT_PREFIX = "strict-prefix";
 const ID = /^[a-z0-9][a-z0-9-]{0,47}$/u;
 const SOURCE = /^[a-f0-9]{40}$/u;
 const DIGEST = /^[a-f0-9]{64}$/u;
@@ -31,7 +31,7 @@ const MAPPING_COPY = {
   reference: { benchmark: "mapping-reference.json", supervisor: "mapping-reference-runtime.json" },
   candidate: { benchmark: "mapping-candidate.json", supervisor: "mapping-candidate-runtime.json" },
 };
-const MINIMUM_MAPPING_COPY = {
+const EXACT_MAPPING_COPY = {
   ...MAPPING_COPY, proof: "mapping-proof.json", comparison_supervisor: "mapping-comparison-runtime.json",
 };
 
@@ -50,7 +50,13 @@ function requireThat(condition, message) {
 }
 
 function experimentFor(options) {
-  return options.experiment === undefined ? DEFAULT_EXPERIMENT : placementExperiment(options.experiment?.name ?? null);
+  return adoptionExperiment(options.experiment === undefined ? undefined : options.experiment?.name ?? null);
+}
+
+function adoptionExperiment(name) {
+  // Coverage also supports operation-mask evidence, but no comparable timed
+  // protocol has been defined for that axis.
+  return name === STRICT_PREFIX ? coverageExperiment(name) : placementExperiment(name);
 }
 
 export function parseAdoptionArguments(argv) {
@@ -67,14 +73,15 @@ export function parseAdoptionArguments(argv) {
   requireThat(ID.test(id ?? "") && ID.test(proofId ?? "") && SOURCE.test(sourceCommit ?? "") &&
     /^\d+(?:\.\d+)?$/u.test(rawResolution) && Number.isFinite(timeResolutionMs) &&
     timeResolutionMs >= 0.001 && timeResolutionMs <= 1_000,
-  "Usage: run-placement-graph-adoption --id UNIQUE-LEAF --proof-id P7P4-PROOF-LEAF --source-sha FULL-HEAD [--time-resolution-ms N] [--experiment movement-clear|minimum-domain-cutoff]");
-  const experiment = placementExperiment(args["--experiment"]);
+  "Usage: run-placement-graph-adoption --id UNIQUE-LEAF --proof-id P7P4-PROOF-LEAF --source-sha FULL-HEAD [--time-resolution-ms N] [--experiment movement-clear|minimum-domain-cutoff|strict-prefix]");
+  const experiment = adoptionExperiment(args["--experiment"]);
   return { id, proofId, sourceCommit, timeResolutionMs, experiment };
 }
 
 export function adoptionSchedule(binary, timeout, experiment = DEFAULT_EXPERIMENT) {
   const selected = experimentFor({ experiment });
-  return Array.from(ORDER, (arm, index) => ({
+  const { arms } = placementAdoptionTimingProtocol(selected.axis);
+  return Array.from(arms, (arm, index) => ({
     name: `trial-${index + 1}-${arm.toLowerCase()}`,
     arm, value: arm === "A" ? "0" : "1", timeout, experiment: selected,
     command: [binary],
@@ -96,7 +103,7 @@ function sequentialAfter(previous, receipt) {
 export function validateAdoptionProof(options, binary, artifactRoot, custody, bundle) {
   const { summary, reference, candidate, comparison } = bundle;
   const experiment = experimentFor(options);
-  const minimum = experiment !== DEFAULT_EXPERIMENT;
+  const exact = experiment !== DEFAULT_EXPERIMENT;
   requireThat(summary?.schema === PROOF_SCHEMA && summary.state === "completed-exact-per-solution" &&
     summary.axis === experiment.axis &&
     (summary.experiment ?? DEFAULT_PLACEMENT_EXPERIMENT) === experiment.name &&
@@ -113,7 +120,7 @@ export function validateAdoptionProof(options, binary, artifactRoot, custody, bu
   const proofOptions = parseProofArguments(["--case", "p7p4", "--id", options.proofId,
     "--source-sha", options.sourceCommit, "--timeout-seconds", String(reference.runtime.outcome?.timeout_seconds),
     "--experiment", experiment.name]);
-  requireThat(summary.case === proofOptions.fixture.name, "The one-I preflight does not qualify P7P4");
+  requireThat(summary.case === proofOptions.fixture.name, "A smaller fixture does not qualify P7P4");
   const steps = proofSchedule(proofOptions, binary, artifactRoot);
   let last, referenceContract;
   for (const [index, step] of steps.entries()) {
@@ -146,7 +153,7 @@ export function validateAdoptionProof(options, binary, artifactRoot, custody, bu
       reference: { benchmark: reference.report, supervisor: reference.runtime },
       candidate: { benchmark: candidate.report, supervisor: candidate.runtime },
       comparison: comparison.report,
-      ...(minimum ? { proof: summary, comparison_supervisor: comparison.runtime } : {}),
+      ...(exact ? { proof: summary, comparison_supervisor: comparison.runtime } : {}),
     },
   };
 }
@@ -154,7 +161,8 @@ export function validateAdoptionProof(options, binary, artifactRoot, custody, bu
 export async function collectPlacementGraphAdoption(options, custody, proof, schedule, io) {
   const observations = [];
   const experiment = experimentFor(options);
-  const minimum = experiment !== DEFAULT_EXPERIMENT;
+  const exact = experiment !== DEFAULT_EXPERIMENT;
+  const { arms, order } = placementAdoptionTimingProtocol(experiment.axis);
   const provenance = {
     source_commit: options.sourceCommit, binary_sha256: custody.binarySha,
     manager_sha256: custody.managerSha, host_fingerprint: custody.hostFingerprint,
@@ -162,25 +170,26 @@ export async function collectPlacementGraphAdoption(options, custody, proof, sch
   const manifest = {
     schema: INPUT_SCHEMA, axis: experiment.axis, output_mode: "global-only",
     time_resolution_ms: options.timeResolutionMs, runs: [],
-    mapping: minimum ? MINIMUM_MAPPING_COPY : MAPPING_COPY,
-    ...(minimum ? { experiment: experiment.name, custody: provenance } : {}),
+    mapping: exact ? EXACT_MAPPING_COPY : MAPPING_COPY,
+    ...(exact ? { experiment: experiment.name, custody: provenance } : {}),
+    ...(experiment.name === STRICT_PREFIX ? { order } : {}),
   };
   const evidence = {
     schema: "clearra.placement-graph-adoption-run.v1", release_authority: false,
     ...provenance,
-    proof_id: options.proofId, order: "ABBA+BAAB", axis: experiment.axis, output_mode: "global-only",
-    ...(minimum ? { experiment: experiment.name } : {}),
+    proof_id: options.proofId, order, axis: experiment.axis, output_mode: "global-only",
+    ...(exact ? { experiment: experiment.name } : {}),
     observations, decision: null, state: "failed",
   };
   const measured = [];
   let previous = proof.last, active;
   try {
     requireThat(experimentFor(proof.proofOptions) === experiment &&
-      schedule.length === ORDER.length && schedule.every((step, index) =>
-      step.arm === ORDER[index] && step.value === (step.arm === "A" ? "0" : "1") &&
+      schedule.length === arms.length && schedule.every((step, index) =>
+      step.arm === arms[index] && step.value === (step.arm === "A" ? "0" : "1") &&
       experimentFor(step) === experiment &&
       step.timeout === proof.proofOptions.timeout && step.command.length === 1),
-    "The timing schedule is not a fixed global-only ABBA+BAAB sequence");
+    `The timing schedule is not a fixed global-only ${order} sequence`);
     for (const step of schedule) {
       active = { name: step.name, arm: step.arm, state: "invalid", supervisor: null };
       observations.push(active);
@@ -215,9 +224,9 @@ export async function collectPlacementGraphAdoption(options, custody, proof, sch
     io.write(MAPPING_COPY.candidate.benchmark, proof.mapping.candidate.benchmark);
     io.write(MAPPING_COPY.candidate.supervisor, proof.mapping.candidate.supervisor);
     io.write(MAPPING_COPY.comparison, proof.mapping.comparison);
-    if (minimum) {
-      io.write(MINIMUM_MAPPING_COPY.proof, proof.mapping.proof);
-      io.write(MINIMUM_MAPPING_COPY.comparison_supervisor, proof.mapping.comparison_supervisor);
+    if (exact) {
+      io.write(EXACT_MAPPING_COPY.proof, proof.mapping.proof);
+      io.write(EXACT_MAPPING_COPY.comparison_supervisor, proof.mapping.comparison_supervisor);
     }
     io.write("manifest.json", manifest);
     io.write("decision.json", decision);
@@ -240,10 +249,7 @@ async function main(argv) {
   requireThat(!Object.keys(process.env).some((key) => key.toUpperCase() === "CLEARRA_EXPECTED_VCPUS"),
     "Remove CLEARRA_EXPECTED_VCPUS to keep native automatic all-logical worker selection");
   const root = realpathSync(resolve(dirname(fileURLToPath(import.meta.url)), "../.."));
-  const rustRoot = join(root, "build", "cargo", "default", "release");
-  const suffix = process.platform === "win32" ? ".exe" : "";
-  const binary = requireOwnedFile(join(rustRoot, "examples", "placement_graph_bench" + suffix), true);
-  const manager = requireOwnedFile(join(rustRoot, "clearra-manage" + suffix), true);
+  const { binary, manager } = placementBenchmarkBinaries(root, "release", process.env);
   const artifactRoot = join(root, ...COVERAGE_ROOT);
   const proofRoot = join(artifactRoot, options.proofId + "-proof");
   const outputRoot = join(artifactRoot, options.id + "-adoption");

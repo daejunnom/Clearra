@@ -15,6 +15,7 @@ const MAX_KEY_BYTES: usize = 512;
 const SUFFIX_BYTES: usize = 105; // 840 possible four-draw tails following each first bag.
 const SUFFIX_BITS: usize = SUFFIX_BYTES * 8;
 const P7P4_PREFIX_COUNT: usize = 5_040;
+pub(super) const P7_INITIAL: u64 = 0x3c0f_03c0f;
 
 /// Tags freeze the fixture's rule, board, hold, CountUnique, output mode,
 /// supply order, queue length and unit weight. P7P4 uses the original
@@ -23,6 +24,7 @@ const P7P4_PREFIX_COUNT: usize = 5_040;
 pub(super) enum CoverageUniverse {
     P7P4,   // Empty 10x4, Jstris180, enabled-empty hold, 10 locks and 11 draws.
     SmallI, // Board 0x3f0, Jstris180, no hold, fixed I.
+    P7,     // Board 0x3c0f03c0f, SRS+, enabled-empty hold, 6 locks and 7 draws.
     #[cfg(test)]
     Tiny,
 }
@@ -32,15 +34,17 @@ impl CoverageUniverse {
         match self {
             Self::P7P4 => 4_233_600,
             Self::SmallI => 1,
+            Self::P7 => 5_040,
             #[cfg(test)]
             Self::Tiny => 4,
         }
     }
 
-    const fn solution_count(self) -> u32 {
+    pub(super) const fn solution_count(self) -> u32 {
         match self {
             Self::P7P4 => 456_459,
             Self::SmallI => 1,
+            Self::P7 => 246,
             #[cfg(test)]
             Self::Tiny => 2,
         }
@@ -50,6 +54,7 @@ impl CoverageUniverse {
         match self {
             Self::P7P4 => 1,
             Self::SmallI => 2,
+            Self::P7 => 3,
             #[cfg(test)]
             Self::Tiny => 255,
         }
@@ -59,6 +64,7 @@ impl CoverageUniverse {
         match tag {
             1 => Ok(Self::P7P4),
             2 => Ok(Self::SmallI),
+            3 => Ok(Self::P7),
             #[cfg(test)]
             255 => Ok(Self::Tiny),
             _ => Err(invalid("unknown coverage universe")),
@@ -73,10 +79,6 @@ impl CoverageUniverse {
         (self.queue_count() as usize).div_ceil(64)
     }
 
-    const fn block_count(self) -> usize {
-        self.queue_count() as usize / SUFFIX_BITS
-    }
-
     fn validate_key(self, key: &str) -> io::Result<()> {
         if !key.starts_with("ctk1|") || key.len() > MAX_KEY_BYTES {
             return Err(invalid("expected a bounded canonical CTK1 identity"));
@@ -89,6 +91,7 @@ impl CoverageUniverse {
         let expected = match self {
             Self::P7P4 => Some((0, 10)),
             Self::SmallI => Some((0x3f0, 1)),
+            Self::P7 => Some((P7_INITIAL, 6)),
             #[cfg(test)]
             Self::Tiny => None,
         };
@@ -154,7 +157,7 @@ impl<W: Write> CoverageWriter<W> {
         let universe = self.evidence.summary.universe;
         let numerator = validate_ranges(universe, ranges)?;
         let payload = QueuePayload::Ranges(ranges.to_vec());
-        if universe.block_count() != 0 && packed_range_size(ranges) > 2_048 {
+        if universe == CoverageUniverse::P7P4 && packed_range_size(ranges) > 2_048 {
             return self.write_solution(key, &payload.words(universe));
         }
         self.write_row(key, &QueueSet { numerator, payload })
@@ -245,6 +248,13 @@ impl Evidence {
             || self.summary.covered_queues != self.summary.universe.queue_count()
         {
             return Err(invalid("incomplete solution family or global queue union"));
+        }
+        // The independent bounded P7 oracle checked every original ordinal.
+        // Its integer total guards both writers and the streaming comparator.
+        if self.summary.universe == CoverageUniverse::P7 && self.summary.covered_pairs != 79_288 {
+            return Err(invalid(
+                "P7 identity/queue pair count differs from the oracle",
+            ));
         }
         Ok(self.summary)
     }
@@ -421,10 +431,10 @@ impl QueueSet {
             ));
         }
         let numerator = words.iter().map(|word| word.count_ones()).sum();
-        let range_limit = if universe.block_count() == 0 {
-            usize::MAX
-        } else {
+        let range_limit = if universe == CoverageUniverse::P7P4 {
             2_048
+        } else {
+            usize::MAX
         };
         if let Some(ranges) = collect_ranges(words, range_limit) {
             return Ok(Self {
@@ -1125,6 +1135,24 @@ mod tests {
         );
         let mut packed = Vec::new();
         assert_eq!(write_queue_set(&mut packed, universe, &words).unwrap(), 68);
+        assert_eq!(read_queue_set(packed.as_slice(), universe).unwrap(), words);
+    }
+
+    #[test]
+    fn p7_ranges_never_use_the_p7p4_bag_block_encoding() {
+        let universe = CoverageUniverse::P7;
+        assert_eq!(
+            CoverageUniverse::from_tag(universe.tag()).unwrap(),
+            universe
+        );
+        let mut words = vec![0x5555_5555_5555_5555; universe.word_count()];
+        *words.last_mut().unwrap() &= (1_u64 << (universe.queue_count() % 64)) - 1;
+        let mut packed = Vec::new();
+        assert_eq!(
+            write_queue_set(&mut packed, universe, &words).unwrap(),
+            universe.queue_count() / 2,
+        );
+        assert_eq!(packed[0], 0);
         assert_eq!(read_queue_set(packed.as_slice(), universe).unwrap(), words);
     }
 

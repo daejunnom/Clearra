@@ -50,6 +50,16 @@ pub use wasm_cpu::{
     run_conditional_ordered_work, structural_order_experiment_totals, ConditionalOrderedWorkMode,
     StructuralOrderMetrics,
 };
+#[cfg(all(
+    feature = "local-search-ab",
+    feature = "parallel",
+    not(target_family = "wasm")
+))]
+pub use wasm_cpu::{
+    with_catalog_guard_strict_parallel_prefix_experiment,
+    with_legacy_strict_parallel_prefix_experiment, with_strict_parallel_prefix_experiment,
+    StrictParallelPrefixReport,
+};
 #[cfg(all(feature = "local-search-ab", feature = "parallel"))]
 pub use wasm_cpu::{with_operation_mask_experiment, OperationMaskExperimentReport};
 #[cfg(feature = "local-search-ab")]

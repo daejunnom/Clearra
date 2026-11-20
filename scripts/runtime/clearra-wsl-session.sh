@@ -80,6 +80,7 @@ done
 [[ "$RUNTIME_MAX" =~ ^[1-9][0-9]*$ ]] || exit 2
 [[ "$GRACE" =~ ^[1-9][0-9]{0,3}$ ]] || exit 2
 [[ "$ENTRY" =~ ^[a-z0-9-]+$ && -f "$GUEST" && ! -L "$GUEST" ]] || exit 2
+source "${GUEST%/*}/clearra-wsl-source-storage.sh"
 for version in "$NODE_VERSION" "$NPM_VERSION" "$PNPM_VERSION" "$RUST_VERSION" "$CARGO_VERSION" "$WASM_BINDGEN_VERSION"; do
     [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || exit 2
 done
@@ -112,6 +113,14 @@ cgroup_path="/sys/fs/cgroup$control_group"
 lease_dir="$(mktemp -d -- "$runtime_dir/clearra-lease.XXXXXXXX")"
 parent_lost_marker="$lease_dir/parent-lost"
 trap 'rm -f -- "$parent_lost_marker"; rmdir -- "$lease_dir"' EXIT
+source_slot= source_identity=
+case "$ENTRY" in
+    wasm-build | core-c-tests | native-cargo | pc-runtime-build-batch)
+        source_root="$(clearra_wsl_source_root)" || exit 2
+        source_identity="$(create_clearra_wsl_source_slot "$source_root" "$lease_dir")" || exit 2
+        source_slot="$source_root/runtime-source"
+        ;;
+esac
 stop_unit() {
     timeout --kill-after=2 "$(( GRACE + 5 ))" systemctl --user stop -- "$unit_name" >/dev/null 2>&1
 }
@@ -149,6 +158,9 @@ systemd_arguments=(
     --setenv "CLEARRA_WSL_EXPECTED_CGROUP=$control_group"
     --setenv "CLEARRA_WSL_MEMORY_MAX=$MEMORY_MAX"
     --setenv "CLEARRA_WSL_TASKS_MAX=$TASKS_MAX"
+    --setenv "CLEARRA_WSL_SOURCE_SLOT=$source_slot"
+    --setenv "CLEARRA_WSL_SOURCE_IDENTITY=$source_identity"
+    --setenv "XDG_STATE_HOME=${XDG_STATE_HOME:-$HOME/.local/state}"
     "${build_environment[@]}"
     --setenv "CLEARRA_WSL_NODE_VERSION=$NODE_VERSION"
     --setenv "CLEARRA_WSL_NPM_VERSION=$NPM_VERSION"
@@ -180,6 +192,16 @@ if owned_cgroup_drained "$cgroup_path" "$control_group" "$observed_cgroup" "$act
 fi
 if [[ "$cgroup_removed" != true || -e "$parent_lost_marker" ]]; then
     status=125
+fi
+if [[ -n "$source_slot" ]]; then
+    if [[ "$status" == 0 ]] &&
+        retire_clearra_wsl_source_slot "$source_slot" "$lease_dir" "$source_identity" "$cgroup_removed"; then
+        printf 'CLEARRA_WSL_SOURCE_STORAGE=released\n'
+    else
+        printf 'CLEARRA_WSL_SOURCE_STORAGE=preserved\n'
+        printf 'Clearra WSL source slot retained for review: %s\n' "$source_slot" >&2
+        [[ "$status" != 0 ]] || status=125
+    fi
 fi
 if [[ -f "$parent_lost_marker" ]]; then
     printf 'CLEARRA_WSL_RESULT=parent-lost\n'
