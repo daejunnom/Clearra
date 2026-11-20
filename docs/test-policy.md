@@ -315,8 +315,8 @@ never reported as passed by the compile-only path.
 | Task | ManagedLocal | Trusted |
 | --- | --- | --- |
 | `Local` | format/metadata, C library-only build, product source contract, architecture validation | native C/Rust tests; an actual policy block fails rather than switching execution surface |
-| `ProductE2E` | source contract; no Rust compilation or product launch | native-linked `clearra_cli::run_with_args` contract; product binary still not launched |
-| `ProductE2EBuilt` | rejected before compilation | build and execute process E2E once |
+| `ProductE2E` | source contract; no Rust compilation or product launch | execute the built Rust product CLI and verify its public contracts |
+| `ProductE2EBuilt` | rejected before compilation | Rust process E2E; the canonical RustProduct shard requires the same-run, same-attempt shipping binary and has no rebuild fallback |
 | `NativeLocal` | C static-library build only | CTest plus native core-executor tests |
 | `COnly`, `COnlySplit`, `COnlyAsan`, `COnlyUbsan` | corresponding C library configuration only | corresponding CTest execution |
 | `Validate` | static architecture validation | same static validation |

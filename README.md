@@ -11,8 +11,10 @@ docs and CLI output use generic falling-block terminology.
 MVP1 targets standard 10-wide boards, tetromino pieces, standard 7-bag supply,
 opening and scenario PC presets, setup/build coverage, validation, and
 text/JSON/fumen-like output. Product requests compile to `SearchProblem`, then
-lower through C `PackingProblem` and `BuildUpProblem`. Checkpoint labels remain
-metadata rather than core success conditions.
+execute through the Rust solver. Native CLI, Discord compute, and Desktop
+use the native Rust runtime; Web calls the Rust solver compiled to WebAssembly.
+The preserved C core is an independent reference, not a product fallback.
+Checkpoint labels remain metadata rather than core success conditions.
 
 Continuation-capable output includes `next_pc_available`, `continuation_token`,
 and `continue_hint`.
@@ -103,8 +105,8 @@ retries through another execution surface.
 | Command | Meaning |
 | --- | --- |
 | `scripts/clearra.ps1 -Task Local` | Process-free source/metadata validation plus a C static-library build. Rust and C test harnesses are not built or launched. |
-| `scripts/clearra.ps1 -Task ProductE2E` | Managed product source-contract check. With `Trusted`, executes the native-linked library route without launching `clearra.exe`. |
-| `scripts/clearra.ps1 -Task ProductE2EBuilt` | Trusted-only product build followed by process E2E once. |
+| `scripts/clearra.ps1 -Task ProductE2E` | Managed product source-contract check. With `Trusted`, executes the built Rust `clearra.exe`. |
+| `scripts/clearra.ps1 -Task ProductE2EBuilt` | Trusted-only Rust executable E2E. The canonical RustProduct shard reuses the verified shipping binary from the same run and attempt; a missing accepted binary is an error there. |
 | `scripts/clearra.ps1 -Task NativeLocal` | Managed builds only the C static library. With `Trusted`, runs CTest and native Rust tests. |
 | `scripts/clearra.ps1 -Task Validate` | Static dependency, unsafe-boundary, forbidden-API, and capability-contract checks. |
 | `scripts/clearra.ps1 -Task DesktopHost -ExecutionSurface Trusted` | On a source-execution-capable runner, compiles the desktop UI in memory, executes the WASM CPU async GUI-host E2E, and attempts the Tauri compile once. Enforced UMCI requires the published release package instead. |
@@ -294,9 +296,11 @@ another runtime's evidence into a desktop success.
 ## Build Ownership
 
 The repository root is a virtual Cargo workspace and has no `build.rs`. C core
-builds are owned by CMake; native linking uses the static C library plus a
-runner-supplied `RUSTFLAGS=-L native=<dir>`. The isolated Tauri crate is outside
-the root workspace because Tauri requires its own build script. Every Cargo task
-shares one external `%LOCALAPPDATA%\Clearra\build\cargo-target` tree.
+reference builds are owned by CMake; only explicit comparison or sanitizer
+routes use the static C library and the corresponding native linker path.
+The isolated Tauri crate is outside the root workspace because Tauri requires
+its own build script. Managed Cargo output belongs to the current build
+transaction under `%LOCALAPPDATA%\Clearra\build`; direct Cargo defaults to
+`build/cargo/default`.
 
 See [docs/build-system.md](docs/build-system.md) for build ownership details.
