@@ -51,10 +51,12 @@ pub use wasm_cpu::{with_operation_mask_experiment, OperationMaskExperimentReport
 #[cfg(feature = "local-search-ab")]
 pub use wasm_cpu::{CapturedSolutionCoverage, P7P4CoverageBlocks};
 pub use wasm_cpu::{
+    WasmCompactPcFailedQueueSession, WasmPcFailedQueueAdvance, WasmPcFailedQueueSession,
+};
+pub use wasm_cpu::{
     WasmFullHeightPcProducer, WasmFullHeightPcResultMerger, WasmFullHeightPcVerifier,
     WasmFullHeightTilingProducer, WasmFullHeightTilingResultMerger, WasmFullHeightTilingWorker,
 };
-pub use wasm_cpu::{WasmPcFailedQueueAdvance, WasmPcFailedQueueSession};
 pub mod wasm_cpu_search_backend;
 pub mod wasm_setup_parallel_backend;
 pub mod wasm_setup_search_backend;

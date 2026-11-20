@@ -141,6 +141,7 @@ pub(crate) use reachability::{
 pub use result::CapturedSolutionCoverage;
 #[cfg(any(test, feature = "local-search-ab"))]
 pub(crate) use result::SolutionCoverageCapture;
+pub use result::WasmCompactPcFailedQueueSession;
 pub(crate) use result::{ExactSearchAdvance, WasmExactSearchSession};
 pub(crate) use setup_finder::{WasmSetupSearchAdvance, WasmSetupSearchSession};
 #[cfg(not(target_family = "wasm"))]

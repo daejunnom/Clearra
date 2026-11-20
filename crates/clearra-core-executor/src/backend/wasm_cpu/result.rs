@@ -30,6 +30,10 @@ use clearra_replay::ExactScoringExecutionBatch;
 use clearra_rules::profile::rule_capability::RuleCapability;
 use clearra_supply::pattern_universe::{PackingPatternMembershipKind, PieceMultisetKey};
 
+#[path = "compact_pc_failed_queue.rs"]
+mod compact_pc_failed_queue;
+pub use compact_pc_failed_queue::WasmCompactPcFailedQueueSession;
+
 use crate::{
     pc_chance_coverage_evidence::{
         strict_coverage_pattern_bitset_from_words, PcChanceCoverageEvidence, PcScoreProblemEvidence,
@@ -3257,11 +3261,18 @@ impl WasmExactSearchSession {
         let solution_coverage_required = solution_probabilities_requested
             || self.problem.objective().kind() == ObjectiveKind::MinimumCover
             || self.problem.objective().execution_constraints().requested();
+        // The compact failed-queue producer seals raw candidate coverage rows,
+        // not just the running union. Even a witness that is redundant for
+        // the union must not stand in for a candidate's original ordinals.
+        let failed_queue_rows = self
+            .problem
+            .pc_chance_evidence_policy()
+            .pc_failed_queue_example_limit()
+            .is_some();
+        let exact_candidate_coverage = solution_coverage_required || failed_queue_rows;
         #[cfg(any(test, feature = "local-search-ab"))]
         let exact_candidate_coverage =
-            solution_coverage_required || self.solution_coverage_capture.is_some();
-        #[cfg(not(any(test, feature = "local-search-ab")))]
-        let exact_candidate_coverage = solution_coverage_required;
+            exact_candidate_coverage || self.solution_coverage_capture.is_some();
         let witness_mode = CandidateWitnessMode::for_candidate(
             &self.problem,
             target,
@@ -3427,6 +3438,19 @@ impl WasmExactSearchSession {
             self.mark_truncated("memory_budget_exceeded");
             return self.complete().map(Some);
         }
+        // A hash identifies physical placements for the ordinary chance path,
+        // but it is not proof of unique native failed-queue row ownership.
+        // This producer is a whole serial execution; use the actual visited
+        // candidate ordinal as its nonzero collision-free row ID.
+        let coverage_row_id = if failed_queue_rows {
+            candidate_ordinal
+                .checked_add(1)
+                .ok_or(WasmExactSearchError::InvalidProblem(
+                    "wasm_compact_failed_queue_candidate_ordinal_overflow",
+                ))?
+        } else {
+            candidate.identity.bucket_hash()
+        };
         let mut solution_coverage = None;
         #[cfg(any(test, feature = "local-search-ab"))]
         if let Some(capture) = self.solution_coverage_capture.as_ref() {
@@ -3443,10 +3467,7 @@ impl WasmExactSearchSession {
             if solution_coverage_required {
                 solution_coverage = Some(candidate_coverage.clone());
             }
-            self.record_build_coverage_row(
-                candidate.identity.bucket_hash(),
-                candidate_coverage.clone(),
-            )?;
+            self.record_build_coverage_row(coverage_row_id, candidate_coverage.clone())?;
         }
         if let Some(root) = result.symbolic_coverage_root {
             let materialized = (solution_coverage_required
@@ -3469,7 +3490,7 @@ impl WasmExactSearchSession {
             }
             if self.pc_chance_coverage_evidence_available {
                 self.record_build_coverage_row(
-                    candidate.identity.bucket_hash(),
+                    coverage_row_id,
                     materialized.expect("chance evidence requested symbolic materialization"),
                 )?;
             }

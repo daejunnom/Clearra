@@ -71,8 +71,9 @@ pub use backend::{
     WasmTilingRootResultMerger, WasmTilingRootWorker,
 };
 pub use backend::{
-    WasmFullHeightPcProducer, WasmFullHeightPcResultMerger, WasmFullHeightPcVerifier,
-    WasmFullHeightTilingProducer, WasmFullHeightTilingResultMerger, WasmFullHeightTilingWorker,
+    WasmCompactPcFailedQueueSession, WasmFullHeightPcProducer, WasmFullHeightPcResultMerger,
+    WasmFullHeightPcVerifier, WasmFullHeightTilingProducer, WasmFullHeightTilingResultMerger,
+    WasmFullHeightTilingWorker,
 };
 pub use buildup::{
     BuildUpEvent, BuildUpReducerReport, BuildUpRunResult, BuildUpRunner, BuildUpState,

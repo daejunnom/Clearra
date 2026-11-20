@@ -77,6 +77,7 @@ jobs:
             extended_pc_native_cooperative_worker_waves_preserve_exact_family_and_drain
             cooperative_canonical_reduction
             ordinary_native_pc_cooperative_session_preserves_admission_and_exact_family
+            compact_pc_failed_queue_exact_compiled_ordinals_and_fail_closed_boundaries
             cooperative_fixed_ordinal_verification_stats_and_serial_handoff
             extended_pc_sealed_terminal_preserves_direct_result_and_admission
             extended_pc_terminal_projection_moves_private_solution_owners

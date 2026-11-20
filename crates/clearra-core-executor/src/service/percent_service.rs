@@ -484,7 +484,7 @@ fn truncation_reason(
         .unwrap_or_else(|| buildup.count_truncated_reason())
 }
 
-fn format_probability(value: f64) -> String {
+pub(crate) fn format_probability(value: f64) -> String {
     if value == 0.0 || value == 1.0 {
         return format!("{value:.0}");
     }
