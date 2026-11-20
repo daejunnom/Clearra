@@ -41,6 +41,17 @@ Windows clearance.
 | Native and WASM build owner | Native/C transactions select an experiment or product owner. The guest's direct WASM Cargo directory remains outside that transaction; the systemd boundary does not guarantee host-build-root environment inheritance. | Pass a validated host build-root and stable checkout identity before admitting the guest. Route WASM into the existing transaction rather than creating a second independent cache/catalog. Qualify ext4 versus Windows-mounted I/O as a separate decision. |
 | Output and retirement | Benchmark output refuses existing data; retirement preflights all candidate trees under their leases before deleting any, refusing nested links and foreign owner records. Retention remains latest five products and one active experiment slot per admitted source/purpose. | Test the complete lifecycle on the dedicated real runtime; fixture tests establish individual behavior only. Do not use storage size as proof of ownership or safe disposal. |
 
+The next contracts are intentionally unwired. The cleanup model accepts
+only a complete, validated list with the dedicated distribution absent,
+uses one deadline across each list/terminate/readback phase, and rejects
+late or truncated responses. The fixed checkout-slot model requests an
+atomic change only with a live reader fence and retires only the exact
+old inode it can still account for. The Node validator checks the host
+volume/path mapping and the exact managed transaction. These three
+contracts are prerequisites for the Windows process transport, Rust host
+handoff, and actual ext4 transaction; they neither touch the historical
+cache nor authorize existing guest build entries to switch automatically.
+
 ## A safe recovery contract (not implemented)
 
 The existing Ubuntu distribution and its lease take precedence. Do not

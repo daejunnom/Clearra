@@ -13,6 +13,11 @@ use crate::runtime::{self, RunOptions, RunOutcome};
 use crate::storage;
 use crate::{Error, Result};
 
+// The deadline protocol stays isolated until a Windows control transport can
+// prove bounded Job ownership and complete nonblocking stdout capture.
+#[cfg(test)]
+mod dedicated_cleanup;
+
 pub fn run_entry(
     repository: &Path,
     policy: &Policy,

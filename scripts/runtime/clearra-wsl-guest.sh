@@ -132,6 +132,120 @@ if __name__ == "__main__":
 PY
 }
 
+# Qualification-only plan; no guest entry calls it. The future host protocol
+# must bind a canonical Windows checkout ID and live lease to an opened ext4
+# slot, and all managed readers must use that lease. sync-workspace still
+# exports the old digest path, outside this protocol.
+stable_source_slot_plan() {
+    python3 - <<'PY'
+from dataclasses import dataclass, replace
+import re
+
+
+MARKER_NAME = ".clearra-wsl-source-owner.v1"
+MARKER = re.compile(
+    r"clearra\.wsl-source-owner\.v1\t([0-9a-f]{24})\t"
+    r"([0-9a-f]{64})\t([0-9a-f]{64})\t([0-9a-f]{32})\n"
+)
+
+
+@dataclass(frozen=True)
+class StableSourceLease:
+    checkout: str
+    session: str
+    device: int
+    # Observation supplied by a future fd-bound supervisor, not caller input.
+    exclusive_and_readers_drained: bool
+
+    @property
+    def incoming(self):
+        return ".incoming-" + self.session
+
+
+@dataclass(frozen=True)
+class StableSourceTree:
+    name: str
+    device: int
+    inode: int
+    marker: str
+    # Current-tree projection from the same verified relative file inventory
+    # and bytes as staging (excluding only MARKER_NAME). A marker or archive
+    # digest alone is not a proof that Cargo/fmt did not mutate the tree.
+    material_sha256: str
+    # Exact directory identity beneath the opened slot, with no linked or
+    # mounted entries in its owned tree.
+    owned_directory: bool
+
+
+@dataclass(frozen=True)
+class StableSourcePlan:
+    action: str
+    lease: StableSourceLease
+    current: StableSourceTree | None
+    incoming: StableSourceTree
+
+
+def validate_lease(lease):
+    if (re.fullmatch(r"[0-9a-f]{24}", lease.checkout) is None
+            or re.fullmatch(r"[0-9a-f]{32}", lease.session) is None
+            or lease.device < 0 or lease.exclusive_and_readers_drained is not True):
+        raise ValueError("stable source slot has no live exclusive reader fence")
+
+
+def validate_tree(lease, tree, name):
+    marker = MARKER.fullmatch(tree.marker)
+    if (tree.owned_directory is not True or tree.name != name
+            or tree.device != lease.device or tree.inode <= 0 or marker is None):
+        raise ValueError("unowned stable source directory")
+    checkout, archive, material, creator = marker.groups()
+    if checkout != lease.checkout or material != tree.material_sha256:
+        raise ValueError("stable source marker or content mismatch")
+    return archive, material, creator
+
+
+def plan_install(lease, verified_archive, incoming, current):
+    validate_lease(lease)
+    archive, material, creator = validate_tree(lease, incoming, lease.incoming)
+    if archive != verified_archive or creator != lease.session:
+        raise ValueError("incoming tree is not bound to this verified archive and lease")
+    # None means ENOENT from a no-follow observation, not a malformed, linked,
+    # unreadable or legacy directory. Those observations must fail closed.
+    if current is None:
+        return StableSourcePlan("rename_noreplace", lease, current, incoming)
+    old_archive, old_material, _ = validate_tree(lease, current, "source")
+    if current.inode == incoming.inode:
+        raise ValueError("stable source directory aliases the incoming tree")
+    if old_archive == archive:
+        if old_material != material:
+            raise ValueError("same source archive has two incompatible material identities")
+        return StableSourcePlan("reuse", lease, current, incoming)
+    # Exchange source and its marker together on the same device. Do not
+    # emulate this through unlink, copy-over or two successive renames.
+    return StableSourcePlan("rename_exchange", lease, current, incoming)
+
+
+def retirement_target(plan, live_lease, current_after, incoming_after):
+    validate_lease(live_lease)
+    if live_lease != plan.lease:
+        raise ValueError("source retirement requires the original live lease")
+    new_source = replace(plan.incoming, name="source")
+    if plan.action == "rename_noreplace":
+        expected = (new_source, None)
+    elif plan.action == "reuse":
+        expected = (plan.current, plan.incoming)
+    elif plan.action == "rename_exchange" and plan.current is not None:
+        expected = (new_source, replace(plan.current, name=live_lease.incoming))
+    else:
+        raise ValueError("unknown stable source transaction")
+    if (current_after, incoming_after) != expected:
+        raise ValueError("stable source has not reached the expected atomic outcome")
+    # Supply the exact sibling identity, including inode+marker, for a future
+    # dir-fd-relative recheck and removal; never retire current or a legacy
+    # digest directory. This prototype neither issues a rename nor unlinks.
+    return incoming_after
+PY
+}
+
 sync_source() (
     # A command substitution normally clears errexit. Keep digest/copy/tar
     # failures terminal inside this private extraction transaction too.
