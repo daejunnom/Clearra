@@ -4,15 +4,17 @@
 #![cfg(feature = "native-c-core")]
 
 use clearra_core_domain::{
-    execution_cancellation::ExecutionCancellationToken,
+    execution_cancellation::{ExecutionCancellationToken, ExecutionControl},
     piece::piece_kind::PieceKind,
     pruning::PruningEvidencePolicy,
     solution::{NormalizedTilingSolutionKey, PiecePlacementMask, StandardBoard64TilingIdentity},
 };
+use clearra_core_executor::{CoreExecutionResult, WasmCpuSearchBackend};
 use clearra_core_ffi::{
     problem::{C_PIECE_I, C_PIECE_J, C_PIECE_L, C_PIECE_O, C_PIECE_S, C_PIECE_T, C_PIECE_Z},
     CBuildUpProblemTemplate, CPackingProblemBuilder, CoreCNative, NativeBuildUpWorkspace,
-    NativeBuildableGeometryTaskOutcome, NativeCandidateReducer, C_BUILDUP_STATUS_OK,
+    NativeBuildableGeometryTaskOutcome, NativeCandidateReducer,
+    C_BUILDUP_STATUS_LOGICAL_REJECT_MAX, C_BUILDUP_STATUS_LOGICAL_REJECT_MIN, C_BUILDUP_STATUS_OK,
 };
 use clearra_pc_graph::request::{
     PcCountPolicy, PcExecutionPolicy, PcQueueInput, PcScenarioBoard, PcScenarioQuery,
@@ -42,6 +44,22 @@ struct ProductionProbe {
     retained_count: usize,
     retained_exact_identity: bool,
     bare_buildup_status: i32,
+    bare_without_catalog_status: Option<i32>,
+}
+
+fn rust_singleton(
+    problem: &SearchProblem,
+    identity: StandardBoard64TilingIdentity,
+) -> Result<CoreExecutionResult, String> {
+    // The diagnostic input domain is exactly this one identity. Keep the
+    // original problem's catalog and supply language, but never export the
+    // reducer's completion flags as claims about the original full family.
+    WasmCpuSearchBackend::execute_complete_precomputed_geometry_candidates_with_control(
+        problem,
+        &[identity],
+        &ExecutionControl::default(),
+    )
+    .map_err(|error| format!("Rust singleton verifier: {error:?}"))
 }
 
 fn piece_code(piece: PieceKind) -> u32 {
@@ -193,6 +211,22 @@ fn probe(
     let bare_buildup_status = NativeBuildUpWorkspace::new()
         .buildup_exists_with_cancellation(&bare, &cancellation)
         .map_err(|error| format!("bare BuildUp: {error:?}"))?;
+    let bare_without_catalog_status = if (C_BUILDUP_STATUS_LOGICAL_REJECT_MIN
+        ..=C_BUILDUP_STATUS_LOGICAL_REJECT_MAX)
+        .contains(&bare_buildup_status)
+    {
+        // Keep the variant-domain bits, but resolve them by direct
+        // placement generation rather than the ILC catalog. Use a fresh
+        // workspace so a previous negative cannot influence the result.
+        bare.geometry_catalog = 0;
+        Some(
+            NativeBuildUpWorkspace::new()
+                .buildup_exists_with_cancellation(&bare, &cancellation)
+                .map_err(|error| format!("bare BuildUp without catalog: {error:?}"))?,
+        )
+    } else {
+        None
+    };
 
     Ok(BoundaryProbe {
         missing_catalog_rows,
@@ -201,6 +235,7 @@ fn probe(
             retained_count,
             retained_exact_identity,
             bare_buildup_status,
+            bare_without_catalog_status,
         }),
     })
 }
@@ -251,8 +286,8 @@ fn fixed_candidate_passes_catalog_buildability_and_exact_sink() {
         (0..5).map(|index| PiecePlacementMask::new(PieceKind::O, 0xc03_u64 << (2 * index))),
     )
     .expect("canonical O-only two-line tiling");
-    let probe = probe(&compile_case(Source::Fixed), identity, Source::Fixed)
-        .expect("bounded native boundary probe");
+    let problem = compile_case(Source::Fixed);
+    let probe = probe(&problem, identity, Source::Fixed).expect("bounded native boundary probe");
     assert!(probe.missing_catalog_rows.is_empty(), "{probe:?}");
     let production = probe.production.expect("all canonical rows exist");
     assert_eq!(production.sink.status, 0, "{production:?}");
@@ -262,6 +297,10 @@ fn fixed_candidate_passes_catalog_buildability_and_exact_sink() {
     assert_eq!(production.retained_count, 1);
     assert!(production.retained_exact_identity);
     assert_eq!(production.bare_buildup_status, C_BUILDUP_STATUS_OK);
+    assert_eq!(production.bare_without_catalog_status, None);
+    let rust = rust_singleton(&problem, identity).expect("bounded Rust singleton");
+    assert_eq!(rust.normalized_solution_identities(), &[identity]);
+    assert_eq!(rust.path_steps().len(), identity.placement_count());
 }
 
 #[test]
@@ -272,12 +311,25 @@ fn full_p7p4_one_exact_c_boundary_probe() {
     let identity = NormalizedTilingSolutionKey::parse_canonical(&key)
         .and_then(|key| key.standard_board64_identity())
         .expect("valid canonical Board64 family key");
-    let report = probe(
-        &compile_case(Source::StandardBag),
-        identity,
-        Source::StandardBag,
-    )
-    .expect("one candidate boundary probe");
+    let problem = compile_case(Source::StandardBag);
+    match rust_singleton(&problem, identity) {
+        Ok(rust) => {
+            let exact_match = rust.normalized_solution_identities() == [identity];
+            println!(
+                "Rust singleton: exact identity retained: {exact_match}; solution found: {:?}; resource truncated: {:?}",
+                rust.bool_field("solution_found"),
+                rust.bool_field("resource_truncated"),
+            );
+            if exact_match {
+                // Core replay describes lock/hold/clear order, not the
+                // movement inputs or the first-success kick sequence.
+                println!("Rust singleton lock witness: {:#?}", rust.path_steps());
+            }
+        }
+        Err(error) => println!("{error}"),
+    }
+    let report =
+        probe(&problem, identity, Source::StandardBag).expect("one candidate boundary probe");
     println!("DAG membership: not tested");
     println!(
         "Missing (piece, original-cell mask): {:?}",
@@ -286,10 +338,11 @@ fn full_p7p4_one_exact_c_boundary_probe() {
     if let Some(production) = report.production {
         println!("Production row sink: {:#?}", production.sink);
         println!(
-            "Retained count: {}; exact identity retained: {}; bare BuildUp status: {}",
+            "Retained count: {}; exact identity retained: {}; bare BuildUp status: {}; bare BuildUp without catalog status: {:?}",
             production.retained_count,
             production.retained_exact_identity,
             production.bare_buildup_status,
+            production.bare_without_catalog_status,
         );
     }
 }

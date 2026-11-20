@@ -181,6 +181,15 @@ table into C; `f504c8f0` again omitted occupancy-equivalent O half-turns.
 The tracked 456,923 baseline was Rust/WASM, not a historical C oracle
 under the same request and rules.
 
+The C packing and movement source paths are unchanged from v0.7.4.
+Historical C BuildUp also gained finite-source terminal hold release
+and generalized the operation-count bound; neither switch changes a
+10-lock standard-bag query by itself. The changed C bridge lowers the
+same exact 10×4 target occupancy and required cells for this fixture.
+Both current CPU implementations get their SRS+ kick offsets from the
+canonical Rust table; reachability and first-success implementations
+remain independent.
+
 Local WSL provided 8 logical CPUs. All twenty subprocess samples ran in
 serial C/Rust/Rust/C order at source `ac9d94ab`, with release example
 SHA-256 `632c662f06d7b99bb67347c4fbf11fe772c60117d638c84203e3a707c0178c56`.
@@ -216,3 +225,21 @@ were about 0.86 GiB (C) and 4.47 GiB (Rust). They are not equal-work
 memory qualification, and the smaller host supervisor's sampled peak
 must not be substituted for solver RSS high-water. No release or
 full C-facing ABI qualification follows from this comparison.
+
+The local canonical-key writer and streaming comparator were exercised
+against the existing-field P7 input at `8684bce0`. All 246 sorted
+keys matched, with zero exclusive members on either arm, and independent
+length-prefixed hashes matched. Restricted single-key probes are a
+separate diagnostic: passing a row sink or an explicitly supplied Rust
+verification universe does not prove full C Geometry DAG membership.
+
+Check the build recipe as well as the binary name when interpreting
+future results. The Windows release CLI uses `wasm-cpu-runtime`, as do
+the Rust product tests above. The current canonical ProductE2E producer
+still builds `native-c-core,webgpu-search` without `wasm-cpu-runtime`.
+That resolves to the C reference context and seals an archive-bound
+receipt; it is not shipping-Rust CLI process evidence. The current
+percent golden also asserts C-only progress and coverage markers. An
+eventual exact-release-binary E2E migration must update these to typed
+evidence while preserving exact source, run, attempt and binary binding.
+Keep the separate C differential tests in RustExact.
