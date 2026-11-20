@@ -9,6 +9,7 @@ use clearra_core_domain::{
     piece::piece_kind::PieceKind,
 };
 use clearra_core_executor::SolutionCoverage;
+use clearra_coverage::pattern::pattern_id::PatternId;
 use clearra_problem::{BuildProblemLimits, BuildQuery, BuildTemplateBridge};
 
 use super::*;
@@ -110,6 +111,98 @@ fn rust_legacy_cover_positive_mechanism_uses_original_ordinal_and_exact_assignme
     assert_eq!(execution.union().covered_patterns().pattern_count(), 1);
     assert_eq!(execution.union().covered_patterns().word_at(0), 1);
     assert_eq!(execution.result().probability().get(), 1.0);
+}
+
+#[test]
+fn rust_legacy_cover_complete_observed_keeps_all_original_ordinals() {
+    let _resource = crate::execution_resource_test_support::execution_resource_test_guard();
+    let count = PieceKind::STANDARD_TETROMINOES.len();
+    let query = one_horizontal_i(count, SearchDefaults::MVP1.build_max_patterns());
+    let legacy = compile(&query);
+    let universe = legacy.piece_source().materialized_universe().unwrap();
+    assert_eq!(universe.pattern_count(), count);
+    assert!(universe.complete());
+
+    let result = execute_complete_observed_candidate(&legacy, &query, &ExecutionControl::default())
+        .expect("single concrete I placement over the whole complete Observed denominator");
+    assert!(result.exact_cover_complete());
+    assert_eq!(result.assignments().len(), 1);
+    assert_eq!(result.matrix().matrix().rows().len(), 1);
+    let original = result.union().covered_patterns();
+    assert_eq!(original.pattern_count(), count);
+    assert_eq!(original.count_ones(), 1);
+    for ordinal in 0..count {
+        assert_eq!(
+            original.contains(PatternId::new(ordinal)),
+            universe.try_sequence_at(ordinal).unwrap().as_ref() == [PieceKind::I],
+        );
+    }
+    assert_eq!(result.result().probability().get(), 1.0 / count as f64);
+}
+
+#[test]
+fn rust_legacy_cover_complete_observed_rejects_partial_denominators_and_cancellation() {
+    let count = PieceKind::STANDARD_TETROMINOES.len();
+    // First input requests only a prefix even though the available source is
+    // complete. Second input asks for the same prefix of a truncated source.
+    for max_patterns in [SearchDefaults::MVP1.build_max_patterns(), count - 1] {
+        let query = one_horizontal_i(count - 1, max_patterns);
+        let legacy = compile(&query);
+        assert!(matches!(
+            execute_complete_observed_candidate(&legacy, &query, &ExecutionControl::default()),
+            Err(RustLegacyCoverCandidateError::IncompleteOriginalSupply)
+        ));
+    }
+
+    let query = one_horizontal_i(count, SearchDefaults::MVP1.build_max_patterns());
+    let legacy = compile(&query);
+    let cancellation = ExecutionCancellationToken::new();
+    cancellation.handle().cancel();
+    assert!(matches!(
+        execute_complete_observed_candidate(&legacy, &query, &ExecutionControl::new(cancellation)),
+        Err(RustLegacyCoverCandidateError::Cancelled)
+    ));
+}
+
+#[test]
+fn rust_legacy_cover_complete_observed_negative_requires_agreeing_kernel_evidence() {
+    let query = one_horizontal_i(7, SearchDefaults::MVP1.build_max_patterns());
+    let expected = concrete_assignment_identity(&query).unwrap();
+    let key = NormalizedTilingSolutionKey::from_standard_board64_identity(expected)
+        .as_str()
+        .to_owned();
+    let result = |keys_complete| {
+        CoreExecutionResult::new(
+            [
+                ("coverage_pattern_count", "7"),
+                ("count_complete", "true"),
+                ("probability_complete", "true"),
+                ("solution_probability_complete", "true"),
+                ("build_variant_count_exact", "true"),
+                ("resource_truncated", "false"),
+                ("solution_keys_complete", keys_complete),
+            ]
+            .map(|(key, value)| (key.into(), value.into()))
+            .to_vec(),
+            Vec::new(),
+        )
+    };
+    assert_eq!(
+        exact_complete_bits(&result("true"), expected, 7),
+        Ok(PatternBitSet::new(7))
+    );
+    assert_eq!(
+        exact_complete_bits(&result("false"), expected, 7),
+        Err(RustLegacyCoverCandidateError::IncompletePhysicalEvidence)
+    );
+    assert_eq!(
+        exact_complete_bits(
+            &result("true").with_normalized_solution_keys(vec![key]),
+            expected,
+            7,
+        ),
+        Err(RustLegacyCoverCandidateError::IncompletePhysicalEvidence)
+    );
 }
 
 #[test]

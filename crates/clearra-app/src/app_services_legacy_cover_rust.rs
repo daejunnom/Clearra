@@ -1,9 +1,10 @@
-//! Bounded Legacy Cover candidate provider, not a product routing decision.
+//! Bounded Legacy Cover candidate providers, not a product routing decision.
 //!
 //! The Legacy reducer's denominator is the requested materialized prefix, not
 //! the queue language of a new scenario. The complete-authority entry point
-//! requires complete expansion. The separate 10×4 probe can certify a row
-//! for prefix [0, 1) from a truncated source without completing that source.
+//! requires complete expansion. The full-Observed provider additionally
+//! requires the whole expansion to be the requested denominator. The
+//! separate 10×4 probe never completes a truncated source.
 
 use clearra_build_coverage::{
     coverage::{
@@ -17,9 +18,11 @@ use clearra_build_coverage::{
     },
 };
 use clearra_core_domain::{
+    board::board_size::BoardSize,
     execution_cancellation::ExecutionControl,
     solution::{
-        PiecePlacementMask, StandardBoard64ColoredTilingIdentity, StandardBoard64TilingIdentity,
+        NormalizedTilingSolutionKey, PiecePlacementMask, StandardBoard64ColoredTilingIdentity,
+        StandardBoard64TilingIdentity,
     },
 };
 use clearra_core_executor::{CoreExecutionResult, WasmCpuSearchBackend, WasmCpuSearchError};
@@ -50,6 +53,7 @@ const FOUR_LINE_PREFIX_SLOTS: usize = 10;
 enum OriginalSupplyAuthority {
     CompleteAuthority,
     TruncatedSourceExactPrefix,
+    CompleteObserved,
 }
 
 #[derive(Debug, PartialEq)]
@@ -58,7 +62,7 @@ pub(super) enum RustLegacyCoverCandidateError {
     UnsupportedAuthority,
     UnsupportedAssignment,
     IncompleteOriginalSupply,
-    InvalidFixedOrdinalProblem,
+    InvalidPhysicalProblem,
     Kernel(WasmCpuSearchError),
     IncompletePhysicalEvidence,
     MissingExactPositiveRow,
@@ -101,6 +105,82 @@ pub(super) fn execute_single_ordinal_candidate(
         control,
     )
     .map(|verified| verified.reduction)
+}
+
+/// Uses one existing Rust PC verification run for the whole, unchanged
+/// Observed universe. The colored allow-list may keep several physical
+/// partitions; only the exact placement identity may publish this row.
+/// This candidate provider does not own the public Legacy result fields.
+pub(super) fn execute_complete_observed_candidate(
+    legacy: &SearchProblem,
+    query: &BuildCoverageQuery,
+    control: &ExecutionControl,
+) -> Result<BuildCoverageExecution, RustLegacyCoverCandidateError> {
+    use RustLegacyCoverCandidateError as Error;
+    let authority = OriginalSupplyAuthority::CompleteObserved;
+    if control.is_cancelled() {
+        return Err(Error::Cancelled);
+    }
+    validate_canonical_authority(legacy, query, authority)?;
+    let expected = concrete_assignment_identity(query)?;
+    let original = legacy.piece_source();
+    let original_universe = original
+        .materialized_universe()
+        .filter(|universe| {
+            original.kind() == PieceSourceKind::ObservedWindow
+                && original.complete()
+                && complete_requested_universe(universe, query.pattern_count())
+        })
+        .ok_or(Error::IncompleteOriginalSupply)?;
+    let board = query.template().board_size();
+    let projected_query = physical_scenario_query(
+        board,
+        legacy,
+        legacy.core_query().remaining_queue().clone(),
+        expected,
+    );
+    let projected = ProblemCompiler::compile_scenario_pc(&projected_query)
+        .map_err(|_| Error::InvalidPhysicalProblem)?;
+    let projected_universe = projected
+        .piece_source()
+        .materialized_universe()
+        .filter(|universe| {
+            projected.piece_source().kind() == PieceSourceKind::ObservedWindow
+                && projected.piece_source().complete()
+                && complete_requested_universe(universe, query.pattern_count())
+        })
+        .ok_or(Error::IncompleteOriginalSupply)?;
+    // A universe with the same size or same set of queues may have different
+    // ordinals. Do not publish coverage until every original ordinal and its
+    // queue length are bound to the PC execution's own materialization.
+    for ordinal in 0..query.pattern_count() {
+        if control.is_cancelled() {
+            return Err(Error::Cancelled);
+        }
+        let original_queue = original_universe
+            .try_sequence_at(ordinal)
+            .ok_or(Error::IncompleteOriginalSupply)?;
+        if original_queue.len() != expected.placement_count()
+            || projected_universe
+                .try_sequence_at(ordinal)
+                .is_none_or(|queue| queue != original_queue)
+        {
+            return Err(Error::IncompleteOriginalSupply);
+        }
+    }
+    let execution = execute_physical(&projected, control)?;
+    let covered = exact_complete_bits(&execution, expected, query.pattern_count())?;
+    reduce_verified_row(legacy, query, control, authority, expected, covered)
+}
+
+fn complete_requested_universe(
+    universe: &clearra_supply::pattern_universe::materialized_pattern_universe::MaterializedPatternUniverse,
+    requested: usize,
+) -> bool {
+    universe.complete()
+        && universe.truncation_reason().is_none()
+        && universe.pattern_count() == requested
+        && universe.total_possible_pattern_count() == requested as u128
 }
 
 /// Qualify a bounded positive Legacy 10×4 row on the materialized ordinal
@@ -151,6 +231,8 @@ fn execute_scoped_ordinal(
                     && universe.total_possible_pattern_count() == universe.pattern_count() as u128
                     && universe.truncation_reason().is_none()
             }
+            // Whole expansion evidence has its own execution entry point.
+            OriginalSupplyAuthority::CompleteObserved => false,
             OriginalSupplyAuthority::TruncatedSourceExactPrefix => {
                 source.kind() == PieceSourceKind::ObservedWindow
                     && !source.complete()
@@ -168,60 +250,112 @@ fn execute_scoped_ordinal(
         .filter(|sequence| sequence.len() == expected.placement_count())
         .ok_or(Error::IncompleteOriginalSupply)?;
     let board = query.template().board_size();
-    let scope = ConcreteCoverageScope::new_uniform(
+    let projected_query = physical_scenario_query(
         board,
-        source.id().get(),
-        PatternUniverseId::new(scope_id(legacy, authority, b"ordinal-universe")),
-        PatternWeightModelId::new(scope_id(legacy, authority, b"uniform-weights")),
-        scope_id(legacy, authority, b"physical-execution"),
+        legacy,
+        PcQueueInput::fixed_sequence(FixedSequence::new(ordinal.into_owned())),
+        expected,
     );
+    let problem = ProblemCompiler::compile_scenario_pc(&projected_query)
+        .map_err(|_| Error::InvalidPhysicalProblem)?;
+    let execution = execute_physical(&problem, control)?;
+    let covered = exact_positive_bits(&execution, expected)?;
+    Ok(VerifiedOrdinalCandidate {
+        exact_assignment: expected,
+        materialized_pattern_count: materialized.pattern_count(),
+        total_possible_pattern_count: materialized.total_possible_pattern_count(),
+        reduction: reduce_verified_row(legacy, query, control, authority, expected, covered)?,
+    })
+}
 
-    let problem = ProblemCompiler::compile_scenario_pc(
-        &PcScenarioQuery::new(
-            PcScenarioBoard::new(board.width(), board.height(), 0),
-            PcQueueInput::fixed_sequence(FixedSequence::new(ordinal.into_owned())),
-            PieceWindow::new(expected.placement_count()),
-        )
-        .with_rule(legacy.rule_profile_value())
-        .with_allow_hold(false)
-        .with_exact_pieces(Some(expected.placement_count()))
-        .with_count_policy(PcCountPolicy::CountAll)
-        .with_solution_probability_policy(PcSolutionProbabilityPolicy::Include)
-        // Only a coarse pruning hint. Same-color unions can hide distinct
-        // placements, so they are never accepted as evidence below.
-        .with_allowed_colored_solution_identities([
-            StandardBoard64ColoredTilingIdentity::from_standard_board64_identity(expected),
-        ])
-        .with_execution_policy(PcExecutionPolicy::mvp_default().with_workers(1)),
+fn physical_scenario_query(
+    board: BoardSize,
+    legacy: &SearchProblem,
+    source: PcQueueInput,
+    expected: StandardBoard64TilingIdentity,
+) -> PcScenarioQuery {
+    PcScenarioQuery::new(
+        PcScenarioBoard::new(board.width(), board.height(), 0),
+        source,
+        PieceWindow::new(expected.placement_count()),
     )
-    .map_err(|_| Error::InvalidFixedOrdinalProblem)?;
-    let execution = match WasmCpuSearchBackend::execute_with_control(&problem, control) {
+    .with_rule(legacy.rule_profile_value())
+    .with_allow_hold(false)
+    .with_exact_pieces(Some(expected.placement_count()))
+    .with_count_policy(PcCountPolicy::CountAll)
+    .with_solution_probability_policy(PcSolutionProbabilityPolicy::Include)
+    // Only a coarse pruning hint. Same-color unions can hide distinct
+    // placements, so they are never accepted as evidence below.
+    .with_allowed_colored_solution_identities([
+        StandardBoard64ColoredTilingIdentity::from_standard_board64_identity(expected),
+    ])
+    .with_execution_policy(
+        PcExecutionPolicy::mvp_default()
+            .with_workers(1)
+            .with_max_patterns(legacy.budget().max_patterns()),
+    )
+}
+
+fn execute_physical(
+    problem: &SearchProblem,
+    control: &ExecutionControl,
+) -> Result<CoreExecutionResult, RustLegacyCoverCandidateError> {
+    use RustLegacyCoverCandidateError as Error;
+    let execution = match WasmCpuSearchBackend::execute_with_control(problem, control) {
         Err(WasmCpuSearchError::Cancelled) => return Err(Error::Cancelled),
         other => other.map_err(Error::Kernel)?,
     };
     if control.is_cancelled() {
         return Err(Error::Cancelled);
     }
-    let covered = exact_positive_bits(&execution, expected)?;
+    Ok(execution)
+}
+
+fn reduce_verified_row(
+    legacy: &SearchProblem,
+    query: &BuildCoverageQuery,
+    control: &ExecutionControl,
+    authority: OriginalSupplyAuthority,
+    expected: StandardBoard64TilingIdentity,
+    covered: PatternBitSet,
+) -> Result<BuildCoverageExecution, RustLegacyCoverCandidateError> {
+    use RustLegacyCoverCandidateError as Error;
+    let scope = ConcreteCoverageScope::new_uniform(
+        query.template().board_size(),
+        legacy.piece_source().id().get(),
+        PatternUniverseId::new(scope_id(
+            legacy,
+            authority,
+            query.pattern_count(),
+            b"ordinal-universe",
+        )),
+        PatternWeightModelId::new(scope_id(
+            legacy,
+            authority,
+            query.pattern_count(),
+            b"uniform-weights",
+        )),
+        scope_id(
+            legacy,
+            authority,
+            query.pattern_count(),
+            b"physical-execution",
+        ),
+    );
     let row = ConcreteAssignmentCoverageRow::new(
         expected,
         scope,
         covered,
         ConcreteCoverageCompleteness::Complete,
     );
-    // A Complete row here covers the scope's one ordinal, even when the
-    // wider source is truncated. That case returns row evidence only.
+    // The truncated probe can only reach this function with its single
+    // positive row; its caller returns prefix evidence, not the reduction.
     let reduction =
         BuildCoverageExecution::from_verified_concrete_assignment_rows(query, scope, vec![row]);
     if control.is_cancelled() {
         return Err(Error::Cancelled);
     }
-    Ok(VerifiedOrdinalCandidate {
-        exact_assignment: expected,
-        materialized_pattern_count: materialized.pattern_count(),
-        total_possible_pattern_count: materialized.total_possible_pattern_count(),
-        reduction: reduction.map_err(Error::Reduction)?,
-    })
+    reduction.map_err(Error::Reduction)
 }
 
 fn validate_canonical_authority(
@@ -238,12 +372,20 @@ fn validate_canonical_authority(
     let limits = query.limits();
     let defaults = SearchDefaults::MVP1;
     let admitted_shape = match authority {
-        OriginalSupplyAuthority::CompleteAuthority => slot_count <= COMPLETE_AUTHORITY_MAX_SLOTS,
+        OriginalSupplyAuthority::CompleteAuthority | OriginalSupplyAuthority::CompleteObserved => {
+            slot_count <= COMPLETE_AUTHORITY_MAX_SLOTS
+        }
         OriginalSupplyAuthority::TruncatedSourceExactPrefix => {
             board.width() == 10 && board.height() == 4 && slot_count == FOUR_LINE_PREFIX_SLOTS
         }
     };
-    if query.pattern_count() != REQUESTED_PATTERN_COUNT
+    let admitted_pattern_count = match authority {
+        OriginalSupplyAuthority::CompleteObserved => {
+            (1..=limits.max_patterns()).contains(&query.pattern_count())
+        }
+        _ => query.pattern_count() == REQUESTED_PATTERN_COUNT,
+    };
+    if !admitted_pattern_count
         || bridge.pattern_count() != query.pattern_count()
         || bridge.selected_pattern_id().is_some()
         || bridge.template().id() != template.id()
@@ -337,19 +479,7 @@ fn exact_positive_bits(
 ) -> Result<PatternBitSet, RustLegacyCoverCandidateError> {
     use RustLegacyCoverCandidateError as Error;
 
-    if execution.usize_field("coverage_pattern_count") != Some(REQUESTED_PATTERN_COUNT)
-        || [
-            "count_complete",
-            "probability_complete",
-            "solution_probability_complete",
-            "build_variant_count_exact",
-        ]
-        .iter()
-        .any(|key| execution.bool_field(key) != Some(true))
-        || execution.bool_field("resource_truncated") != Some(false)
-    {
-        return Err(Error::IncompletePhysicalEvidence);
-    }
+    require_complete_coverage(execution, REQUESTED_PATTERN_COUNT)?;
     let mut exact = execution
         .solution_coverages()
         .iter()
@@ -365,7 +495,65 @@ fn exact_positive_bits(
     Ok(covered.clone())
 }
 
-fn scope_id(legacy: &SearchProblem, authority: OriginalSupplyAuthority, purpose: &[u8]) -> u64 {
+fn require_complete_coverage(
+    execution: &CoreExecutionResult,
+    pattern_count: usize,
+) -> Result<(), RustLegacyCoverCandidateError> {
+    if execution.usize_field("coverage_pattern_count") != Some(pattern_count)
+        || [
+            "count_complete",
+            "probability_complete",
+            "solution_probability_complete",
+            "build_variant_count_exact",
+        ]
+        .iter()
+        .any(|key| execution.bool_field(key) != Some(true))
+        || execution.bool_field("resource_truncated") != Some(false)
+    {
+        return Err(RustLegacyCoverCandidateError::IncompletePhysicalEvidence);
+    }
+    Ok(())
+}
+
+fn exact_complete_bits(
+    execution: &CoreExecutionResult,
+    expected: StandardBoard64TilingIdentity,
+    pattern_count: usize,
+) -> Result<PatternBitSet, RustLegacyCoverCandidateError> {
+    use RustLegacyCoverCandidateError as Error;
+    require_complete_coverage(execution, pattern_count)?;
+    if execution.bool_field("solution_keys_complete") != Some(true) {
+        return Err(Error::IncompletePhysicalEvidence);
+    }
+    let key = NormalizedTilingSolutionKey::from_standard_board64_identity(expected);
+    let mut keys = execution
+        .normalized_solution_keys()
+        .iter()
+        .filter(|candidate| candidate.as_str() == key.as_str());
+    let mut rows = execution
+        .solution_coverages()
+        .iter()
+        .filter(|row| row.identity() == expected);
+    match (keys.next(), rows.next()) {
+        (None, None) => Ok(PatternBitSet::new(pattern_count)),
+        (Some(_), Some(row))
+            if keys.next().is_none()
+                && rows.next().is_none()
+                && row.covered_patterns().pattern_count() == pattern_count
+                && row.covered_patterns().count_ones() != 0 =>
+        {
+            Ok(row.covered_patterns().clone())
+        }
+        _ => Err(Error::IncompletePhysicalEvidence),
+    }
+}
+
+fn scope_id(
+    legacy: &SearchProblem,
+    authority: OriginalSupplyAuthority,
+    pattern_count: usize,
+    purpose: &[u8],
+) -> u64 {
     // Bind the original source and physical rules, never a producer candidate
     // ID or display key. This labels in-process evidence; it is not a proof.
     let mut hash = Sha256::new();
@@ -373,12 +561,13 @@ fn scope_id(legacy: &SearchProblem, authority: OriginalSupplyAuthority, purpose:
     hash.update([match authority {
         OriginalSupplyAuthority::CompleteAuthority => 0,
         OriginalSupplyAuthority::TruncatedSourceExactPrefix => 1,
+        OriginalSupplyAuthority::CompleteObserved => 2,
     }]);
     hash.update(purpose);
     hash.update([0]);
     hash.update(legacy.piece_source().id().get().to_le_bytes());
     hash.update((ORIGINAL_ORDINAL as u64).to_le_bytes());
-    hash.update((REQUESTED_PATTERN_COUNT as u64).to_le_bytes());
+    hash.update((pattern_count as u64).to_le_bytes());
     hash.update(legacy.rule_profile_value().id().as_str());
     hash.update([0]);
     hash.update(legacy.problem_id().as_str());
