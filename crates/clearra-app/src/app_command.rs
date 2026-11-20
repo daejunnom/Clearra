@@ -9,8 +9,12 @@ use crate::commands::{
 };
 use crate::{app_context::AppExecutionContext, app_response::AppResponse};
 use clearra_core_domain::objective::objective_kind::ObjectiveKind;
+use clearra_core_executor::WasmCpuSearchBackend;
 use clearra_host_contract::{AppCommandKind, BackendPolicy, QueryEnvelope};
-use clearra_pc_graph::request::PcCountPolicy;
+use clearra_pc_graph::request::{
+    OpeningPcSearchQuery, PcCountPolicy, PcExecutionPolicy, PcScenarioQuery,
+};
+use clearra_rules::{kicks::VerifiedKickTableProfile, profile::rule_profile::RuleProfileId};
 use clearra_validation::{
     diagnostic::diagnostic_report::DiagnosticReport,
     validators::{
@@ -72,49 +76,63 @@ pub enum AppCommand {
 impl AppCommand {
     /// Returns the request-owned exact accelerator policy for command families
     /// that lower to the PC/BuildUp executor. Hosts use this before loading a
-    /// profile asset, so an explicit per-request disable performs no disk or
-    /// network work and cannot inherit a previous session's snapshot.
+    /// profile asset. Explicit disable takes no asset I/O, and a submitted
+    /// kick table cannot borrow a built-in profile's asset authority by name.
     pub fn exact_accelerator_policy(&self) -> Option<(bool, bool)> {
-        let policy = match self {
-            Self::Pc(command) => command.query().execution_policy(),
-            Self::Scenario(command) => command.query().execution_policy(),
-            Self::Path(command) => command.query().execution_policy(),
+        match self {
+            Self::Pc(command) => opening_accelerator_policy(command.query()),
+            Self::Scenario(command) => scenario_accelerator_policy(command.query()),
+            Self::Path(command) => opening_accelerator_policy(command.query()),
             Self::Percent(command) => {
-                return command
-                    .query()
-                    .map(|query| query.execution_policy())
-                    .or_else(|| {
-                        command
-                            .opening_query()
-                            .map(|query| query.execution_policy())
-                    })
-                    .map(|policy| {
-                        (
-                            policy.exact_legal_board_enabled(),
-                            policy.conditioned_reachability_enabled(),
-                        )
-                    });
+                if let Some(query) = command.query() {
+                    scenario_accelerator_policy(query)
+                } else {
+                    command.opening_query().and_then(opening_accelerator_policy)
+                }
             }
-            Self::BuildProbability(command) => command.query().core_query().execution_policy(),
-            Self::BuildV2(command) => command
-                .request_profile_query()
-                .core_query()
-                .execution_policy(),
-            Self::Setup(command) => {
-                return Some((
-                    command.query().exact_legal_board_enabled(),
-                    command.query().conditioned_reachability_enabled(),
-                ));
+            Self::BuildProbability(command) => {
+                scenario_accelerator_policy(command.query().core_query())
             }
-            Self::SetupScore(command) => return command.exact_accelerator_policy(),
-            _ => return None,
-        };
-        Some((
-            policy.exact_legal_board_enabled(),
-            policy.conditioned_reachability_enabled(),
-        ))
+            Self::BuildV2(command) => {
+                scenario_accelerator_policy(command.request_profile_query().core_query())
+            }
+            Self::Setup(command) => Some((
+                command.query().exact_legal_board_enabled(),
+                command.query().conditioned_reachability_enabled(),
+            )),
+            Self::SetupScore(command) => command.exact_accelerator_policy(),
+            _ => None,
+        }
     }
 }
+
+fn scenario_accelerator_policy(query: &PcScenarioQuery) -> Option<(bool, bool)> {
+    builtin_accelerator_policy(
+        query.rule().id(),
+        query.verified_kick_profile(),
+        query.execution_policy(),
+    )
+}
+
+fn opening_accelerator_policy(query: &OpeningPcSearchQuery) -> Option<(bool, bool)> {
+    builtin_accelerator_policy(
+        query.rule().id(),
+        query.verified_kick_profile(),
+        query.execution_policy(),
+    )
+}
+
+fn builtin_accelerator_policy(
+    rule: RuleProfileId,
+    verified: Option<&VerifiedKickTableProfile>,
+    policy: &PcExecutionPolicy,
+) -> Option<(bool, bool)> {
+    WasmCpuSearchBackend::builtin_accelerators_match(rule, verified).then_some((
+        policy.exact_legal_board_enabled(),
+        policy.conditioned_reachability_enabled(),
+    ))
+}
+
 impl AppCommand {
     pub fn kind(&self) -> AppCommandKind {
         match self {

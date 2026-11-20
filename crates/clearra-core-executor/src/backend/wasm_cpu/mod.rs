@@ -226,26 +226,51 @@ fn ensure_connected_kick_profile(
     };
     let rule_selection = problem.rule_profile();
     if let Some(verified) = rule_selection.verified_kick_profile() {
-        let supplied = verified.profile();
-        // Rust currently uses request-independent tables keyed by profile ID.
-        // An import may retain that ID while changing the first successful
-        // rotation. Admit it only if the actual table is already connected.
-        // Verification excludes duplicate transition keys, so record order
-        // is irrelevant here, but the candidate order within each key is not.
-        if supplied.source_rule() != builtin.source_rule()
-            || supplied.source_rule() != rule_selection.rule().id()
-            || supplied.transition_count() != builtin.transition_count()
-            || !supplied
-                .entries()
-                .iter()
-                .all(|entry| builtin.sequence_for(entry.transition()) == Some(entry.sequence()))
-        {
+        if !matches_builtin_order(rule_selection.rule().id(), verified, builtin) {
             return Err(WasmExactSearchError::InvalidProblem(
                 "wasm_exact_backend_requires_canonical_ordered_kick_profile",
             ));
         }
     }
     Ok(())
+}
+
+pub(super) fn builtin_accelerators_match_rule(
+    rule: clearra_rules::profile::rule_profile::RuleProfileId,
+    verified: Option<&clearra_rules::kicks::VerifiedKickTableProfile>,
+) -> bool {
+    use clearra_rules::profile::rule_profile::RuleProfileId;
+
+    let Some(verified) = verified else {
+        return matches!(
+            rule,
+            RuleProfileId::Srs
+                | RuleProfileId::SrsPlus
+                | RuleProfileId::SrsX
+                | RuleProfileId::Jstris180
+                | RuleProfileId::NoKick
+        );
+    };
+    kick_profiles::builtin_kick_profile(verified.profile().id())
+        .is_some_and(|builtin| matches_builtin_order(rule, verified, builtin))
+}
+
+fn matches_builtin_order(
+    selected_rule: clearra_rules::profile::rule_profile::RuleProfileId,
+    verified: &clearra_rules::kicks::VerifiedKickTableProfile,
+    builtin: &clearra_rules::kicks::KickTableProfile,
+) -> bool {
+    let supplied = verified.profile();
+    // Verification excludes duplicate transition keys. Record order is
+    // irrelevant, but each transition's first-success order is authority.
+    supplied.id() == builtin.id()
+        && supplied.source_rule() == selected_rule
+        && supplied.source_rule() == builtin.source_rule()
+        && supplied.transition_count() == builtin.transition_count()
+        && supplied
+            .entries()
+            .iter()
+            .all(|entry| builtin.sequence_for(entry.transition()) == Some(entry.sequence()))
 }
 
 const fn piece_index(piece: clearra_core_domain::piece::piece_kind::PieceKind) -> usize {

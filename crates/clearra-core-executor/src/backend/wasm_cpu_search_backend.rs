@@ -429,6 +429,16 @@ impl WasmCpuSearchSession {
 }
 
 impl WasmCpuSearchBackend {
+    /// Whether a host may load assets qualified for the named built-in
+    /// profile. A verified import is eligible only when its actual ordered
+    /// kicks equal that profile, not merely when its profile ID agrees.
+    pub fn builtin_accelerators_match(
+        rule: clearra_rules::profile::rule_profile::RuleProfileId,
+        verified: Option<&clearra_rules::kicks::VerifiedKickTableProfile>,
+    ) -> bool {
+        super::wasm_cpu::builtin_accelerators_match_rule(rule, verified)
+    }
+
     /// This capability describes only the native four-word Tiling worker
     /// runner, not browser distribution or ordinary PC product reducers.
     pub const fn supports_extended_native_tiling_workers() -> bool {

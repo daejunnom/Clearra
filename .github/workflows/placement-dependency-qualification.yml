@@ -223,7 +223,8 @@ jobs:
           cargo test --locked -p clearra-app --features native-c-core --test extended_pc_tiling full_height_scenario_continuation_restarts_at_an_accepted_path_checkpoint || status=1
           cargo test --locked -p clearra-app --features native-c-core --test opening_continuation_parity || status=1
           cargo test --locked -p clearra-app --features native-c-core \
-            --test scenario_replay_parity --test scenario_verified_kick_admission --no-fail-fast || status=1
+            --test scenario_replay_parity --test scenario_verified_kick_admission \
+            --test exact_accelerator_policy --no-fail-fast || status=1
           cargo test --locked -p clearra-app --features native-c-core --test exact_accelerator_product_execution setup_score_reuse || status=1
           exit "$status"
           SH
