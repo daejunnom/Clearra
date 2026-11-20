@@ -1049,7 +1049,7 @@ impl WasmExactSearchSession {
         }
         let height = u8::try_from(problem.compact_pc_geometry_height())
             .map_err(|_| WasmExactSearchError::InvalidProblem("wasm_local_ordered_kick_height"))?;
-        let authority = CompactKickAuthority::admit_srs90_order_variant(10, height, verified)
+        let authority = CompactKickAuthority::admit_local_order_variant(10, height, verified)
             .map_err(|error| match error {
                 CompactKickAdmission::Unsupported => unconnected,
                 CompactKickAdmission::IndexOrCoordinateOverflow => {

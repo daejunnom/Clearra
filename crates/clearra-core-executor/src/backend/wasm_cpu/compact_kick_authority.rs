@@ -65,16 +65,21 @@ pub(super) struct CompactPieceKicks<'a> {
 }
 
 impl CompactKickAuthority {
-    pub(super) fn admit_srs90_order_variant(
+    pub(super) fn admit_local_order_variant(
         width: u8,
         height: u8,
         verified: &VerifiedKickTableProfile,
     ) -> Result<Self, CompactKickAdmission> {
-        let canonical = builtin_kick_profile(KickTableProfileId::Srs90)
-            .expect("the standard SRS90 table is available");
         let supplied = verified.profile();
+        let selected_rule = match supplied.id() {
+            KickTableProfileId::Srs90 => RuleProfileId::Srs,
+            KickTableProfileId::SrsPlus => RuleProfileId::SrsPlus,
+            _ => return Err(CompactKickAdmission::Unsupported),
+        };
+        let canonical =
+            builtin_kick_profile(supplied.id()).ok_or(CompactKickAdmission::Unsupported)?;
         // Keep the existing compact free-sky scope: this tranche only
-        // permits ordering changes to the standard quarter-turn candidates.
+        // permits ordering changes to connected quarter-/half-turn candidates.
         // A new candidate membership or rotation topology is unqualified.
         if supplied.id() != canonical.id()
             || supplied.source_rule() != canonical.source_rule()
@@ -97,7 +102,7 @@ impl CompactKickAuthority {
         Self::admit(
             width,
             height,
-            RuleProfileId::Srs,
+            selected_rule,
             verified,
             CompileBudget {
                 poses: 10_000,
@@ -466,6 +471,40 @@ mod tests {
             0
         );
         assert_eq!(second_field | (I_ORIGINAL >> 10), 0x3ff);
+    }
+
+    #[test]
+    fn local_srs_plus_half_turn_reordering_agrees_with_independent_locks() {
+        let base = SrsKicks::srs_plus_profile();
+        let canonical = verify(base.clone());
+        let mut entries = base.entries().to_vec();
+        let entry = entries
+            .iter_mut()
+            .find(|entry| {
+                let transition = entry.transition();
+                transition.piece() == PieceKind::T
+                    && transition.to() == transition.from().rotated_180()
+                    && entry.sequence().len() > 1
+            })
+            .unwrap();
+        let mut offsets = entry.sequence().offsets().to_vec();
+        offsets.reverse();
+        assert_ne!(offsets.as_slice(), entry.sequence().offsets());
+        *entry = KickTableEntry::new(entry.transition(), KickOffsetSequence::new(offsets));
+        let reordered = verify(KickTableProfile::new(
+            base.id(),
+            base.source_rule(),
+            entries,
+        ));
+        let admit =
+            |profile| CompactKickAuthority::admit_local_order_variant(10, 4, profile).unwrap();
+        let first = admit(&canonical);
+        let second = admit(&reordered);
+        assert_ne!(first, second);
+        for board in [0x0f_83c7, 0x10_4800, 0x00f0_0cf0] {
+            exact_locks(&canonical, &first, board, PieceKind::T);
+            exact_locks(&reordered, &second, board, PieceKind::T);
+        }
     }
 
     #[test]

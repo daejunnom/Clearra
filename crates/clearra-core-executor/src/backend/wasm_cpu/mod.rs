@@ -240,13 +240,80 @@ fn ensure_connected_kick_profile(
     };
     let rule_selection = problem.rule_profile();
     if let Some(verified) = rule_selection.verified_kick_profile() {
-        if !matches_builtin_order(rule_selection.rule().id(), verified, builtin) {
+        if !matches_builtin_order(rule_selection.rule().id(), verified, builtin)
+            && !fixed_compact_scenario_has_same_playable_kicks(problem, verified.profile(), builtin)
+        {
             return Err(WasmExactSearchError::InvalidProblem(
                 "wasm_exact_backend_requires_canonical_ordered_kick_profile",
             ));
         }
     }
     Ok(())
+}
+
+/// In a whole fixed no-hold Scenario only the submitted queue pieces can
+/// move or appear in a replay. If their ordered tables agree exactly, a
+/// difference elsewhere in a verified import cannot alter that search.
+/// This is not a profile-wide proof and never qualifies imported assets.
+fn fixed_compact_scenario_has_same_playable_kicks(
+    problem: &clearra_problem::SearchProblem,
+    supplied: &clearra_rules::kicks::KickTableProfile,
+    builtin: &clearra_rules::kicks::KickTableProfile,
+) -> bool {
+    use clearra_pc_graph::request::{PcCountPolicy, RequestedSearchBackend, WorkerPolicy};
+    use clearra_problem::{
+        goal::SearchGoal, SearchOutputPolicy, SearchProblemKind, SearchProblemPreset,
+    };
+
+    let backend = problem.backend_policy();
+    let supply = problem.supply();
+    if supplied.id() != builtin.id()
+        || supplied.source_rule() != builtin.source_rule()
+        || supplied.source_rule() != problem.rule_profile().rule().id()
+        || supplied.supports_180() != builtin.supports_180()
+        || problem.preset() != SearchProblemPreset::ScenarioPc
+        || problem.problem_kind() != SearchProblemKind::ScenarioPc
+        || !matches!(problem.search_goal(), SearchGoal::ClearToEmpty)
+        || problem.initial_board().width() != 10
+        || !(1..=6).contains(&problem.visible_height())
+        || !(1..=6).contains(&problem.compact_pc_geometry_height())
+        || backend.requested_backend() != RequestedSearchBackend::Cpu
+        || backend.worker_policy() != WorkerPolicy::Fixed(1)
+        || backend.tablebase_requested()
+        || backend.precompute_build_dependencies()
+        || !matches!(
+            problem.count_policy(),
+            PcCountPolicy::CountAll | PcCountPolicy::CountUnique
+        )
+        || problem.output_policy() != SearchOutputPolicy::Trace
+        || problem.objective().score().requested()
+        || problem.objective().execution_constraints().requested()
+        || problem.solution_probability_policy().requested()
+        || problem
+            .queue_observation_policy()
+            .requires_observation_policy()
+        || supply.hold_enabled()
+        || supply.hold_piece().is_some()
+        || supply.projects_unplaced_lookahead()
+        || problem.continuation_policy().min_remaining_queue() != 0
+    {
+        return false;
+    }
+    let Some(sequence) = problem.piece_source().fixed_sequence() else {
+        return false;
+    };
+    if sequence.is_empty() || problem.exact_pieces() != Some(sequence.len()) {
+        return false;
+    }
+    let playable = |entry: &&clearra_rules::kicks::KickTableEntry| {
+        sequence.pieces().contains(&entry.transition().piece())
+    };
+    let mut actual = supplied.entries().iter().filter(playable);
+    let expected = builtin.entries().iter().filter(playable);
+    // A verified profile has unique keys. Equality of each supplied
+    // sequence and the relevant entry counts also excludes missing keys.
+    actual.clone().count() == expected.count()
+        && actual.all(|entry| builtin.sequence_for(entry.transition()) == Some(entry.sequence()))
 }
 
 pub(super) fn builtin_accelerators_match_rule(

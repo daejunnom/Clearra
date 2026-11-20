@@ -74,7 +74,7 @@ fn expect_single_i(response: &AppResponse) -> &CoreExecutionResult {
 }
 
 #[test]
-fn imported_srs_plus_requires_the_same_ordered_transition_table_in_rust() {
+fn imported_srs_plus_requires_the_same_ordered_transitions_for_playable_pieces() {
     let _admission = PRODUCT_ADMISSION
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -85,17 +85,20 @@ fn imported_srs_plus_requires_the_same_ordered_transition_table_in_rust() {
     let canonical = KickTableProfile::new(builtin.id(), builtin.source_rule(), entries.clone());
 
     // Keep ID, source, transition keys and candidate membership identical.
-    // Changing a T kick order does not affect the independent I-only oracle,
-    // but cannot be accepted as a supported profile for other boards.
-    let entry = entries
-        .iter_mut()
-        .find(|entry| entry.transition().piece() == PieceKind::T && entry.sequence().len() > 1)
-        .unwrap();
-    let mut offsets = entry.sequence().offsets().to_vec();
-    offsets.reverse();
-    assert_ne!(offsets.as_slice(), entry.sequence().offsets());
-    *entry = KickTableEntry::new(entry.transition(), KickOffsetSequence::new(offsets));
-    let reordered = KickTableProfile::new(builtin.id(), builtin.source_rule(), entries);
+    let changed_order = |piece| {
+        let mut entries = entries.clone();
+        let entry = entries
+            .iter_mut()
+            .find(|entry| entry.transition().piece() == piece && entry.sequence().len() > 1)
+            .unwrap();
+        let mut offsets = entry.sequence().offsets().to_vec();
+        offsets.reverse();
+        assert_ne!(offsets.as_slice(), entry.sequence().offsets());
+        *entry = KickTableEntry::new(entry.transition(), KickOffsetSequence::new(offsets));
+        KickTableProfile::new(builtin.id(), builtin.source_rule(), entries)
+    };
+    let reordered_unused_t = changed_order(PieceKind::T);
+    let reordered_playable_i = changed_order(PieceKind::I);
 
     // Process-wide execution leases remain sequential across both drivers.
     let rust = AppContext::new(
@@ -110,11 +113,24 @@ fn imported_srs_plus_requires_the_same_ordered_transition_table_in_rust() {
         cooperative.field("normalized_solution_set_hash"),
         Some(exact_digest)
     );
+    // The only playable piece sees identical transitions, so the Rust
+    // trace-producing path can use the same exact solver in both drivers.
+    for response in [
+        rust.run(scenario_request(&reordered_unused_t)),
+        cooperatively(&rust, scenario_request(&reordered_unused_t)),
+    ] {
+        let result = expect_single_i(&response);
+        assert_eq!(
+            result.field("normalized_solution_set_hash"),
+            Some(exact_digest)
+        );
+        assert_eq!(result.path_steps(), direct.path_steps());
+    }
 
     #[cfg(feature = "native-c-core")]
     {
         let native = AppContext::native_c_reference();
-        for profile in [&canonical, &reordered] {
+        for profile in [&canonical, &reordered_unused_t] {
             let response = native.run(scenario_request(profile));
             assert_eq!(
                 expect_single_i(&response).field("normalized_solution_set_hash"),
@@ -124,8 +140,8 @@ fn imported_srs_plus_requires_the_same_ordered_transition_table_in_rust() {
     }
 
     for rejected in [
-        rust.run(scenario_request(&reordered)),
-        cooperatively(&rust, scenario_request(&reordered)),
+        rust.run(scenario_request(&reordered_playable_i)),
+        cooperatively(&rust, scenario_request(&reordered_playable_i)),
     ] {
         assert_eq!(
             rejected.status(),
