@@ -421,7 +421,9 @@ async function main(argv) {
   } finally {
     release();
   }
-  process.stdout.write(JSON.stringify({ proof: join(proofRoot, "summary.json"), state: evidence.state }) + "\n");
+  process.stdout.write(JSON.stringify({
+    proof: join(proofRoot, "summary.json"), state: evidence.state, error: evidence.error,
+  }) + "\n");
   if (!evidence.mapping) process.exitCode = interrupted === "SIGINT" ? 130 : interrupted === "SIGTERM" ? 143 : 1;
 }
 

@@ -5982,8 +5982,8 @@ mod tests {
                 PatternBitSet,
             >::new()));
             let capture_rows = Arc::clone(&rows);
-            let capture = move |identity, fragment: CapturedSolutionCoverage<'_>| {
-                let CapturedSolutionCoverage::Bitmap(bits) = fragment else {
+            let capture = move |identity, fragment: super::CapturedSolutionCoverage<'_>| {
+                let super::CapturedSolutionCoverage::Bitmap(bits) = fragment else {
                     return Err("small fixture must export the explicit bitmap");
                 };
                 let mut rows = capture_rows.lock().expect("fixture capture");
