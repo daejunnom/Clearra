@@ -168,8 +168,8 @@ jobs:
         shell: pwsh
         run: |
           "path=$(pnpm store path --silent)" >> $env:GITHUB_OUTPUT
-      - name: Cache only the exact pnpm store
-        uses: actions/cache@v4
+      - name: Restore only the exact pnpm store without publishing a cache
+        uses: actions/cache/restore@v4
         with:
           path: ${{ steps.pnpm-store.outputs.path }}
           key: clearra-pnpm-${{ runner.os }}-${{ runner.arch }}-node-22.23.2-pnpm-11.5.0-${{ hashFiles('pnpm-lock.yaml') }}

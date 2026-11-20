@@ -9,7 +9,9 @@ function isolated(source) {
   assert.doesNotMatch(source, /workflow_run:|workflow_call:|pull_request:|\bsecrets\.|\benvironment:|id-token:|:\s*write\b|continue-on-error/u);
   assert.doesNotMatch(source, /\bgh\s|\bgcloud\s|\bssh\s|\bscp\s|git\s+(?:push|tag)|deploy-pages|\/dispatches|canonical-acceptance-evidence|CLEARRA_ACCEPTED_/u);
   const actions = [...source.matchAll(/^\s*(?:- )?uses: (\S+)/gmu)].map(m => m[1]);
-  for (const action of actions) assert.ok(['actions/checkout@v4', 'actions/setup-node@v4', 'actions/upload-artifact@v4'].includes(action));
+  const readOnlyActions = ['actions/checkout@v4', 'actions/setup-node@v4',
+    'actions/cache/restore@v4', 'actions/upload-artifact@v4'];
+  for (const action of actions) assert.ok(readOnlyActions.includes(action));
   assert.equal((source.match(/persist-credentials: false/gu) ?? []).length,
     actions.filter(a => a === 'actions/checkout@v4').length);
 }
@@ -21,4 +23,5 @@ for (const [name, mutation] of [
   ['deployment', s => s + '\n# gh workflow run release-cli.yml'],
   ['accepted artifact', s => s + '\n# canonical-acceptance-evidence.mjs'],
   ['cache writer', s => s + '\n      - uses: actions/cache@v4'],
+  ['explicit cache writer', s => s + '\n      - uses: actions/cache/save@v4'],
 ]) test(`rejects ${name}`, () => assert.throws(() => isolated(mutation(workflow))));
