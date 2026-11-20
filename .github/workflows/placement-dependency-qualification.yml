@@ -63,6 +63,7 @@ jobs:
             family_root_count_ family_handoff_ prepared_parallel_family_
             extended_parallel_cooperative_preparation_
             extended_pc_native_cooperative_worker_waves_preserve_exact_family_and_drain
+            cooperative_canonical_reduction
             extended_pc_terminal_projection_moves_private_solution_owners
             extended_result_materialization_projection_has_an_exact_one_byte_boundary
             typed_score_publication_releases_transient_backing_slots

@@ -1610,3 +1610,7 @@ mod cooperative {
 #[cfg(test)]
 #[path = "extended_pc_family_parallel_worker_tests.rs"]
 mod worker_tests;
+
+#[cfg(test)]
+#[path = "extended_pc_cooperative_canonical.rs"]
+mod cooperative_canonical;
