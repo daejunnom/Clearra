@@ -4598,10 +4598,16 @@ impl WasmExactSearchSession {
                         "wasm_result_solution_coverage_storage_unavailable",
                     )
                 })?;
+        }
+        if let Some(coverage) = self.solution_coverage.take() {
+            // Terminal assembly no longer needs the mutable row index. Move
+            // the existing bitset owners into the canonical result and let the
+            // index allocation die before generating keys, reports and proof.
+            self.solution_coverage_bytes = 0;
             solution_coverages.extend(
                 coverage
-                    .iter()
-                    .map(|(identity, bits)| SolutionCoverage::new(*identity, bits.clone())),
+                    .into_iter()
+                    .map(|(identity, bits)| SolutionCoverage::new(identity, bits)),
             );
             solution_coverages.sort_unstable_by_key(SolutionCoverage::identity);
         }
@@ -6257,6 +6263,83 @@ mod tests {
             session.solution_coverage.as_ref().expect("row map")[&identity],
             expected
         );
+    }
+
+    #[test]
+    fn terminal_result_moves_solution_coverage_out_of_the_completed_session() {
+        let query = PcScenarioQuery::new(
+            PcScenarioBoard::standard_10(2, 0),
+            PcQueueInput::fixed_sequence(FixedSequence::new(vec![
+                PieceKind::I,
+                PieceKind::I,
+                PieceKind::O,
+                PieceKind::O,
+                PieceKind::O,
+            ])),
+            PieceWindow::new(5),
+        )
+        .with_allow_hold(false)
+        .with_exact_pieces(Some(5))
+        .with_count_policy(PcCountPolicy::CountAll)
+        .with_solution_probability_policy(
+            clearra_pc_graph::request::PcSolutionProbabilityPolicy::Include,
+        )
+        .with_objective(ObjectivePolicy::minimum_cover());
+        let problem = ProblemCompiler::compile_scenario_pc(&query)
+            .expect("minimum-cover source")
+            .with_pc_minimum_cover_v2_evidence();
+        let mut session = WasmExactSearchSession::new(&problem).expect("private row index");
+        let control = ExecutionControl::default();
+        let mut source_storage = Vec::new();
+        let mut completed = None;
+        for _ in 0..10_000 {
+            match session.advance(1, &control).expect("cooperative search") {
+                ExactSearchAdvance::Pending => {
+                    let rows = session.solution_coverage.as_ref().expect("live row index");
+                    if rows.len() == 4 {
+                        assert!(session.solution_coverage_bytes > 0);
+                        source_storage = rows
+                            .iter()
+                            .map(|(identity, row)| (*identity, row.storage_component(0)))
+                            .collect();
+                    }
+                }
+                ExactSearchAdvance::Completed(result) => {
+                    completed = Some(result);
+                    break;
+                }
+                ExactSearchAdvance::Cancelled => panic!("unexpected cancellation"),
+            }
+        }
+        let result = completed.expect("small exact search completes within the work bound");
+        assert!(
+            session.solution_coverage.is_none(),
+            "row index must not survive"
+        );
+        assert_eq!(session.solution_coverage_bytes, 0);
+        assert_eq!(source_storage.len(), 4);
+        assert_eq!(result.bool_field("build_variant_count_exact"), Some(true));
+        assert_eq!(
+            result.bool_field("solution_probability_complete"),
+            Some(true)
+        );
+        assert!(result
+            .pc_chance_coverage_evidence()
+            .is_some_and(|evidence| evidence.complete()));
+        assert_eq!(result.coverage_pattern_words(), &[1]);
+        assert_eq!(result.solution_coverages().len(), 4);
+        assert_eq!(result.normalized_solution_coverages().len(), 4);
+        for coverage in result.solution_coverages() {
+            let (_, source) = source_storage
+                .iter()
+                .find(|(identity, _)| *identity == coverage.identity())
+                .expect("same exact solution identity in result");
+            let row = coverage.covered_patterns();
+            assert!(source.is_some());
+            assert_eq!(row.storage_component(0), *source);
+            assert_eq!(row.pattern_count(), 1);
+            assert_eq!(row.word_at(0), 1);
+        }
     }
 
     #[test]
