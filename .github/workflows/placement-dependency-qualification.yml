@@ -211,6 +211,10 @@ jobs:
           status=0
           cargo test --locked -p clearra-core-executor --no-default-features --features native-c-core \
             --test legacy_cover_native_witness --test pc_tiling_control_parity --no-fail-fast || status=1
+          # Measure the opt-in bounded prefix with the same C build and test binary.
+          cargo test --locked -p clearra-core-executor --no-default-features --features native-c-core \
+            --test legacy_cover_native_witness -- --ignored --exact \
+            native_and_rust_agree_on_complete_bounded_legacy_prefix_assignment_matrix --nocapture || status=1
           # These selectors share one lib-test executable. A compile failure
           # prevents all of them, but does not prevent the integration tests.
           app_lib=(cargo test --locked -p clearra-app --features native-c-core --lib)
