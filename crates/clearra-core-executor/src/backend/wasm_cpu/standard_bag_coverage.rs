@@ -1758,7 +1758,16 @@ impl StandardBagCoverage {
         for index in 0..7 {
             children[index] = self.union(left_children[index], right_children[index])?;
         }
-        let root = self.intern_node(level, valid_mask, children)?;
+        // Both roots already have this level and valid mask. If the union
+        // preserves an operand's exact child vector, reuse that decision
+        // node and its summary without hashing or interning it again.
+        let root = if children == left_children {
+            left
+        } else if children == right_children {
+            right
+        } else {
+            self.intern_node(level, valid_mask, children)?
+        };
         if self.union_memo.try_reserve(1).is_ok() {
             self.union_memo.insert(key, root);
         }
@@ -2242,6 +2251,43 @@ mod supply_automaton_tests {
             SupplyProvenanceId(0x77),
         );
         (universe, initial)
+    }
+
+    #[test]
+    fn contained_language_union_reuses_an_existing_node_without_an_interner() {
+        let mut coverage = coverage_for_len(2, false);
+        let mut broader_children = [REJECT; 7];
+        broader_children[0] = ACCEPT;
+        broader_children[1] = ACCEPT;
+        let broader = coverage
+            .intern_node(0, FULL_STANDARD_BAG, broader_children)
+            .expect("two permitted prefixes");
+        let mut narrower_children = [REJECT; 7];
+        narrower_children[0] = ACCEPT;
+        let narrower = coverage
+            .intern_node(0, FULL_STANDARD_BAG, narrower_children)
+            .expect("one permitted prefix");
+        let mut disjoint_children = [REJECT; 7];
+        disjoint_children[2] = ACCEPT;
+        let disjoint = coverage
+            .intern_node(0, FULL_STANDARD_BAG, disjoint_children)
+            .expect("different permitted prefix");
+        assert_ne!(broader, narrower);
+        let original_len = coverage.nodes.len();
+        coverage.interning_disabled = true;
+
+        assert_eq!(coverage.union(broader, narrower).unwrap(), broader);
+        assert_eq!(coverage.union(narrower, broader).unwrap(), broader);
+        assert_eq!(coverage.nodes.len(), original_len);
+
+        let combined = coverage.union(broader, disjoint).unwrap();
+        assert_eq!(coverage.nodes.len(), original_len + 1);
+        assert_eq!(
+            coverage.nodes[reference_index(combined)].children,
+            [ACCEPT, ACCEPT, ACCEPT, REJECT, REJECT, REJECT, REJECT]
+        );
+        assert_eq!(coverage.union(narrower, combined).unwrap(), combined);
+        assert_eq!(coverage.nodes.len(), original_len + 1);
     }
 
     #[cfg(feature = "parallel")]
