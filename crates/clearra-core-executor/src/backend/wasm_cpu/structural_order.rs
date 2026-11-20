@@ -17,6 +17,11 @@ pub struct StructuralOrderMetrics {
     /// Successful candidate/frame guards using one cached positive movement
     /// certificate for the entire occupancy interval instead of hard drop.
     pub cached_interval_guards: u64,
+    /// Analytic interval work includes candidates whose later certificate
+    /// fails. These are not old-cache observations or primitive BFS states.
+    pub algebraic_interval_attempts: u64,
+    pub algebraic_interval_guards: u64,
+    pub algebraic_interval_row_steps: u64,
 }
 
 thread_local! {
@@ -54,6 +59,9 @@ mod process_totals {
     static RESIDUALS: AtomicU64 = AtomicU64::new(0);
     static TWINS: AtomicU64 = AtomicU64::new(0);
     static INTERVALS: AtomicU64 = AtomicU64::new(0);
+    static ALGEBRAIC_ATTEMPTS: AtomicU64 = AtomicU64::new(0);
+    static ALGEBRAIC_GUARDS: AtomicU64 = AtomicU64::new(0);
+    static ALGEBRAIC_ROWS: AtomicU64 = AtomicU64::new(0);
 
     pub(super) fn record(delta: StructuralOrderMetrics) {
         BYPASSES.fetch_add(delta.skipped_build_graphs, Ordering::Relaxed);
@@ -68,7 +76,16 @@ mod process_totals {
             language_residual_states: RESIDUALS.load(Ordering::Relaxed),
             exchangeable_operations_removed: TWINS.load(Ordering::Relaxed),
             cached_interval_guards: INTERVALS.load(Ordering::Relaxed),
+            algebraic_interval_attempts: ALGEBRAIC_ATTEMPTS.load(Ordering::Relaxed),
+            algebraic_interval_guards: ALGEBRAIC_GUARDS.load(Ordering::Relaxed),
+            algebraic_interval_row_steps: ALGEBRAIC_ROWS.load(Ordering::Relaxed),
         }
+    }
+
+    pub(super) fn record_algebraic(attempts: u64, guards: u64, rows: u64) {
+        ALGEBRAIC_ATTEMPTS.fetch_add(attempts, Ordering::Relaxed);
+        ALGEBRAIC_GUARDS.fetch_add(guards, Ordering::Relaxed);
+        ALGEBRAIC_ROWS.fetch_add(rows, Ordering::Relaxed);
     }
 }
 
@@ -82,6 +99,7 @@ pub(super) fn record_bypass(
         language_residual_states: residual_states as u64,
         exchangeable_operations_removed: removed_operations as u64,
         cached_interval_guards: interval_guards as u64,
+        ..StructuralOrderMetrics::default()
     };
     METRICS.with(|slot| {
         let mut value = slot.get();
@@ -93,6 +111,21 @@ pub(super) fn record_bypass(
     });
     #[cfg(feature = "local-search-ab")]
     process_totals::record(delta);
+}
+
+pub(super) fn record_algebraic_intervals(attempts: usize, guards: usize, rows: usize) {
+    if attempts == 0 {
+        return;
+    }
+    METRICS.with(|slot| {
+        let mut value = slot.get();
+        value.algebraic_interval_attempts += attempts as u64;
+        value.algebraic_interval_guards += guards as u64;
+        value.algebraic_interval_row_steps += rows as u64;
+        slot.set(value);
+    });
+    #[cfg(feature = "local-search-ab")]
+    process_totals::record_algebraic(attempts as u64, guards as u64, rows as u64);
 }
 
 /// Diagnostic totals since process start. Read after all experiment workers

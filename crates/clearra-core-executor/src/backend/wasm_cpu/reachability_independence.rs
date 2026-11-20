@@ -34,10 +34,12 @@ pub(in super::super) const fn static_dependency_peak_upper_bound() -> usize {
 ///
 /// We reverse-close the target over *all* potential movement edges, ignoring
 /// collision and first-success restrictions. Every concrete path to the target
-/// is contained in this optimistic predecessor set. For each predecessor we
-/// include every collision test that could change an outgoing edge, including
-/// ordered kick competitors whose destinations are outside the predecessor set.
-/// Target grounding and canonical sky-seed admission are included as well.
+/// is contained in this optimistic predecessor set. Preserve the induced
+/// transition graph on that set: its pose masks cover all translation tests,
+/// while a rotation also reads every earlier first-success competitor before
+/// its last candidate inside the set. Competitors may lie outside the set.
+/// Later kicks and independent translations that leave the predecessor set
+/// cannot affect target membership. Target grounding is included separately.
 ///
 /// Thus `(a ^ b) & mask == 0` preserves target-lock membership for valid boards
 /// `a` and `b` under the same template. This is a conservative sufficient
@@ -105,32 +107,38 @@ pub(in super::super) fn static_lock_dependency_mask(
     }
 
     let mut dependency_mask = 0_u64;
-    // These are normally empty sky masks, but seed admission is an explicit
-    // part of the proof rather than an assumption about the current profile.
-    for &seed in &template.sky_seeds {
-        dependency_mask |= template.state_masks[usize::from(seed)];
-    }
+    // Every concrete path from a seed to the goal stays in this reverse
+    // closure: a pose outside it has no potential path to the goal at all.
+    // Seed admission inside the closure is covered by its pose mask below;
+    // admitting or blocking any other seed cannot affect this Boolean query.
     for source in queue.into_iter().map(usize::from) {
         dependency_mask |= template.state_masks[source];
-        for &target in &template.translation_targets[source] {
-            if target != INVALID_STATE_INDEX {
-                dependency_mask |= template.state_masks[usize::from(target)];
-            }
-        }
+        // Translation inputs do not compete with one another. A translation
+        // whose destination is inside the closure reads an already included
+        // pose mask; one leaving it can never return and need not be read.
         for slot in 0..if template.allow_180 { 3 } else { 2 } {
             let transition = source * 3 + slot;
             let begin = template.rotation_target_offsets[transition] as usize;
             let end = template.rotation_target_offsets[transition + 1] as usize;
-            // Include the entire ordered sequence, not only targets that can
-            // themselves reach the goal. An earlier successful competitor can
-            // suppress a later kick into the goal's predecessor closure.
-            for &target in &template.rotation_targets[begin..end] {
+            let targets = &template.rotation_targets[begin..end];
+            let Some(last_relevant) = targets
+                .iter()
+                .rposition(|&target| seen[usize::from(target)] != 0)
+            else {
+                continue;
+            };
+            // An earlier success outside the closure suppresses a later
+            // relevant kick and MUST stay in the footprint. Once all relevant
+            // candidates have failed, the eventual result is outside the
+            // closure regardless of later collisions, so that suffix is free.
+            for &target in &targets[..=last_relevant] {
                 dependency_mask |= template.state_masks[usize::from(target)];
             }
         }
     }
     // Grounding reads the downward pose even when that pose is unreachable.
-    // It is also covered above, but retain this explicit output precondition.
+    // That translation can leave the reverse closure and is an explicit
+    // output precondition, unlike irrelevant outgoing translation inputs.
     let below = template.translation_targets[goal][0];
     if y != 0 && below != INVALID_STATE_INDEX {
         dependency_mask |= template.state_masks[usize::from(below)];
@@ -329,6 +337,108 @@ mod tests {
     }
 
     #[test]
+    fn o_target_keeps_only_its_own_support_cells_below_the_ancestor_rows() {
+        // With no translational O rotation or upward move, every possible
+        // predecessor is at y >= 2. Horizontal moves can cross the full width,
+        // so all cells in rows 2..4 stay relevant, but below them only the two
+        // target support cells at (1,1), (2,1) affect this Boolean lock query.
+        const EXPECTED: u64 = 0xff60;
+        for profile in PROFILES {
+            let template = ReachabilityTemplate::compile(4, 4, PieceKind::O, profile);
+            for rotation in RotationState::ALL {
+                assert_eq!(
+                    static_lock_dependency_mask(&template, rotation, 1, 2),
+                    Some(EXPECTED),
+                    "{profile:?}/{rotation:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn static_target_masks_preserve_every_outside_bit_change_across_profiles_and_kinds() {
+        const WIDTH: u8 = 6;
+        const HEIGHT: u8 = 4;
+        const CELLS: usize = (WIDTH * HEIGHT) as usize;
+        let full = (1_u64 << CELLS) - 1;
+        let bases = [0, 1_u64 << 7, (0x1f_u64 << 12) | (1_u64 << 5)];
+        let mut perturbations = 0;
+        for profile in PROFILES {
+            for piece in PieceKind::STANDARD_TETROMINOES {
+                let template = ReachabilityTemplate::compile(WIDTH, HEIGHT, piece, profile);
+                for board in bases {
+                    let oracle =
+                        reference_spawn_lock_anchors(WIDTH, HEIGHT, board, piece, profile).unwrap();
+                    let mut changed_oracles: [Option<[u64; 4]>; CELLS] = [None; CELLS];
+                    for rotation in RotationState::ALL {
+                        let (x, y) = (1, 2);
+                        let mask = static_lock_dependency_mask(&template, rotation, x, y).unwrap();
+                        let anchor = 1_u64 << (y as usize * usize::from(WIDTH) + x as usize);
+                        let expected = oracle[rotation.quarter_turns() as usize] & anchor != 0;
+                        let mut outside = full & !mask;
+                        while outside != 0 {
+                            let cell = outside.trailing_zeros() as usize;
+                            outside &= outside - 1;
+                            let changed = *changed_oracles[cell].get_or_insert_with(|| {
+                                reference_spawn_lock_anchors(
+                                    WIDTH,
+                                    HEIGHT,
+                                    board ^ (1_u64 << cell),
+                                    piece,
+                                    profile,
+                                )
+                                .unwrap()
+                            });
+                            assert_eq!(
+                                changed[rotation.quarter_turns() as usize] & anchor != 0,
+                                expected,
+                                "{profile:?}/{piece:?}/{rotation:?}, board={board:#x}, cell={cell}, mask={mask:#x}"
+                            );
+                            perturbations += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert!(perturbations > 100, "exercise nonempty outside regions");
+    }
+
+    #[test]
+    fn a_remote_o_entry_barrier_is_not_a_fixed_two_cell_neighborhood() {
+        const WIDTH: u8 = 6;
+        const HEIGHT: u8 = 6;
+        // Leave a one-cell opening, so this is not an uncleared full row. An O
+        // cannot cross the barrier although the goal and two rows above it are
+        // unchanged. A small local guard is exact only with a proved entry.
+        let remote_barrier = 0x1f_u64 << (4 * WIDTH);
+        for profile in PROFILES {
+            assert!(oracle_lock(
+                WIDTH,
+                HEIGHT,
+                0,
+                PieceKind::O,
+                profile,
+                RotationState::Zero,
+                0,
+                0
+            ));
+            assert!(!oracle_lock(
+                WIDTH,
+                HEIGHT,
+                remote_barrier,
+                PieceKind::O,
+                profile,
+                RotationState::Zero,
+                0,
+                0
+            ));
+            let template = ReachabilityTemplate::compile(WIDTH, HEIGHT, PieceKind::O, profile);
+            let mask = static_lock_dependency_mask(&template, RotationState::Zero, 0, 0).unwrap();
+            assert_ne!(mask & remote_barrier, 0);
+        }
+    }
+
+    #[test]
     fn triple_kick_j_surface_is_not_certified_independent_of_the_t_lock() {
         const WIDTH: u8 = 5;
         const HEIGHT: u8 = 6;
@@ -412,6 +522,54 @@ mod tests {
         let block_earlier = search_reachable_locks(&template, only_earlier, &mut scratch, None);
         assert!(!open_earlier.locks.contains(4, RotationState::Right, 1, 3));
         assert!(block_earlier.locks.contains(4, RotationState::Right, 1, 3));
+    }
+
+    #[test]
+    fn later_kicks_outgoing_translations_and_unrelated_seeds_do_not_expand_the_mask() {
+        let mut template =
+            ReachabilityTemplate::compile(4, 4, PieceKind::T, KickTableProfileId::Srs90);
+        let index = |rotation, x, y| {
+            state_index(template.width, template.ceiling, State { rotation, x, y }).unwrap()
+        };
+        let source = index(RotationState::Zero, 1, 4);
+        let earlier = index(RotationState::Right, 2, 3);
+        let goal = index(RotationState::Right, 1, 3);
+        let later = index(RotationState::Left, 0, 0);
+        let transition = source * 3;
+
+        // The exact finite movement table has one competing rotation and an
+        // independent translation to a sink. The sink is also a separate
+        // seed. None of its paths can ever enter the goal's predecessor set.
+        template.translation_targets.fill([INVALID_STATE_INDEX; 3]);
+        template.translation_targets[source][1] = later as u16;
+        template.rotation_targets = vec![earlier as u16, goal as u16, later as u16];
+        template.rotation_kick_indices = vec![0, 1, 2];
+        template.rotation_target_offsets.fill(0);
+        template.rotation_target_offsets[transition + 1..].fill(3);
+        template.sky_seeds = vec![source as u16, later as u16];
+        let earlier_only = template.state_masks[earlier] & !template.state_masks[goal];
+        let later_only = template.state_masks[later]
+            & !(template.state_masks[source]
+                | template.state_masks[earlier]
+                | template.state_masks[goal]);
+        assert_ne!(earlier_only, 0);
+        assert_ne!(later_only, 0);
+        let mask = static_lock_dependency_mask(&template, RotationState::Right, 1, 3).unwrap();
+        assert_eq!(mask & earlier_only, earlier_only);
+        assert_eq!(mask & later_only, 0);
+
+        let mut scratch = ReachabilityScratch::default();
+        for block_earlier in [false, true] {
+            let base = if block_earlier { earlier_only } else { 0 };
+            for sink_occupancy in [0, later_only] {
+                let result =
+                    search_reachable_locks(&template, base | sink_occupancy, &mut scratch, None);
+                assert_eq!(
+                    result.locks.contains(4, RotationState::Right, 1, 3),
+                    block_earlier
+                );
+            }
+        }
     }
 
     #[test]

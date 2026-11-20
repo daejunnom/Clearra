@@ -74,6 +74,8 @@ mod setup_suffix_coverage;
 mod standard_bag_coverage;
 mod standard_bag_product_memo;
 #[cfg(test)]
+mod static_influence_integration_tests;
+#[cfg(test)]
 mod structural_graph_probability_tests;
 #[cfg(any(test, feature = "local-search-ab"))]
 mod structural_order;

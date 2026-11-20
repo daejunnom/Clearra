@@ -31,7 +31,7 @@ pub(super) struct CertifiedPlacementPoset {
     operation_count: usize,
     pieces: [PieceKind; MAX_BOARD64_PIECES],
     predecessors: [u16; MAX_BOARD64_PIECES],
-    observed_guard_count: usize,
+    interval_guard_count: usize,
 }
 
 impl CertifiedPlacementPoset {
@@ -45,10 +45,10 @@ impl CertifiedPlacementPoset {
         &self.predecessors[..self.operation_count]
     }
 
-    /// Number of operation / deleted-row frames certified by an observed
-    /// positive guard instead of the direct hard-drop corridor proof.
-    pub(super) fn observed_guard_count(&self) -> usize {
-        self.observed_guard_count
+    /// Number of operation / deleted-row frames certified by an exact analytic
+    /// or observed interval guard instead of the direct hard-drop corridor.
+    pub(super) fn interval_guard_count(&self) -> usize {
+        self.interval_guard_count
     }
 }
 
@@ -75,18 +75,19 @@ pub(super) fn compile(
     compile_with_guard(catalog, candidate, |_, _, _, _, _| false)
 }
 
-/// Extend the hard-drop certificate with already observed positive guards.
+/// Extend the hard-drop certificate with exact positive interval guards.
 ///
 /// The callback receives kind, the exact ILC target pose, original deleted-row
 /// mask, minimum physical board and maximum physical board. It may return true
-/// only if one existing positive certificate covers the entire occupancy
-/// interval under this catalog owner, kick profile and row frame. Independent
-/// successful point queries at the two bounds are insufficient. The callback
-/// must not start a primitive traversal; a miss remains Unknown / fallback.
+/// only if a sound analytic rule or one existing positive certificate covers
+/// the entire occupancy interval under this catalog, kick profile and row
+/// frame. Independent successful point queries at the two bounds are
+/// insufficient. The callback must not start a primitive traversal; a miss
+/// remains Unknown / fallback.
 pub(super) fn compile_with_guard(
     catalog: &GeometryCatalog,
     candidate: &GeometryCandidate,
-    mut observed_guard: impl FnMut(PieceKind, InstantiatedRealization, u16, u64, u64) -> bool,
+    mut interval_guard: impl FnMut(PieceKind, InstantiatedRealization, u16, u64, u64) -> bool,
 ) -> Option<CertifiedPlacementPoset> {
     let geometry = CandidateGeometry::compile(catalog, candidate)?;
     if geometry.has_unprovable_initial_support_disjunction(catalog, candidate) {
@@ -172,7 +173,7 @@ pub(super) fn compile_with_guard(
     }
 
     let mut certified_operations = 0_u16;
-    let mut observed_guard_count = 0;
+    let mut interval_guard_count = 0;
     let mut pending_frames = possible_frames;
     while pending_frames != 0 {
         let deleted = pending_frames.trailing_zeros() as u16;
@@ -222,7 +223,7 @@ pub(super) fn compile_with_guard(
                 let guarded = catalog
                     .instantiations(candidate.row_ids()[operation], deleted)
                     .any(|realization| {
-                        observed_guard(
+                        interval_guard(
                             geometry.pieces[operation],
                             realization,
                             deleted,
@@ -233,13 +234,13 @@ pub(super) fn compile_with_guard(
                 if !guarded {
                     return None;
                 }
-                observed_guard_count += 1;
+                interval_guard_count += 1;
             }
             // For every actual ideal E in this frame, min ⊆ E ⊆ max.
             // Compaction at fixed D preserves occupancy inclusion. Grounding
             // at min and an empty corridor at max imply a hard-drop edge at E.
-            // Otherwise the callback supplies one existing positive proof for
-            // the entire interval, including first-success kick conditions.
+            // Otherwise the callback supplies an exact analytic or observed
+            // proof for the interval, including first-success kick conditions.
             // The candidate's disjoint original cells and exact ILC lock mask
             // also make place/clear commute with target compaction.
             certified_operations |= 1_u16 << operation;
@@ -253,7 +254,7 @@ pub(super) fn compile_with_guard(
         operation_count: geometry.operation_count,
         pieces: geometry.pieces,
         predecessors,
-        observed_guard_count,
+        interval_guard_count,
     })
 }
 

@@ -742,6 +742,7 @@ fn retains_solution_coverage_evidence(problem: &SearchProblem) -> bool {
 }
 
 fn add_reachability_metrics(total: &mut ReachabilityMetrics, next: ReachabilityMetrics) {
+    total.static_influence.accumulate(next.static_influence);
     total.lock_queries = total.lock_queries.saturating_add(next.lock_queries);
     total.harddrop_queries = total.harddrop_queries.saturating_add(next.harddrop_queries);
     total.harddrop_hits = total.harddrop_hits.saturating_add(next.harddrop_hits);
@@ -1037,6 +1038,17 @@ mod tests {
     #[test]
     fn conditioned_reachability_counters_survive_worker_merge() {
         let mut total = super::ReachabilityMetrics {
+            static_influence:
+                super::super::reachability::static_influence::StaticInfluenceMetrics {
+                    queries: 3,
+                    reachable: 1,
+                    unreachable: 2,
+                    row_steps: 4,
+                    cache_hits: 1,
+                    masked_queries: 5,
+                    ignored_cells: 6,
+                    mask_compilations: 1,
+                },
             conditioned_complete_hits: 1,
             conditioned_misses: 2,
             conditioned_lookup_attempts: 3,
@@ -1047,6 +1059,17 @@ mod tests {
         super::add_reachability_metrics(
             &mut total,
             super::ReachabilityMetrics {
+                static_influence:
+                    super::super::reachability::static_influence::StaticInfluenceMetrics {
+                        queries: 5,
+                        reachable: 3,
+                        unreachable: 2,
+                        row_steps: 7,
+                        cache_hits: 2,
+                        masked_queries: 9,
+                        ignored_cells: 10,
+                        mask_compilations: 2,
+                    },
                 conditioned_complete_hits: 3,
                 conditioned_misses: 4,
                 conditioned_lookup_attempts: 5,
@@ -1060,6 +1083,14 @@ mod tests {
         assert!(total.conditioned_requested);
         assert!(total.conditioned_policy_enabled);
         assert!(total.conditioned_snapshot_active);
+        assert_eq!(total.static_influence.queries, 8);
+        assert_eq!(total.static_influence.reachable, 4);
+        assert_eq!(total.static_influence.unreachable, 4);
+        assert_eq!(total.static_influence.row_steps, 11);
+        assert_eq!(total.static_influence.cache_hits, 3);
+        assert_eq!(total.static_influence.masked_queries, 14);
+        assert_eq!(total.static_influence.ignored_cells, 16);
+        assert_eq!(total.static_influence.mask_compilations, 3);
     }
 
     #[test]

@@ -23,6 +23,12 @@ mod independence;
 #[path = "reachability_reverse_dependency.rs"]
 mod reverse_dependency;
 
+#[cfg(any(test, feature = "local-search-ab"))]
+#[path = "monotone_reachability.rs"]
+mod monotone_reachability;
+#[path = "reachability_static_influence.rs"]
+pub(super) mod static_influence;
+
 #[cfg(test)]
 #[path = "reachability_peer_tests.rs"]
 mod peer_tests;
@@ -140,6 +146,21 @@ pub(super) fn checked_reachability_retained_upper_bound(
     if super::placement_dependency::enabled() {
         bytes = (dependency_cache::PlacementDependencyCache::retained_upper_bound()
             + independence::static_dependency_peak_upper_bound()) as u128;
+    }
+    #[cfg(any(test, feature = "local-search-ab"))]
+    if static_influence::enabled() {
+        bytes = bytes
+            .checked_add(static_influence::StaticInfluenceCache::retained_upper_bound() as u128)?;
+        if !super::placement_dependency::enabled() {
+            bytes = bytes.checked_add(independence::static_dependency_peak_upper_bound() as u128)?;
+        }
+        bytes = bytes.checked_add(
+            7_u128
+                .checked_mul(4)?
+                .checked_mul(u128::from(width))?
+                .checked_mul(u128::from(height))?
+                .checked_mul(core::mem::size_of::<OnceLock<Option<u64>>>() as u128)?,
+        )?;
     }
     let mut maximum_scratch_states = 0_u128;
     for piece in STANDARD_PIECES {
@@ -457,6 +478,7 @@ fn reachability_cache_set_start(hash: u64, capacity: usize) -> usize {
 
 #[derive(Clone, Copy, Debug, Default)]
 pub(super) struct ReachabilityMetrics {
+    pub static_influence: static_influence::StaticInfluenceMetrics,
     pub lock_queries: usize,
     pub harddrop_queries: usize,
     pub harddrop_hits: usize,
@@ -486,6 +508,8 @@ pub(super) struct ReachabilityMetrics {
 pub(super) struct ReachabilityWorkspace {
     #[cfg(any(test, feature = "local-search-ab"))]
     placement_dependencies: dependency_cache::PlacementDependencyCache,
+    #[cfg(any(test, feature = "local-search-ab"))]
+    static_influence_cache: static_influence::StaticInfluenceCache,
     cache: ReachabilityCache,
     scratch: ReachabilityScratch,
     templates: [Option<Arc<ReachabilityTemplate>>; 7],
@@ -519,6 +543,8 @@ impl Default for ReachabilityWorkspace {
         Self {
             #[cfg(any(test, feature = "local-search-ab"))]
             placement_dependencies: dependency_cache::PlacementDependencyCache::default(),
+            #[cfg(any(test, feature = "local-search-ab"))]
+            static_influence_cache: static_influence::StaticInfluenceCache::default(),
             cache: ReachabilityCache::default(),
             scratch: ReachabilityScratch::default(),
             templates: std::array::from_fn(|_| None),
@@ -642,6 +668,39 @@ impl ReachabilityWorkspace {
         )
     }
 
+    /// A cold, analytic O proof for a complete fixed-row occupancy interval.
+    /// Failure is Unknown; only `proven=true` may replace the physical graph.
+    /// The explicit profile and ILC mask belong to the candidate being proved.
+    #[cfg(any(test, feature = "local-search-ab"))]
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn try_monotone_lock_interval(
+        &self,
+        catalog: &GeometryCatalog,
+        minimum_board: u64,
+        maximum_board: u64,
+        piece: PieceKind,
+        profile: KickTableProfileId,
+        realization: InstantiatedRealization,
+        frame: Option<LocalRelationRowFrame>,
+    ) -> Option<(bool, usize)> {
+        if !static_influence::enabled() || piece != PieceKind::O {
+            return None;
+        }
+        let capability = monotone_reachability::MonotoneOCapability::for_profile(profile)?;
+        let attempt = capability.proves_lock_interval(
+            catalog.width(),
+            catalog.height(),
+            minimum_board,
+            maximum_board,
+            realization.rotation,
+            realization.x,
+            realization.lock_y,
+            realization.lock_mask,
+            frame?,
+        )?;
+        Some((attempt.proven, usize::from(attempt.row_steps)))
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn scoring_lock_evidence(
         &mut self,
@@ -719,6 +778,86 @@ impl ReachabilityWorkspace {
                 } => (exhaustive, admit, key_present),
             };
         #[cfg(any(test, feature = "local-search-ab"))]
+        let static_query = if static_influence::enabled() {
+            if piece == PieceKind::O {
+                if let Some(result) =
+                    monotone_reachability::MonotoneOCapability::for_profile(self.kick_profile_id)
+                        .and_then(|capability| {
+                            capability.lock_reachable(
+                                catalog.width(),
+                                catalog.height(),
+                                board,
+                                rotation,
+                                x,
+                                y,
+                            )
+                        })
+                {
+                    self.metrics.static_influence.answer(
+                        result.reachable,
+                        usize::from(result.row_steps),
+                        false,
+                    );
+                    let cells = usize::from(catalog.width()) * usize::from(catalog.height());
+                    let all = u64::MAX >> (64 - cells);
+                    if result.influence_mask != all {
+                        self.metrics.static_influence.masked_queries = self
+                            .metrics
+                            .static_influence
+                            .masked_queries
+                            .saturating_add(1);
+                        self.metrics.static_influence.ignored_cells =
+                            self.metrics.static_influence.ignored_cells.saturating_add(
+                                (all & !result.influence_mask).count_ones() as usize,
+                            );
+                    }
+                    self.cache_exact_target(
+                        board,
+                        piece,
+                        catalog.width(),
+                        rotation,
+                        x,
+                        y,
+                        result.reachable,
+                        admit,
+                    );
+                    return result.reachable;
+                }
+            }
+            let query = self.templates[piece_index(piece)]
+                .as_ref()
+                .and_then(|template| {
+                    self.static_influence_cache.prepare(
+                        template,
+                        board,
+                        piece,
+                        rotation,
+                        x,
+                        y,
+                        &mut self.metrics.static_influence,
+                    )
+                });
+            if let Some(reachable) =
+                query.and_then(|query| self.static_influence_cache.lookup(query))
+            {
+                self.metrics.static_influence.answer(reachable, 0, true);
+                self.cache_exact_target(
+                    board,
+                    piece,
+                    catalog.width(),
+                    rotation,
+                    x,
+                    y,
+                    reachable,
+                    admit,
+                );
+                return reachable;
+            }
+            query
+        } else {
+            None
+        };
+        #[cfg(any(test, feature = "local-search-ab"))]
         if let Some(reachable) = self.placement_dependencies.lookup(
             catalog,
             board,
@@ -729,6 +868,9 @@ impl ReachabilityWorkspace {
             y,
             frame,
         ) {
+            if let Some(query) = static_query {
+                self.static_influence_cache.insert(query, reachable);
+            }
             // Preserve the existing exact-board cache as the cheapest first
             // tier. A target certificate proves no other lock on this board.
             let mut desired = ReachableLocks::default();
@@ -1046,6 +1188,10 @@ impl ReachabilityWorkspace {
                 )
             };
         self.generated_states = self.generated_states.saturating_add(visited_state_count);
+        #[cfg(any(test, feature = "local-search-ab"))]
+        if let Some(query) = static_query {
+            self.static_influence_cache.insert(query, reachable);
+        }
         self.cache.insert(
             board,
             piece,
@@ -1055,6 +1201,39 @@ impl ReachabilityWorkspace {
             admit,
         );
         reachable
+    }
+
+    #[cfg(any(test, feature = "local-search-ab"))]
+    #[allow(clippy::too_many_arguments)]
+    fn cache_exact_target(
+        &mut self,
+        board: u64,
+        piece: PieceKind,
+        width: u8,
+        rotation: RotationState,
+        x: i8,
+        y: i8,
+        reachable: bool,
+        admit: bool,
+    ) {
+        let mut desired = ReachableLocks::default();
+        desired.insert(width, rotation, x, y);
+        self.cache.insert(
+            board,
+            piece,
+            if reachable {
+                desired
+            } else {
+                ReachableLocks::default()
+            },
+            if reachable {
+                ReachableLocks::default()
+            } else {
+                desired
+            },
+            false,
+            admit,
+        );
     }
 
     pub fn configure(&mut self, operation_count: usize) {
@@ -1119,7 +1298,8 @@ impl ReachabilityWorkspace {
 
     fn retained_bytes_with_shared(&self, include_shared: bool) -> usize {
         #[cfg(any(test, feature = "local-search-ab"))]
-        let prototype_bytes = self.placement_dependencies.retained_bytes();
+        let prototype_bytes = self.placement_dependencies.retained_bytes()
+            + self.static_influence_cache.retained_bytes();
         #[cfg(not(any(test, feature = "local-search-ab")))]
         let prototype_bytes = 0;
         self.cache.retained_bytes()
@@ -1178,6 +1358,10 @@ impl ReachabilityWorkspace {
     }
 
     fn clear_cache_preserving_policy(&mut self) {
+        #[cfg(any(test, feature = "local-search-ab"))]
+        {
+            self.static_influence_cache = static_influence::StaticInfluenceCache::default();
+        }
         self.cache = ReachabilityCache {
             exhaustive_observations: self.cache.exhaustive_observations,
             ..ReachabilityCache::default()
@@ -1342,6 +1526,10 @@ pub(super) struct ReachabilityTemplate {
     rotation_kick_indices: Vec<u8>,
     reverse_rotation_offsets: Vec<u32>,
     reverse_rotation_sources: Vec<ReverseRotationSource>,
+    // Shared immutable per-target proof, compiled before an occupancy search.
+    // None is an unsupported proof, never an unreachable target.
+    #[cfg(any(test, feature = "local-search-ab"))]
+    static_dependency_masks: Vec<OnceLock<Option<u64>>>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1442,11 +1630,31 @@ impl ReachabilityTemplate {
             rotation_kick_indices,
             reverse_rotation_offsets,
             reverse_rotation_sources,
+            #[cfg(any(test, feature = "local-search-ab"))]
+            static_dependency_masks: {
+                let mut masks = Vec::new();
+                if static_influence::enabled()
+                    && (1..=10).contains(&width)
+                    && (1..=6).contains(&height)
+                {
+                    let count = 4 * usize::from(width) * usize::from(height);
+                    if masks.try_reserve_exact(count).is_ok() {
+                        masks.extend((0..count).map(|_| OnceLock::new()));
+                    }
+                }
+                masks
+            },
         }
     }
 
     pub fn retained_bytes(&self) -> usize {
-        self.state_masks.capacity() * core::mem::size_of::<u64>()
+        #[cfg(any(test, feature = "local-search-ab"))]
+        let static_bytes =
+            self.static_dependency_masks.capacity() * core::mem::size_of::<OnceLock<Option<u64>>>();
+        #[cfg(not(any(test, feature = "local-search-ab")))]
+        let static_bytes = 0;
+        static_bytes
+            + self.state_masks.capacity() * core::mem::size_of::<u64>()
             + self.translation_targets.capacity() * core::mem::size_of::<[u16; 3]>()
             + self.reverse_translation_sources.capacity() * core::mem::size_of::<[u16; 3]>()
             + self.sky_seeds.capacity() * core::mem::size_of::<u16>()

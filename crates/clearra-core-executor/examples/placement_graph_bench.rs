@@ -77,6 +77,11 @@ mod run {
         if !matches!(structural_mode.as_str(), "0" | "1") {
             return Err("CLEARRA_STRUCTURAL_ORDER must be 0 or 1 at process start".into());
         }
+        let static_influence_mode =
+            std::env::var("CLEARRA_STATIC_INFLUENCE").unwrap_or_else(|_| "0".into());
+        if !matches!(static_influence_mode.as_str(), "0" | "1") {
+            return Err("CLEARRA_STATIC_INFLUENCE must be 0 or 1 at process start".into());
+        }
         let binary_sha = file_sha(&std::env::current_exe().map_err(|e| e.to_string())?)?;
         let capacity = CpuCapacity::current();
         let policy = PcExecutionPolicy::mvp_default()
@@ -95,7 +100,7 @@ mod run {
         }
         let compile_ms = compile_started.elapsed().as_secs_f64() * 1000.0;
         eprintln!(
-            "placement_graph_bench starting: case={} mode={} structural_mode={} auto_cpu_limit={}",
+            "placement_graph_bench starting: case={} mode={} structural_mode={} static_influence_mode={} auto_cpu_limit={}",
             if small {
                 "one-I-preflight"
             } else {
@@ -103,6 +108,7 @@ mod run {
             },
             mode,
             structural_mode,
+            static_influence_mode,
             capacity.hard_limit(),
         );
         let search_started = Instant::now();
@@ -153,13 +159,28 @@ mod run {
             "binary_sha256": binary_sha,
             "mode": mode,
             "structural_mode": structural_mode,
-            "variant": variant(&mode, &structural_mode),
+            "static_influence_mode": static_influence_mode,
+            "variant": variant(&mode, &structural_mode, &static_influence_mode),
+            "static_influence": {
+                "scope": "completed search, workspace counters aggregated after worker joins; null means metric not exposed",
+                "queries": result.usize_field("reachability_static_influence_queries"),
+                "reachable": result.usize_field("reachability_static_influence_reachable"),
+                "unreachable": result.usize_field("reachability_static_influence_unreachable"),
+                "row_steps": result.usize_field("reachability_static_influence_row_steps"),
+                "cache_hits": result.usize_field("reachability_static_influence_cache_hits"),
+                "masked_queries": result.usize_field("reachability_static_influence_masked_queries"),
+                "ignored_cells": result.usize_field("reachability_static_influence_ignored_cells"),
+                "mask_compilations": result.usize_field("reachability_static_influence_mask_compilations")
+            },
             "structural_order": {
                 "scope": "process lifetime, one completed search; sampled after worker joins",
                 "skipped_build_graphs": structural_totals.skipped_build_graphs,
                 "language_residual_states": structural_totals.language_residual_states,
                 "exchangeable_operations_removed": structural_totals.exchangeable_operations_removed,
-                "cached_interval_guards": structural_totals.cached_interval_guards
+                "cached_interval_guards": structural_totals.cached_interval_guards,
+                "algebraic_interval_attempts": structural_totals.algebraic_interval_attempts,
+                "algebraic_interval_guards": structural_totals.algebraic_interval_guards,
+                "algebraic_interval_row_steps": structural_totals.algebraic_interval_row_steps
             },
             "other_process_configuration": {
                 "CLEARRA_STANDARD_BAG_MEMO": std::env::var("CLEARRA_STANDARD_BAG_MEMO").ok(),
@@ -429,11 +450,25 @@ mod run {
                 }
             }
         }
-        // Old reports contained only the dependency mode. Keep their 0/1
-        // grouping while distinguishing every structural arm in newer runs.
+        // Missing experimental axes in old reports mean disabled. Keep their
+        // original grouping when every report predates that axis. A binary
+        // mismatch remains a parity error, even for otherwise compatible JSON.
+        let has_static_influence_mode = reports
+            .iter()
+            .any(|report| report.get("static_influence_mode").is_some());
         let legacy_modes = reports
             .iter()
-            .all(|report| report.get("structural_mode").is_none());
+            .all(|report| report.get("structural_mode").is_none())
+            && !has_static_influence_mode;
+        let report_variant = |dependency: &str, structural: &str, static_influence: &str| {
+            if legacy_modes {
+                dependency.to_owned()
+            } else if has_static_influence_mode {
+                variant(dependency, structural, static_influence)
+            } else {
+                format!("dependency={dependency},structural={structural}")
+            }
+        };
         let mut times: BTreeMap<String, Vec<f64>> = BTreeMap::new();
         for report in &reports {
             let dependency_mode = report["mode"].as_str().ok_or("mode missing")?;
@@ -441,14 +476,19 @@ mod run {
                 None => "0",
                 Some(value) => value.as_str().ok_or("structural_mode must be a string")?,
             };
-            if !matches!(dependency_mode, "0" | "1") || !matches!(structural_mode, "0" | "1") {
+            let static_influence_mode = match report.get("static_influence_mode") {
+                None => "0",
+                Some(value) => value
+                    .as_str()
+                    .ok_or("static_influence_mode must be a string")?,
+            };
+            if !matches!(dependency_mode, "0" | "1")
+                || !matches!(structural_mode, "0" | "1")
+                || !matches!(static_influence_mode, "0" | "1")
+            {
                 return Err("result mode flags must be 0 or 1".into());
             }
-            let mode = if legacy_modes {
-                dependency_mode.to_owned()
-            } else {
-                variant(dependency_mode, structural_mode)
-            };
+            let mode = report_variant(dependency_mode, structural_mode, static_influence_mode);
             let ms = report["timing_ms"]["search"]
                 .as_f64()
                 .ok_or("search time missing")?;
@@ -466,46 +506,74 @@ mod run {
                 )
             })
             .collect();
-        let dependency_baseline = if legacy_modes {
-            "0"
-        } else {
-            "dependency=0,structural=0"
-        };
-        let dependency_treatment = if legacy_modes {
-            "1"
-        } else {
-            "dependency=1,structural=0"
-        };
-        let structural_treatment = "dependency=1,structural=1";
+        let dependency_baseline = report_variant("0", "0", "0");
+        let dependency_treatment = report_variant("1", "0", "0");
+        let structural_treatment = report_variant("1", "1", "0");
+        let static_influence_treatment = report_variant("1", "0", "1");
+        let all_experiments_treatment = report_variant("1", "1", "1");
         let time_change = |baseline: &str, treatment: &str| {
             means
                 .get(baseline)
                 .zip(means.get(treatment))
                 .map(|(a, b)| (b / a - 1.0) * 100.0)
         };
-        let dependency_change = time_change(dependency_baseline, dependency_treatment);
-        let structural_change = time_change(dependency_treatment, structural_treatment);
-        let combined_change = time_change(dependency_baseline, structural_treatment);
-        let (primary_baseline, primary_treatment, change) = if structural_change.is_some() {
+        let dependency_change = time_change(&dependency_baseline, &dependency_treatment);
+        let structural_change = (!legacy_modes)
+            .then(|| time_change(&dependency_treatment, &structural_treatment))
+            .flatten();
+        let combined_change = (!legacy_modes)
+            .then(|| time_change(&dependency_baseline, &structural_treatment))
+            .flatten();
+        let static_influence_change = has_static_influence_mode
+            .then(|| time_change(&dependency_treatment, &static_influence_treatment))
+            .flatten();
+        let static_influence_over_structural_change = has_static_influence_mode
+            .then(|| time_change(&structural_treatment, &all_experiments_treatment))
+            .flatten();
+        let all_experiments_change = has_static_influence_mode
+            .then(|| time_change(&dependency_baseline, &all_experiments_treatment))
+            .flatten();
+        let (primary_baseline, primary_treatment, change) = if static_influence_change.is_some() {
             (
-                dependency_treatment,
-                structural_treatment,
+                &dependency_treatment,
+                &static_influence_treatment,
+                static_influence_change,
+            )
+        } else if static_influence_over_structural_change.is_some() {
+            (
+                &structural_treatment,
+                &all_experiments_treatment,
+                static_influence_over_structural_change,
+            )
+        } else if structural_change.is_some() {
+            (
+                &dependency_treatment,
+                &structural_treatment,
                 structural_change,
             )
         } else {
-            (dependency_baseline, dependency_treatment, dependency_change)
+            (
+                &dependency_baseline,
+                &dependency_treatment,
+                dependency_change,
+            )
         };
         println!("{}", serde_json::to_string_pretty(&json!({
             "schema": "clearra.placement-graph-comparison.v1", "files": paths,
             "equivalent": differences.is_empty(), "differences": differences,
-            "mode_grouping": if legacy_modes { "dependency-only (legacy reports)" } else { "dependency-and-structural" },
+            "mode_grouping": if legacy_modes { "dependency-only (legacy reports)" }
+                else if has_static_influence_mode { "dependency-structural-static-influence" }
+                else { "dependency-and-structural" },
             "search_times_ms_by_mode": times, "mean_search_ms_by_mode": means,
             "treatment_time_change_percent": change,
             "primary_comparison": { "baseline": primary_baseline, "treatment": primary_treatment },
             "time_change_percent": {
                 "dependency_vs_disabled": dependency_change,
                 "structural_vs_dependency": structural_change,
-                "combined_vs_disabled": combined_change
+                "combined_vs_disabled": combined_change,
+                "static_influence_vs_dependency": static_influence_change,
+                "static_influence_vs_structural": static_influence_over_structural_change,
+                "all_experiments_vs_disabled": all_experiments_change
             },
             "scope": "same binary/input/CPU, exact reported full-set hash and global coverage; no p95 claim"
         })).map_err(|e| e.to_string())?);
@@ -515,7 +583,13 @@ mod run {
         Ok(())
     }
 
-    fn variant(dependency_mode: &str, structural_mode: &str) -> String {
-        format!("dependency={dependency_mode},structural={structural_mode}")
+    fn variant(
+        dependency_mode: &str,
+        structural_mode: &str,
+        static_influence_mode: &str,
+    ) -> String {
+        format!(
+            "dependency={dependency_mode},structural={structural_mode},static_influence={static_influence_mode}"
+        )
     }
 }

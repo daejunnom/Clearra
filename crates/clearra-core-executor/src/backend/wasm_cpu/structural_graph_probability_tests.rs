@@ -446,7 +446,7 @@ fn cached_positive_interval_certifies_roof_orders_without_new_primitive_states()
             assert_eq!(workspace.generated_state_count(), primitive_states,
             "graph certification and interval lookup must not launch another primitive traversal");
             assert!(positive_interval_queries > 0);
-            assert!(certificate.observed_guard_count() > 0);
+            assert!(certificate.interval_guard_count() > 0);
 
             let transitions = physical_transitions(&catalog, &candidate, profile);
             let oracle = operation_words(certificate.pieces(), &transitions);
@@ -466,7 +466,7 @@ fn cached_positive_interval_certifies_roof_orders_without_new_primitive_states()
             assert_eq!(workspace.generated_state_count(), primitive_states);
             (
                 primitive_states,
-                certificate.observed_guard_count(),
+                certificate.interval_guard_count(),
                 oracle.len(),
             )
         });

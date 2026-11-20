@@ -1565,10 +1565,29 @@ fn verify_certified_poset(
     if !StandardBagCoverage::supports(universe, problem.initial_hold()) {
         return Ok(None);
     }
-    let Some(poset) = super::placement_poset::compile_with_guard(
+    let mut algebraic_attempts = 0;
+    let mut algebraic_guards = 0;
+    let mut algebraic_row_steps = 0;
+    let poset = super::placement_poset::compile_with_guard(
         catalog,
         candidate,
         |piece, realization, deleted, minimum, maximum| {
+            if let Some((proven, row_steps)) = workspace.reachability.try_monotone_lock_interval(
+                catalog,
+                minimum,
+                maximum,
+                piece,
+                problem.kick_profile().profile_id(),
+                realization,
+                LocalRelationRowFrame::new(catalog.height(), deleted),
+            ) {
+                algebraic_attempts += 1;
+                algebraic_row_steps += row_steps;
+                if proven {
+                    algebraic_guards += 1;
+                    return true;
+                }
+            }
             workspace.reachability.proves_lock_for_interval(
                 catalog,
                 minimum,
@@ -1579,7 +1598,15 @@ fn verify_certified_poset(
                 LocalRelationRowFrame::new(catalog.height(), deleted),
             )
         },
-    ) else {
+    );
+    // Include failed candidates and failed interval attempts in this cost.
+    // Aggregate once per candidate, never an atomic per row/primitive state.
+    super::structural_order::record_algebraic_intervals(
+        algebraic_attempts,
+        algebraic_guards,
+        algebraic_row_steps,
+    );
+    let Some(poset) = poset else {
         return Ok(None);
     };
     // A bounded count-vector traversal can still be exponential for a general
@@ -1605,7 +1632,9 @@ fn verify_certified_poset(
             .pieces()
             .len()
             .saturating_sub(language.operation_classes),
-        poset.observed_guard_count(),
+        poset
+            .interval_guard_count()
+            .saturating_sub(algebraic_guards),
     );
     Ok(Some(CandidateBuildResult {
         buildable: coverage.covers_any_pattern,

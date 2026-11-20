@@ -68,7 +68,7 @@ use super::{
     },
     kick_profiles::replay_profile_ids,
     mix_digest, mix_order_independent_candidate_digest,
-    reachability::ReachabilityMetrics,
+    reachability::{static_influence::StaticInfluenceMetrics, ReachabilityMetrics},
     standard_bag_coverage::StandardBagCoverage,
     WasmExactSearchError, MAX_BOARD64_PIECES,
 };
@@ -182,6 +182,58 @@ fn exact_canonical_optional_u32_field(
     (parsed.to_string() == value).then_some(Some(parsed))
 }
 
+const STATIC_INFLUENCE_DIAGNOSTIC_FIELDS: [&str; 8] = [
+    "reachability_static_influence_queries",
+    "reachability_static_influence_reachable",
+    "reachability_static_influence_unreachable",
+    "reachability_static_influence_row_steps",
+    "reachability_static_influence_cache_hits",
+    "reachability_static_influence_masked_queries",
+    "reachability_static_influence_ignored_cells",
+    "reachability_static_influence_mask_compilations",
+];
+
+/// Older workers may omit this experimental diagnostic bundle entirely.
+/// Their unreported counters contribute zero to aggregation; this is not
+/// evidence that those workers measured zero events. Once any bundle field is
+/// present, every field must be unique and canonical. Required correctness,
+/// coverage, representative and resource evidence remains mandatory elsewhere.
+fn exact_optional_static_influence_diagnostics(
+    result: &CoreExecutionResult,
+) -> Option<StaticInfluenceMetrics> {
+    let any_reported = result
+        .summary_field_entries()
+        .any(|(key, _)| STATIC_INFLUENCE_DIAGNOSTIC_FIELDS.contains(&key));
+    if !any_reported {
+        return Some(StaticInfluenceMetrics::default());
+    }
+    Some(StaticInfluenceMetrics {
+        queries: exact_canonical_usize_field(result, "reachability_static_influence_queries")?,
+        reachable: exact_canonical_usize_field(result, "reachability_static_influence_reachable")?,
+        unreachable: exact_canonical_usize_field(
+            result,
+            "reachability_static_influence_unreachable",
+        )?,
+        row_steps: exact_canonical_usize_field(result, "reachability_static_influence_row_steps")?,
+        cache_hits: exact_canonical_usize_field(
+            result,
+            "reachability_static_influence_cache_hits",
+        )?,
+        masked_queries: exact_canonical_usize_field(
+            result,
+            "reachability_static_influence_masked_queries",
+        )?,
+        ignored_cells: exact_canonical_usize_field(
+            result,
+            "reachability_static_influence_ignored_cells",
+        )?,
+        mask_compilations: exact_canonical_usize_field(
+            result,
+            "reachability_static_influence_mask_compilations",
+        )?,
+    })
+}
+
 #[derive(Clone, Copy)]
 struct DistributedWorkerScalarEvidence {
     packing_candidate_count: usize,
@@ -226,6 +278,7 @@ struct DistributedWorkerScalarEvidence {
     legal_board_verified_negative_prunes: usize,
     reachability_partial_searches: usize,
     reachability_exhaustive_searches: usize,
+    static_influence: StaticInfluenceMetrics,
     representative_candidate_ordinal: Option<u64>,
     representative_candidate_id: Option<u64>,
     representative_pattern_id: Option<u32>,
@@ -374,6 +427,7 @@ fn exact_distributed_worker_scalar_evidence(
             result,
             "reachability_exhaustive_searches",
         )?,
+        static_influence: exact_optional_static_influence_diagnostics(result)?,
         representative_candidate_ordinal: exact_canonical_optional_u64_field(
             result,
             "representative_candidate_ordinal",
@@ -3528,6 +3582,9 @@ impl WasmExactSearchSession {
             .parallel_reachability_metrics
             .exhaustive_searches
             .saturating_add(scalar.reachability_exhaustive_searches);
+        self.parallel_reachability_metrics
+            .static_influence
+            .accumulate(scalar.static_influence);
 
         if self.problem.output_policy().retains_representative_trace() {
             if let Some(rank) = scalar.representative_candidate_ordinal {
@@ -5140,6 +5197,38 @@ impl WasmExactSearchSession {
                 "reachability_exhaustive_searches",
                 reachability_metrics.exhaustive_searches,
             ),
+            field(
+                "reachability_static_influence_queries",
+                reachability_metrics.static_influence.queries,
+            ),
+            field(
+                "reachability_static_influence_reachable",
+                reachability_metrics.static_influence.reachable,
+            ),
+            field(
+                "reachability_static_influence_unreachable",
+                reachability_metrics.static_influence.unreachable,
+            ),
+            field(
+                "reachability_static_influence_row_steps",
+                reachability_metrics.static_influence.row_steps,
+            ),
+            field(
+                "reachability_static_influence_cache_hits",
+                reachability_metrics.static_influence.cache_hits,
+            ),
+            field(
+                "reachability_static_influence_masked_queries",
+                reachability_metrics.static_influence.masked_queries,
+            ),
+            field(
+                "reachability_static_influence_ignored_cells",
+                reachability_metrics.static_influence.ignored_cells,
+            ),
+            field(
+                "reachability_static_influence_mask_compilations",
+                reachability_metrics.static_influence.mask_compilations,
+            ),
             field("resource_truncated", self.truncated_reason.is_some()),
             field(
                 "resource_truncation_reason",
@@ -5553,6 +5642,7 @@ pub(super) fn retains_buildable_identity_evidence(problem: &SearchProblem) -> bo
 }
 
 fn add_reachability_metrics(total: &mut ReachabilityMetrics, next: ReachabilityMetrics) {
+    total.static_influence.accumulate(next.static_influence);
     total.lock_queries = total.lock_queries.saturating_add(next.lock_queries);
     total.harddrop_queries = total.harddrop_queries.saturating_add(next.harddrop_queries);
     total.harddrop_hits = total.harddrop_hits.saturating_add(next.harddrop_hits);
@@ -5608,8 +5698,10 @@ mod tests {
 
     use super::{
         canonical_minimum_cover_portfolio, checked_typed_problem_evidence_upper_bound,
+        exact_distributed_worker_scalar_evidence, exact_optional_static_influence_diagnostics,
         packed_rows_are_valid, DistributedTilingRootRun, ExactSearchAdvance,
-        WasmExactSearchSession, MAX_BOARD64_PIECES,
+        StaticInfluenceMetrics, WasmExactSearchSession, MAX_BOARD64_PIECES,
+        STATIC_INFLUENCE_DIAGNOSTIC_FIELDS,
     };
     use crate::backend::wasm_cpu::tiling_parallel::{
         WasmPackedTilingIdentity, WasmTilingRootChunk,
@@ -5699,6 +5791,16 @@ mod tests {
     #[test]
     fn conditioned_reachability_counters_survive_result_aggregation() {
         let mut total = super::ReachabilityMetrics {
+            static_influence: super::StaticInfluenceMetrics {
+                queries: 3,
+                reachable: 1,
+                unreachable: 2,
+                row_steps: 4,
+                cache_hits: 1,
+                masked_queries: 5,
+                ignored_cells: 6,
+                mask_compilations: 1,
+            },
             conditioned_complete_hits: 2,
             conditioned_misses: 3,
             conditioned_lookup_attempts: 4,
@@ -5709,6 +5811,16 @@ mod tests {
         super::add_reachability_metrics(
             &mut total,
             super::ReachabilityMetrics {
+                static_influence: super::StaticInfluenceMetrics {
+                    queries: 5,
+                    reachable: 3,
+                    unreachable: 2,
+                    row_steps: 7,
+                    cache_hits: 2,
+                    masked_queries: 9,
+                    ignored_cells: 10,
+                    mask_compilations: 2,
+                },
                 conditioned_complete_hits: 5,
                 conditioned_misses: 7,
                 conditioned_lookup_attempts: 9,
@@ -5722,6 +5834,14 @@ mod tests {
         assert!(total.conditioned_requested);
         assert!(total.conditioned_policy_enabled);
         assert!(total.conditioned_snapshot_active);
+        assert_eq!(total.static_influence.queries, 8);
+        assert_eq!(total.static_influence.reachable, 4);
+        assert_eq!(total.static_influence.unreachable, 4);
+        assert_eq!(total.static_influence.row_steps, 11);
+        assert_eq!(total.static_influence.cache_hits, 3);
+        assert_eq!(total.static_influence.masked_queries, 14);
+        assert_eq!(total.static_influence.ignored_cells, 16);
+        assert_eq!(total.static_influence.mask_compilations, 3);
     }
 
     #[test]
@@ -6230,6 +6350,23 @@ mod tests {
             ("legal_board_verified_negative_prunes", "0".to_owned()),
             ("reachability_partial_searches", "0".to_owned()),
             ("reachability_exhaustive_searches", "0".to_owned()),
+            ("reachability_static_influence_queries", "0".to_owned()),
+            ("reachability_static_influence_reachable", "0".to_owned()),
+            ("reachability_static_influence_unreachable", "0".to_owned()),
+            ("reachability_static_influence_row_steps", "0".to_owned()),
+            ("reachability_static_influence_cache_hits", "0".to_owned()),
+            (
+                "reachability_static_influence_masked_queries",
+                "0".to_owned(),
+            ),
+            (
+                "reachability_static_influence_ignored_cells",
+                "0".to_owned(),
+            ),
+            (
+                "reachability_static_influence_mask_compilations",
+                "0".to_owned(),
+            ),
             ("representative_candidate_ordinal", String::new()),
             ("representative_candidate_id", String::new()),
             ("representative_pattern_id", String::new()),
@@ -6298,6 +6435,118 @@ mod tests {
         LOCK.get_or_init(|| Mutex::new(()))
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    #[test]
+    fn distributed_static_influence_diagnostic_bundle_is_optional_but_atomic() {
+        let absent = CoreExecutionResult::new(Vec::new(), Vec::new());
+        assert_eq!(
+            exact_optional_static_influence_diagnostics(&absent),
+            Some(StaticInfluenceMetrics::default())
+        );
+
+        let reported = CoreExecutionResult::new(
+            STATIC_INFLUENCE_DIAGNOSTIC_FIELDS
+                .into_iter()
+                .zip([3, 1, 2, 4, 1, 5, 6, 1])
+                .map(|(key, value)| (key.to_owned(), value.to_string()))
+                .collect(),
+            Vec::new(),
+        );
+        assert_eq!(
+            exact_optional_static_influence_diagnostics(&reported),
+            Some(StaticInfluenceMetrics {
+                queries: 3,
+                reachable: 1,
+                unreachable: 2,
+                row_steps: 4,
+                cache_hits: 1,
+                masked_queries: 5,
+                ignored_cells: 6,
+                mask_compilations: 1,
+            })
+        );
+
+        for key in STATIC_INFLUENCE_DIAGNOSTIC_FIELDS {
+            let partial = reported.clone().without_field_for_test(key);
+            assert!(
+                exact_optional_static_influence_diagnostics(&partial).is_none(),
+                "missing diagnostic: {key}"
+            );
+            let only_one =
+                CoreExecutionResult::new(vec![(key.to_owned(), "0".to_owned())], Vec::new());
+            assert!(
+                exact_optional_static_influence_diagnostics(&only_one).is_none(),
+                "isolated diagnostic: {key}"
+            );
+            for value in ["01", "+1", "-1", " 1", "", "184467440737095516160"] {
+                let malformed = replace_worker_field(reported.clone(), key, value);
+                assert!(
+                    exact_optional_static_influence_diagnostics(&malformed).is_none(),
+                    "malformed diagnostic: {key}={value:?}"
+                );
+            }
+            let duplicate = reported
+                .clone()
+                .with_additional_fields(vec![(key.to_owned(), "0".to_owned())]);
+            assert!(
+                exact_optional_static_influence_diagnostics(&duplicate).is_none(),
+                "duplicate diagnostic: {key}"
+            );
+        }
+    }
+
+    #[test]
+    fn distributed_legacy_worker_without_static_influence_diagnostics_keeps_exact_evidence() {
+        let _guard = typed_chance_distributed_test_guard();
+        let (problem, mut worker) = typed_chance_worker_fixture();
+        for key in STATIC_INFLUENCE_DIAGNOSTIC_FIELDS {
+            worker = worker.without_field_for_test(key);
+        }
+        let scalar = exact_distributed_worker_scalar_evidence(&worker)
+            .expect("legacy worker retains all mandatory evidence");
+        assert_eq!(scalar.static_influence, StaticInfluenceMetrics::default());
+        for key in [
+            "count_complete",
+            "coverage_row_count",
+            "resource_peak_cpu_bytes",
+            "representative_candidate_id",
+        ] {
+            let invalid = worker.clone().without_field_for_test(key);
+            assert!(
+                exact_distributed_worker_scalar_evidence(&invalid).is_none(),
+                "required evidence remains mandatory: {key}"
+            );
+        }
+
+        let mut coordinator =
+            WasmExactSearchSession::new_external_geometry(&problem).expect("coordinator");
+        coordinator
+            .absorb_distributed_result(&worker)
+            .expect("legacy worker with complete exact evidence");
+        assert_eq!(
+            coordinator.parallel_reachability_metrics.static_influence,
+            StaticInfluenceMetrics::default()
+        );
+        let result = match coordinator
+            .complete_external_geometry(0, 0)
+            .expect("complete coordinator")
+        {
+            ExactSearchAdvance::Completed(result) => result,
+            ExactSearchAdvance::Pending | ExactSearchAdvance::Cancelled => {
+                panic!("coordinator must complete")
+            }
+        };
+        let evidence = result
+            .pc_chance_coverage_evidence()
+            .expect("coordinator-bound legacy worker evidence");
+        assert!(evidence.complete());
+        assert!(evidence.problem().matches_search_problem(&problem));
+        assert_eq!(result.coverage_pattern_words(), &[1]);
+        assert_eq!(
+            evidence.coverage_union().words(),
+            result.coverage_pattern_words()
+        );
     }
 
     #[test]
