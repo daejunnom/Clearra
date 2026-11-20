@@ -19,9 +19,9 @@ fn scenario_request(profile: &KickTableProfile) -> AppRequest {
     // Use the same JSON/verification boundary as the legacy CLI assembler.
     let json = KickImport::to_json(profile).unwrap();
     let profile = VerifiedKickTableProfile::try_new(KickImport::from_json(&json).unwrap()).unwrap();
-    // Six cells are filled in the bottom row, leaving an exact horizontal I.
+    // The 1L target has six filled cells, leaving an exact horizontal I.
     let query = PcScenarioQuery::new(
-        PcScenarioBoard::standard_10(4, 0x3f0),
+        PcScenarioBoard::standard_10(1, 0x3f0),
         PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::I])),
         PieceWindow::new(1),
     )

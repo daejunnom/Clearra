@@ -2627,16 +2627,17 @@ mod family_enumerator_stack_tests {
         let a = family.append(4, FAMILY_EMPTY).unwrap();
         let b = family.append(5, FAMILY_EMPTY).unwrap();
         let root = family.union(a, b).unwrap();
+        let mut reservation_scratch = None;
         let (enumerator, count) = FamilyEnumerator::from_completed_family(
             Arc::from([]),
             family,
             root,
             1,
-            Some(&mut scratch),
+            Some(&mut reservation_scratch),
         );
-        assert!(scratch.is_some());
-        let fallback =
-            search_with(enumerator, count).prepare_compiled_parallel(usize::MAX, scratch);
+        assert!(reservation_scratch.is_some());
+        let fallback = search_with(enumerator, count)
+            .prepare_compiled_parallel(usize::MAX, reservation_scratch);
         let ParallelGeometryPreparation::Serial { geometry, reason } = fallback else {
             panic!("impossible partition reservation cannot dispatch");
         };

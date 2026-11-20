@@ -13,14 +13,19 @@ use clearra_pc_graph::request::{
 use clearra_supply::queue::fixed_sequence::FixedSequence;
 
 fn scenario_query() -> PcScenarioQuery {
-    // Normalize the already-complete bottom row first. The remaining 0x3f0
-    // leaves exactly four horizontally adjacent cells for the only I.
+    // The full bottom row clears before search. In the 2L target only O
+    // can cover the two remaining bottom holes; the two horizontal I pieces
+    // then uniquely tile x=2..9 in the original upper row.
     PcScenarioQuery::new(
-        PcScenarioBoard::standard_10(4, (0x3f0 << 10) | 0x3ff),
-        PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::I])),
-        PieceWindow::new(1),
+        PcScenarioBoard::standard_10(2, (0x3fc << 10) | 0x3ff),
+        PcQueueInput::fixed_sequence(FixedSequence::new(vec![
+            PieceKind::O,
+            PieceKind::I,
+            PieceKind::I,
+        ])),
+        PieceWindow::new(3),
     )
-    .with_exact_pieces(Some(1))
+    .with_exact_pieces(Some(3))
     .with_allow_hold(false)
     .with_count_policy(PcCountPolicy::CountAll)
     .with_retained_trace_limit(1)
@@ -69,7 +74,10 @@ fn compact_fixed_scenario_input_replay_matches_native_and_cooperative() {
     let cooperative = complete_cooperatively(&rust, request);
     let direct = core(&direct);
     let cooperative = core(&cooperative);
-    let expected_key = "ctk1|initial=00000000000003f0|placements=I:000000000000000f";
+    let expected_key = concat!(
+        "ctk1|initial=00000000000003fc|placements=",
+        "I:000000000000f000,I:00000000000f0000,O:0000000000000c03",
+    );
     assert_eq!(direct.normalized_solution_keys().len(), 1);
     assert_eq!(direct.normalized_solution_keys()[0], expected_key);
     assert_eq!(direct.bool_field("count_complete"), Some(true));
@@ -82,7 +90,7 @@ fn compact_fixed_scenario_input_replay_matches_native_and_cooperative() {
     };
     assert_eq!(
         decoded.initial_board(),
-        &PcScenarioBoard::standard_10(4, 0x3f0)
+        &PcScenarioBoard::standard_10(2, 0x3fc)
     );
     assert_eq!(
         decoded
@@ -90,9 +98,9 @@ fn compact_fixed_scenario_input_replay_matches_native_and_cooperative() {
             .as_fixed_sequence()
             .unwrap()
             .pieces(),
-        &[PieceKind::I]
+        &[PieceKind::O, PieceKind::I, PieceKind::I]
     );
-    assert_eq!(decoded.exact_pieces(), Some(1));
+    assert_eq!(decoded.exact_pieces(), Some(3));
     assert_eq!(decoded.count_policy(), PcCountPolicy::CountAll);
     assert!(!decoded.allow_hold());
     let fields = [
@@ -142,7 +150,7 @@ fn compact_fixed_scenario_input_replay_matches_native_and_cooperative() {
     // sr2 cannot describe a caller-supplied supply window. Keep the actual
     // solve available and omit a token that would silently change its input.
     let override_request =
-        legacy_scenario(scenario_query().with_supply_window_size(SupplyWindowSize::new(1)));
+        legacy_scenario(scenario_query().with_supply_window_size(SupplyWindowSize::new(3)));
     let override_direct = rust.run(override_request.clone());
     let override_cooperative = complete_cooperatively(&rust, override_request);
     assert_eq!(core(&override_direct).field("scenario_replay_token"), None);
