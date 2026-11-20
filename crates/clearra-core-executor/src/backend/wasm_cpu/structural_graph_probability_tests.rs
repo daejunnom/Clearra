@@ -745,3 +745,136 @@ fn count_all_same_current_and_held_piece_keeps_the_operation_graph() {
             > 1
     );
 }
+
+#[test]
+fn clear_can_close_a_translation_entry_and_requires_a_movement_predecessor() {
+    use clearra_core_domain::piece::rotation::RotationState;
+
+    let t_cells = 0x201c00;
+    let l_cells = 0xc02008;
+    let (catalog, candidate) = fixture(3, &[(PieceKind::T, t_cells), (PieceKind::L, l_cells)]);
+    let initial = catalog.initial_board();
+    assert_eq!(initial, 0x3f1fc3f7);
+    let pieces: Vec<_> = candidate
+        .row_ids()
+        .iter()
+        .map(|&row_id| catalog.skeleton(row_id).piece)
+        .collect();
+    let l_operation = pieces
+        .iter()
+        .position(|&piece| piece == PieceKind::L)
+        .unwrap();
+    let (after_l, deleted) = subset_state(&catalog, &candidate, 1 << l_operation);
+    assert_eq!((after_l, deleted), (0xff7f8, 1));
+    let t_row = catalog.skeleton_id(PieceKind::T, t_cells).unwrap();
+    let before_clear = catalog
+        .instantiations(t_row, 0)
+        .find(|lock| {
+            lock.rotation == RotationState::Zero
+                && lock.x == 0
+                && lock.lock_y == 1
+                && lock.lock_mask == t_cells
+        })
+        .unwrap();
+    let after_clear = catalog
+        .instantiations(t_row, deleted)
+        .find(|lock| {
+            lock.rotation == RotationState::Zero
+                && lock.x == 0
+                && lock.lock_y == 0
+                && lock.lock_mask == 0x807
+        })
+        .unwrap();
+    assert!(placement_poset::compile(&catalog, &candidate).is_none());
+
+    // At D=0, L alone would complete original row zero, so that undeleted
+    // row forces L out of the interval maximum. T can enter from x=1 and
+    // slide left. L first clears that row and leaves a one-cell top entrance
+    // above T's three-cell base; the fixed-orientation proof is now Unknown.
+    // The full reference oracle also rejects T there under every profile.
+    //
+    // The exact language {TL} is representable by the ordinary poset T < L.
+    // What is missing is inference of this necessary movement/clear edge,
+    // beyond the compiler's current grounding and row-contributor facts.
+    // A positive-only certificate miss must never invent that negative fact.
+    for profile in [
+        KickTableProfileId::Srs90,
+        KickTableProfileId::SrsPlus,
+        KickTableProfileId::SrsX,
+        KickTableProfileId::Jstris180,
+        KickTableProfileId::NoKick,
+    ] {
+        let transitions = physical_transitions(&catalog, &candidate, profile);
+        assert_eq!(
+            operation_words(&pieces, &transitions),
+            BTreeSet::from([vec![PieceKind::T, PieceKind::L]]),
+            "profile={profile:?}: exactly T before L"
+        );
+        let anchors = reference_spawn_lock_anchors(10, 3, after_l, PieceKind::T, profile).unwrap();
+        assert_eq!(
+            anchors[RotationState::Zero.quarter_turns() as usize] & 1,
+            0,
+            "profile={profile:?}: T cannot enter after L's clear"
+        );
+
+        let workspace = ReachabilityWorkspace::default();
+        structural_order::with_translation_interval_mode(true, || {
+            let initial_attempt = workspace
+                .try_translation_lock_interval(
+                    &catalog,
+                    initial,
+                    initial,
+                    PieceKind::T,
+                    profile,
+                    before_clear,
+                    LocalRelationRowFrame::new(3, 0),
+                )
+                .unwrap();
+            assert!(initial_attempt.0);
+            assert!(initial_attempt.1 > 0);
+            let after_l_attempt = workspace
+                .try_translation_lock_interval(
+                    &catalog,
+                    after_l,
+                    after_l,
+                    PieceKind::T,
+                    profile,
+                    after_clear,
+                    LocalRelationRowFrame::new(3, deleted),
+                )
+                .unwrap();
+            assert!(!after_l_attempt.0);
+            assert!(after_l_attempt.1 > 0);
+
+            let mut positive_t_guards = 0;
+            let certificate = placement_poset::compile_with_guard(
+                &catalog,
+                &candidate,
+                |piece, realization, deleted, minimum, maximum| {
+                    let proven = workspace
+                        .try_translation_lock_interval(
+                            &catalog,
+                            minimum,
+                            maximum,
+                            piece,
+                            profile,
+                            realization,
+                            LocalRelationRowFrame::new(3, deleted),
+                        )
+                        .is_some_and(|(proven, _)| proven);
+                    if proven && piece == PieceKind::T {
+                        positive_t_guards += 1;
+                    }
+                    proven
+                },
+            );
+            assert!(positive_t_guards > 0);
+            assert!(certificate.is_none());
+        });
+        assert_eq!(
+            workspace.generated_state_count(),
+            0,
+            "cold certificates must not run primitive traversal"
+        );
+    }
+}

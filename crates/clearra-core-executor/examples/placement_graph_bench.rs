@@ -82,6 +82,11 @@ mod run {
         if !matches!(static_influence_mode.as_str(), "0" | "1") {
             return Err("CLEARRA_STATIC_INFLUENCE must be 0 or 1 at process start".into());
         }
+        let translation_interval_mode =
+            std::env::var("CLEARRA_TRANSLATION_INTERVAL").unwrap_or_else(|_| "0".into());
+        if !matches!(translation_interval_mode.as_str(), "0" | "1") {
+            return Err("CLEARRA_TRANSLATION_INTERVAL must be 0 or 1 at process start".into());
+        }
         let binary_sha = file_sha(&std::env::current_exe().map_err(|e| e.to_string())?)?;
         let capacity = CpuCapacity::current();
         let policy = PcExecutionPolicy::mvp_default()
@@ -100,7 +105,7 @@ mod run {
         }
         let compile_ms = compile_started.elapsed().as_secs_f64() * 1000.0;
         eprintln!(
-            "placement_graph_bench starting: case={} mode={} structural_mode={} static_influence_mode={} auto_cpu_limit={}",
+            "placement_graph_bench starting: case={} mode={} structural_mode={} static_influence_mode={} translation_interval_mode={} auto_cpu_limit={}",
             if small {
                 "one-I-preflight"
             } else {
@@ -109,6 +114,7 @@ mod run {
             mode,
             structural_mode,
             static_influence_mode,
+            translation_interval_mode,
             capacity.hard_limit(),
         );
         let search_started = Instant::now();
@@ -160,7 +166,8 @@ mod run {
             "mode": mode,
             "structural_mode": structural_mode,
             "static_influence_mode": static_influence_mode,
-            "variant": variant(&mode, &structural_mode, &static_influence_mode),
+            "translation_interval_mode": translation_interval_mode,
+            "variant": variant(&mode, &structural_mode, &static_influence_mode, &translation_interval_mode),
             "static_influence": {
                 "scope": "completed search, workspace counters aggregated after worker joins; null means metric not exposed",
                 "queries": result.usize_field("reachability_static_influence_queries"),
@@ -180,7 +187,10 @@ mod run {
                 "cached_interval_guards": structural_totals.cached_interval_guards,
                 "algebraic_interval_attempts": structural_totals.algebraic_interval_attempts,
                 "algebraic_interval_guards": structural_totals.algebraic_interval_guards,
-                "algebraic_interval_row_steps": structural_totals.algebraic_interval_row_steps
+                "algebraic_interval_row_steps": structural_totals.algebraic_interval_row_steps,
+                "translation_interval_attempts": structural_totals.translation_interval_attempts,
+                "translation_interval_guards": structural_totals.translation_interval_guards,
+                "translation_interval_row_steps": structural_totals.translation_interval_row_steps
             },
             "other_process_configuration": {
                 "CLEARRA_STANDARD_BAG_MEMO": std::env::var("CLEARRA_STANDARD_BAG_MEMO").ok(),
@@ -456,15 +466,29 @@ mod run {
         let has_static_influence_mode = reports
             .iter()
             .any(|report| report.get("static_influence_mode").is_some());
+        let has_translation_interval_mode = reports
+            .iter()
+            .any(|report| report.get("translation_interval_mode").is_some());
         let legacy_modes = reports
             .iter()
             .all(|report| report.get("structural_mode").is_none())
-            && !has_static_influence_mode;
-        let report_variant = |dependency: &str, structural: &str, static_influence: &str| {
+            && !has_static_influence_mode
+            && !has_translation_interval_mode;
+        let report_variant = |dependency: &str,
+                              structural: &str,
+                              static_influence: &str,
+                              translation_interval: &str| {
             if legacy_modes {
                 dependency.to_owned()
+            } else if has_translation_interval_mode {
+                variant(
+                    dependency,
+                    structural,
+                    static_influence,
+                    translation_interval,
+                )
             } else if has_static_influence_mode {
-                variant(dependency, structural, static_influence)
+                format!("dependency={dependency},structural={structural},static_influence={static_influence}")
             } else {
                 format!("dependency={dependency},structural={structural}")
             }
@@ -482,13 +506,25 @@ mod run {
                     .as_str()
                     .ok_or("static_influence_mode must be a string")?,
             };
+            let translation_interval_mode = match report.get("translation_interval_mode") {
+                None => "0",
+                Some(value) => value
+                    .as_str()
+                    .ok_or("translation_interval_mode must be a string")?,
+            };
             if !matches!(dependency_mode, "0" | "1")
                 || !matches!(structural_mode, "0" | "1")
                 || !matches!(static_influence_mode, "0" | "1")
+                || !matches!(translation_interval_mode, "0" | "1")
             {
                 return Err("result mode flags must be 0 or 1".into());
             }
-            let mode = report_variant(dependency_mode, structural_mode, static_influence_mode);
+            let mode = report_variant(
+                dependency_mode,
+                structural_mode,
+                static_influence_mode,
+                translation_interval_mode,
+            );
             let ms = report["timing_ms"]["search"]
                 .as_f64()
                 .ok_or("search time missing")?;
@@ -506,11 +542,13 @@ mod run {
                 )
             })
             .collect();
-        let dependency_baseline = report_variant("0", "0", "0");
-        let dependency_treatment = report_variant("1", "0", "0");
-        let structural_treatment = report_variant("1", "1", "0");
-        let static_influence_treatment = report_variant("1", "0", "1");
-        let all_experiments_treatment = report_variant("1", "1", "1");
+        let dependency_baseline = report_variant("0", "0", "0", "0");
+        let dependency_treatment = report_variant("1", "0", "0", "0");
+        let structural_treatment = report_variant("1", "1", "0", "0");
+        let static_influence_treatment = report_variant("1", "0", "1", "0");
+        let static_structural_treatment = report_variant("1", "1", "1", "0");
+        let translation_treatment = report_variant("1", "1", "0", "1");
+        let all_experiments_treatment = report_variant("1", "1", "1", "1");
         let time_change = |baseline: &str, treatment: &str| {
             means
                 .get(baseline)
@@ -528,12 +566,30 @@ mod run {
             .then(|| time_change(&dependency_treatment, &static_influence_treatment))
             .flatten();
         let static_influence_over_structural_change = has_static_influence_mode
-            .then(|| time_change(&structural_treatment, &all_experiments_treatment))
+            .then(|| time_change(&structural_treatment, &static_structural_treatment))
             .flatten();
-        let all_experiments_change = has_static_influence_mode
+        let translation_change = has_translation_interval_mode
+            .then(|| time_change(&structural_treatment, &translation_treatment))
+            .flatten();
+        let translation_over_static_change = has_translation_interval_mode
+            .then(|| time_change(&static_structural_treatment, &all_experiments_treatment))
+            .flatten();
+        let all_experiments_change = (has_static_influence_mode || has_translation_interval_mode)
             .then(|| time_change(&dependency_baseline, &all_experiments_treatment))
             .flatten();
-        let (primary_baseline, primary_treatment, change) = if static_influence_change.is_some() {
+        let (primary_baseline, primary_treatment, change) = if translation_change.is_some() {
+            (
+                &structural_treatment,
+                &translation_treatment,
+                translation_change,
+            )
+        } else if translation_over_static_change.is_some() {
+            (
+                &static_structural_treatment,
+                &all_experiments_treatment,
+                translation_over_static_change,
+            )
+        } else if static_influence_change.is_some() {
             (
                 &dependency_treatment,
                 &static_influence_treatment,
@@ -542,7 +598,7 @@ mod run {
         } else if static_influence_over_structural_change.is_some() {
             (
                 &structural_treatment,
-                &all_experiments_treatment,
+                &static_structural_treatment,
                 static_influence_over_structural_change,
             )
         } else if structural_change.is_some() {
@@ -562,6 +618,7 @@ mod run {
             "schema": "clearra.placement-graph-comparison.v1", "files": paths,
             "equivalent": differences.is_empty(), "differences": differences,
             "mode_grouping": if legacy_modes { "dependency-only (legacy reports)" }
+                else if has_translation_interval_mode { "dependency-structural-static-influence-translation-interval" }
                 else if has_static_influence_mode { "dependency-structural-static-influence" }
                 else { "dependency-and-structural" },
             "search_times_ms_by_mode": times, "mean_search_ms_by_mode": means,
@@ -573,6 +630,8 @@ mod run {
                 "combined_vs_disabled": combined_change,
                 "static_influence_vs_dependency": static_influence_change,
                 "static_influence_vs_structural": static_influence_over_structural_change,
+                "translation_interval_vs_structural": translation_change,
+                "translation_interval_vs_static_structural": translation_over_static_change,
                 "all_experiments_vs_disabled": all_experiments_change
             },
             "scope": "same binary/input/CPU, exact reported full-set hash and global coverage; no p95 claim"
@@ -587,9 +646,10 @@ mod run {
         dependency_mode: &str,
         structural_mode: &str,
         static_influence_mode: &str,
+        translation_interval_mode: &str,
     ) -> String {
         format!(
-            "dependency={dependency_mode},structural={structural_mode},static_influence={static_influence_mode}"
+            "dependency={dependency_mode},structural={structural_mode},static_influence={static_influence_mode},translation_interval={translation_interval_mode}"
         )
     }
 }

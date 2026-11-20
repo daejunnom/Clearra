@@ -2,9 +2,11 @@
 
 작성일: 2026-11-20 KST
 
-조사 기준: `prototype/placement-dependency-20261120`, `caacfae0c9958949858bb846f2bb52eb5fcbb50d`
+초안 조사 기준: `prototype/placement-dependency-20261120`, `caacfae0c9958949858bb846f2bb52eb5fcbb50d`
 
-상태: **기획 문서. 구현·리팩터링·삭제·새 벤치마크를 실행하지 않았다.**
+내부 연산 추가 감사 기준: `45cbf15eec6a6c8821946756807f90703466dff6`. 2.4절의 파일·줄 수는 초안 기준 집계이며 추가 감사의 새 집계가 아니다.
+
+상태: **실행 계획과 소스 감사 문서. 추가 감사에서는 제품 코드 수정·빌드·벤치마크를 하지 않았다.** 병행하는 CEGIS 구현·검증의 진행과 결과는 5.7절의 별도 실행보고에 연결한다. 이 문서의 보강만으로 11절 작업을 완료 처리하지 않는다.
 
 ## 1. 결정과 우선순위
 
@@ -60,7 +62,7 @@
 
 `clearra-exact-cover`의 현재 `solve_first` 중심 solver와 ILC 전체 family compiler는 계약이 다르다. `clearra-geometry`의 정적 placement 열거도 stretched target-frame ILC를 자동 대체하지 않는다. **기존 코어를 우선 검토하되, 의미가 같은 부분만 재사용한다.**
 
-`CompactedRowFrame`은 이미 행 대응의 단일 소유자이고 `LocalRelationRowFrame`은 이를 감싸 더 좁은 범위를 허용한다. 이 wrapper를 중복으로 지우지 않는다. 현재 일부 변환은 폭 10·높이 1~6이라는 계약을 가지므로, extended 지원은 새 변환기를 복제하지 않고 범위별 일반화 가능성을 검증한다. `ProjectionCatalog`도 compact/extended 입력을 `compile_projected`로 합치는 기존 재사용 사례다. [S10]
+`CompactedRowFrame`은 기존 compact 행 대응의 소유자이고 `LocalRelationRowFrame`은 이를 감싸 더 좁은 범위를 허용한다. 이 wrapper를 중복으로 지우지 않는다. 다만 `catalog.rs`와 `buildup.rs`에도 행 사상이 있으며 저장소 전체의 행 변환이 이미 한 구현에 통합된 상태는 아니다. `CompactedRowFrame`은 높이 1~6·`u8` 삭제 mask이고 일부 보드 adapter는 폭 10을 전제한다. C target-frame 투영의 최대 16행·`u16` mask 계약을 이 좁은 객체로 대체하지 않는다. 순수 행사상과 보드 adapter를 구별하여 범위별 일반화 가능성을 검증한다. `ProjectionCatalog`가 compact/extended 입력을 `compile_projected`로 합치는 것은 기존 재사용 사례다. [S10][S12]
 
 ### 2.3 APDP 적용 범위와 메모리 문제를 구분한다
 
@@ -107,10 +109,12 @@
 10. 워커는 환경의 자동 논리 프로세서 수를 유지한다. 자원 정책이나 워커 수를 줄여 실패를 숨기지 않는다. 큰 벤치마크는 manager 아래에서 순차 실행한다.
 11. 원시 실행 기록은 `_local/artifacts/`, 검토한 해석은 `docs/research/`에 둔다. 코드 이동·성능 변경·정책 변경을 한 변경에 섞지 않는다.
 12. 이번 문서는 구현 완료 기록이 아니다. 아래 체크리스트는 후속 구현과 검증을 통과해야 완료 처리한다.
+13. **SRP는 작업·리뷰 규약으로만 사용한다.** 1,000줄 제한, 필수 `SRP rationale:` 문구, marker 존재 여부, 파일·타입·crate 개수로 합격을 판정하는 정적 gate를 새로 만들거나 복구하지 않는다. 정해진 문구나 주석의 존재는 구현·증명의 근거가 아니다.
+14. Rust에서는 속도와 메모리 효율성을 위해 통상적인 SRP 경계를 넘어서 연산·상태를 함께 둘 수 있다. 분리가 재계산·복사·할당·장기 보유·dispatch를 늘린다면 융합을 검토한다. 변경 리뷰에 실제 연산·소유권의 이유를 남기되 파일별 의무 문구나 예외 승인 제도를 만들지 않는다. 정확성·완전성·실제 의존성·ABI·unsafe 경계 계약은 그대로 지킨다.
 
 ## 4. 목표 구조와 객체의 책임
 
-객체화의 기준은 **하나의 의미, 그 의미의 불변식, 필요한 데이터의 수명, 제한된 변경 경로**다. 클래스 수나 trait 수를 늘리는 것이 아니다. 다음은 개념적 역할이며 각 행을 새 crate나 새 파일로 만들라는 요구가 아니다.
+객체화의 기준은 **의미와 불변식을 명시하고, 실제 연산과 데이터 수명을 관리하는 것**이다. Rust에 클래스 계층을 강제하거나 책임 하나마다 객체·trait를 추가하지 않는다. 한 커널이 여러 역할을 함께 수행하는 편이 반복 연산과 메모리를 줄이면 그 구조를 유지할 수 있다. 다음은 계약을 논의하기 위한 역할이며 각 행을 새 crate나 새 파일로 만들라는 요구가 아니다.
 
 | 역할 | 기존 소유자 우선 | 소유해야 할 내용 | 소유하지 않을 내용 |
 | --- | --- | --- | --- |
@@ -211,6 +215,14 @@ CountAll이 요구하지 않는 한 동일 배치의 여러 terminal 증거가 �
 
 개발 중에는 기존 정확 BuildUp을 비교·fallback으로 사용할 수 있다. 하지만 fallback이 남은 비율과 비용을 공개해야 하며, 모든 대상 관계가 완성됐다고 선언할 때는 predicate 내부에 물리 탐색을 숨길 수 없다. 일반화가 아직 안 된 범위는 범위별 미완성으로 남긴다.
 
+### 5.7 병행 CEGIS 구현의 결과와 다음 우선순위
+
+[Translation interval·내부 연산 재사용 실행보고](translation-interval-and-operation-reuse-2026-11-20.md)에 모든 표준 미노의 고정 방향 좌우·하강 양성 구간 증명, 적용 계약, 독립 검증과 제품 결과를 기록했다. 해당 증명은 BFS/pose 방문 집합 없이 구간 전체를 보장하지만, 측정한 비-O 제품 사례의 전체 graph/primitive 감소는 0이었다. 기본 비활성 실험으로 유지하며 큰 검색의 성능 향상이나 G06 전체 완료로 표시하지 않는다.
+
+T/L 반례의 정확한 언어는 `{TL}`로 일반 poset가 표현할 수 있다. 빠진 것은 **이동과 줄 삭제로 인한 차단에서 필요한 선행 간선을 도출하는 단계**다. 현재 compiler는 `D=0`의 T 양성 증명을 얻고도 `D={0}`에서의 실패를 올바르게 Unknown으로 남겨 전체 인증을 중단한다. 양성 guard 하나를 전체 관계 완성으로 계산하지 않는다.
+
+다음 작은 작업의 순서는 G01의 증거 권한·조건 계약, G05/G09의 모든 마지막 이동 역상을 포함하는 bounded 부정 증명, G03의 clear 원인과 해당 부정 조건 결합, G06/G15의 유효한 부분 증명 재사용이다. 역상 전체가 경계/최소 점유에 막힌 경우만 부정하며, 일부 이동이나 특정 kick만 검사한 실패를 간선으로 승격하지 않는다. 특정 frame의 차단을 무조건 선행관계로 일반화하려면 그 조건이 모든 관련 prefix에서 유지된다는 증명이 추가로 필요하다. 이 부분 계약이 준비되면 기존 typed relation과 supply를 연결하고, 큰 family 재설계 전체를 기다리지 않는다.
+
 ## 6. ILC·APDP의 구조적 최적화
 
 ### 6.1 ILC: 정확한 frame-domain을 한 번 정의한다
@@ -292,6 +304,109 @@ M_{peak}\approx M_{shared}+W M_{worker}+M_{live\ candidate}
 
 진단 작업은 알고리즘과 독립적으로 먼저 진행할 수 있다. 정상 exit·Unix signal·manager 종료를 구분하고, 커널 peak와 표본 peak, 읽을 수 있는 외부 한도와 unavailable을 구분한다. hot path에 supervisor나 노드별 시계를 넣지 않는다.
 
+### 7.3 전환·재사용의 실제 단위: 12개 내부 연산군
+
+아래 OP01~OP12는 11절의 88개 작업을 구체화하는 감사 지도이며, 새 작업 수·파일 수·crate 수가 아니다. **이미 같은 계산이 있는지, 같은 이름이지만 명제·지원 범위가 다른지, 계산은 있으나 제품 연결이 없는지를 먼저 구분한다.** 경로가 길어지는 것을 피하기 위해 이 절의 `W/`는 `crates/clearra-core-executor/src/backend/wasm_cpu/`, `C/`는 `core-c/src/`를 뜻한다. 이름이 같은 helper를 합치는 것만으로 성능 개선이라고 판정하지 않는다.
+
+#### OP01 — 행 사상과 줄 삭제 누적: O03·O07·I06
+
+- **기존 구현·소비자:** C의 `packing/target_frame_projection.c::{clearra_target_frame_project_lock_operation,clearra_target_frame_merge_deleted_rows}`; Rust `crates/clearra-core-executor/src/row_frame.rs::CompactedRowFrame`, `W/catalog.rs::target_row_for_current_row`, `W/buildup.rs::{merge_deleted_rows,place_and_clear,compact_target_board}`. ILC·BuildUp·관계·replay가 소비한다.
+- **입출력·불변식:** `(target height, 삭제된 원래 행 D, 물리 행)`에서 원래 행을 얻고, 새 물리 삭제 행은 이전 프레임으로 역변환한 후 D에 합친다. surviving rows의 순서를 보존한다. 삭제 행 개수만 같은 두 D를 동치로 보지 않는다.
+- **공유·무효화:** 동일 owner의 `(height,D)` 행사상은 공유 가능하다. 보드 layout·target 높이 또는 D가 바뀌면 해당 변환의 유효성을 다시 판정한다. compact의 1~6행·`u8` mask/폭 10 adapter와 C의 최대 16행·`u16` mask를 동일 범위로 취급하지 않는다.
+- **남은 작업:** 순수 행사상과 좁은 보드 adapter의 계약을 분리해 중복 계산을 연결한다. 좁힌 `LocalRelationRowFrame`은 별도 의미를 갖는 wrapper이므로 무조건 제거하지 않는다. [S10][S12]
+
+#### OP02 — 형상 좌표와 ordered kick 정규화: O01·O02·O07·G05
+
+- **기존 구현·소비자:** `clearra-piece-registry`, `clearra-rules/src/kicks`; C `reachability/kick_first_success.c::{clearra_reachability_kick_offsets_for_transition,clearra_kick_first_success}`; `W/reachability.rs`, `W/extended_reachability.rs`, `clearra-finesse/src/lib.rs`의 `normalized_kick_delta`·`normalized_rotation_center`. `W/kick_profiles.rs`는 이미 Rust `SrsKicks`·`NoKick`를 사용한다.
+- **입출력·불변식:** `(shape definition, from/to rotation, 순서 있는 kick offsets, 좌표 규약)`을 정규화된 후보 전이로 만든다. delta는 `kick + center(from) - center(to)`이며 앞 후보 실패 조건과 선택된 kick index를 잃지 않는다. 같은 occupied mask도 orientation·spin/finesse evidence까지 같은 것은 아니다.
+- **공유·무효화:** 불변 shape/rule/dimensions/source-entry 계약별 템플릿을 공유한다. builtin profile ID만으로 식별하는 계약을 custom profile까지 넓힐 때에는 실제 내용·버전의 동일성도 보존한다. shape registry·180 허용·좌표 또는 source-entry 규약 변경 시 기존 증명이 유효한지 확인한다.
+- **남은 작업:** 세 Rust 정규화 소비자의 의미 원천을 통합하고 ABI ID 인코딩만 분리한다. 관계 compiler는 이 전이 계약을 재사용한다. 최대 kick offset만으로 독립적인 영향 반경을 새로 추정하지 않는다. [S2][S13]
+
+#### OP03 — ILC 행 투영 필요조건: I05·I08
+
+- **기존 구현·소비자:** `W/inverse_projection.rs::ProjectionRowFilter::compile`, compact·extended inverse catalog, C `packing/target_frame_projection.c`. Rust 필터는 local row별 열 점유와 허용 target row를 만들고 열별 요구량과 가용량의 모순을 제거한다.
+- **입출력·불변식:** `(projection policy,width,height,shape cells,local rows,x,available-row 의미)`에서 허용 투영 후보를 얻는다. 이는 **필요조건 필터**이며 leaf의 정확 projection을 대체하지 않는다.
+- **공유·무효화:** shape kind만이 아니라 rotation/x/열 점유와 available-row 조건이 같을 때 공유한다. residual 변경으로 가용 행 의미가 바뀌면 이전 필터를 그대로 사용하지 않는다. 기존 compact/extended 공용 필터를 또 만들지 않는다.
+- **남은 작업:** 동일 열 요구식·행 가용 조건을 여러 ILC 분기에서 다시 생성하는 부분을 찾아 전달·증분 갱신한다. bitfield나 container 변경은 이 작업의 범위 밖이다. [S12]
+
+#### OP04 — 정확 realization과 clear-state domain: I01~I03·O04
+
+- **기존 구현·소비자:** C `packing/geometry_realization_domain.c::{clearra_geometry_catalog_instantiate_realization,clearra_geometry_catalog_skeleton_supports_clear_state,clearra_geometry_catalog_realizations_for_clear_state}`; `W/catalog.rs::{instantiate_realization_raw,compile_instantiation_table}`, `GeometryCatalog::{realizations,instantiations,realization_requirement_is_satisfied}`. ILC·BuildUp·support·replay가 소비한다.
+- **입출력·불변식:** `(canonical skeleton,realization alternative,D)`에서 `(lock mask,rotation,x,lock_y)`를 얻는다. 필요한 삭제 행 포함, 자기 target 행 삭제 금지, 삭제된 아래 행 수에 따른 y 이동, **재투영 target cells의 정확 일치**를 모두 만족해야 한다.
+- **강도 차이:** Rust `skeleton_requirement_domains`는 어떤 alternative의 `required_deleted_rows`가 D에 포함된다는 약한 조건이다. C `skeleton_supports_clear_state`의 exact-state bits/정확 instantiation과 같지 않다. 필요조건을 정확 domain API의 성공으로 바꾸지 않는다.
+- **공유·무효화:** `(catalog owner,skeleton ID,D)`에서 모든 구체 alternative를 보존한다. Rust의 사전 instantiation 표는 상한·할당 조건 밖에서 raw iterator로 fallback한다. catalog/registry/projection 계약이 달라지면 ID와 결과를 재사용하지 않는다. C의 template/operation ID·projection evidence까지 소비하는 경로는 Rust tuple만으로 parity를 선언하지 않는다. [S12]
+
+#### OP05 — 접지·cell incidence·행 contributor: G02·G03·A05
+
+- **기존 구현·소비자:** `GeometryCatalog::support`, `W/buildup.rs::placement_is_grounded`; C `buildup/grounded_filter.c::clearra_buildup_grounded_filter_accepts`, `buildup/realization_domain_propagation.c::clearra_realization_deleted_rows_for_state`; Rust `RealizationFeasibilityWorkspace::dependency_relaxation_is_infeasible`의 row contributors.
+- **입출력·불변식:** placement가 바닥에 닿거나 한 칸 아래 placement가 board와 교차해야 접지한다. 접지는 필요조건이다. 행 contributor가 모두 실행되면 줄 삭제를 유도하며 같은 kind의 서로 다른 operation도 별개 contributor다.
+- **공유·무효화:** 정확 realization/D별 아래 외곽과 가능한 supporter OR, 원래 행 contributor를 공유한다. D 변경으로 위치가 바뀌거나 prefix의 concrete supporter가 달라지면 갱신한다. 같은 residual/counts만으로 support 관계를 공유하지 않는다.
+- **남은 작업:** 양쪽 코어에 이미 있는 접지 reject를 추가하는 것이 아니라, 타일링 이전에 supporter 대안과 직접/clear 간접 관계를 준비하여 비관련 쌍 생성을 줄인다. 완전한 저비용 all-mino relation은 아직 신규 개발 범위다. [S14]
+
+#### OP06 — APDP·SameTile·Hall domain: A02~A05·A08
+
+- **기존 구현·소비자:** `W/geometry_domain.rs::{DomainPropagation::compile,compile_minimum,exact_parent_rows,apdp_domain_is_complete,hall_impossible}`; `W/geometry_apdp.rs::ExactArmPairIndex`, `GeometryCatalog::apdp_row_is_static_exact`; C `apdp/geometry_apdp.c::{clearra_geometry_apdp_compile_support_flags,clearra_geometry_apdp_propagate}`, `pruning/geometry_parent_hall_bound.c::clearra_geometry_parent_hall_bound_propagate`.
+- **입출력·불변식:** `(catalog,remaining cells,feasible piece mask)`에서 concrete parent domain을 얻고, Hall 판정에는 잔여 공급 수량의 상한도 반영한다. SameTile은 모든 가용 full placement의 공통 셀에서 유도한다. APDP prune은 모든 full parent가 static-exact 지원 범위에 포함됨을 확인한 경우만 허용한다.
+- **공유·무효화:** child residual에서 제거된 parent가 실제로 영향을 주는 cell/partial만 갱신한다. 공급 가능 kind 변화는 domain을, 잔여 수량 변화는 Hall 상한을 갱신하며 branch rollback은 이전 parent 대안을 정확히 복구한다. partial 모양을 공유해도 concrete full parent들을 kind 하나로 합치지 않는다.
+- **남은 작업:** 기존 full-domain 반복 스캔을 증분 전파로 줄인다. 고급 경로가 비활성인 빈 P7P4에 효과를 주장하지 않는다. static 활성 범위의 손익과 temporal parent 확장은 별도 과제다. [S4][S14]
+
+#### OP07 — residual family와 completion: I07·G13·Q01
+
+- **기존 구현·소비자:** `W/geometry.rs::{ResidualKey,AvailableRowKey,GeometryCompletionOracle}`, `W/geometry_family.rs::GeometrySolutionFamily`의 `Append/Union/Product`; C `packing/geometry_residual_memo.h`, `geometry_solution_family.c`.
+- **입출력·불변식:** 고정된 catalog·target/prefix 계약 안에서 `(remaining,packed_counts)`가 suffix family를 찾는다. available-row key는 `after_line_clear`도 포함하며 permutation-closed geometry와 post-clear residual compiler 상태를 분리한다.
+- **공유·무효화:** node ID와 memo 값은 해당 compiler/family owner의 namespace에 속한다. 삽입/인터닝을 하지 못하면 정상 계산으로 되돌아간다. geometry residual이 같아도 prefix의 support·통로·row contributors·goal 이력은 다를 수 있다.
+- **남은 작업:** 새 residual memo를 추가하지 않고 기존 suffix에 **경계 조건을 인자로 받는 relation fragment**를 연결한다. family ID만으로 완성된 movement 결과를 캐시하지 않는다. 독립성을 증명하지 않은 `Product`에 확률 곱을 붙이지 않는다. [S2][S4][S15]
+
+#### OP08 — 물리 도달성 템플릿과 질의 권한: O05·G04~G09·M06
+
+- **기존 구현·소비자:** `W/reachability.rs::{SharedReachabilityTemplates,ReachabilityTemplate,ReachabilityWorkspace,ReachabilityCache}`; C `reachability/*`, `buildup/buildup_workspace.c::clearra_buildup_workspace_prepare`.
+- **입출력·불변식:** 불변 rule/shape/layout에서 전이 템플릿을 만들고 board/target으로 Boolean·lock family·witness·spin/finesse evidence를 구한다. partial search의 positive lock은 재사용할 수 있지만 누락된 lock은 exhaustive 부정 증거 없이 unreachable로 만들 수 없다. Boolean proof는 전체 lock family·증거·multiplicity를 대체하지 않는다.
+- **공유·무효화:** Rust shared template는 request 소유이며 board/cache/frontier는 worker private다. dimensions/profile 변경은 template와 cache를 함께 무효화한다. C workspace도 layout/rule descriptor 변경 시 reachability·lock·transition cache epoch를 갱신한다. 호출자가 고정한 owner 조건을 key 밖에 둔 것과 무시한 것은 다르다.
+- **남은 작업:** 템플릿 공유는 이미 존재한다. 신규 목표는 보편적 무영향·진입 증명으로 board별 질의를 생략하고 unresolved 부분만 기존 정확 커널로 보내는 것이다. proof를 만들기 위한 topology 순회도 구성 비용에 포함한다. [S13][S15]
+
+#### OP09 — 물리 전이와 terminal evidence: G10~G12·M03·M04
+
+- **기존 구현·소비자:** C `buildup/buildup_geometry_transition_cache.h/.c`; Rust `W/buildup.rs::{BuildOrderGraph,BuildEdge,CandidateProjection,exact_scoring_execution_graph}`, `W/result.rs::prepare_exact_scoring_execution_batch`.
+- **입출력·불변식:** `(board,concrete operation,D,rule owner,trace/transition mode)`에서 다음 board/D와 lock/clear 증거를 얻는다. C key는 pose/mask/operation ID, reachability-relevant state, required D, cleared lines 및 trace/transition mode를 구별한다. 공급이 달라도 물리 전이는 같을 수 있지만 goal에 필요한 label은 유지한다.
+- **공유·무효화:** C root cache는 initial board·candidate/canonical operation set·trace mode도 비교한다. Rust 결과 경로는 buildable identities를 모은 뒤 identity별 scoring graph를 다시 만들고 보유한다. 후보 검증에서 이미 확보한 증거를 해당 소비자까지 전달할 기회다.
+- **남은 작업:** Boolean/첫 witness와 모든 execution label을 구분해 필요한 증거만 생산·이전한다. B2B-save·chain·score 정책은 기존 권위를 유지하고 물리 event와 분리한다. 단순 첫 witness 저장으로 모든 실행의 scoring coverage를 대체하지 않는다. [S6][S15]
+
+#### OP10 — 공급·hold·언어 coverage: Q01~Q05
+
+- **기존 구현·소비자:** `crates/clearra-supply/src/execution_automaton/supply_execution_automaton.rs::{SupplyExecutionAutomaton,SupplyExecutionState,SupplyExecutionMemoKey}`; 기존 `hold_automaton`은 canonical automaton의 type alias다. `W/standard_bag_coverage.rs`, `W/standard_bag_product_memo.rs`; C `supply/{hold_automaton,standard_bag_automaton,supply_state}.c`가 대응한다.
+- **입출력·불변식:** 공급 상태와 Current/SwapHeld/StoreCurrent 선택을 소비 미노·다음 공급 상태로 바꾼다. 일반 상태에는 source identity/kind, cursor, hold policy/empty/piece, bag epoch/remainder, observation, provenance가 있다. 확률은 성공 실행의 합이 아닌 성공 큐의 합집합이다.
+- **공유·무효화:** `StandardBagProductMemoKey`의 `(language_node,depth,bag_remainder,hold_code)`는 다른 조건이 고정된 worker request/epoch 내부에서만 충분하다. `StandardBagCoverage::supports`는 `Standard7BagLexicographic`, fresh source 등의 범위를 확인한다. 이를 arbitrary supply로 일반화하거나 ID를 다른 owner에 이동하지 않는다.
+- **남은 작업:** relation의 accepted language를 기존 공급 product에 연결한다. graph 전용 hold automaton을 새로 만들지 않는다. 같은 kind의 occurrence·hold 분기와 큐 overlap을 보존하며 필요한 경우에만 개별 큐를 materialize한다. [S16]
+
+#### OP11 — 취소·소유권·완료 상태: O06·R06·M03~M06
+
+- **기존 구현·소비자:** `clearra-core-domain/src/execution_cancellation.rs::ExecutionControl`, `clearra-core-ffi/src/memory/{native_core_context,native_scope}.rs`; C `memory/*`; Rust catalog/template/workspace/result 소유자들. native memory facade는 이미 C 포인터를 감싼 RAII다.
+- **계약:** cache admission 실패는 miss, 선택적 증명 실패는 Unknown, 필수 결과의 자원 부족은 incomplete/error, 모든 대안의 완전 부정만 infeasible이다. `RealizationFeasibilityWorkspace`의 generation은 후보별 증거 수명을 제한하며 stale graph는 fail-open한다.
+- **현재 범위:** `W/realization_feasibility.rs`의 `PRODUCT_COMPLETE_REALIZATION_FEASIBILITY_PREPASS_ENABLED`는 감사 SHA에서 `false`다. 제품경로의 해당 complete prepass는 0개 상태를 탐색한 Unknown을 반환한다. 자료형 존재를 이미 활성화된 완전 의존성 그래프의 증거로 쓰지 않는다.
+- **남은 작업:** 중복 소유와 후속 graph 재생성을 줄이고 요청·worker·후보·결과의 수명을 맞춘다. C arena/pool/scratch 이름을 Rust로 복제하지 않는다. Rust 전환 자체에 속도·peak 개선을 보장하는 의미를 부여하지 않는다. [S3][S14][S17]
+
+#### OP12 — 제품 서비스·ABI cutover: R01~R12·H01~H05
+
+- **기존 경로:** `crates/clearra-app/src/app_services.rs::{execute_search_backend_with_control,execute_build_coverage_with_control}`, `clearra-core-ffi/src/problem/generic_buildup.rs`, CLI routing 및 호스트 adapter.
+- **확인한 격차:** NativeCore는 execution constraints와 supplied colored identity filter를 거절한다. WasmCpu의 legacy build-coverage 서비스는 `wasm_cpu_build_coverage_not_connected`다. 반대로 C generic BuildUp도 Board128/Wide를 unsupported로 판정한다. 따라서 모든 C 범위를 Rust가 새로 구현해야 한다는 추정도 옳지 않다.
+- **분류·전환:** `양쪽 지원 / C만 지원 / Rust만 지원 / 커널은 있으나 서비스 미연결 / 양쪽 미지원`을 요청별로 기록한다. FFI에서 ID 인코딩만 가져오는 의존성과 실제 native 함수 호출도 분리한다. 마지막 consumer가 사라지고 해당 결과·오류·해제 계약이 검증된 기능부터 퇴역시킨다.
+- **남은 작업:** 기능별 identity, coverage, CountAll, terminal evidence, cancellation/resource completeness를 맞추고 기존 Rust 계산을 서비스에 연결한다. backend enum 변경·crate rename·C 파일 수 감소만으로 전환 완료를 선언하지 않는다. [S1][S18]
+
+### 7.4 재사용 동치와 증거의 범위
+
+공유 key가 짧은 이유가 owner에 고정된 계약 때문이면, 결과를 다른 수명으로 옮길 때 그 계약도 함께 옮겨야 한다. hash/digest만으로 서로 다른 실제 key를 동일시하지 않는다. 이미 조건이 고정된 호출마다 큰 key를 복제하라는 지침은 아니다.
+
+| 관측상 같은 값 | 공유 가능한 대표 계산 | 추가로 같아야 하는 조건 |
+| --- | --- | --- |
+| 같은 piece kind | 공급 종류 집계 | concrete placement·occurrence·hold 분기까지 동치는 아님 |
+| 같은 target cell 소유 | skeleton과 geometry family | D·realization·물리 pose·evidence는 별도 |
+| 같은 physical lock mask | 해당 범위의 collision/grounding | orientation·ordered kick·last rotation·spin/finesse |
+| 같은 board와 D | owner가 고정된 물리 전이 | remaining operation·supply·goal history·결과 권한 |
+| 같은 residual과 counts | 같은 compiler의 geometry suffix | prefix supporter·통로·clear contributors·goal 경계 |
+| 같은 language node ID | 같은 worker/epoch의 product memo | family namespace·universe·weight·관측/공급 계약 |
+
+이 구분이 필요한 이유는 “연산 결과의 재사용”과 “문제를 더 약하게 관측한 값의 우연한 일치”가 다르기 때문이다. 기존 함수 이름을 바꾸는 작업보다 이 동치·무효화 계약을 맞추는 일이 C→Rust 범위의 큰 부분이다.
+
 ## 8. Google Rust 가이드의 적용 범위
 
 공식 가이드의 일반 원칙과 플랫폼 전용 규칙을 구분한다. 핵심 채택 항목은 rustfmt, 명확한 타입·오류·소유권, 불필요한 깊은 복사 회피, 필요한 경우의 trait, 최소 unsafe 경계다. Chromium 전용 작은 crate·평면 파일 배치·async/thread 규칙을 Cargo 프로젝트에 일괄 적용하지 않는다. stable 도구로 지원하지 않는 포맷 옵션은 가이드가 허용하는 범위에서 제외한다. [E1]
@@ -301,13 +416,13 @@ Clearra에 적용할 설계 결정은 다음과 같다.
 | Clearra 결정 | 적용 이유와 완료 기준 |
 | --- | --- |
 | 기존 crate를 먼저 사용 | 공통 의미 소유자와 의존성 방향이 명확해야 새 crate를 제안할 수 있음 |
-| `struct`/`enum`과 `impl`로 불변식 캡슐화 | invalid ID/frame/proof 상태를 외부에서 임의 조립하지 않음 |
+| `struct`/`enum`과 `impl`로 불변식 캡슐화 | invalid ID/frame/proof 상태를 외부에서 임의 조립하지 않되 클래스식 계층을 강제하지 않음 |
 | trait는 실제 교체·generic 경계에 한정 | 파일 정리만을 위한 trait, 모든 hot call의 동적 dispatch를 만들지 않음 |
 | 불변 요청 데이터와 worker 가변 상태 분리 | 실제 수명이 드러나고, 불필요한 clone과 중복 컴파일이 사라짐 |
 | 필요한 공유 소유권은 명시적으로 허용 | 여러 워커가 같은 불변 owner를 사용할 때 무리한 lifetime 또는 unsafe로 대체하지 않음 |
 | 기존 safe-core 정책 유지 | ABI 등 불가피한 경계만 별도 검토; workspace 전체 금지를 느슨하게 만들지 않음 |
 | 공개 API와 내부 구현의 안정성 구분 | 외부 호환 계약을 보존하면서 내부 구현을 정리할 수 있어야 함 |
-| 폴더·파일은 책임으로 조직 | 상위 모듈은 연결을 담당하고 관련 타입은 응집도에 따라 같은 leaf에 배치 |
+| 폴더·파일은 실제 연산·소유권에 맞춤 | 관련 타입과 hot 연산을 함께 둘 수 있고, SRP 경계를 넘는 융합도 시간·메모리와 정확성의 근거로 판단 |
 
 위 표는 Clearra의 적용 결정이며, 모든 항목이 Google의 보편적 강제 규칙이라는 뜻은 아니다. 기존 `Cargo.toml`은 edition 2021, workspace `unsafe_code = forbid`를 선언하며 FFI에는 예외가 있다. edition 변경·전 저장소 재포맷을 성능 작업에 섞지 않는다. [S7]
 
@@ -343,7 +458,9 @@ Pages GUI, Discord, CLI의 속도 차이는 같은 canonical 요청, 같은 core
 - 큰 모듈이 기하·물리·공급·출력·호스트 수명을 동시에 소유하는가.
 - 통합 후에도 검색·리뷰·테스트 소유권이 더 명확해지는가.
 
-문서와 실행 검증도 일치시켜야 한다. `docs/architecture-validation.md`는 helper shell, action-per-file, 1,000줄 기준을 설명하지만, 현재 `validate_srp_policy.ps1`는 PowerShell 문법 검사를 수행하고 `validate_file_size.ps1`는 검사 대상 열거를 담당한다. 문서에 적힌 SRP 정책이 실행된다고 보고하면 안 된다. 의미 소유권·의존성·공개 API의 검사와 사람이 검토하는 응집도 기준을 분리하여 실제 검사와 문서를 맞춘다. 파일 길이나 주석만으로 SRP를 증명하지 않는다. [S9]
+**SRP는 `AGENTS.md`의 작업 규약으로 남기며 자동 합격 기준으로 만들지 않는다.** 과거 문서의 helper shell, action-per-file, 1,000줄 제한, `SRP rationale:` 표식 요구를 복구하지 않는다. 단순 문구·marker·파일 배치 검사를 늘려 이 계획의 완료를 주장하지 않는다. 현재 `validate_srp_policy.ps1`는 PowerShell 문법 검사이고 `validate_file_size.ps1`는 검사 대상 열거다. 역사적인 파일 이름을 SRP 검증의 근거로 해석하지 않는다. 실제 의존성·ABI·unsafe 경계의 계약 검사와 실행한 정확성 검증은 별도로 유지한다. [S9]
+
+Rust의 모듈 분리는 실행 시간과 메모리 효율성을 위한 수단이다. 연산을 분리하면 동일한 projection·domain·증거를 다시 만들거나 중간 상태를 더 오래 보유해야 하는 경우에는 함께 두거나 융합한다. 이는 강제 SRP 예외가 아니라 정상적인 설계 선택이다. 줄 수를 낮추기 위한 파일 분할, 한 작업당 새 파일·crate 생성, 형식적 경계를 위한 중간 객체 도입을 하지 않는다.
 
 파일 이동·rename은 관련 기능의 계약이 안정된 뒤 별도 변경으로 진행한다. 같은 `geometry.rs`나 `app_services.rs`를 기능 담당자와 구조 담당자가 동시에 고치지 않는다. 일괄 대이동으로 후속 정확성 비교와 병렬 작업을 막지 않는다.
 
@@ -358,8 +475,8 @@ V01·V02·V03 같은 검증 작업은 전체 항목이 끝날 때까지 기다�
 ### F. 공통 계약·기준선 — 8개
 
 - [ ] 수정 파일: `docs/architecture.md`, `docs/dependency-boundary.md`, 구현 내용: **F01 — 실행 경로와 목표 Rust 소유권을 동결한다.** 선행: 없음. 완료: native/WASM/CLI/Discord의 실제 feature·backend와 현재/목표 구조가 구분되고 기존 C 전제의 대체 범위가 명시된다.
-- [ ] 수정 파일: `docs/research/rust-core-and-relation-roadmap-2026-11-20.md`, `crates/clearra-core-domain/src`, 구현 내용: **F02 — 배치·행·공급·결과의 동등성 계약을 고정한다.** 선행: 없음. 완료: concrete ID, selected/executed, CountAll, hold, coverage, terminal label, Unknown/Incomplete의 의미와 비교 항목이 확정된다.
-- [ ] 수정 파일: `docs/dependency-boundary.md`, 구현 내용: **F03 — 공통 의미별 단일 소유자와 허용 의존성 표를 확정한다.** 선행: F01, F02. 완료: 기존 객체 우선 재사용과 특수화·ABI adapter의 예외가 설명되고 scoring 등 제품 경계가 보존된다.
+- [ ] 수정 파일: `docs/research/rust-core-and-relation-roadmap-2026-11-20.md`, `crates/clearra-core-domain/src`, 구현 내용: **F02 — 배치·행·공급·결과의 동등성 계약을 고정한다.** 선행: 없음. 완료: concrete ID, selected/executed, CountAll, hold, coverage, terminal label, Unknown/Incomplete와 7.4절의 동치 단계가 확정된다. 필요조건·exact 결과 및 Boolean·증거 family의 권한을 구분한다.
+- [ ] 수정 파일: `docs/dependency-boundary.md`, 구현 내용: **F03 — 공통 의미별 단일 소유자와 허용 의존성 표를 확정한다.** 선행: F01, F02. 완료: 7.3절 연산군별 기존 소유자, 입력·출력, key 안팎의 고정 계약, lifetime과 무효화가 정해지고 scoring 등 제품 경계가 보존된다. 연산군마다 새 객체·파일·crate를 만들지 않는다.
 - [ ] 수정 파일: `docs/architecture.md`, `Cargo.toml`, 구현 내용: **F04 — Google Rust 가이드 적용 결정을 문서화한다.** 선행: F03. 완료: 일반/플랫폼 전용 규칙, stable 도구, unsafe 예외, 공개 API와 내부 코드의 기준이 구분된다. 이 단계에서 전역 재포맷·edition 변경을 하지 않는다.
 - [ ] 수정 파일: `docs/research/rust-core-and-relation-roadmap-2026-11-20.md`, 구현 내용: **F05 — 파일 현황의 분류·기준 SHA·소유자 목록을 확정한다.** 선행: 없음. 완료: tracked source/test/vendor/generated를 재현 가능하게 집계하고 삭제 후보와 실제 퇴역 조건을 구분한다.
 - [ ] 수정 파일: `crates/clearra-core-executor/examples/placement_graph_bench.rs`, 구현 내용: **F06 — 비교 요청과 출력 계약을 고정한다.** 선행: F02. 완료: P7P4의 10배치/11공급, hold, profile, 출력·증거 모드, 가속, 자동 워커 정책, 성공 결과 검산값이 하나의 비교 계약에 들어간다.
@@ -370,9 +487,9 @@ V01·V02·V03 같은 검증 작업은 전체 항목이 끝날 때까지 기다�
 
 - [ ] 수정 파일: `crates/clearra-geometry/src`, `crates/clearra-core-executor/src/backend/wasm_cpu/reachability.rs`, `crates/clearra-core-executor/src/backend/wasm_cpu/extended_reachability.rs`, `crates/clearra-finesse/src/lib.rs`, 구현 내용: **O01 — 중복 kick·회전 중심 정규화를 공통 소유자로 옮긴다.** 선행: F03. 완료: 세 소비자가 같은 정의를 사용하며 ordered kick·좌표 의미가 동일하다. 실제 소유자는 crate 의존성을 확인해 확정한다.
 - [ ] 수정 파일: `crates/clearra-core-executor/src/backend/wasm_cpu/kick_profiles.rs`, `crates/clearra-core-ffi/src/rules`, 구현 내용: **O02 — 프로필 ID의 의미와 ABI 인코딩을 분리한다.** 선행: F03. 완료: Rust 코어가 FFI crate를 프로필 의미의 원천으로 참조하지 않으며 기존 replay ID 호환성이 유지된다.
-- [ ] 수정 파일: `crates/clearra-core-executor/src/row_frame.rs`, `crates/clearra-core-executor/src/conditioned_local_relation.rs`, 구현 내용: **O03 — 기존 행 좌표 객체를 ILC·관계의 공통 계약으로 확정한다.** 선행: F02, F03. 완료: 폭·높이·terminal frame 제한과 좁힌 wrapper가 보존되며 새 행 변환 구현이 생기지 않는다.
+- [ ] 수정 파일: `crates/clearra-core-executor/src/row_frame.rs`, `crates/clearra-core-executor/src/conditioned_local_relation.rs`, `crates/clearra-core-executor/src/backend/wasm_cpu/catalog.rs`, 구현 내용: **O03 — 기존 행 좌표 연산을 ILC·관계의 공통 계약으로 확정한다.** 선행: F02, F03. 완료: 순수 행사상과 폭 10·높이 1~6/terminal wrapper를 구분하고 C의 최대 16행 계약을 좁히지 않는다. 같은 의미의 변환을 연결하되 일반화가 필요한 부분은 범위별로 검증한다.
 - [ ] 수정 파일: `crates/clearra-core-executor/src/backend/wasm_cpu/catalog.rs`, `crates/clearra-core-executor/src/backend/wasm_cpu/placement_conditions.rs`, 구현 내용: **O04 — cell incidence의 소유자를 카탈로그로 통일한다.** 선행: I01. 완료: 같은 cell→placement 목록의 중복 생성이 제거되고 각 소비자의 수명·실제 보유 비용이 명확하다.
-- [ ] 수정 파일: `crates/clearra-core-executor/src/backend/wasm_cpu/mod.rs`, `crates/clearra-core-executor/src/backend/wasm_cpu/reachability.rs`, 구현 내용: **O05 — 불변 compiled 데이터의 요청 소유권을 통일한다.** 선행: F03, O02. 완료: 같은 요청의 catalog/template가 불필요하게 반복 생성되지 않고 공유 범위와 해제 시점이 명시된다.
+- [ ] 수정 파일: `crates/clearra-core-executor/src/backend/wasm_cpu/mod.rs`, `crates/clearra-core-executor/src/backend/wasm_cpu/reachability.rs`, 구현 내용: **O05 — 불변 compiled 데이터의 요청 소유권을 통일한다.** 선행: F03, O02. 완료: 기존 `SharedReachabilityTemplates`와 catalog owner를 재사용하며 남은 중복 생성만 제거한다. dimensions/profile 변경에 따른 무효화와 worker-private 결과의 범위를 보존한다.
 - [ ] 수정 파일: `crates/clearra-core-executor/src/backend/wasm_cpu/parallel_worker.rs`, `crates/clearra-core-executor/src/backend/wasm_cpu/buildup.rs`, 구현 내용: **O06 — 가변 workspace를 워커 수명에 맞춘다.** 선행: F03, O05. 완료: worker private 상태와 candidate 임시 상태가 분리되고 취소·완료 후 참조가 요청 전체를 붙잡지 않는다.
 - [ ] 수정 파일: `crates/clearra-core-executor/src/backend/wasm_cpu/extended_board.rs`, `crates/clearra-core-executor/src/backend/wasm_cpu/extended_reachability.rs`, 구현 내용: **O07 — compact/extended의 공통 의미와 특수화 경계를 정한다.** 선행: O01, O03. 완료: 공유 가능한 규칙·projection은 재사용하고 크기별 능력·실행 커널은 필요한 경우 유지한다.
 - [ ] 수정 파일: `crates/clearra-core-executor/src/backend/mod.rs`, `crates/clearra-core-executor/src/backend/wasm_cpu/mod.rs`, 구현 내용: **O08 — 기존 Rust CPU 구현을 공통 서비스 면으로 노출한다.** 선행: O01, O02, O03, F03. 완료: 새 solver 없이 기존 geometry/verification을 native와 WASM가 소비할 수 있고 공개 호환 경로가 명시된다.
@@ -380,7 +497,7 @@ V01·V02·V03 같은 검증 작업은 전체 항목이 끝날 때까지 기다�
 ### R. C→Rust 제품 전환 — 12개
 
 - [ ] 수정 파일: `core-c/include`, `crates/clearra-core-ffi/src/raw/bindings.rs`, 구현 내용: **R01 — C 심볼의 실제 소비자를 분류한다.** 선행: F01. 완료: 내부 전용·확인된 외부 ABI·qualification 전용을 나누고 유지해야 할 layout·ownership 계약이 정해진다.
-- [ ] 수정 파일: `crates/clearra-app/src/app_services.rs`, `crates/clearra-cli/src/cli_routing.rs`, 구현 내용: **R02 — 제품 요청별 C/Rust 기능 격차를 fixture에 연결한다.** 선행: F01, F02. 완료: 공통 지원·한쪽 미지원·일부 연결만 된 기능이 구분되고 전환 누락을 검사할 수 있다.
+- [ ] 수정 파일: `crates/clearra-app/src/app_services.rs`, `crates/clearra-cli/src/cli_routing.rs`, 구현 내용: **R02 — 제품 요청별 C/Rust 기능 격차를 fixture에 연결한다.** 선행: F01, F02. 완료: 양쪽 지원·C만 지원·Rust만 지원·커널 존재/서비스 미연결·양쪽 미지원을 구별하고 기존 연산을 다시 구현하지 않는다. build-coverage 미연결과 양쪽의 capability 거절을 같은 기능 결손으로 묶지 않는다.
 - [ ] 수정 파일: `crates/clearra-app/src/app_services.rs`, `crates/clearra-core-executor/src/backend/wasm_cpu/build_probability.rs`, 구현 내용: **R03 — 기존 build coverage 진입점의 Rust 연결 격차를 닫는다.** 선행: R02, O08. 완료: 기존 Rust supply/coverage 계산을 재사용하여 요청·결과·완전성 계약을 만족한다.
 - [ ] 수정 파일: `crates/clearra-core-executor/src/backend/wasm_cpu/extended_geometry.rs`, `crates/clearra-core-executor/src/backend/wasm_cpu/extended_buildup.rs`, 구현 내용: **R04 — 확인된 확장 보드·규칙·generic 기능 격차를 하나씩 연결한다.** 선행: R02, O07, O08. 완료: 현재 지원 계약을 잃지 않으며 미지원 조합을 조용히 축소하거나 fallback하지 않는다. 기능 가족별로 하위 작업을 배정한다.
 - [ ] 수정 파일: `crates/clearra-core-executor/src/backend/wasm_cpu/setup_finder.rs`, `crates/clearra-core-executor/src/backend/wasm_cpu/extended_pc_search.rs`, 구현 내용: **R05 — setup/checkpoint/continuation 제품 경로를 공통 Rust 실행에 연결한다.** 선행: R02, O08. 완료: 목표 checkpoint·관측 정책·해 identity가 기존 계약과 같다. 서로 다른 요청 가족은 별도 변경으로 제출한다.
@@ -394,7 +511,7 @@ V01·V02·V03 같은 검증 작업은 전체 항목이 끝날 때까지 기다�
 
 ### I. ILC의 정확한 재사용 — 8개
 
-- [ ] 수정 파일: `crates/clearra-core-executor/src/backend/wasm_cpu/catalog.rs`, `crates/clearra-core-executor/src/backend/wasm_cpu/placement_conditions.rs`, 구현 내용: **I01 — 약한 필요조건과 exact realization-domain의 소비자를 분리한다.** 선행: O03. 완료: 각 필드가 어떤 명제를 증명하는지와 단일 소유자·필요 view가 명시된다.
+- [ ] 수정 파일: `crates/clearra-core-executor/src/backend/wasm_cpu/catalog.rs`, `crates/clearra-core-executor/src/backend/wasm_cpu/placement_conditions.rs`, 구현 내용: **I01 — 약한 필요조건과 exact realization-domain의 소비자를 분리한다.** 선행: O03. 완료: Rust requirement-domain과 C exact clear-state-domain의 강도 차이, 자기 행 삭제·재투영 조건이 명시되고 소비자가 올바른 view를 사용한다.
 - [ ] 수정 파일: `crates/clearra-core-executor/src/backend/wasm_cpu/catalog.rs`, `crates/clearra-core-executor/src/backend/wasm_cpu/placement_conditions.rs`, 구현 내용: **I02 — exact frame-domain의 중복 유도를 제거한다.** 선행: I01. 완료: 같은 `(placement, D)` 판정은 한 권위에서 나오며 약한 requirement domain으로 대체하지 않는다.
 - [ ] 수정 파일: `crates/clearra-core-executor/src/backend/wasm_cpu/catalog.rs`, 구현 내용: **I03 — 실제 사용되는 frame의 instantiation을 재사용한다.** 선행: I02. 완료: 전체 D 선계산과 반복 raw 계산의 비용을 요청 특성별로 비교하여 불필요한 계산을 생략하고 정확한 결과를 공유한다.
 - [ ] 수정 파일: `crates/clearra-core-executor/src/backend/wasm_cpu/catalog.rs`, `crates/clearra-core-executor/src/backend/wasm_cpu/inverse_projection.rs`, 구현 내용: **I04 — 기호적 ILC domain의 필요충분성을 연구한다.** 선행: I01, F08. 완료: 표준 범위에서 삭제 필요·자기 행 금지·정확 투영을 포함하는 증명 또는 반례가 남는다. 미증명 범위는 기존 exact path를 유지한다.
@@ -435,7 +552,7 @@ V01·V02·V03 같은 검증 작업은 전체 항목이 끝날 때까지 기다�
 ### Q. 큐·확률·순열 — 5개
 
 - [ ] 수정 파일: `crates/clearra-core-executor/src/backend/wasm_cpu/piece_order_language.rs`, `crates/clearra-core-executor/src/backend/wasm_cpu/structural_order.rs`, 구현 내용: **Q01 — 완성 관계를 기존 순서 언어의 입력으로 연결한다.** 선행: G01, F02. 완료: poset fast subset과 일반 조건부 관계의 구분이 있으며 물리 판정을 재실행하지 않는다.
-- [ ] 수정 파일: `crates/clearra-core-executor/src/backend/wasm_cpu/standard_bag_product_memo.rs`, `crates/clearra-core-executor/src/backend/wasm_cpu/terminal_hold_projection.rs`, 구현 내용: **Q02 — 같은 kind·hold·CountAll의 multiplicity 계약을 결합한다.** 선행: Q01. 완료: concrete occurrence와 공급 선택을 보존하고 CountUnique/CountAll의 집계가 다르게 유지된다.
+- [ ] 수정 파일: `crates/clearra-core-executor/src/backend/wasm_cpu/standard_bag_product_memo.rs`, `crates/clearra-core-executor/src/backend/wasm_cpu/terminal_hold_projection.rs`, 구현 내용: **Q02 — 같은 kind·hold·CountAll의 multiplicity 계약을 결합한다.** 선행: Q01. 완료: 기존 canonical supply automaton을 재사용하고 concrete occurrence와 공급 선택을 보존한다. standard-bag product key의 worker/epoch와 일반 공급의 관측·provenance를 혼합하지 않으며 CountUnique/CountAll의 집계를 구분한다.
 - [ ] 수정 파일: `crates/clearra-core-executor/src/backend/wasm_cpu/standard_bag_coverage.rs`, `crates/clearra-core-executor/src/backend/wasm_cpu/coverage_product.rs`, 구현 내용: **Q03 — 여러 타일링의 성공 큐를 정확히 합집합한다.** 선행: Q02. 완료: 서로 겹치는 실행 언어를 더해서 확률을 부풀리지 않고 universe·weight가 다른 coverage를 섞지 않는다.
 - [ ] 수정 파일: `crates/clearra-core-executor/src/backend/wasm_cpu/build_probability.rs`, 구현 내용: **Q04 — 독립 관계 성분의 가중 합성을 연구한다.** 선행: Q02, G13, A07. 완료: shuffle·hold·bag·goal coupling을 반영하며 단순 확률 곱이나 factorial 보정의 반례를 배제한다.
 - [ ] 수정 파일: `crates/clearra-core-executor/src/backend/wasm_cpu/build_probability.rs`, `crates/clearra-core-executor/src/backend/wasm_cpu/result.rs`, 구현 내용: **Q05 — 확률 전용 요청에서 큐·물리 prefix materialization을 생략한다.** 선행: Q03, G15, O08. 완료: 실제 제품의 해별/전체 확률이 oracle와 같고 출력 모드가 요구하지 않는 중간 객체가 생성되지 않는다.
@@ -460,10 +577,10 @@ V01·V02·V03 같은 검증 작업은 전체 항목이 끝날 때까지 기다�
 ### S. 파일·SRP·문서 정리 — 7개
 
 - [ ] 수정 파일: `docs/architecture.md`, `config/clearra-management.v1.json`, 구현 내용: **S01 — 소스 수와 산출물 수의 관리 기준을 분리한다.** 선행: F05. 완료: 보존할 evidence·재현 가능한 산출물·vendor가 구별되고 자동 삭제로 재현 증거를 잃지 않는다. config 수정은 필요할 때만 별도로 검토한다.
-- [ ] 수정 파일: `docs/architecture-validation.md`, `scripts/architecture/validate_srp_policy.ps1`, `scripts/architecture/validate_file_size.ps1`, 구현 내용: **S02 — SRP 문서와 실제 검사 범위를 일치시킨다.** 선행: F05. 완료: 의존성/공개 API의 자동 검사, 설계 리뷰, 크기 지표가 구분되고 주석·길이를 정확성 증거로 쓰지 않는다.
+- [x] 수정 파일: `AGENTS.md`, `docs/architecture-validation.md`, `docs/srp-debt.md`, 구현 내용: **S02 — SRP를 작업 규약으로 정리하고 정적 합격 기준을 폐기한다.** 선행: 없음. 완료: 1,000줄 제한·필수 rationale 문구·marker·action-per-file 강제를 복구할 여지가 없고 Rust의 속도·메모리를 위한 연산 융합이 허용된다. 기존 스크립트의 문법 검사/대상 열거와 실제 ABI·의존성·unsafe 계약 및 실행 증거를 구분한다. 새 정적 SRP 검사는 만들지 않는다. 2026-11-20 후속 변경에서 세 문서를 수정하고 실제 스크립트의 범위와 대조했다.
 - [ ] 수정 파일: `crates/clearra-core-domain/src/objective`, `crates/clearra-piece-registry/src/registry/piece_registry.rs`, 구현 내용: **S03 — 작은 도메인 가족 하나씩 응집도를 정리한다.** 선행: F03, F04. 완료: 관련 enum·정책·impl의 소유권과 공개 import 호환성을 보존한다. 각 가족을 별도 변경으로 제출하며 성능 개선으로 보고하지 않는다.
 - [ ] 수정 파일: `crates/clearra-app/src/request.rs`, `crates/clearra-app/src/response.rs`, `crates/clearra-app/src/run_request.rs`, `crates/clearra-app/src/search_backend_warmup.rs`, 구현 내용: **S04 — 얇은 전달·재수출 파일의 통합 여부를 판정한다.** 선행: F03, H01. 완료: 실제 외부 소비자와 공개 경로를 보존하며 불필요한 탐색·이동 비용만 줄인다.
-- [ ] 수정 파일: `crates/clearra-core-executor/src/backend/wasm_cpu/result.rs`, `crates/clearra-core-executor/src/backend/wasm_cpu/buildup.rs`, 구현 내용: **S05 — 대형 모듈을 확정된 상태·증거·실행 책임대로 정리한다.** 선행: M03, G12, O08. 완료: relation compiler, oracle, 실행 수명, 결과 조립의 owner가 명확하며 새 모듈은 한 변경 이유를 갖는다. 파일 이동과 알고리즘 수정은 분리한다.
+- [ ] 수정 파일: `crates/clearra-core-executor/src/backend/wasm_cpu/result.rs`, `crates/clearra-core-executor/src/backend/wasm_cpu/buildup.rs`, 구현 내용: **S05 — 대형 모듈의 연산·증거·수명을 정리한다.** 선행: M03, G12, O08. 완료: relation compiler, oracle, 실행 수명, 결과 조립의 실제 owner가 명확하다. 분리의 재계산·복사·보유 비용이 크면 함께 유지하거나 융합하며 새 파일 생성을 완료 조건으로 삼지 않는다. 순수 파일 이동과 알고리즘 수정은 분리한다.
 - [ ] 수정 파일: `crates/clearra-coverage/src/cover/exact_minimum_cover.rs`, `crates/clearra-gui-host/src/desktop_host/desktop_request_bridge.rs`, 구현 내용: **S06 — 다른 대형 모듈의 후속 분리 경계를 조사한다.** 선행: F05. 완료: 현재 핵심 탐색 작업을 막지 않는 별도 책임·소비자 지도를 남긴다. 조사 후 실제 분리는 독립된 후속 구현 범위로 진행한다.
 - [ ] 수정 파일: `crates/clearra-core-executor/src/backend/mod.rs`, `crates/clearra-core-executor/src/backend/wasm_cpu`, 구현 내용: **S07 — 안정된 공통 CPU 모듈의 이름·재수출을 정리한다.** 선행: R08, G15, H05. 완료: host 이름과 알고리즘 소유권이 혼동되지 않고 public API 호환 계획에 따라 순수 이동 변경을 완료한다.
 
@@ -499,6 +616,8 @@ flowchart TD
     S --> C["중복 경로 퇴역"]
     V --> C
 ```
+
+화살표는 **소비할 범위의 계약**을 뜻한다. O 전체가 끝나야 G/I/R을 시작한다는 의미가 아니다. 예를 들어 O03의 순수 행사상 계약이 정해지면 I01을 시작할 수 있으며, support/clear 검증과 O01의 kick 정규화 작업도 독립된 파일에서 진행할 수 있다. S02의 작업 규약 수정은 소스 집계 F05나 알고리즘 구현을 기다리지 않는다.
 
 ### 12.2 3명 작업자와 1명 통합자 기준 배치
 
@@ -536,6 +655,34 @@ flowchart TD
 - 목표 정책 생산자는 G10이 확정되면 물리 그래프 소비자와 다른 파일에서 병렬 구현할 수 있다.
 - 기능별 Rust parity를 통과하면 해당 기능을 전환할 수 있다. 모든 UI/ABI 가족이 동시에 준비되어야만 시작하는 구조를 만들지 않는다.
 - 관계 알고리즘 개선은 전체 파일 이동이나 모든 C 삭제를 기다리지 않는다.
+
+### 12.5 작은 작업의 실행·인계 절차
+
+88개 기본 작업은 담당 범위이며 한 번의 큰 변경 단위가 아니다. 담당자는 각 작업을 아래 순서로 잘라 진행한다. 이 절의 단계마다 새 파일·crate·상태 타입을 만들지 않는다.
+
+1. **계약 작성:** OP 연산군, 실제 입력/출력, 필요조건/충분조건/정확 결과의 강도, 지원 보드·미노·프로필을 적는다. key 밖에서 owner가 고정하는 값과 변경 시 무효화할 값도 지정한다. 이 단계는 읽기 전용 조사로 병렬 진행할 수 있다.
+2. **소비자 한 곳 선택:** 가장 작은 실제 소비자와 비교 oracle을 정한다. 기존 결과를 전달할 수 있는지 먼저 확인한다. 전 저장소 rename이나 추상 인터페이스를 먼저 만들지 않는다.
+3. **한 경로 연결:** 기존 계산 결과를 그 소비자에서 사용하게 하고, 남아 있는 중복 계산과 fallback을 명시한다. stale owner·다른 D·다른 profile·부분 계산을 정확 결과로 재사용하지 않는 사례를 해당 범위에서 검증한다.
+4. **동일 계약의 소비자 확대:** 같은 의미인 소비자만 순차 연결하고, compact/extended 또는 Boolean/evidence 차이는 별도 하위 범위로 남긴다. C와 Rust의 이름이 같다는 이유로 연결하지 않는다.
+5. **중복 퇴역:** 마지막 실제 소비자가 사라진 계산·wrapper만 제거한다. 필요한 독립 oracle은 보존한다. 파일 이동은 동작 변경과 분리한다.
+6. **인계와 통합:** 변경한 경로, 감소시킨 연산, 기존/새 owner, 실제 검증 결과, 미지원·미완성 범위를 다음 소비자 담당자에게 넘긴다. 검사 문구 존재나 체크박스 수로 완료를 판정하지 않는다. 큰 실행은 통합자가 준비된 범위의 gate를 확인한 뒤 순차 수행한다.
+
+다음은 동시에 배정할 수 있는 구체적인 작업 묶음이다. 계약 정리와 oracle 설계는 해당 구현 파일의 편집권이 없어도 진행할 수 있다. 표의 준비 조건은 각 묶음의 연결 단계에 적용하고, 최종 완료 조건은 11절을 유지한다.
+
+| 독립 묶음 | 시작할 작은 작업 | 준비되어야 할 계약 | 다음 소비자와 인계물 |
+| --- | --- | --- | --- |
+| 행 프레임 | O03의 순수 사상과 adapter 범위를 대조 | F02·F03 | I01/G03: 행 순서·D 누적·compact/extended 범위 |
+| 규칙 정규화 | O01/O02의 세 정규화 소비자와 ID 인코딩 대조 | F03 | G05/O07: ordered delta·좌표·profile 변경 조건 |
+| 정확 realization | I01에서 약한 domain 소비자와 exact 소비자 분리 후 I02의 한 경로 연결 | O03 | G02/I03: owner별 `(skeleton,D)`의 정확 alternative view |
+| 앞단 투영 재사용 | I05에서 같은 shape/row 조건이 다시 계산되는 호출군 선정 | I02 | catalog 담당: 의미가 완전한 공유 입력과 제거한 projection 계산 |
+| APDP 증분 | A02의 full parent 대안 확인, A03의 영향받은 parent 갱신, A04의 rollback 비교 | F02·O04 | A05/G13: 변화한 cell/partial과 보존되는 parent 대안 |
+| Support와 clear | G02의 supporter OR와 G03의 row contributor를 각각 준비 | G01·I02·O04; clear는 O03 | G15/G13: 직접 영향과 clear 간접 영향이 분리된 관계 |
+| Movement·CEGIS | G05/G06의 전제와 positive proof, G14의 반례 최소화 | F08·G01·O01의 해당 규칙 계약 | G15/V02: 범용/미노/프로필별 적용 범위와 residual fallback |
+| 공급 product | Q01의 관계 언어 입력 및 Q02의 canonical 공급 전이 | G01·F02 | Q03: occurrence·hold 다중성과 request/epoch namespace |
+| 소유권·증거 | O05/O06의 수명 지도와 M02 계측 후 M03의 한 결과 모드 | F03·F07, 해당 compiled 계약 | M04/R06: 공유/worker/후보/결과와 incomplete 처리 |
+| 제품·ABI | R01/R02에서 기능 가족 하나의 소비자와 지원 범위 확인 | F01·F02 | R03~R06: 재사용/미연결/미구현을 구분한 실제 요청 fixture |
+
+각 묶음은 한 worker가 여러 파일을 소유하거나 여러 단계가 한 파일 안에서 끝날 수 있다. 반대로 한 작업 ID가 행 사상 계약, Boolean 소비자, evidence 소비자의 별도 제출로 나뉠 수 있다. 통합자는 `catalog.rs`·`buildup.rs`·`result.rs` 등의 공통 파일에 들어오는 변경을 12.3절 편집권에 따라 순차 연결한다. **병렬화의 단위는 파일 개수가 아니라 서로 독립적인 계산 계약과 변경 범위다.**
 
 ## 13. 정확성 및 성능 검증 설계
 
@@ -615,7 +762,7 @@ MS2·MS3·MS4는 병렬 진행 가능하다. MS1의 개선을 모든 연구의 �
 
 ## 16. 근거와 재현 범위
 
-소스 근거는 문서 상단의 기준 SHA를 대상으로 읽었다. 현재 이 문서와 링크를 위한 문서 수정 이외의 제품 소스 변경은 없다. 아래 파일 링크는 저장소 안에서 열 수 있는 상대 링크이며, 기준 소스는 [고정 커밋](https://github.com/daejunnom/Clearra/tree/caacfae0c9958949858bb846f2bb52eb5fcbb50d)으로도 확인할 수 있다.
+초안 소스 근거와 파일 수 집계는 [초안 기준 커밋](https://github.com/daejunnom/Clearra/tree/caacfae0c9958949858bb846f2bb52eb5fcbb50d)을 대상으로 한다. 7.3~7.4절의 내부 연산 추가 감사는 [추가 감사 기준 커밋](https://github.com/daejunnom/Clearra/tree/45cbf15eec6a6c8821946756807f90703466dff6)을 읽었다. 아래 파일 링크는 현재 저장소에서 여는 상대 링크다. 병행 CEGIS 제품 변경과 실행 결과는 5.7절의 별도 보고서가 담당하며, 이번 문서 감사에서 실행한 빌드·테스트·벤치마크로 취급하지 않는다.
 
 | ID | 확인한 근거 |
 | --- | --- |
@@ -627,14 +774,21 @@ MS2·MS3·MS4는 병렬 진행 가능하다. MS1의 개선을 모든 연구의 �
 | S6 | [B2B-save](../../crates/clearra-scoring/src/b2b_preservation.rs), [B2B chain](../../crates/clearra-scoring/src/event/score_event.rs), [기존 wrapper](../../crates/clearra-postprocess/src/score_batch/b2b_execution_filter.rs), [목표 계약](../../crates/clearra-objectives/src/policy/execution_constraint_policy.rs), [물리 scoring evidence](../../crates/clearra-replay/src/scoring_execution.rs) |
 | S7 | [workspace 설정](../../Cargo.toml), [executor 설정](../../crates/clearra-core-executor/Cargo.toml), [FFI 설정](../../crates/clearra-core-ffi/Cargo.toml) |
 | S8 | [Discord 직접 실행](../../apps/clearra-discord-bot/src/clearra/direct-executor.mjs), [job runner](../../apps/clearra-discord-bot/src/job-service/runner.mjs), [Web worker](../../apps/clearra-web/src/workers/DistributedWasmJobRunner.ts), [CLI routing](../../crates/clearra-cli/src/cli_routing.rs) |
-| S9 | [검증 문서](../architecture-validation.md), [실제 SRP 검사](../../scripts/architecture/validate_srp_policy.ps1), [대상 파일 열거](../../scripts/architecture/validate_file_size.ps1), [의존성 경계](../dependency-boundary.md) |
+| S9 | [작업 규약](../../AGENTS.md), [검증 문서](../architecture-validation.md), [PowerShell 문법 검사](../../scripts/architecture/validate_srp_policy.ps1), [대상 파일 열거](../../scripts/architecture/validate_file_size.ps1), [의존성 경계](../dependency-boundary.md). 역사적인 스크립트 이름을 SRP gate로 해석하지 않음 |
 | S10 | [공통 row frame](../../crates/clearra-core-executor/src/row_frame.rs), [범위를 좁힌 wrapper](../../crates/clearra-core-executor/src/conditioned_local_relation.rs), [공통 projection](../../crates/clearra-core-executor/src/backend/wasm_cpu/geometry_projection.rs) |
 | S11 | 기준 SHA의 `git ls-files` 경로 목록과 원본 줄 수 집계. `tools/vendor/` 제외 자체 Rust 2,264개; 계획용 제품 분류의 제외 규칙은 2.4절에 명시. [대형 cover](../../crates/clearra-coverage/src/cover/exact_minimum_cover.rs), [build probability](../../crates/clearra-core-executor/src/backend/wasm_cpu/build_probability.rs), [result](../../crates/clearra-core-executor/src/backend/wasm_cpu/result.rs), [desktop bridge](../../crates/clearra-gui-host/src/desktop_host/desktop_request_bridge.rs) |
+| S12 | [C target-frame projection](../../core-c/src/packing/target_frame_projection.c), [C exact realization](../../core-c/src/packing/geometry_realization_domain.c), [Rust catalog](../../crates/clearra-core-executor/src/backend/wasm_cpu/catalog.rs), [Rust ILC 필요조건](../../crates/clearra-core-executor/src/backend/wasm_cpu/inverse_projection.rs), [BuildUp 행 연산](../../crates/clearra-core-executor/src/backend/wasm_cpu/buildup.rs). OP01/03/04의 범위·명제 강도·fallback 근거 |
+| S13 | [C first-success](../../core-c/src/reachability/kick_first_success.c), [Rust profile 연결](../../crates/clearra-core-executor/src/backend/wasm_cpu/kick_profiles.rs), [Rust reachability](../../crates/clearra-core-executor/src/backend/wasm_cpu/reachability.rs)의 정규화·`SharedReachabilityTemplates`·cache 권한/무효화; extended/finesse 대응은 S2 |
+| S14 | [C grounding](../../core-c/src/buildup/grounded_filter.c), [C realization domain propagation](../../core-c/src/buildup/realization_domain_propagation.c), [C APDP](../../core-c/src/apdp/geometry_apdp.c), [C Hall](../../core-c/src/pruning/geometry_parent_hall_bound.c), [Rust realization feasibility](../../crates/clearra-core-executor/src/backend/wasm_cpu/realization_feasibility.rs), [Rust APDP domain](../../crates/clearra-core-executor/src/backend/wasm_cpu/geometry_domain.rs). OP05/06/11의 필요조건·완전 도메인·prepass 비활성·stale generation 근거 |
+| S15 | [C residual memo](../../core-c/src/packing/geometry_residual_memo.h), [C completion memo](../../core-c/src/buildup/buildup_completion_memo.h), [C physical transition key](../../core-c/src/buildup/buildup_geometry_transition_cache.h), [C workspace 무효화](../../core-c/src/buildup/buildup_workspace.c), [Rust family/completion](../../crates/clearra-core-executor/src/backend/wasm_cpu/geometry.rs), [점수 증거 재생성](../../crates/clearra-core-executor/src/backend/wasm_cpu/result.rs)의 `prepare_exact_scoring_execution_batch` |
+| S16 | [canonical supply automaton](../../crates/clearra-supply/src/execution_automaton/supply_execution_automaton.rs), [hold alias](../../crates/clearra-supply/src/hold_automaton/hold_automaton.rs), [standard-bag coverage](../../crates/clearra-core-executor/src/backend/wasm_cpu/standard_bag_coverage.rs), [product memo key](../../crates/clearra-core-executor/src/backend/wasm_cpu/standard_bag_product_memo.rs). OP10의 일반/특수 공급 범위와 request/epoch 소유권 근거 |
+| S17 | [ExecutionControl](../../crates/clearra-core-domain/src/execution_cancellation.rs), [native scope](../../crates/clearra-core-ffi/src/memory/native_scope.rs), [native context](../../crates/clearra-core-ffi/src/memory/native_core_context.rs). C allocator 및 optional proof 근거는 S3/S14 |
+| S18 | [C generic BuildUp 지원 범위](../../crates/clearra-core-ffi/src/problem/generic_buildup.rs), [서비스의 실제 지원·미연결 분기](../../crates/clearra-app/src/app_services.rs). OP12의 C/Rust 기능 격차 분류 근거 |
 | E1 | [Google 공식 Rust Style Guide](https://google.github.io/styleguide/rustguide.html), 2026-11-20 열람. 일반 규칙과 `[chrome]` 등 특정 코드베이스 규칙을 구분하여 적용 |
 
 기준 SHA의 추적 C/H 285개는 `src/` 176개, `include/` 25개, `tests/` 83개, `tools/` 1개다. 다운로드·시스템 라이브러리의 native 코드 수는 이 집계에 포함하지 않았다. 파일·줄 수 집계는 성능 측정이 아니다.
 
-문서는 C/Rust 경로, ILC/APDP, 파일·SRP의 세 독립 소스 검토를 통합한 뒤, prune 문구·선행조건·기존 소유자·실제 경로를 다시 검토했다. 새 테스트나 벤치마크를 실행한 결과로 제시하지 않는다.
+문서는 C/Rust 경로, ILC/APDP, 파일·SRP의 독립 검토에 12개 내부 연산군의 소스 감사를 보강했다. 감사 결과는 지원 범위와 명제 강도를 설명하는 근거이며 성능 parity나 속도·메모리 향상을 실행으로 입증한 결과가 아니다. SRP 문구·길이·marker gate의 복구는 후속 구현 범위에도 포함하지 않는다.
 
 [S1]: ../../crates/clearra-app/src/app_services.rs
 [S2]: ../../crates/clearra-core-executor/src/backend/wasm_cpu/placement_conditions.rs
@@ -647,4 +801,11 @@ MS2·MS3·MS4는 병렬 진행 가능하다. MS1의 개선을 모든 연구의 �
 [S9]: ../architecture-validation.md
 [S10]: ../../crates/clearra-core-executor/src/row_frame.rs
 [S11]: https://github.com/daejunnom/Clearra/tree/caacfae0c9958949858bb846f2bb52eb5fcbb50d
+[S12]: ../../crates/clearra-core-executor/src/backend/wasm_cpu/catalog.rs
+[S13]: ../../crates/clearra-core-executor/src/backend/wasm_cpu/reachability.rs
+[S14]: ../../crates/clearra-core-executor/src/backend/wasm_cpu/realization_feasibility.rs
+[S15]: ../../core-c/src/buildup/buildup_geometry_transition_cache.h
+[S16]: ../../crates/clearra-supply/src/execution_automaton/supply_execution_automaton.rs
+[S17]: ../../crates/clearra-core-domain/src/execution_cancellation.rs
+[S18]: ../../crates/clearra-app/src/app_services.rs
 [E1]: https://google.github.io/styleguide/rustguide.html

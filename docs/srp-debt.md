@@ -1,99 +1,86 @@
-# SRP Policy
+# SRP Work Guidelines
 
-Clearra applies SRP at the cohesive module boundary. A module has one reason to change;
-a function, method, assertion, or marker does not automatically need a
-separate physical file.
+The repository work rules in [AGENTS.md](../AGENTS.md) govern code organization.
+SRP is a design and review guideline, not a static gate or a requirement that
+each file have exactly one responsibility. Rust organization follows data
+ownership, invariants, computational reuse, and execution requirements.
 
-## Cohesion Rules
+There are no line-count limits, preferred size bands, required `SRP rationale:`
+comments, or file/type/crate-count targets. File layout, helper names, and marker
+text do not establish compliance. Do not reinstate the former structural gate
+or require a textual exemption for a larger or combined module.
 
-- A public domain type or public contract may own a dedicated file when it
-  forms a stable API boundary.
-- An independent algorithm stage, backend, or validation policy owns a module
-  because it has an independent change reason.
-- Private helpers stay with their cohesive owner when they implement the same
-  invariant or state transition.
-- Constructors, accessors, and small functions that manipulate one parent state
-  stay together. A one-function private helper cluster is file-level
-  fragmentation, not SRP.
-- Related state-transition code should remain readable as one module. Roughly
-  100-400 lines for domain modules, 150-500 for orchestrators, 150-600 for
-  algorithm stages, 200-700 for behavior tests, and 100-500 for validation
-  tasks are useful review ranges, but size alone is not SRP debt.
-- Large behavior may use a larger file or split into named submodules by actual
-  responsibility. Line wrapping or arbitrary line limits are not design tools.
-- Tests group domain behavior in one test module and keep individual cases as
-  test functions. A file per test case is not required.
-- Architecture validation groups checks by contract area. Marker-per-file validation is forbidden.
-- Rust `include!` implementation trees, C source-includes, and generated
-  `impl_001_methods` or `_functions` trees are not module boundaries.
-  Method-per-file fragmentation is forbidden.
-- Empty inherent `impl` shells, declaration-per-header `_api` trees, and
-  include/comment-only C translation units are generated residue, not
-  ownership boundaries.
-- CMake source and test manifests remain cohesive lists. A directory of
-  file-per-section manifest snippets is forbidden.
-- Rust integration-test support lives below its owning test. A root-level
-  `*_support.rs` file becomes an unintended Cargo test target.
-- A file above 1,000 lines must carry an `SRP rationale:` that names its one
-  behavior-level change reason. This is a permanent design explanation, not an
-  exemption or deadline; temporary large-file exemption is forbidden.
+## Organize Around Useful Ownership
 
-## Behavior Module Boundaries
+- Start with the existing owner of the data and computation. A public contract,
+  independent algorithm, or independently reusable stage can justify its own
+  module; that choice does not require a separate file for every type or method.
+- Keep private helpers, constructors, and state transitions together when they
+  share an invariant or lifetime. Split a module when the resulting boundary
+  makes the implementation and its consumers easier to reason about.
+- Check reuse at the level of operations and derived results. Sharing a source
+  file or wrapper is insufficient if each caller reconstructs the same catalog,
+  projection, relation, or evidence. Preserve all inputs and scope conditions
+  that make a previously computed result valid.
+- Prefer existing Rust structs, enums, and inherent implementations where they
+  express real ownership. Do not add class-like layers, traits, dynamic dispatch,
+  or shared mutable owners merely to satisfy a decomposition pattern.
+- Treat a small work item as a reviewable change, not a request for a new file.
+  Related methods, tests, and manifest entries may remain together. A useful
+  public boundary can remain small without being considered debt.
 
-The high-risk test surfaces are grouped by observable behavior:
+## Performance and Memory Tradeoffs
 
-- BuildUp runner: native behavior, coverage source, objective reduction,
-  execution retention, and replay trace. Memo-key safety remains independently
-  owned by `buildup_memo_key_tests.rs`.
-- JSON output: render, diagnostic/replay, PC score, PC trace/continuation, PC
-  backend/result, and incomplete-resource contracts.
-- GPU worker: descriptor, scheduling, trust/fallback, and memory lifetime.
-- Spin target: recognition, Unknown policy, coverage probability, kick
-  evidence, and replay execution.
+Execution time and memory efficiency can justify keeping multiple conventional
+responsibilities in one module or fusing their operations. This is appropriate
+when a split would duplicate calculations, allocate or copy intermediate data,
+retain results longer, or add avoidable dispatch and synchronization.
 
-The owner test files contain shared fixture construction and module declarations;
-the behavior files contain executable cases. A case-per-file directory is not a
-valid replacement for these modules.
+Evaluate the affected computation and data lifetime rather than assuming that
+more abstraction improves the design. Explain material tradeoffs in the change
+review using algorithmic reasoning and relevant measurements when available.
+No fixed comment, per-file statement, or exception approval mechanism is
+required. Conversely, a vague performance claim does not justify an unrelated
+redesign or the creation of another independent solver.
 
-Product E2E follows build, run, assertions, and report stages.
-`product-e2e.ps1` owns parameter handling and stage composition only. Build and
-binary resolution, marker/golden assertions, command/backend execution, and
-report emission each have an
-independent script module. The one-function report module is retained because
-report emission is an independently reusable terminal stage, not a helper
-fragment.
+Keep exactness, completeness, resource reporting, public API contracts, and
+unsafe-boundary isolation intact. Performance-driven organization does not
+permit dropping valid solutions or confusing incomplete evidence with an
+impossibility proof.
+
+## Tests and Tooling
+
+Group tests around observable behavior and reusable fixtures. BuildUp, coverage,
+resource outcomes, replay, kick evidence, and goal conditions can have distinct
+test owners without a mandatory file per behavior or case. Preserve independent
+oracles when implementation helpers are shared.
+
+Product E2E still needs build, execution, assertions, and report behavior, but
+their physical file boundaries should follow reuse and data ownership rather
+than a fixed function-to-file mapping. Avoid creating unintended Cargo test
+targets when placing Rust integration-test helpers.
+
+The historical `validate_srp_policy.ps1` name currently refers to PowerShell
+syntax parsing. `validate_file_size.ps1` supplies its source list. Neither checks
+SRP, file length, mandatory comments, or module ownership. Syntax, dependency,
+ABI, and safety checks retain their own meanings; passing them does not prove
+SRP or solver correctness. See [Architecture Validation](architecture-validation.md).
 
 ## Review Questions
 
-Reviewers should ask:
+1. Which existing object or computation already owns this meaning?
+2. Are repeated derivations being reused under the same valid inputs and scope?
+3. Does the proposed boundary clarify invariants and data lifetime?
+4. Would splitting introduce duplicate work, copies, allocations, retention,
+   dispatch, or synchronization that a combined implementation avoids?
+5. Are public API, exactness, resource, and unsafe contracts still preserved?
+6. Do the relevant tests exercise behavior and counterexamples independently of
+   marker text or implementation naming?
 
-1. Does the file have one coherent reason to change?
-2. Do its private functions implement the same invariant or transition?
-3. Would splitting improve ownership, or merely force readers through include
-   order and filesystem hops?
-4. Are tests grouped around observable domain behavior?
-5. Does an architecture check validate behavior and boundaries rather than the
-   mere presence of a string in a tiny file?
-6. If a module exceeds 1,000 lines, does its permanent `SRP rationale:` explain
-   a single change reason without a temporary exemption?
+## Historical Inventory
 
-## Governed Surface
-
-The gate covers source, tests, and scripts under `crates`, `core-c`, `scripts`,
-`tools`, `apps`, `packages`, and `gui`. Generated and dependency directories are
-excluded. Very large files produce a review warning, not an automatic failure.
-
-The structural gate rejects known over-fragmentation forms while allowing
-public domain modules and real dependency boundaries to remain separate.
-
-## Consolidation Baseline
-
-The July 2026 consolidation reduced the governed code surface from roughly
-19,791 entries with a median size near 9 lines to 2,102 source files with a
-65-line median. Files at or below 10 lines fell to 214, and files at or below
-20 lines fell to 383. These numbers are a review baseline, not size limits.
-
-The remaining short files are primarily public identifier/domain types,
-module export boundaries, and tool configuration. The intentional
-`core-c/tests/test_board64.c` implementation include remains an aggregate test
-adapter; production C implementation includes are forbidden by the gate.
+The earlier July 2026 consolidation record reported roughly 19,791 entries with
+a median size near 9 lines, followed by 2,102 source files with a 65-line median.
+It reported 214 files at or below 10 lines and 383 at or below 20 lines. These
+are historical inventory figures, not current measurements, recommended sizes,
+warning thresholds, or acceptance criteria.

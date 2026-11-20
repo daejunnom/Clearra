@@ -34,6 +34,32 @@ already write exclusively inside a declared root, and programs already inside
 a finite CI/container memory boundary do not need `runtime run` merely because
 they start a process.
 
+## Code organization and computational reuse
+
+SRP is a working guideline for design and review, not a static acceptance gate.
+Do not impose file-length limits, required `SRP rationale:` comments, marker
+presence checks, or targets for the number of files, types, or crates. A small
+task does not require a new file. Keep related operations together when that
+makes their invariants and data lifetime easier to understand.
+
+Reuse existing computational units and their valid derived results, not only
+source files or wrappers. Check the inputs, semantic scope, and owner lifetime
+before sharing a calculation. Avoid rebuilding the same catalog, projection,
+relation, or evidence through different public entry points.
+
+Rust organization must serve execution time and memory efficiency. Prefer the
+existing structs, enums, modules, and inherent implementations where they
+express real ownership. Do not force class-like layers or extra indirection
+for an abstract SRP ideal. Keep or fuse operations and state across a
+conventional responsibility boundary when splitting them would cause repeated
+work, additional copies or allocations, longer retention, or dispatch overhead.
+Explain material tradeoffs in the change review using the relevant algorithmic
+reasoning and available measurements; no per-file wording is required.
+
+These design choices must preserve exactness, completeness, resource reporting,
+public API contracts, and unsafe-boundary isolation. They do not weaken actual
+dependency, ABI, safety, or executed correctness checks.
+
 ## Generated output paths
 
 Clearra-generated files must stay inside a repository or platform root declared

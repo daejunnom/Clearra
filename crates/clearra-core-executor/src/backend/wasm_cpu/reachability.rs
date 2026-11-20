@@ -701,6 +701,41 @@ impl ReachabilityWorkspace {
         Some((attempt.proven, usize::from(attempt.row_steps)))
     }
 
+    /// A cold positive certificate using only left/right/down translations.
+    /// The currently connected builtin profiles share this core's all-x,
+    /// all-rotation sky entry and Boolean lock contract. No rotation or ordered
+    /// kick edge is needed by the witness. A miss is Unknown, not unreachable.
+    #[cfg(any(test, feature = "local-search-ab"))]
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn try_translation_lock_interval(
+        &self,
+        catalog: &GeometryCatalog,
+        minimum_board: u64,
+        maximum_board: u64,
+        piece: PieceKind,
+        profile: KickTableProfileId,
+        realization: InstantiatedRealization,
+        frame: Option<LocalRelationRowFrame>,
+    ) -> Option<(bool, usize)> {
+        if !super::structural_order::translation_intervals_enabled() {
+            return None;
+        }
+        let _ = builtin_kick_profile(profile)?;
+        let attempt = monotone_reachability::proves_translation_lock_interval(
+            piece,
+            catalog.width(),
+            catalog.height(),
+            minimum_board,
+            maximum_board,
+            realization.rotation,
+            realization.x,
+            realization.lock_y,
+            realization.lock_mask,
+            frame?,
+        )?;
+        Some((attempt.proven, usize::from(attempt.row_steps)))
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn scoring_lock_evidence(
         &mut self,

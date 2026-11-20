@@ -1,4 +1,10 @@
-//! Exact Boolean O reachability without a pose graph or visited-state storage.
+//! Monotone movement proofs without a pose graph or visited-state storage.
+//!
+//! For every standard piece, a fixed-orientation path using only horizontal
+//! translations and downward moves is a sufficient entry witness, independent
+//! of the kick table. Its absence is Unknown: a rotation may provide another
+//! path. On an occupancy interval, minimum-board grounding and a maximum-board
+//! translation path certify every intermediate board without enumerating it.
 //!
 //! Admission proves from the actual registry and kick entries that all O
 //! rotations occupy the same normalized 2x2 cells and cannot translate the
@@ -21,7 +27,203 @@ use clearra_rules::kicks::{KickTableProfile, KickTableProfileId};
 
 use crate::conditioned_local_relation::LocalRelationRowFrame;
 
-use super::{builtin_kick_profile, normalized_kick_delta};
+use super::{builtin_kick_profile, normalized_kick_delta, piece_index};
+
+/// A positive-only proof attempt using no rotations. Failure means Unknown for
+/// the full movement system, including NoKick, which still permits rotations.
+/// This is deliberately not an exact Boolean lock result like `MonotoneOResult`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct TranslationIntervalAttempt {
+    pub proven: bool,
+    /// Physical anchor rows evaluated, including unsuccessful attempts.
+    pub row_steps: u8,
+}
+
+/// Validated normalized cells for one immutable standard shape/orientation.
+/// Only these small shape-derived operands are shared; no candidate, board,
+/// line-clear frame, pose graph, or movement result is retained here.
+#[derive(Clone, Copy, Debug)]
+struct TranslationShape {
+    cells: [(u8, u8); 4],
+    width: u8,
+    height: u8,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct TranslationPathAttempt {
+    exists: bool,
+    row_steps: u8,
+}
+
+impl TranslationShape {
+    fn for_piece(piece: PieceKind, rotation: RotationState) -> Option<&'static Self> {
+        static SHAPES: [OnceLock<Option<TranslationShape>>; 28] = [const { OnceLock::new() }; 28];
+        let index = piece_index(piece) * 4 + usize::from(rotation.quarter_turns());
+        SHAPES[index]
+            .get_or_init(|| Self::compile(piece, rotation))
+            .as_ref()
+    }
+
+    fn compile(piece: PieceKind, rotation: RotationState) -> Option<Self> {
+        let definition = standard_tetromino_registry().get(piece)?;
+        let mut cells = [(0, 0); 4];
+        let mut occupied = 0_u16;
+        let mut min_x = 4;
+        let mut min_y = 4;
+        let mut width = 0;
+        let mut height = 0;
+        for (index, cell) in definition.shape(rotation).cells().into_iter().enumerate() {
+            if !(0..=3).contains(&cell.x()) || !(0..=3).contains(&cell.y()) {
+                return None;
+            }
+            let x = cell.x() as u8;
+            let y = cell.y() as u8;
+            cells[index] = (x, y);
+            occupied |= 1_u16 << (y * 4 + x);
+            min_x = min_x.min(x);
+            min_y = min_y.min(y);
+            width = width.max(x + 1);
+            height = height.max(y + 1);
+        }
+        if occupied.count_ones() != 4 || min_x != 0 || min_y != 0 {
+            return None;
+        }
+        Some(Self {
+            cells,
+            width,
+            height,
+        })
+    }
+
+    fn lock_mask(&self, width: u8, height: u8, x: i8, y: i8) -> Option<u64> {
+        if x < 0
+            || y < 0
+            || x as u16 + u16::from(self.width) > u16::from(width)
+            || y as u16 + u16::from(self.height) > u16::from(height)
+        {
+            return None;
+        }
+        let mut mask = 0_u64;
+        for &(dx, dy) in &self.cells {
+            let index = (y as u32 + u32::from(dy)) * u32::from(width) + x as u32 + u32::from(dx);
+            mask |= 1_u64.checked_shl(index)?;
+        }
+        Some(mask)
+    }
+
+    /// Exact for fixed-orientation translations only. It is private so its
+    /// negative result cannot be mistaken for full rotation-aware reachability.
+    /// The connected solver seeds every admissible x/orientation above the
+    /// board; a caller with a narrower spawn/entry contract cannot use this.
+    fn path_from_sky(
+        &self,
+        width: u8,
+        height: u8,
+        board: u64,
+        x: i8,
+        y: i8,
+    ) -> Option<TranslationPathAttempt> {
+        if !(1..=10).contains(&width)
+            || !(1..=6).contains(&height)
+            || self.width > width
+            || x < 0
+            || x as u16 + u16::from(self.width) > u16::from(width)
+            || y < 0
+            || y >= height as i8
+            || board >> (u32::from(width) * u32::from(height)) != 0
+        {
+            return None;
+        }
+        let row_cells = (1_u16 << width) - 1;
+        let anchor_mask = (1_u16 << (width - self.width + 1)) - 1;
+        let mut frontier = 1_u16 << x as u32;
+        let mut row_steps = 0;
+        for row in y as u8..height {
+            let mut free_anchors = anchor_mask;
+            for &(dx, dy) in &self.cells {
+                let occupied = board_row(board, width, height, row + dy, row_cells);
+                free_anchors &= !(occupied >> dx);
+            }
+            frontier = horizontal_closure(frontier, free_anchors);
+            row_steps += 1;
+            if frontier == 0 {
+                return Some(TranslationPathAttempt {
+                    exists: false,
+                    row_steps,
+                });
+            }
+        }
+        Some(TranslationPathAttempt {
+            exists: true,
+            row_steps,
+        })
+    }
+}
+
+/// Prove a lock for every occupancy `minimum <= board <= maximum` in one fixed
+/// row-clear frame, for any connected kick profile with the existing solver's
+/// horizontal/down translations and all-x/all-orientation sky seeds.
+///
+/// For a shape S and anchor row y, the free-anchor set is
+/// `F_y = anchor_mask & AND_(dx,dy in S) !(row(maximum,y+dy) >> dx)`.
+/// Starting at the target, horizontal component closure followed by the same
+/// anchors one row above is exact for the reverse of translation-only paths:
+/// every downward path visits rows in order, and each within-row segment lies
+/// in one free horizontal component. Thus a nonempty frontier at the sky is a
+/// real path on maximum. Removing occupied cells cannot invalidate any chosen
+/// translation on that path; grounding proved on minimum persists when cells
+/// are added. The two facts prove every intermediate lock.
+///
+/// No rotation is executed, so neither later kicks nor earlier first-success
+/// competitors participate in this witness. This does not prove that their
+/// absence is irrelevant to *all* possible paths. `proven == false` and `None`
+/// must both remain Unknown, never a candidate-rejection result.
+///
+/// The caller must establish the candidate's row-contributor conditions and
+/// use ordinary Boolean lock feasibility, not finesse, spin, finite-lock-delay
+/// or arbitrary-entry semantics. Bounds and target must use the same physical
+/// frame. This preserves LocalRelationRowFrame's current width-10 admission.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn proves_translation_lock_interval(
+    piece: PieceKind,
+    width: u8,
+    height: u8,
+    minimum: u64,
+    maximum: u64,
+    rotation: RotationState,
+    x: i8,
+    y: i8,
+    expected_lock_mask: u64,
+    frame: LocalRelationRowFrame,
+) -> Option<TranslationIntervalAttempt> {
+    if width != 10
+        || !(1..=6).contains(&height)
+        || minimum & !maximum != 0
+        || frame.target_height() != height
+        || !frame.accepts_physical_board(width, minimum)
+        || !frame.accepts_physical_board(width, maximum)
+    {
+        return None;
+    }
+    let shape = TranslationShape::for_piece(piece, rotation)?;
+    let lock_mask = shape.lock_mask(width, height, x, y)?;
+    if expected_lock_mask != lock_mask || !frame.accepts_physical_board(width, lock_mask) {
+        return None;
+    }
+    let floor_cells = (1_u64 << width) - 1;
+    let support_cells = (lock_mask >> width) & !lock_mask;
+    if lock_mask & floor_cells == 0 && minimum & support_cells == 0 {
+        return Some(TranslationIntervalAttempt {
+            proven: false,
+            row_steps: 0,
+        });
+    }
+    let path = shape.path_from_sky(width, height, maximum, x, y)?;
+    Some(TranslationIntervalAttempt {
+        proven: path.exists,
+        row_steps: path.row_steps,
+    })
+}
 
 /// Constructible only after the registry/profile monotonicity proof succeeds.
 /// The proof is independent of width, height, board occupancy and target pose.
@@ -292,6 +494,8 @@ fn horizontal_closure(seeds: u16, free: u16) -> u16 {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::{HashSet, VecDeque};
+
     use super::*;
     use clearra_rules::{
         kicks::{KickOffset, KickOffsetSequence, KickTableEntry, KickTransition},
@@ -333,9 +537,10 @@ mod tests {
     }
 
     #[test]
-    fn horizontal_interval_closure_matches_every_nine_bit_graph() {
-        for free in 0..1_u16 << 9 {
-            for seeds in 0..1_u16 << 9 {
+    fn horizontal_interval_closure_matches_every_ten_bit_graph() {
+        // A vertical I has ten anchors on a width-ten board, including x=9.
+        for free in 0..1_u16 << 10 {
+            for seeds in 0..1_u16 << 10 {
                 let mut expected = seeds & free;
                 loop {
                     let next = (expected | (expected << 1) | (expected >> 1)) & free;
@@ -346,6 +551,354 @@ mod tests {
                 }
                 assert_eq!(horizontal_closure(seeds, free), expected);
             }
+        }
+    }
+
+    /// A deliberately separate cell-based BFS. It does not use compiled shape
+    /// operands, free-anchor masks, horizontal closure or production traversal.
+    fn reference_translation_anchors(
+        width: u8,
+        height: u8,
+        board: u64,
+        piece: PieceKind,
+        rotation: RotationState,
+    ) -> u64 {
+        let cells = standard_tetromino_registry()
+            .get(piece)
+            .unwrap()
+            .shape(rotation)
+            .cells();
+        let placeable = |x: i8, y: i8| {
+            cells.iter().all(|cell| {
+                let cell_x = i16::from(x) + i16::from(cell.x());
+                let cell_y = i16::from(y) + i16::from(cell.y());
+                cell_x >= 0
+                    && cell_x < i16::from(width)
+                    && cell_y >= 0
+                    && (cell_y >= i16::from(height)
+                        || board & (1_u64 << (cell_y as u32 * u32::from(width) + cell_x as u32))
+                            == 0)
+            })
+        };
+        let mut visited = HashSet::new();
+        let mut queue = VecDeque::new();
+        for x in 0..width as i8 {
+            if placeable(x, height as i8) {
+                visited.insert((x, height as i8));
+                queue.push_back((x, height as i8));
+            }
+        }
+        let mut anchors = 0;
+        while let Some((x, y)) = queue.pop_front() {
+            if y < height as i8 {
+                anchors |= 1_u64 << (y as u32 * u32::from(width) + x as u32);
+            }
+            for next in [(x - 1, y), (x + 1, y), (x, y - 1)] {
+                if next.0 >= 0
+                    && next.0 < width as i8
+                    && next.1 >= 0
+                    && placeable(next.0, next.1)
+                    && visited.insert(next)
+                {
+                    queue.push_back(next);
+                }
+            }
+        }
+        anchors
+    }
+
+    fn reference_lock_mask(
+        width: u8,
+        piece: PieceKind,
+        rotation: RotationState,
+        x: u8,
+        y: u8,
+    ) -> u64 {
+        standard_tetromino_registry()
+            .get(piece)
+            .unwrap()
+            .shape(rotation)
+            .cells()
+            .into_iter()
+            .fold(0, |mask, cell| {
+                mask | (1_u64
+                    << ((u32::from(y) + cell.y() as u32) * u32::from(width)
+                        + u32::from(x)
+                        + cell.x() as u32))
+            })
+    }
+
+    #[test]
+    fn every_standard_shape_matches_independent_translation_bfs_on_small_boards() {
+        for piece in PieceKind::STANDARD_TETROMINOES {
+            for rotation in RotationState::ALL {
+                let shape = TranslationShape::for_piece(piece, rotation).unwrap();
+                for (width, height) in [(1_u8, 4_u8), (3, 3), (4, 3)] {
+                    if shape.width > width {
+                        continue;
+                    }
+                    for board in 0..1_u64 << (width * height) {
+                        let expected =
+                            reference_translation_anchors(width, height, board, piece, rotation);
+                        for y in 0..height {
+                            for x in 0..=width - shape.width {
+                                let actual = shape
+                                    .path_from_sky(width, height, board, x as i8, y as i8)
+                                    .unwrap();
+                                let anchor = 1_u64 << (y * width + x);
+                                assert_eq!(
+                                    actual.exists,
+                                    expected & anchor != 0,
+                                    "piece={piece:?}, rotation={rotation:?}, {width}x{height}, board={board:#x}, target=({x},{y})"
+                                );
+                                assert!((1..=height - y).contains(&actual.row_steps));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn every_shape_interval_covers_all_intermediate_boards_and_clear_frames() {
+        let (width, height) = (10, 6);
+        for piece in PieceKind::STANDARD_TETROMINOES {
+            for rotation in RotationState::ALL {
+                let cells = standard_tetromino_registry()
+                    .get(piece)
+                    .unwrap()
+                    .shape(rotation)
+                    .cells();
+                let shape_width = cells.iter().map(|cell| cell.x()).max().unwrap() as u8 + 1;
+                let shape_height = cells.iter().map(|cell| cell.y()).max().unwrap() as u8 + 1;
+                let support_x = cells.iter().find(|cell| cell.y() == 0).unwrap().x() as u8;
+                for (y, deleted_rows, variable_row) in [(1_u8, 0_u16, 4_u8), (0, 1, 3)] {
+                    let frame = LocalRelationRowFrame::new(height, deleted_rows).unwrap();
+                    let support = if y == 0 { 0 } else { 1_u64 << support_x };
+                    // Every vertical drop at the target x crosses this roof.
+                    // Entry beside it followed by a horizontal slide succeeds.
+                    let roof = ((1_u64 << shape_width) - 1) << ((y + shape_height) * width);
+                    let minimum = support | roof;
+                    let variable = (3_u64 << (variable_row * width + 8))
+                        | (3_u64 << ((variable_row + 1) * width + 8));
+                    let maximum = minimum | variable;
+                    let lock_mask = reference_lock_mask(width, piece, rotation, 0, y);
+                    let attempt = proves_translation_lock_interval(
+                        piece, width, height, minimum, maximum, rotation, 0, y as i8, lock_mask,
+                        frame,
+                    )
+                    .unwrap();
+                    assert!(
+                        attempt.proven,
+                        "piece={piece:?}, rotation={rotation:?}, deleted_rows={deleted_rows:#b}"
+                    );
+                    assert!(attempt.row_steps > 0);
+                    let mut assignment = variable;
+                    let mut count = 0;
+                    loop {
+                        let board = minimum | assignment;
+                        assert!(frame.accepts_physical_board(width, board));
+                        for profile in PROFILES {
+                            let expected =
+                                crate::reachability_reference::reference_spawn_lock_anchors(
+                                    width, height, board, piece, profile,
+                                )
+                                .unwrap();
+                            assert_ne!(
+                                expected[rotation.quarter_turns() as usize]
+                                    & (1_u64 << (y * width)),
+                                0,
+                                "piece={piece:?}, rotation={rotation:?}, profile={profile:?}, board={board:#x}, deleted_rows={deleted_rows:#b}"
+                            );
+                        }
+                        count += 1;
+                        if assignment == 0 {
+                            break;
+                        }
+                        assignment = (assignment - 1) & variable;
+                    }
+                    assert_eq!(count, 16);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn every_shape_requires_minimum_grounding_and_vertical_i_admits_x_nine() {
+        let frame = LocalRelationRowFrame::new(6, 0).unwrap();
+        for piece in PieceKind::STANDARD_TETROMINOES {
+            for rotation in RotationState::ALL {
+                let cells = standard_tetromino_registry()
+                    .get(piece)
+                    .unwrap()
+                    .shape(rotation)
+                    .cells();
+                let support_x = cells.iter().find(|cell| cell.y() == 0).unwrap().x() as u8;
+                let lock_mask = reference_lock_mask(10, piece, rotation, 0, 1);
+                for maximum in [0, 1_u64 << support_x] {
+                    let attempt = proves_translation_lock_interval(
+                        piece, 10, 6, 0, maximum, rotation, 0, 1, lock_mask, frame,
+                    )
+                    .unwrap();
+                    assert!(!attempt.proven);
+                    assert_eq!(attempt.row_steps, 0);
+                }
+            }
+        }
+        for rotation in [RotationState::Right, RotationState::Left] {
+            let expected_lock_mask = reference_lock_mask(10, PieceKind::I, rotation, 9, 0);
+            assert!(
+                proves_translation_lock_interval(
+                    PieceKind::I,
+                    10,
+                    6,
+                    0,
+                    0,
+                    rotation,
+                    9,
+                    0,
+                    expected_lock_mask,
+                    frame,
+                )
+                .unwrap()
+                .proven
+            );
+        }
+    }
+
+    #[test]
+    fn distant_translation_entry_and_joint_blockers_remain_relevant() {
+        let frame = LocalRelationRowFrame::new(6, 0).unwrap();
+        let rotation = RotationState::Zero;
+        let attempt = |minimum, maximum, x| {
+            proves_translation_lock_interval(
+                PieceKind::T,
+                10,
+                6,
+                minimum,
+                maximum,
+                rotation,
+                x,
+                0,
+                reference_lock_mask(10, PieceKind::T, rotation, x as u8, 0),
+                frame,
+            )
+            .unwrap()
+        };
+        let roof = 0x7f_u64 << 20;
+        let distant_i = (2..6).fold(0_u64, |mask, y| mask | (1_u64 << (10 * y + 7)));
+        assert!(attempt(roof, roof, 0).proven);
+        assert!(!attempt(roof, roof | distant_i, 0).proven);
+        let local_cells = (0..6).fold(0_u64, |mask, y| mask | (0xf_u64 << (10 * y)));
+        assert_eq!(roof & local_cells, (roof | distant_i) & local_cells);
+
+        // Each entrance survives either blocker alone. Both must be retained
+        // in any independence argument; an individual-pair test is insufficient.
+        let middle_roof = 7_u64 << 23;
+        let left_blocker = 1_u64 << 21;
+        let right_blocker = 1_u64 << 27;
+        for extra in [0, left_blocker, right_blocker] {
+            assert!(attempt(middle_roof, middle_roof | extra, 3).proven);
+        }
+        assert!(!attempt(middle_roof, middle_roof | left_blocker | right_blocker, 3).proven);
+    }
+
+    #[test]
+    fn translation_miss_is_unknown_even_when_rotation_proves_the_lock() {
+        // Only a two-cell-wide entrance remains. Horizontal T cannot cross
+        // the roof, but Right T enters at x=8 and rotates below it, then slides
+        // to the target. This also works with zero kick offsets: rotations do
+        // not disappear merely because a profile is named NoKick.
+        let board = 0xff_u64 << 20;
+        let rotation = RotationState::Zero;
+        let attempt = proves_translation_lock_interval(
+            PieceKind::T,
+            10,
+            6,
+            board,
+            board,
+            rotation,
+            0,
+            0,
+            reference_lock_mask(10, PieceKind::T, rotation, 0, 0),
+            LocalRelationRowFrame::new(6, 0).unwrap(),
+        )
+        .unwrap();
+        assert!(!attempt.proven);
+        assert!(attempt.row_steps > 0);
+        for profile in PROFILES {
+            let expected = crate::reachability_reference::reference_spawn_lock_anchors(
+                10,
+                6,
+                board,
+                PieceKind::T,
+                profile,
+            )
+            .unwrap();
+            assert_ne!(expected[rotation.quarter_turns() as usize] & 1, 0);
+        }
+    }
+
+    #[test]
+    fn translation_interval_rejects_wrong_frame_bounds_ilc_and_partial_target() {
+        let piece = PieceKind::L;
+        let rotation = RotationState::Right;
+        let lock_mask = reference_lock_mask(10, piece, rotation, 0, 0);
+        let frame = LocalRelationRowFrame::new(6, 0).unwrap();
+        let attempt = |minimum, maximum, expected, candidate_frame| {
+            proves_translation_lock_interval(
+                piece,
+                10,
+                6,
+                minimum,
+                maximum,
+                rotation,
+                0,
+                0,
+                expected,
+                candidate_frame,
+            )
+        };
+        assert!(attempt(0, 0, lock_mask, frame).unwrap().proven);
+        assert!(attempt(1, 0, lock_mask, frame).is_none());
+        assert!(attempt(0, 0, lock_mask ^ 1, frame).is_none());
+        assert!(attempt(0, 0, lock_mask, LocalRelationRowFrame::new(5, 0).unwrap()).is_none());
+        assert!(attempt(
+            0,
+            1_u64 << 50,
+            lock_mask,
+            LocalRelationRowFrame::new(6, 1).unwrap(),
+        )
+        .is_none());
+        assert!(attempt(0, 1_u64 << 60, lock_mask, frame).is_none());
+        assert!(attempt(0, lock_mask, lock_mask, frame).is_some_and(|attempt| !attempt.proven));
+        assert!(proves_translation_lock_interval(
+            PieceKind::I,
+            10,
+            6,
+            0,
+            0,
+            RotationState::Right,
+            0,
+            0,
+            reference_lock_mask(10, PieceKind::I, RotationState::Right, 0, 0),
+            LocalRelationRowFrame::new(6, 0b111).unwrap(),
+        )
+        .is_none());
+        for (width, height, x, y) in [
+            (6, 6, 0, 0),
+            (10, 0, 0, 0),
+            (10, 7, 0, 0),
+            (10, 6, -1, 0),
+            (10, 6, 9, 0),
+            (10, 6, 0, -1),
+            (10, 6, 0, 5),
+        ] {
+            assert!(proves_translation_lock_interval(
+                piece, width, height, 0, 0, rotation, x, y, lock_mask, frame,
+            )
+            .is_none());
         }
     }
 

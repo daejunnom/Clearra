@@ -22,11 +22,34 @@ pub struct StructuralOrderMetrics {
     pub algebraic_interval_attempts: u64,
     pub algebraic_interval_guards: u64,
     pub algebraic_interval_row_steps: u64,
+    /// Subset of analytic work using a cold, fixed-orientation translation
+    /// witness. Unlike the O capability, failure is never an impossibility.
+    pub translation_interval_attempts: u64,
+    pub translation_interval_guards: u64,
+    pub translation_interval_row_steps: u64,
 }
 
 thread_local! {
     static MODE: Cell<Option<bool>> = const { Cell::new(None) };
+    static TRANSLATION_MODE: Cell<Option<bool>> = const { Cell::new(None) };
     static METRICS: Cell<StructuralOrderMetrics> = Cell::new(StructuralOrderMetrics::default());
+}
+
+pub(super) fn translation_intervals_enabled() -> bool {
+    if let Some(mode) = TRANSLATION_MODE.with(Cell::get) {
+        return mode;
+    }
+    #[cfg(feature = "local-search-ab")]
+    {
+        static MODE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *MODE.get_or_init(|| {
+            std::env::var("CLEARRA_TRANSLATION_INTERVAL").is_ok_and(|value| value == "1")
+        })
+    }
+    #[cfg(not(feature = "local-search-ab"))]
+    {
+        false
+    }
 }
 
 pub(super) fn enabled() -> bool {
@@ -52,9 +75,9 @@ mod process_totals {
 
     use super::StructuralOrderMetrics;
 
-    // Updated only on a successful graph bypass, not for every geometric
-    // candidate or primitive transition. These are process-lifetime diagnostic
-    // totals; the finite benchmark performs exactly one search per process.
+    // Bypass totals count successful certificates. Analytic totals also count
+    // failed candidates, once per candidate rather than per row or primitive
+    // transition. The finite benchmark performs one search per process.
     static BYPASSES: AtomicU64 = AtomicU64::new(0);
     static RESIDUALS: AtomicU64 = AtomicU64::new(0);
     static TWINS: AtomicU64 = AtomicU64::new(0);
@@ -62,6 +85,9 @@ mod process_totals {
     static ALGEBRAIC_ATTEMPTS: AtomicU64 = AtomicU64::new(0);
     static ALGEBRAIC_GUARDS: AtomicU64 = AtomicU64::new(0);
     static ALGEBRAIC_ROWS: AtomicU64 = AtomicU64::new(0);
+    static TRANSLATION_ATTEMPTS: AtomicU64 = AtomicU64::new(0);
+    static TRANSLATION_GUARDS: AtomicU64 = AtomicU64::new(0);
+    static TRANSLATION_ROWS: AtomicU64 = AtomicU64::new(0);
 
     pub(super) fn record(delta: StructuralOrderMetrics) {
         BYPASSES.fetch_add(delta.skipped_build_graphs, Ordering::Relaxed);
@@ -79,6 +105,9 @@ mod process_totals {
             algebraic_interval_attempts: ALGEBRAIC_ATTEMPTS.load(Ordering::Relaxed),
             algebraic_interval_guards: ALGEBRAIC_GUARDS.load(Ordering::Relaxed),
             algebraic_interval_row_steps: ALGEBRAIC_ROWS.load(Ordering::Relaxed),
+            translation_interval_attempts: TRANSLATION_ATTEMPTS.load(Ordering::Relaxed),
+            translation_interval_guards: TRANSLATION_GUARDS.load(Ordering::Relaxed),
+            translation_interval_row_steps: TRANSLATION_ROWS.load(Ordering::Relaxed),
         }
     }
 
@@ -86,6 +115,12 @@ mod process_totals {
         ALGEBRAIC_ATTEMPTS.fetch_add(attempts, Ordering::Relaxed);
         ALGEBRAIC_GUARDS.fetch_add(guards, Ordering::Relaxed);
         ALGEBRAIC_ROWS.fetch_add(rows, Ordering::Relaxed);
+    }
+
+    pub(super) fn record_translation(attempts: u64, guards: u64, rows: u64) {
+        TRANSLATION_ATTEMPTS.fetch_add(attempts, Ordering::Relaxed);
+        TRANSLATION_GUARDS.fetch_add(guards, Ordering::Relaxed);
+        TRANSLATION_ROWS.fetch_add(rows, Ordering::Relaxed);
     }
 }
 
@@ -128,6 +163,21 @@ pub(super) fn record_algebraic_intervals(attempts: usize, guards: usize, rows: u
     process_totals::record_algebraic(attempts as u64, guards as u64, rows as u64);
 }
 
+pub(super) fn record_translation_intervals(attempts: usize, guards: usize, rows: usize) {
+    if attempts == 0 {
+        return;
+    }
+    METRICS.with(|slot| {
+        let mut value = slot.get();
+        value.translation_interval_attempts += attempts as u64;
+        value.translation_interval_guards += guards as u64;
+        value.translation_interval_row_steps += rows as u64;
+        slot.set(value);
+    });
+    #[cfg(feature = "local-search-ab")]
+    process_totals::record_translation(attempts as u64, guards as u64, rows as u64);
+}
+
 /// Diagnostic totals since process start. Read after all experiment workers
 /// have joined; this is not a multi-search session statistics interface.
 #[cfg(feature = "local-search-ab")]
@@ -156,4 +206,16 @@ pub(super) fn with_mode<T>(
     };
     let output = action();
     (output, METRICS.with(Cell::get))
+}
+
+#[cfg(test)]
+pub(super) fn with_translation_interval_mode<T>(enabled: bool, action: impl FnOnce() -> T) -> T {
+    struct Restore(Option<bool>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            TRANSLATION_MODE.with(|slot| slot.set(self.0));
+        }
+    }
+    let _restore = Restore(TRANSLATION_MODE.with(|slot| slot.replace(Some(enabled))));
+    action()
 }

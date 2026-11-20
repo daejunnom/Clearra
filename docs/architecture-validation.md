@@ -1,11 +1,12 @@
 # Architecture Validation Authority
 
-Clearra separates static architecture authority from executed correctness
-evidence. Runtime correctness is not inferred from marker presence.
+Clearra separates interface and safety contracts from executed correctness
+evidence. Runtime correctness is not inferred from marker presence. SRP is a
+design and review guideline in `AGENTS.md`, not an automated acceptance gate.
 
-## Release-Blocking Static Checks
+## Interface and Safety Contract Checks
 
-Static marker or source scans may block release only for these contracts:
+Source-level checks may enforce these contracts:
 
 - dependency boundary
 - forbidden API and forbidden algorithm surface
@@ -15,19 +16,29 @@ Static marker or source scans may block release only for these contracts:
 - NoProductDebt product-source policy with test fixtures and `docs/history`
   excluded by explicit allowlist
 
-The default `Validate` task also checks SRP source structure. That structural
-check is not marker-based solver-correctness evidence. Advisory implementation
-and release-wiring audits remain individually callable, but they are not part
-of the default release-blocking validation set.
+These checks concern the actual dependencies, supported interfaces, and safety
+contracts. Adding a comment, a type name, or an expected string does not prove
+that the corresponding behavior is implemented. Advisory implementation and
+release-wiring audits remain separate from executed correctness evidence.
 
-The SRP task validates physical module ownership rather than counting marker
-strings. It checks that the BuildUp, JSON, GPU worker, and spin-target test
-owners index concrete behavior modules while executable cases live in those
-modules. It parses Product E2E PowerShell with the PowerShell AST and verifies
-that build, assertions, run/cases, and report functions are owned by their
-corresponding stage files. It also rejects
-`mod helper_*` shells, action-per-file TypeScript helper clusters, and
-1,000-line modules without a permanent single-change-reason rationale.
+## Code Organization Is a Work Guideline
+
+There is no 1,000-line limit, required `SRP rationale:` comment, or static SRP
+gate. File counts, source layout, helper names, and marker text are not SRP
+acceptance criteria. Do not restore the former size or wording rules when
+updating validation.
+
+The existing `scripts/architecture/validate_srp_policy.ps1` defines
+`Assert-PowerShellSourcesParse`. It parses PowerShell sources and reports syntax
+errors. `validate_file_size.ps1` supplies the governed file list; it does not
+measure file sizes or validate module ownership. The historical script names
+do not establish an SRP check, and successful parsing proves syntax only.
+
+Use the working rules in `AGENTS.md` to review cohesion, computational reuse,
+and data ownership. Rust performance and memory requirements can justify
+keeping or fusing operations across a conventional SRP boundary. Such a choice
+must preserve correctness and the interface and safety contracts above; it
+does not require a mandated comment or a structural exemption mechanism.
 
 Examples of claims that marker presence cannot prove:
 

@@ -1568,11 +1568,14 @@ fn verify_certified_poset(
     let mut algebraic_attempts = 0;
     let mut algebraic_guards = 0;
     let mut algebraic_row_steps = 0;
+    let mut translation_attempts = 0;
+    let mut translation_guards = 0;
+    let mut translation_row_steps = 0;
     let poset = super::placement_poset::compile_with_guard(
         catalog,
         candidate,
         |piece, realization, deleted, minimum, maximum| {
-            if let Some((proven, row_steps)) = workspace.reachability.try_monotone_lock_interval(
+            let o_attempt = workspace.reachability.try_monotone_lock_interval(
                 catalog,
                 minimum,
                 maximum,
@@ -1580,9 +1583,32 @@ fn verify_certified_poset(
                 problem.kick_profile().profile_id(),
                 realization,
                 LocalRelationRowFrame::new(catalog.height(), deleted),
-            ) {
+            );
+            // An admitted O proof already solves this translation subgraph;
+            // do not repeat it. Other pieces use a positive-only witness.
+            let (attempt, translation) = match o_attempt {
+                Some(attempt) => (Some(attempt), false),
+                None => (
+                    workspace.reachability.try_translation_lock_interval(
+                        catalog,
+                        minimum,
+                        maximum,
+                        piece,
+                        problem.kick_profile().profile_id(),
+                        realization,
+                        LocalRelationRowFrame::new(catalog.height(), deleted),
+                    ),
+                    true,
+                ),
+            };
+            if let Some((proven, row_steps)) = attempt {
                 algebraic_attempts += 1;
                 algebraic_row_steps += row_steps;
+                if translation {
+                    translation_attempts += 1;
+                    translation_row_steps += row_steps;
+                    translation_guards += usize::from(proven);
+                }
                 if proven {
                     algebraic_guards += 1;
                     return true;
@@ -1605,6 +1631,11 @@ fn verify_certified_poset(
         algebraic_attempts,
         algebraic_guards,
         algebraic_row_steps,
+    );
+    super::structural_order::record_translation_intervals(
+        translation_attempts,
+        translation_guards,
+        translation_row_steps,
     );
     let Some(poset) = poset else {
         return Ok(None);
