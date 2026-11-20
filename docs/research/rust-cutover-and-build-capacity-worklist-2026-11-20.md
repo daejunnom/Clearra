@@ -151,3 +151,68 @@ separate from owner-supervised wall time. Report censored, mismatched,
 resource-limited and serial-fallback arms explicitly. A runner with fewer
 than 11 logical processors does not qualify the 11-worker case. Hosted
 qualification does not replace the Windows proof or release a product.
+
+## 2026-11-20 deployed path and local ABBA readback
+
+The [Pages deployment identity](https://daejunnom.github.io/Clearra/clearra-build-identity.json)
+reported v0.8.4 with both source and engine bound to `fb795810`. The live
+coordinator/verifier JavaScript and WASM manifest matched their listed
+SHA-256 values, and the manifest agreed with the source and engine. This
+is asset readback, not a timed browser session.
+
+- v0.7.4 ordinary Web PC used a WASM Geometry/candidate producer and up
+  to N−1 verifier realms. Its Tiling roots were a separate route.
+- v0.8.4 eligible compact CPU CountUnique distributes natural multiset
+  roots to separate WASM verifier realms. Resource/observation guards
+  can instead select streaming Geometry plus parallel BuildUp, or serial.
+  Empty board with empty Hold is normally the Opening preset.
+- The integration candidate retains the ordinary Web split while
+  distinguishing root issuance from completion and releasing transferred
+  batch memory sooner. Native Rust uses a shared in-process queue and
+  verifies candidates as their Geometry branches are enumerated; this is
+  not the browser protocol.
+
+The `core-c` tree at `fb795810` and the measured `ac9d94ab` is identical
+(`9c01f6a0ad6ea1264c1283630183ea694802cffd`). At the native bridge,
+worker-report and completion handling changed, not this fixture's
+packing algorithm. Older C rules did change: `62320310` corrected the
+SRS+ I half-turn table and switched to passing the verified Rust rule
+table into C; `f504c8f0` again omitted occupancy-equivalent O half-turns.
+The tracked 456,923 baseline was Rust/WASM, not a historical C oracle
+under the same request and rules.
+
+Local WSL provided 8 logical CPUs. All twenty subprocess samples ran in
+serial C/Rust/Rust/C order at source `ac9d94ab`, with release example
+SHA-256 `632c662f06d7b99bb67347c4fbf11fe772c60117d638c84203e3a707c0178c56`.
+The input used the historical native 4L Scenario request for the two
+standard-bag fixtures, not the GUI Opening request. Compare canonical
+counts and ordered keys for CountUnique; optional coverage is not part
+of that comparison. The fixed queue also checks complete coverage.
+
+| Fixture | Workers | C elapsed (mean) | Rust elapsed (mean) | Result |
+| --- | ---: | ---: | ---: | --- |
+| Fixed 2L, CountAll | 1 | 20.71 ms | 15.22 ms | 4 keys and fixed-queue coverage match |
+| Existing field P7, CountUnique | 1 | 180.76 ms | 35.34 ms | 246 keys match |
+| Existing field P7, CountUnique | 2 | 130.78 ms | 30.73 ms | 246 keys match |
+| Existing field P7, CountUnique | 8 | 97.91 ms | 45.36 ms | 246 keys match |
+| Empty 4L P7P4, CountUnique | 8 | 1,258.15 / 1,252.04 s | 99.20 / 102.11 s | Raw timings only: distinct solution families |
+
+Both large C samples returned 456,842 with `cts1:d4b34c7820453afc`;
+both Rust samples returned 456,923 with `cts1:98ebe8726537b29f`. The C
+receipt reports 1 Geometry DAG worker, 8 candidate-processing workers,
+and 1 final BuildUp worker. Its raw Tiling stream is a different
+serial-only path. The numbers do not prove that one set is a subset of
+the other. The discrepancy is already present in the native retained
+packing sink after buildability filtering. Next, diff the full
+canonical key sequences in both directions, replay an actual differing
+identity, and check raw C DAG membership, realization pruning and
+predecessors, BuildUp, and sink dedup in order. Change rules and worker
+width as separate variables.
+
+Rust's P7 peak solver RSS at 1/2/8 workers was 11.63/17.38/49.75 MiB;
+the 65,536-slot private reachability table accounts for a structural
+5.25 MiB per initialized worker. On the large case, raw solver RSS peaks
+were about 0.86 GiB (C) and 4.47 GiB (Rust). They are not equal-work
+memory qualification, and the smaller host supervisor's sampled peak
+must not be substituted for solver RSS high-water. No release or
+full C-facing ABI qualification follows from this comparison.
