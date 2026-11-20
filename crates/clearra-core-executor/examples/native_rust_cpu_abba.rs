@@ -14,7 +14,8 @@ use clearra_core_executor::{CoreExecutionResult, PcService, WasmCpuSearchBackend
 use clearra_objectives::policy::objective_policy::ObjectivePolicy;
 use clearra_pc_graph::request::{
     OpeningPcSearchQuery, PcCountPolicy, PcExecutionPolicy, PcHoldPolicy, PcQueueInput,
-    PcScenarioBoard, PcScenarioQuery, PieceWindow, RequestedSearchBackend, SupplyWindowSize,
+    PcScenarioBoard, PcScenarioQuery, PcSolutionProbabilityPolicy, PieceWindow,
+    RequestedSearchBackend, SupplyWindowSize,
 };
 use clearra_problem::{ProblemCompileError, ProblemCompiler, SearchProblem};
 use clearra_rules::profile::builtin_rules::srs_plus;
@@ -108,6 +109,7 @@ fn compile_standard_bag_case(
         .with_allow_hold(true)
         .with_rule(srs_plus())
         .with_count_policy(PcCountPolicy::CountUnique)
+        .with_solution_probability_policy(PcSolutionProbabilityPolicy::Omit)
         .with_supply_window_size(SupplyWindowSize::new(placements + 1))
         .with_retained_trace_limit(1)
         .with_execution_policy(policy),

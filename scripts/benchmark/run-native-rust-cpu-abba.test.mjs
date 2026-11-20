@@ -59,11 +59,40 @@ test('C packing width remains limited evidence, not proof of C BuildUp active wo
   assert.deepEqual(c.identity, rust.identity, 'incomparable diagnostic variant counts are not result identity');
 });
 
+test('CountUnique proves family parity even when only Rust emits coverage', () => {
+  const native = evidence(C, 11);
+  const rust = evidence(R, 11);
+  native.semantic.probability_complete = false;
+  native.semantic.covered_pattern_count = 0;
+  rust.semantic.coverage_sha256 = 'a'.repeat(64);
+  const c = validateSample(native, 'full-p7p4', C, 11).identity;
+  const r = validateSample(rust, 'full-p7p4', R, 11).identity;
+  assert.deepEqual(c, r);
+  assert(!Object.hasOwn(c, 'covered_pattern_count'), 'diagnostic coverage is never promoted to parity');
+  native.semantic.count_complete = false;
+  assert.throws(() => validateSample(native, 'full-p7p4', C, 11), /complete count/);
+});
+
+test('positive fixed queue still requires verified complete coverage', () => {
+  const sample = evidence(C, 1);
+  sample.case = 'fixed-2l';
+  sample.semantic.solution_count = 4;
+  sample.semantic.pattern_count = 1;
+  sample.semantic.covered_pattern_count = 1;
+  assert.equal(validateSample(sample, 'fixed-2l', C, 1).identity.covered_pattern_count, 1);
+  sample.semantic.probability_complete = false;
+  assert.throws(() => validateSample(sample, 'fixed-2l', C, 1), /complete probability/);
+  sample.semantic.probability_complete = true;
+  sample.semantic.covered_pattern_count = 0;
+  assert.throws(() => validateSample(sample, 'fixed-2l', C, 1));
+});
+
 test('semantic or actual runtime drift is a rejection rather than a fast observation', () => {
   for (const mutate of [
     sample => { sample.semantic.solution_count--; },
     sample => { sample.semantic.solution_set_hash = 'cts1:ffffffffffffffff'; },
-    sample => { sample.semantic.probability_complete = false; },
+    sample => { sample.semantic.count_complete = false; },
+    sample => { sample.semantic.pattern_count = 5040; },
     sample => { sample.semantic.resource_truncated = true; },
     sample => { sample.backend.fallback = true; },
     sample => { sample.backend.selected = 'cpu'; },

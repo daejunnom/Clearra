@@ -14,9 +14,9 @@ const OUTPUT_BYTES = 1024 * 1024;
 const LOCAL_LEASE_MS = 7_200_000;
 const GUARD_MS = 30_000;
 const CASES = Object.freeze({
-  'fixed-2l': { count: 4, hash: null, countPolicy: 'all', patternCount: 1, workers: 1 },
-  'existing-p7': { count: 246, hash: 'cts1:cb0b19c391d5003e', countPolicy: 'unique', patternCount: 5040 },
-  'full-p7p4': { count: 456923, hash: 'cts1:98ebe8726537b29f', countPolicy: 'unique', patternCount: 4233600 },
+  'fixed-2l': { count: 4, hash: null, countPolicy: 'all', patternCount: 1, compareCoverage: true, workers: 1 },
+  'existing-p7': { count: 246, hash: 'cts1:cb0b19c391d5003e', countPolicy: 'unique', patternCount: 5040, compareCoverage: false },
+  'full-p7p4': { count: 456923, hash: 'cts1:98ebe8726537b29f', countPolicy: 'unique', patternCount: 4233600, compareCoverage: false },
 });
 
 const sampleSchema = 'clearra.native-rust-cpu-abba.sample.v1';
@@ -64,7 +64,6 @@ export function validateSample(sample, caseId, arm, workers) {
   const { semantic, backend } = sample;
   const expected = CASES[caseId];
   assert.equal(semantic.count_complete, true, 'missing complete count authority');
-  assert.equal(semantic.probability_complete, true, 'missing complete probability authority');
   assert.equal(semantic.resource_truncated, false, 'resource-truncated result');
   assert.equal(semantic.solution_count, expected.count);
   assert(/^cts1:[0-9a-f]{16}$/.test(semantic.solution_set_hash ?? ''), 'missing canonical set hash');
@@ -72,7 +71,18 @@ export function validateSample(sample, caseId, arm, workers) {
   assert(semantic.ordered_key_sha256 === null || /^[0-9a-f]{64}$/.test(semantic.ordered_key_sha256));
   assert(semantic.coverage_sha256 === null || /^[0-9a-f]{64}$/.test(semantic.coverage_sha256));
   assert.equal(semantic.pattern_count, expected.patternCount, 'coverage universe differs from the fixture');
-  assert(integer(semantic.covered_pattern_count, 1, semantic.pattern_count));
+  if (expected.compareCoverage) {
+    assert.equal(semantic.probability_complete, true, 'missing complete probability authority');
+    assert(integer(semantic.covered_pattern_count, 1, semantic.pattern_count));
+  } else {
+    // The CountUnique native path intentionally skips probability authority
+    // when no probabilities are requested. Rust can retain additional
+    // coverage in the same request. Neither presence nor equality of that
+    // surplus qualifies probability parity on this benchmark.
+    assert(semantic.probability_complete === null || typeof semantic.probability_complete === 'boolean');
+    assert(semantic.covered_pattern_count === null ||
+      integer(semantic.covered_pattern_count, 0, semantic.pattern_count));
+  }
   // The native field counts retained variants; the Rust field can count
   // logical variants. Never make these unequal diagnostics an oracle.
   if (expected.countPolicy === 'all') {
@@ -108,7 +118,7 @@ export function validateSample(sample, caseId, arm, workers) {
       solution_count: semantic.solution_count,
       solution_set_hash: semantic.solution_set_hash,
       pattern_count: semantic.pattern_count,
-      covered_pattern_count: semantic.covered_pattern_count,
+      ...(expected.compareCoverage ? { covered_pattern_count: semantic.covered_pattern_count } : {}),
     },
   };
 }
@@ -172,7 +182,7 @@ async function main(argv) {
   fs.mkdirSync(output);
   const binaryHash = await sha256(binary);
   const manifest = {
-    schema: 'clearra.native-rust-cpu-abba.v1',
+    schema: 'clearra.native-rust-cpu-abba.v2',
     authority: 'benchmark-only-not-release',
     source_revision: sourceRevision,
     binary, binary_sha256: binaryHash,
@@ -181,6 +191,10 @@ async function main(argv) {
       logical_capacity: os.availableParallelism(), cpu_model: os.cpus()[0]?.model ?? null,
     },
     case: caseId, fixture: CASES[caseId],
+    comparison_scope: CASES[caseId].compareCoverage ? 'normalized-solution-family-and-fixed-queue-coverage' : 'normalized-unique-solution-family-only',
+    coverage_note: CASES[caseId].compareCoverage
+      ? 'Compare the one fixed queue; build-variant diagnostics are not equivalent.'
+      : 'Probabilities were not requested. Rust can do additional coverage work; its probability/count/hash fields are diagnostics, not coverage parity.',
     requested_workers: workers, schedule,
     timeout_seconds_per_sample: timeout,
     tool_profile: 'benchmark-search',
@@ -196,7 +210,7 @@ async function main(argv) {
   const samples = [];
   const runIds = new Set();
   const orderedHashes = new Set();
-  const coverageHashes = new Set();
+  const coverageHashes = { 'native-c': new Set(), 'rust-cpu': new Set() };
   let identity, failure;
   let missingTreeProof = false;
   for (const [index, arm] of schedule.entries()) {
@@ -244,14 +258,17 @@ async function main(argv) {
       assert.equal(solver.compiled_source_commit, sourceRevision, 'binary is not bound to this checkout');
       const accepted = validateSample(solver, caseId, arm, workers);
       identity ??= accepted.identity;
-      assert.deepEqual(accepted.identity, identity, 'semantic digest or coverage mismatch');
+      assert.deepEqual(accepted.identity, identity, 'qualified result identity mismatch');
       sample.worker_evidence = accepted.workerEvidence;
       const orderedHash = solver.semantic.ordered_key_sha256;
       if (orderedHash !== null) orderedHashes.add(orderedHash);
       assert(orderedHashes.size <= 1, 'ordered normalized-key sequence disagrees');
       const coverage = solver.semantic.coverage_sha256;
-      if (coverage !== null) coverageHashes.add(coverage);
-      assert(coverageHashes.size <= 1, 'coverage union words disagree');
+      if (coverage !== null) coverageHashes[arm].add(coverage);
+      if (CASES[caseId].compareCoverage) {
+        assert(new Set([...coverageHashes['native-c'], ...coverageHashes['rust-cpu']]).size <= 1,
+          'qualified fixed-queue coverage union words disagree');
+      }
       assert(typeof outcome.memory_pressure_observed === 'boolean' &&
         integer(outcome.memory_pressure_events, 0), 'no supervisor pressure evidence');
       sample.peak_memory_bytes = process.platform === 'linux'
@@ -282,15 +299,20 @@ async function main(argv) {
       observed_slots: samples.filter(sample => sample.solver?.semantic.ordered_key_sha256).length,
       sha256: orderedHashes.size === 1 ? [...orderedHashes][0] : null,
     },
-    coverage_word_sequence: {
-      observed_slots: samples.filter(sample => sample.solver?.semantic.coverage_sha256).length,
-      sha256: coverageHashes.size === 1 ? [...coverageHashes][0] : null,
+    coverage_observations: {
+      compared: CASES[caseId].compareCoverage,
+      sha256_by_arm: Object.fromEntries(Object.entries(coverageHashes).map(([arm, hashes]) => [arm, [...hashes]])),
+      matrix: samples.filter(sample => sample.solver).map(({ slot, arm, solver: { semantic } }) => ({
+        slot, arm, probability_complete: semantic.probability_complete, covered_pattern_count: semantic.covered_pattern_count,
+        coverage_sha256: semantic.coverage_sha256,
+      })),
     },
     ...summarize(samples, failure),
   };
   write('summary.json', summary);
   process.stdout.write(JSON.stringify({
     output, result: summary.result, failure: summary.failure,
+    comparison_scope: manifest.comparison_scope,
     no_regression_observed: summary.no_regression_observed, aggregate: summary.aggregate,
   }) + '\n');
   if (missingTreeProof) process.exitCode = 2;
