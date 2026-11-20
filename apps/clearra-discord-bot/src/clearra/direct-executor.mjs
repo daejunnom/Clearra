@@ -7,6 +7,8 @@ import {
 } from "./command.mjs";
 
 export class ClearraDirectExecutor {
+  #executeJob;
+
   constructor(config, options = {}) {
     this.now = options.now ?? Date.now;
     this.timeoutPolicy = {
@@ -103,7 +105,8 @@ export class ClearraDirectExecutor {
       config.maxGifBytes ?? config.maxArtifactBytes ?? config.maxOutputBytes,
       "artifact limit",
     );
-    this.runner = options.runner ?? new ClearraCommandRunner({
+    const externalRunner = options.runner;
+    const runner = externalRunner ?? new ClearraCommandRunner({
       executable: config.executable,
       processLogicalProcessors: config.processLogicalProcessors,
       expectedVcpus: config.expectedVcpus,
@@ -114,6 +117,11 @@ export class ClearraDirectExecutor {
       maxArtifactBytes: this.maxArtifactBytes,
       terminationGraceMs: config.terminationGraceMs,
     }, options.runnerOptions);
+    // The runner constructed here owns and enforces the canonical result
+    // boundary. A supplied runner has not crossed that boundary yet.
+    this.#executeJob = externalRunner == null
+      ? (job, executionOptions) => runner.execute(job, executionOptions)
+      : (job, executionOptions) => runner.execute(job, executionOptions).then(assertDiscordCanonicalOnlyResult);
   }
 
   execute(arguments_, options = {}) {
@@ -134,7 +142,7 @@ export class ClearraDirectExecutor {
       ? latestDeadlineUnixMs
       : absoluteDeadline(options.deadlineUnixMs);
 
-    return this.runner.execute(
+    return this.#executeJob(
       {
         arguments: [...arguments_],
         timeoutClass,
@@ -143,7 +151,7 @@ export class ClearraDirectExecutor {
         maxArtifactBytes: this.maxArtifactBytes,
       },
       { signal: options.signal },
-    ).then(assertDiscordCanonicalOnlyResult);
+    );
   }
 }
 

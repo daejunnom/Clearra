@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
+import { PassThrough } from "node:stream";
 import test from "node:test";
 
 import { ClearraDirectExecutor } from "../src/clearra/direct-executor.mjs";
@@ -121,6 +123,42 @@ test("direct execution rejects alternative metadata but permits normal families"
     executor.execute(["pc", "minimals"]),
     /alternative-result metadata/,
   );
+});
+
+test("direct CLI deserializes a canonical result only at its owning runner", async (t) => {
+  const accepted = JSON.stringify({ kind: "best-save", summary: { best_save_winners: [] } });
+  const forbidden = JSON.stringify({ kind: "pc-minimum-cover.v2", portfolio_alternative_page: {} });
+  const outputs = [accepted, forbidden];
+  const parse = JSON.parse;
+  let acceptedParses = 0;
+  t.mock.method(JSON, "parse", (text, reviver) => {
+    if (text === accepted) acceptedParses++;
+    return parse(text, reviver);
+  });
+
+  const executor = new ClearraDirectExecutor(directConfig(), {
+    runnerOptions: {
+      readOomKillCount: async () => null,
+      spawn: () => {
+        const child = new EventEmitter();
+        child.stdout = new PassThrough();
+        child.stderr = new PassThrough();
+        child.exitCode = null;
+        child.signalCode = null;
+        queueMicrotask(() => {
+          child.stdout.end(outputs.shift());
+          child.stderr.end();
+          child.exitCode = 0;
+          child.emit("close", 0, null);
+        });
+        return child;
+      },
+    },
+  });
+
+  assert.equal((await executor.execute(["pc", "best-save"])).stdout, accepted);
+  assert.equal(acceptedParses, 1, "the runner owns the canonical JSON boundary");
+  await assert.rejects(executor.execute(["pc", "minimals"]), /alternative-result metadata/);
 });
 
 test("direct execution cannot extend a caller deadline or its command-class bound", async () => {

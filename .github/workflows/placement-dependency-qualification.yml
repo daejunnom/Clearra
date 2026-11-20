@@ -179,7 +179,12 @@ jobs:
           scripts/release/stage-windows-desktop-startup-readback.test.mjs
       - name: Test the Web transfer owner and Discord artifact projection
         if: ${{ !cancelled() && steps.node.outcome == 'success' }}
-        run: node --experimental-strip-types --test apps/clearra-web/test/verifierBatchOwnership.test.mjs apps/clearra-discord-bot/test/job-service.test.mjs
+        run: >-
+          node --experimental-strip-types --test
+          apps/clearra-web/test/verifierBatchOwnership.test.mjs
+          apps/clearra-discord-bot/test/direct-executor.test.mjs
+          apps/clearra-discord-bot/test/cli-authority-result-paths.test.mjs
+          apps/clearra-discord-bot/test/job-service.test.mjs
   operation-reuse:
     if: >-
       github.ref == 'refs/heads/codex/v090-relation-rust-integration' &&
