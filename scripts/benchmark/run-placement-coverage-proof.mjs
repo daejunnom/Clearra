@@ -21,6 +21,16 @@ const RUN_ID = /^\d{16,21}-[1-9]\d*$/u;
 const MAX_JSON_BYTES = 4 * 1024 * 1024;
 const P7P4_FREE_RESERVE = 33n * 1024n * 1024n * 1024n;
 const DEFAULT_EXPERIMENT = placementExperiment(DEFAULT_PLACEMENT_EXPERIMENT);
+const MINIMUM_EXPERIMENT = placementExperiment("minimum-domain-cutoff");
+// This registry entry belongs only to the exact-coverage proof driver. The
+// adoption launcher must reject it before scheduling any timing work.
+const OPERATION_MASKS_EXPERIMENT = Object.freeze({
+  name: "operation-masks",
+  axis: "operation_mask_mode",
+  environmentKey: "CLEARRA_OPERATION_MASKS",
+  dependencyMode: "0",
+  structuralMode: "0",
+});
 const AXIS = DEFAULT_EXPERIMENT.axis;
 const ARTIFACT = "solution-coverage.clrcov";
 const COVERAGE_ROOT = ["_local", "artifacts", "benchmarks", "placement-graph-coverage"];
@@ -57,7 +67,8 @@ const LEGACY_NULLABLE_AXES = [
   "ordered_kick_interval_mode", "ilc_lazy_frame_mode", "no_entry_components_mode", "same_tile_parent_reuse_mode",
 ];
 const KNOWN_MODE_KEYS = new Set([
-  "output_mode", "structural_mode", AXIS, ...NEUTRAL_AXES, ...LEGACY_OPTIONAL_AXES, ...LEGACY_NULLABLE_AXES,
+  "output_mode", "structural_mode", AXIS, OPERATION_MASKS_EXPERIMENT.axis,
+  ...NEUTRAL_AXES, ...LEGACY_OPTIONAL_AXES, ...LEGACY_NULLABLE_AXES,
 ]);
 const CASES = Object.freeze({
   small: Object.freeze({
@@ -77,8 +88,12 @@ function requireThat(value, message) {
   if (!value) throw new Error(message);
 }
 
+function coverageExperiment(name) {
+  return name === OPERATION_MASKS_EXPERIMENT.name ? OPERATION_MASKS_EXPERIMENT : placementExperiment(name);
+}
+
 function experimentFor(options) {
-  return options.experiment === undefined ? DEFAULT_EXPERIMENT : placementExperiment(options.experiment?.name ?? null);
+  return options.experiment === undefined ? DEFAULT_EXPERIMENT : coverageExperiment(options.experiment?.name ?? null);
 }
 
 export function parseProofArguments(argv) {
@@ -95,10 +110,10 @@ export function parseProofArguments(argv) {
   requireThat(Object.hasOwn(CASES, key) &&
     /^[a-z0-9][a-z0-9-]{0,47}$/u.test(id ?? "") &&
     COMMIT.test(sourceCommit ?? ""),
-  "Usage: run-placement-coverage-proof --case small|p7p4 --id UNIQUE-LEAF --source-sha FULL-HEAD [--timeout-seconds N] [--experiment movement-clear|minimum-domain-cutoff]");
-  const experiment = placementExperiment(options["--experiment"]);
+  "Usage: run-placement-coverage-proof --case small|p7p4 --id UNIQUE-LEAF --source-sha FULL-HEAD [--timeout-seconds N] [--experiment movement-clear|minimum-domain-cutoff|operation-masks]");
+  const experiment = coverageExperiment(options["--experiment"]);
   requireThat(experiment === DEFAULT_EXPERIMENT || key === "p7p4",
-    "The minimum-domain cutoff proof requires the empty-origin P7P4 fixture");
+    `The ${experiment.name} proof requires the empty-origin P7P4 fixture`);
   const fixture = CASES[key];
   const buildProfile = options["--build-profile"] ?? "release";
   requireThat(buildProfile === "release" || (key === "small" && buildProfile === "debug"),
@@ -155,12 +170,67 @@ function summaryEquals(value, expected) {
   return value === expected || value === String(expected);
 }
 
+function operationMaskParity(report, step, fixture) {
+  const proof = report.operation_masks;
+  const count = (key) => {
+    const value = proof?.[key];
+    requireThat(Number.isSafeInteger(value) && value >= 0, step.name + ": invalid operation-mask evidence " + key);
+    return value;
+  };
+  const workers = count("workers");
+  const requested = count("requested_workers");
+  const executing = count("executing_workers");
+  const graphPasses = count("graph_passes");
+  const maskPasses = count("mask_passes");
+  const live = count("mask_live_passes");
+  const subsets = count("visited_subsets");
+  const edges = count("selected_edges");
+  const maskBytes = count("mask_bytes");
+  const concreteBytes = ["graph_node_bytes", "graph_edge_bytes", "graph_piece_edge_bytes"]
+    .reduce((total, key) => total + count(key), 0);
+  const projection = count("graph_projection_bytes");
+  const passes = graphPasses + maskPasses;
+  requireThat(workers === report.cpu.hard_limit && executing >= 2 && executing <= workers &&
+    subsets > 0 && edges > 0 && Number.isSafeInteger(passes) &&
+    Number.isSafeInteger(concreteBytes + maskBytes) && projection >= concreteBytes + maskBytes &&
+    summaryEquals(report.summary.total_build_order_nodes, subsets) &&
+    summaryEquals(report.summary.worker_graph_projection_retained_bytes, projection),
+  step.name + ": operation-mask worker/work evidence does not match the core result");
+  if (step.value === "1") {
+    requireThat(requested === workers && graphPasses === 0 && concreteBytes === 0 &&
+      live > 0 && maskPasses >= live && maskBytes > 0,
+    step.name + ": operation-mask treatment did not use a live bounded mask traversal exclusively");
+  } else {
+    requireThat(requested === 0 && maskPasses === 0 && live === 0 && maskBytes === 0 &&
+      graphPasses > 0 && concreteBytes > 0,
+    step.name + ": operation-mask control was not purely concrete");
+  }
+  const replay = report.operation_mask_representative;
+  const ordinal = report.summary.representative_pattern_id;
+  requireThat((typeof ordinal === "string" && /^(?:0|[1-9]\d*)$/u.test(ordinal) ||
+    Number.isSafeInteger(ordinal) && ordinal >= 0) && Number(ordinal) < fixture.queues &&
+    Array.isArray(replay) && replay.length === fixture.placed && replay.every((lock) =>
+      Array.isArray(lock) && lock.length === 6 && typeof lock[0] === "string" &&
+      /^[IOTSZJL]$/u.test(lock[0]) &&
+      Number.isSafeInteger(lock[1]) && lock[1] >= 0 && lock[1] < 4 &&
+      Number.isSafeInteger(lock[2]) && Number.isSafeInteger(lock[3]) &&
+      typeof lock[4] === "string" && lock[4].length > 0 &&
+      Number.isSafeInteger(lock[5]) && lock[5] >= 0 && lock[5] <= 4) &&
+    replay.reduce((sum, lock) => sum + lock[5], 0) === fixture.height,
+  step.name + ": operation-mask evidence is missing concrete representative replay");
+  // Compare the work being represented, not the byte capacity of the two
+  // different representations. The latter is neither elapsed time nor RSS.
+  return { passes, subsets, edges, ordinal: Number(ordinal), replay };
+}
+
 export function validatedProofArm(report, receipt, step, options, binarySha, outputMode = "solution-coverage") {
   const fixture = options.fixture;
   const experiment = experimentFor(options);
-  const minimumCutoff = experiment !== DEFAULT_EXPERIMENT;
+  const strictSource = experiment !== DEFAULT_EXPERIMENT;
+  const minimumCutoff = experiment === MINIMUM_EXPERIMENT;
+  const operationMasks = experiment === OPERATION_MASKS_EXPERIMENT;
   const neutralFollowOn = (name) => name === experiment.axis || report[name] === "0" ||
-    (!minimumCutoff && !Object.hasOwn(report, name));
+    (!strictSource && !Object.hasOwn(report, name));
   requireThat(experimentFor(step) === experiment && (step.value === "0" || step.value === "1"),
     step.name + ": wrong scheduled proof experiment or arm");
   requireThat(report?.schema === "clearra.placement-graph-benchmark.v1" &&
@@ -171,12 +241,17 @@ export function validatedProofArm(report, receipt, step, options, binarySha, out
     report.mode === experiment.dependencyMode && report.structural_mode === experiment.structuralMode &&
     (experiment.axis === AXIS || report[AXIS] === "0") &&
     NEUTRAL_AXES.every((name) => report[name] === "0") && LEGACY_OPTIONAL_AXES.every(neutralFollowOn) &&
-    LEGACY_NULLABLE_AXES.every((name) => report[name] === "0" || (!minimumCutoff && report[name] == null)) &&
-    (!minimumCutoff || Object.keys(report).every((key) => !key.endsWith("_mode") || KNOWN_MODE_KEYS.has(key))),
+    LEGACY_NULLABLE_AXES.every((name) => report[name] === "0" || (!strictSource && report[name] == null)) &&
+    (!strictSource || Object.keys(report).every((key) => !key.endsWith("_mode") || KNOWN_MODE_KEYS.has(key))) &&
+    (operationMasks ? outputMode === "solution-coverage" :
+      [OPERATION_MASKS_EXPERIMENT.axis, "operation_masks", "operation_mask_representative"]
+        .every((name) => !Object.hasOwn(report, name))),
   step.name + ": unexpected source, mode, or coverage output");
-  if (minimumCutoff) {
+  if (strictSource) {
     requireThat(options.key === "p7p4" && report.compiled_source_commit === options.sourceCommit,
-      step.name + ": minimum-domain proof requires the exact P7P4 compile-time source");
+      step.name + ": " + experiment.name + " proof requires the exact P7P4 compile-time source");
+  }
+  if (minimumCutoff) {
     requireThat(unprofiledEmptyMinimumRoute(report),
       step.name + ": minimum-domain proof requires the active unprofiled empty-origin route");
   }
@@ -205,7 +280,7 @@ export function validatedProofArm(report, receipt, step, options, binarySha, out
     ids?.count === fixture.solutions && ids.reported_total_count === fixture.solutions &&
     ids.covers_reported_family === true && SHA.test(ids.sha256_ordered_ctk1_v1 ?? "") &&
     coverage?.set_bit_count === fixture.queues && SHA.test(coverage.sha256_le_v1 ?? "") &&
-    (!minimumCutoff || coverage.word_count === fixture.queues / 64) &&
+    (!strictSource || coverage.word_count === fixture.queues / 64) &&
     (outputMode === "global-only" ? mapping == null : (
       outputMode === "solution-coverage" && mapping?.complete === true && SHA.test(mapping.sha256 ?? "") &&
       mapping.solution_count === fixture.solutions && mapping.total_weight === fixture.queues &&
@@ -217,6 +292,7 @@ export function validatedProofArm(report, receipt, step, options, binarySha, out
   return {
     input, cpu, ids: ids.sha256_ordered_ctk1_v1, globalCoverage: coverage.sha256_le_v1,
     process: report.other_process_configuration, backend: report.backend_contract,
+    ...(operationMasks ? { operationMaskParity: operationMaskParity(report, step, fixture) } : {}),
   };
 }
 
@@ -329,8 +405,12 @@ export function benchmarkEnvironment(environment, step) {
     ...MODES, CLEARRA_PLACEMENT_DEPENDENCY: experiment.dependencyMode,
     CLEARRA_STRUCTURAL_ORDER: experiment.structuralMode, [experiment.environmentKey]: step.value,
   };
-  const allowed = Object.fromEntries(Object.entries(environment).filter(([key]) =>
-    !Object.hasOwn(expected, key.toUpperCase())));
+  // The operation-mask control (explicit "0") is not the legacy unset
+  // behavior. Strip inherited variants, but only opt in for this profile.
+  const allowed = Object.fromEntries(Object.entries(environment).filter(([key]) => {
+    const normalized = key.toUpperCase();
+    return normalized !== OPERATION_MASKS_EXPERIMENT.environmentKey && !Object.hasOwn(expected, normalized);
+  }));
   return { ...allowed, ...expected };
 }
 

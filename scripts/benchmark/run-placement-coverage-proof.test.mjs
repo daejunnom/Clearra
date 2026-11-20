@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { join } from "node:path";
 import test from "node:test";
+import { parseAdoptionArguments } from "./run-placement-graph-adoption.mjs";
 import {
   assertExactComparison, benchmarkEnvironment, classifyProofRuntime, collectPlacementCoverageProof,
   parseProofArguments, proofSchedule, validatedProofArm,
@@ -12,6 +13,7 @@ const artifacts = join("test-artifacts", "coverage");
 const binary = join("test-build", "placement_graph_bench");
 const cli = (key, rest = []) => ["--case", key, "--id", "proof-42", "--source-sha", source, ...rest];
 const minimumArgs = ["--experiment", "minimum-domain-cutoff"];
+const operationMaskArgs = ["--experiment", "operation-masks"];
 const [reference, candidate, comparison] = proofSchedule(parseProofArguments(cli("p7p4")), binary, artifacts);
 
 function runtime(step, index) {
@@ -30,11 +32,12 @@ function runtime(step, index) {
 
 function armReport(step, receipt, fixture) {
   const minimum = step.experiment?.name === "minimum-domain-cutoff";
+  const operationMask = step.experiment?.name === "operation-masks";
   return {
     schema: "clearra.placement-graph-benchmark.v1", case: fixture.name, valid: true, validation_errors: [],
     binary_sha256: binarySha, supervisor_run_id: receipt.outcome.run_id, output_mode: "solution-coverage",
-    movement_clear_certificates_mode: minimum ? "0" : step.value,
-    mode: minimum ? "0" : "1", structural_mode: minimum ? "0" : "1",
+    movement_clear_certificates_mode: minimum || operationMask ? "0" : step.value,
+    mode: minimum || operationMask ? "0" : "1", structural_mode: minimum || operationMask ? "0" : "1",
     static_influence_mode: "0", translation_interval_mode: "0", incremental_domain_mode: "0",
     first_kick_interval_mode: "0",
     conditional_order_mode: "0",
@@ -53,6 +56,24 @@ function armReport(step, receipt, fixture) {
         minimum_incidence_rows_scanned: 0, minimum_incidence_rows_skipped: 0, minimum_cells_cut_off: 0,
       },
     } : {}),
+    ...(operationMask ? {
+      compiled_source_commit: source, operation_mask_mode: step.value,
+      minimum_domain_cutoff_mode: "0", minimum_domain_work_mode: "0",
+      ordered_kick_guard_reuse_mode: "0", geometric_edge_reuse_mode: "0", ilc_lazy_frame_mode: "0",
+      operation_masks: {
+        workers: 12, executing_workers: 12, requested_workers: step.value === "1" ? 12 : 0,
+        graph_passes: step.value === "0" ? 456_459 : 0,
+        mask_passes: step.value === "1" ? 456_459 : 0, mask_live_passes: step.value === "1" ? 456_459 : 0,
+        visited_subsets: 400_000_000, selected_edges: 2_147_483_648,
+        graph_node_bytes: step.value === "0" ? 123_000 : 0,
+        graph_edge_bytes: step.value === "0" ? 321_000 : 0,
+        graph_piece_edge_bytes: step.value === "0" ? 34_000 : 0,
+        mask_bytes: step.value === "1" ? 51_000 : 0,
+        graph_projection_bytes: step.value === "0" ? 500_000 : 60_000,
+      },
+      operation_mask_representative: Array.from("IOTSZJLIOT", (kind, index) =>
+        [kind, index % 4, index, 0, "use-current", index === 9 ? 4 : 0]),
+    } : {}),
     input: {
       board: fixture.board, height: fixture.height, placed_pieces: fixture.placed, supplied_pieces: fixture.supplied,
       supply: fixture.supply, original_supply_count: fixture.queues, hold: fixture.hold,
@@ -63,6 +84,8 @@ function armReport(step, receipt, fixture) {
       count_complete: "true", probability_complete: "true", resource_truncated: "false",
       normalized_solution_set_hash: "cts1:2fcbc950acdffa31", workers_used: "12",
       parallel_active_workers: "12", cpu_parallel_execution: "true",
+      ...(operationMask ? { total_build_order_nodes: "400000000", representative_pattern_id: "0",
+        worker_graph_projection_retained_bytes: step.value === "0" ? "500000" : "60000" } : {}),
     },
     materialized_identities: {
       count: fixture.solutions, reported_total_count: fixture.solutions, covers_reported_family: true,
@@ -250,6 +273,124 @@ test("minimum comparison binds both captured arms without acquiring adoption aut
   assert.deepEqual(bad.invoked, ["reference", "candidate"]);
   assert.equal(rejected.state, "failed");
   assert.equal(rejected.mapping, null);
+});
+
+test("operation-mask proof opts in both roles but leaves the flag unset in historical lanes", () => {
+  assert.throws(() => parseProofArguments(cli("small", operationMaskArgs)), /requires the empty-origin P7P4/u);
+  assert.throws(() => parseAdoptionArguments(["--id", "adopt", "--proof-id", "proof-incompatible",
+    "--source-sha", source, ...operationMaskArgs]), /Unknown placement experiment/u);
+  const options = parseProofArguments(cli("p7p4", operationMaskArgs));
+  const steps = proofSchedule(options, binary, artifacts);
+  assert.deepEqual(steps.map(({ value }) => value), ["0", "1", "0"]);
+  assert.equal(options.experiment.axis, "operation_mask_mode");
+  const hostile = {
+    clearra_operation_masks: "1", CLEARRA_OPERATION_MASKS: "1",
+    CLEARRA_PLACEMENT_DEPENDENCY: "1", CLEARRA_STRUCTURAL_ORDER: "1",
+    CLEARRA_MINIMUM_DOMAIN_CUTOFF: "1", CLEARRA_MINIMUM_DOMAIN_WORK: "1",
+    CLEARRA_MOVEMENT_CLEAR_CERTIFICATES: "1", KEEP_SETTING: "1",
+  };
+  for (const step of steps.slice(0, 2)) {
+    const environment = benchmarkEnvironment(hostile, step);
+    assert.equal(environment.CLEARRA_OPERATION_MASKS, step.value);
+    assert.equal(environment.clearra_operation_masks, undefined);
+    assert.equal(environment.KEEP_SETTING, "1");
+    assert.ok(Object.entries(environment).every(([name, value]) => !name.startsWith("CLEARRA_") ||
+      name === "CLEARRA_OPERATION_MASKS" || value === "0"));
+  }
+  for (const other of [reference, proofSchedule(parseProofArguments(cli("p7p4", minimumArgs)), binary, artifacts)[0]]) {
+    const environment = benchmarkEnvironment(hostile, other);
+    assert.equal(Object.hasOwn(environment, "CLEARRA_OPERATION_MASKS"), false);
+    assert.equal(Object.hasOwn(environment, "clearra_operation_masks"), false);
+  }
+});
+
+test("operation-mask report enforces real concrete/mask activity, isolated source, and replay", () => {
+  const options = parseProofArguments(cli("p7p4", operationMaskArgs));
+  const [ref, mask] = proofSchedule(options, binary, artifacts);
+  const receipt = runtime(mask, 1);
+  const result = armReport(mask, receipt, options.fixture);
+  const validate = (report = result) => validatedProofArm(report, receipt, mask, options, binarySha);
+  assert.doesNotThrow(() => validate());
+  assert.throws(() => validate({ ...result, compiled_source_commit: null }), /compile-time source/u);
+  for (const patch of [
+    { operation_mask_mode: undefined }, { operation_mask_mode: "0" }, { mode: "1" }, { structural_mode: "1" },
+    { movement_clear_certificates_mode: "1" }, { minimum_domain_cutoff_mode: "1" }, { minimum_domain_work_mode: "1" },
+    { unrecognized_operation_shortcut_mode: "0" },
+  ]) assert.throws(() => validate({ ...result, ...patch }), /unexpected source, mode, or coverage output/u);
+  for (const patch of [
+    { executing_workers: 1 }, { workers: 10 }, { requested_workers: 0 }, { mask_live_passes: 0 },
+    { graph_passes: 1 }, { graph_node_bytes: 1 },
+    { mask_bytes: 0 }, { selected_edges: 0 }, { visited_subsets: 1 }, { graph_projection_bytes: 59_999 },
+  ]) assert.throws(() => validate({ ...result, operation_masks: { ...result.operation_masks, ...patch } }), /operation-mask/u);
+  const referenceReceipt = runtime(ref, 0);
+  const control = armReport(ref, referenceReceipt, options.fixture);
+  assert.doesNotThrow(() => validatedProofArm(control, referenceReceipt, ref, options, binarySha));
+  assert.throws(() => validatedProofArm({
+    ...control, operation_masks: { ...control.operation_masks, mask_passes: 1 },
+  }, referenceReceipt, ref, options, binarySha), /control was not purely concrete/u);
+  assert.throws(() => validate({ ...result, operation_mask_representative: [] }), /concrete representative replay/u);
+  assert.throws(() => validate({ ...result, summary: { ...result.summary, representative_pattern_id: "" } }),
+    /concrete representative replay/u);
+  assert.throws(() => validatedProofArm({ ...result, solution_coverage: null, output_mode: "global-only" },
+    receipt, mask, options, binarySha, "global-only"), /unexpected source, mode, or coverage output/u);
+});
+
+test("historical movement-clear and minimum proofs reject explicit operation-mask control as well as treatment", () => {
+  for (const args of [[], minimumArgs]) {
+    const options = parseProofArguments(cli("p7p4", args));
+    const [step] = proofSchedule(options, binary, artifacts);
+    const receipt = runtime(step, 0);
+    const historical = armReport(step, receipt, options.fixture);
+    assert.doesNotThrow(() => validatedProofArm(historical, receipt, step, options, binarySha));
+    for (const mode of ["0", "1"]) {
+      assert.throws(() => validatedProofArm({ ...historical, operation_mask_mode: mode }, receipt, step, options, binarySha),
+        /unexpected source, mode, or coverage output/u);
+    }
+  }
+});
+
+test("operation-mask proof compares equal traversal work and concrete replay, then exact queue streams", async () => {
+  const options = parseProofArguments(cli("p7p4", operationMaskArgs));
+  const steps = proofSchedule(options, binary, artifacts);
+  const io = mockIo(options, steps);
+  const proof = await collectPlacementCoverageProof(options, binarySha, steps, io);
+  assert.deepEqual(io.invoked, ["reference", "candidate", "comparison"]);
+  assert.equal(proof.experiment, "operation-masks");
+  assert.equal(proof.axis, "operation_mask_mode");
+  assert.equal(proof.state, "completed-exact-per-solution");
+  assert.equal(proof.source_binding, "compile-time-and-checkout");
+  assert.equal(proof.release_authority, false);
+  assert.equal(proof.timing_adoption_authority, false);
+  assert.deepEqual(proof.mapping, {
+    comparison: "comparison.json",
+    reference: { benchmark: "reference.json", supervisor: "reference-runtime.json" },
+    candidate: { benchmark: "candidate.json", supervisor: "candidate-runtime.json" },
+  });
+  assert.ok(io.writes.has("comparison-runtime.json"));
+  for (const mutate of [
+    (report) => { report.operation_masks.selected_edges += 1; },
+    (report) => { report.operation_masks.mask_passes += 1; },
+    (report) => { report.operation_mask_representative[0][2] += 1; },
+    (report) => { report.summary.representative_pattern_id = "1"; },
+  ]) {
+    const bad = mockIo(options, steps, (step, execution) => {
+      if (step.name === "candidate") mutate(execution.report);
+      return execution;
+    });
+    const rejected = await collectPlacementCoverageProof(options, binarySha, steps, bad);
+    assert.deepEqual(bad.invoked, ["reference", "candidate"]);
+    assert.equal(rejected.state, "failed");
+    assert.equal(rejected.mapping, null);
+    assert.match(rejected.error, /agree on exact fixture/u);
+  }
+  const badStream = mockIo(options, steps, (step, execution) => {
+    if (step.name === "comparison") execution.report.right_sha256 = execution.report.left_sha256;
+    return execution;
+  });
+  const rejectedStream = await collectPlacementCoverageProof(options, binarySha, steps, badStream);
+  assert.deepEqual(badStream.invoked, ["reference", "candidate", "comparison"]);
+  assert.equal(rejectedStream.state, "failed");
+  assert.equal(rejectedStream.mapping, null);
 });
 
 test("successful exact sequence writes bound mapping and no release/performance authority", async () => {
