@@ -3863,6 +3863,114 @@ fn fixed_no_hold_opening_cpu_multi_preserves_family_without_pc2() {
 }
 
 #[test]
+fn fixed_no_hold_opening_worker_observes_only_applied_candidate_packets() {
+    use crate::distributed_wire::{decode_candidate_batch, encode_candidate_batch};
+    use clearra_core_executor::WasmCandidatePacket;
+
+    fn drain_batch(
+        verifier: &mut WasmDistributedVerifierRuntime,
+        bytes: &[u8],
+        on_committed: &mut impl FnMut(&WasmCandidatePacket),
+    ) -> Result<(), WasmCommandRuntimeError> {
+        let mut step = verifier.consume_with_compact_commit_probe(bytes, on_committed)?;
+        for _ in 0..4_096 {
+            assert!(
+                step.partial.is_none(),
+                "compact PC retains its worker aggregate"
+            );
+            if !step.has_pending_work {
+                return Ok(());
+            }
+            step = verifier.continue_with_compact_commit_probe(on_committed)?;
+        }
+        panic!("compact verifier exceeded its test work bound");
+    }
+
+    let _resource_guard = typed_pc_distributed_test_guard();
+    let runtime = WasmCommandRuntime::default()
+        .with_host_capabilities(WasmHostCapabilities::new(4, false, false));
+    const COMMAND: &str =
+        "clearra pc --lines 2 --queue IIOOOIIOOO --no-hold --count all --backend cpu --workers 2";
+    let WasmDistributedPreparation::Coordinator(mut coordinator) =
+        WasmDistributedCoordinator::prepare(&runtime, COMMAND).expect("compact CPU coordinator")
+    else {
+        panic!("expected the actual distributed product path");
+    };
+    assert_eq!(coordinator.mode(), WasmDistributedMode::CpuMulti);
+
+    // The verifier has its own compiled command, immutable catalogs, cursor,
+    // and reducer, and sees only the same encoded batches as the Worker ABI.
+    let mut verifier = WasmDistributedVerifierRuntime::prepare(&runtime, COMMAND)
+        .expect("independent compact worker owner");
+    let mut first_batch = None;
+    let mut observed = 0;
+    let mut finished = false;
+    for _ in 0..4_096 {
+        match coordinator
+            .advance_producer(64, 2)
+            .expect("compact producer step")
+        {
+            WasmDistributedProducerAdvance::Pending => {}
+            WasmDistributedProducerAdvance::Batch(batch) => {
+                let expected = decode_candidate_batch(&batch).expect("canonical packet bytes");
+                let mut committed = 0;
+                drain_batch(&mut verifier, &batch, &mut |packet| {
+                    assert_eq!(packet, &expected[committed]);
+                    assert_eq!(packet.ordinal(), observed);
+                    committed += 1;
+                    observed += 1;
+                })
+                .expect("compact exact worker batch applied");
+                assert_eq!(committed, expected.len(), "one commit per exact candidate");
+                if first_batch.is_none() {
+                    first_batch = Some(batch);
+                }
+            }
+            WasmDistributedProducerAdvance::Completed => {
+                finished = true;
+                break;
+            }
+            _ => panic!("unexpected compact CPU producer state"),
+        }
+    }
+    assert!(finished && observed > 0);
+    let partial = verifier.finish().expect("real compact worker aggregate");
+    coordinator
+        .absorb_partial(&partial)
+        .expect("actual partial merger");
+    drop(verifier);
+    let result = finish_distributed_cpu_source(coordinator, 2);
+    assert_eq!(result.app_response().status(), AppStatus::Success);
+    let report = result.search_report().expect("complete compact search");
+    assert!(report.count_complete && report.probability_complete);
+    assert_eq!(report.unique_solution_count, 4);
+    assert_eq!(report.covered_pattern_count, 1);
+    assert!(!report
+        .summary_fields
+        .iter()
+        .any(|(key, _)| key == "continuation_token"));
+
+    let mut cancelled = WasmDistributedVerifierRuntime::prepare(&runtime, COMMAND)
+        .expect("cancelled worker fixture");
+    cancelled.cancel_compact_commit_probe();
+    assert!(
+        drain_batch(&mut cancelled, &first_batch.unwrap(), &mut |_| {
+            panic!("cancelled work committed")
+        })
+        .is_err()
+    );
+    drop(cancelled);
+
+    let bad_rows = encode_candidate_batch(&[WasmCandidatePacket::new(0, 0, vec![u32::MAX; 5])]);
+    let mut rejected = WasmDistributedVerifierRuntime::prepare(&runtime, COMMAND)
+        .expect("rejected worker fixture");
+    assert!(drain_batch(&mut rejected, &bad_rows, &mut |_| {
+        panic!("rejected candidate committed")
+    })
+    .is_err());
+}
+
+#[test]
 fn typed_pc_minimals_distributed_geometry_completes_with_the_same_exact_family() {
     let _resource_guard = typed_pc_distributed_test_guard();
     let runtime = WasmCommandRuntime::default()

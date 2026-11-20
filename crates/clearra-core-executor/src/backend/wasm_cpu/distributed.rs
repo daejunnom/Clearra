@@ -411,6 +411,37 @@ impl WasmDistributedVerifier {
         }
     }
 
+    /// Observes one committed compact PC candidate without copying its identity.
+    /// This is local reducer evidence, not transport, request, or family
+    /// authority; in particular it cannot authorize a continuation by itself.
+    #[doc(hidden)]
+    pub fn consume_with_compact_candidate_commit(
+        &mut self,
+        candidate: &WasmCandidatePacket,
+        control: &ExecutionControl,
+        on_committed: impl FnOnce(&WasmCandidatePacket),
+    ) -> Result<(), &'static str> {
+        let compact = !control.is_cancelled()
+            && candidate.pass_index() == 0
+            && !candidate.is_extended()
+            && candidate.row_ids().len() == 5;
+        let before = compact.then(|| self.session.distributed_progress().candidates);
+        self.consume(candidate, control)?;
+        // A filtered-out candidate can return Ok without reaching the reducer.
+        // A failed, cancelled, or early resource terminal returns Err above,
+        // possibly after advancing the packing count, and must never commit.
+        if before
+            .and_then(|count| count.checked_add(1))
+            .is_some_and(|expected| {
+                self.session.distributed_progress().candidates == expected
+                    && !control.is_cancelled()
+            })
+        {
+            on_committed(candidate);
+        }
+        Ok(())
+    }
+
     pub fn finish(&mut self) -> Result<CoreExecutionResult, &'static str> {
         if self.finished {
             return Err("wasm_distributed_verifier_already_finished");

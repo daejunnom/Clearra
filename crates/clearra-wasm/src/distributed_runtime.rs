@@ -3753,6 +3753,31 @@ impl WasmDistributedVerifierRuntime {
         input: &[u8],
         external_retained_bytes: u128,
     ) -> Result<WasmDistributedVerifierConsume, WasmCommandRuntimeError> {
+        self.consume_with_candidate_observer::<false>(input, external_retained_bytes, &mut |_| {})
+    }
+
+    // The production ABI uses a `false` instantiation, with no observer or
+    // candidate-delta work. Tests opt in inside the isolated verifier owner.
+    #[cfg(test)]
+    pub(crate) fn consume_with_compact_commit_probe(
+        &mut self,
+        input: &[u8],
+        on_committed: &mut impl FnMut(&WasmCandidatePacket),
+    ) -> Result<WasmDistributedVerifierConsume, WasmCommandRuntimeError> {
+        self.consume_with_candidate_observer::<true>(input, input.len() as u128, on_committed)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn cancel_compact_commit_probe(&self) {
+        self.control.cancellation.handle().cancel();
+    }
+
+    fn consume_with_candidate_observer<const OBSERVE: bool>(
+        &mut self,
+        input: &[u8],
+        external_retained_bytes: u128,
+        on_committed: &mut impl FnMut(&WasmCandidatePacket),
+    ) -> Result<WasmDistributedVerifierConsume, WasmCommandRuntimeError> {
         if self.has_pending_candidates() {
             return Err(distributed_error(
                 "E_WASM_DISTRIBUTED_STATE",
@@ -3867,7 +3892,7 @@ impl WasmDistributedVerifierRuntime {
                     distributed_search_error("E_WASM_DISTRIBUTED_CANDIDATE_MEMORY", error)
                 })?;
             self.begin_pending_candidates(candidates, retained);
-            return self.advance_pending_candidate();
+            return self.advance_pending_candidate::<OBSERVE>(on_committed);
         }
         if let DistributedVerifier::FullHeightPc(verifier) = &mut self.verifier {
             if external_retained_bytes < input.len() as u128 {
@@ -3902,7 +3927,7 @@ impl WasmDistributedVerifierRuntime {
                     distributed_search_error("E_WASM_DISTRIBUTED_CANDIDATE_MEMORY", error)
                 })?;
             self.begin_pending_candidates(candidates, retained);
-            return self.advance_pending_candidate();
+            return self.advance_pending_candidate::<OBSERVE>(on_committed);
         }
         if let DistributedVerifier::BuildProbability(verifier) = &mut self.verifier {
             if external_retained_bytes < input.len() as u128 {
@@ -3941,13 +3966,13 @@ impl WasmDistributedVerifierRuntime {
                     distributed_search_error("E_WASM_DISTRIBUTED_CANDIDATE_MEMORY", error)
                 })?;
             self.begin_pending_candidates(candidates, external_retained_bytes);
-            return self.advance_pending_candidate();
+            return self.advance_pending_candidate::<OBSERVE>(on_committed);
         }
         let candidates = decode_candidate_batch(input).map_err(|error| {
             distributed_error("E_WASM_DISTRIBUTED_CANDIDATE_INVALID", error.reason())
         })?;
         self.begin_pending_candidates(candidates, 0);
-        self.advance_pending_candidate()
+        self.advance_pending_candidate::<OBSERVE>(on_committed)
     }
 
     fn begin_pending_candidates(
@@ -3971,8 +3996,9 @@ impl WasmDistributedVerifierRuntime {
     /// and must commit together. Keeping the remaining decoded batch behind a
     /// cursor lets the worker yield and publish a heartbeat between those
     /// transactions without weakening that authority.
-    fn advance_pending_candidate(
+    fn advance_pending_candidate<const OBSERVE: bool>(
         &mut self,
+        on_committed: &mut impl FnMut(&WasmCandidatePacket),
     ) -> Result<WasmDistributedVerifierConsume, WasmCommandRuntimeError> {
         if !self.has_pending_candidates() {
             if matches!(
@@ -4014,9 +4040,16 @@ impl WasmDistributedVerifierRuntime {
                         has_pending_work: true,
                     });
                 }
-                verifier
-                    .consume(candidate, &self.control)
-                    .map_err(|reason| distributed_error("E_WASM_DISTRIBUTED_VERIFY", reason))?;
+                let result = if OBSERVE {
+                    verifier.consume_with_compact_candidate_commit(
+                        candidate,
+                        &self.control,
+                        on_committed,
+                    )
+                } else {
+                    verifier.consume(candidate, &self.control)
+                };
+                result.map_err(|reason| distributed_error("E_WASM_DISTRIBUTED_VERIFY", reason))?;
             }
             DistributedVerifier::BuildProbability(verifier) => verifier
                 .consume_with_external_retained(
@@ -4087,8 +4120,23 @@ impl WasmDistributedVerifierRuntime {
     pub fn continue_work(
         &mut self,
     ) -> Result<WasmDistributedVerifierConsume, WasmCommandRuntimeError> {
+        self.continue_with_candidate_observer::<false>(&mut |_| {})
+    }
+
+    #[cfg(test)]
+    pub(crate) fn continue_with_compact_commit_probe(
+        &mut self,
+        on_committed: &mut impl FnMut(&WasmCandidatePacket),
+    ) -> Result<WasmDistributedVerifierConsume, WasmCommandRuntimeError> {
+        self.continue_with_candidate_observer::<true>(on_committed)
+    }
+
+    fn continue_with_candidate_observer<const OBSERVE: bool>(
+        &mut self,
+        on_committed: &mut impl FnMut(&WasmCandidatePacket),
+    ) -> Result<WasmDistributedVerifierConsume, WasmCommandRuntimeError> {
         if self.has_pending_candidates() {
-            return self.advance_pending_candidate();
+            return self.advance_pending_candidate::<OBSERVE>(on_committed);
         }
         match &mut self.verifier {
             DistributedVerifier::Recovery(verifier) if verifier.has_pending_work() => {

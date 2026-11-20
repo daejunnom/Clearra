@@ -224,7 +224,7 @@ jobs:
           SH
       - name: Check the actual compact distributed continuation boundary
         if: ${{ !cancelled() }}
-        run: cargo test --locked -p clearra-wasm --lib tests::fixed_no_hold_opening_cpu_multi_preserves_family_without_pc2 -- --exact --test-threads=1
+        run: cargo test --locked -p clearra-wasm --lib tests::fixed_no_hold_opening_ -- --test-threads=1
   desktop-cli-readback:
     if: >-
       github.repository == 'daejunnom/Clearra' &&
