@@ -13,8 +13,8 @@ pub use kick_profile_registry::{
     KickProfileCapability, KickProfileDescriptor, KickProfileRegistry, KickProfileSourceKind,
 };
 pub use kick_table::{
-    KickOffset, KickOffsetSequence, KickTable, KickTableEntry, KickTableProfile,
-    KickTableProfileId, KickTransition,
+    normalized_kick_delta, KickOffset, KickOffsetSequence, KickTable, KickTableEntry,
+    KickTableProfile, KickTableProfileId, KickTransition,
 };
 pub use kick_verification::{
     KickProfileVerificationReport, KickVerificationCase, KickVerificationFailureReason,

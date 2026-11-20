@@ -1,12 +1,13 @@
-//! Board-independent collision dependencies for one canonical spawn-to-lock query.
+//! Scoped collision certificates for canonical spawn-to-lock queries.
 //!
 //! This optional prototype compiles a uniform condition before a tiling or a
 //! physical board is known. It does not declare a lock reachable, authorize a
 //! negative prune, or replace a completed BuildUp check. Its result says only:
 //! under this same template and physical target pose, changing board cells
 //! outside the returned mask cannot change whether the target lock is reachable.
-//! The caller must separately preserve the canonical operation and original-row
-//! frame when lifting this physical condition into a placement relation graph.
+//! The separate bounded no-entry check can exclude one exact target pose over
+//! a fixed-frame occupancy interval. The caller must preserve the canonical
+//! operation and original-row frame when lifting either physical result.
 
 use super::*;
 
@@ -14,6 +15,78 @@ use super::*;
 // policy. Unsupported or malformed templates return no certificate.
 const MAX_DEPENDENCY_STATES: usize = 8 * 1024;
 const MAX_DEPENDENCY_EDGES: usize = 1024 * 1024;
+
+// Most negatives should have no incoming edge at all. Also allow a few
+// mutually reachable poses (including rotation cycles) in a sealed cavity,
+// without turning a useful small certificate into another full search.
+const MAX_NO_ENTRY_POSES: usize = 16;
+
+/// Absence of any canonical sky seed in a small, closed optimistic predecessor
+/// set proves that the exact target pose cannot be reached. The already-owned
+/// reverse tables were compiled from the solver's actual forward transitions.
+/// They include all legal rotation slots and every geometrically valid kick,
+/// even kicks suppressed on the actual board by first-success priority.
+///
+/// Any board containing `minimum_board` can only remove vertices from this
+/// optimistic graph: a predecessor colliding with minimum occupancy remains
+/// blocked. This is not a monotonicity argument for the ordered-kick solver
+/// itself. No target grounding, positive witness, or higher-level
+/// unreachability is inferred. A seed, unsupported pose, or work beyond the
+/// fixed-size closure yields Unknown.
+pub(super) fn bounded_no_entry_on_minimum_board(
+    template: &ReachabilityTemplate,
+    minimum_board: u64,
+    target: usize,
+) -> bool {
+    let Some(&target_mask) = template.state_masks.get(target) else {
+        return false;
+    };
+    let Ok(target) = u16::try_from(target) else {
+        return false;
+    };
+    if target == INVALID_STATE_INDEX
+        || target_mask == INVALID_STATE_MASK
+        || (minimum_board & target_mask) != 0
+    {
+        return false;
+    }
+
+    let mut poses = [target; MAX_NO_ENTRY_POSES];
+    let mut count = 1;
+    let mut cursor = 0;
+    while cursor < count {
+        let pose = usize::from(poses[cursor]);
+        cursor += 1;
+        if template.is_sky_seed(pose) {
+            return false;
+        }
+
+        let begin = template.reverse_rotation_offsets[pose] as usize;
+        let end = template.reverse_rotation_offsets[pose + 1] as usize;
+        let rotations = template.reverse_rotation_sources[begin..end]
+            .iter()
+            .map(|source| source.source);
+        let translations = template.reverse_translation_sources[pose].into_iter();
+        for source in translations.chain(rotations) {
+            if source == INVALID_STATE_INDEX {
+                continue;
+            }
+            let mask = template.state_masks[usize::from(source)];
+            if mask == INVALID_STATE_MASK || (minimum_board & mask) != 0 {
+                continue;
+            }
+            if poses[..count].contains(&source) {
+                continue;
+            }
+            let Some(next) = poses.get_mut(count) else {
+                return false;
+            };
+            *next = source;
+            count += 1;
+        }
+    }
+    true
+}
 
 /// Additional bounded scratch for one serial static-mask compilation.
 ///
@@ -275,6 +348,151 @@ mod tests {
             & (1_u64
                 << (usize::try_from(y).unwrap() * usize::from(width) + usize::try_from(x).unwrap()))
             != 0
+    }
+
+    #[test]
+    fn bounded_no_entry_proves_t_blocked_after_l_clear_not_before() {
+        const BEFORE_CLEAR: u64 = 0x3f1fc3f7;
+        const AFTER_CLEAR: u64 = 0x000f_f7f8;
+        for profile in PROFILES {
+            let template = ReachabilityTemplate::compile(10, 3, PieceKind::T, profile);
+            let target = |y| {
+                state_index(
+                    template.width,
+                    template.ceiling,
+                    State {
+                        rotation: RotationState::Zero,
+                        x: 0,
+                        y,
+                    },
+                )
+                .unwrap()
+            };
+            assert!(bounded_no_entry_on_minimum_board(
+                &template,
+                AFTER_CLEAR,
+                target(0)
+            ));
+            assert!(!oracle_lock(
+                10,
+                3,
+                AFTER_CLEAR,
+                PieceKind::T,
+                profile,
+                RotationState::Zero,
+                0,
+                0
+            ));
+            assert!(!bounded_no_entry_on_minimum_board(
+                &template,
+                BEFORE_CLEAR,
+                target(1)
+            ));
+            assert!(oracle_lock(
+                10,
+                3,
+                BEFORE_CLEAR,
+                PieceKind::T,
+                profile,
+                RotationState::Zero,
+                0,
+                1
+            ));
+        }
+    }
+
+    #[test]
+    fn bounded_no_entry_requires_a_seedless_closed_predecessor_set() {
+        let profile = KickTableProfileId::NoKick;
+        let template = ReachabilityTemplate::compile(6, 5, PieceKind::O, profile);
+        let index = |x, y| {
+            state_index(
+                template.width,
+                template.ceiling,
+                State {
+                    rotation: RotationState::Zero,
+                    x,
+                    y,
+                },
+            )
+            .unwrap()
+        };
+        let target = index(0, 0);
+        let bottom_wall = 0b111000 | (0b111000 << 6);
+        let sealed = bottom_wall | (0b000111 << 12);
+
+        // This is not the one-pose proof: the x=1 pose is a valid predecessor
+        // of x=0 and can be reached from x=0 in the optimistic graph.
+        assert!(template.reverse_translation_sources[target].contains(&(index(1, 0) as u16)));
+        assert!(template.reverse_translation_sources[index(1, 0)].contains(&(target as u16)));
+        assert_eq!(template.state_masks[index(1, 0)] & sealed, 0);
+        assert!(bounded_no_entry_on_minimum_board(&template, sealed, target));
+        assert!(!oracle_lock(
+            6,
+            5,
+            sealed,
+            PieceKind::O,
+            profile,
+            RotationState::Zero,
+            0,
+            0
+        ));
+
+        // Removing the roof connects to the product's real sky seeds.
+        assert!(!bounded_no_entry_on_minimum_board(
+            &template,
+            bottom_wall,
+            target
+        ));
+        assert!(oracle_lock(
+            6,
+            5,
+            bottom_wall,
+            PieceKind::O,
+            profile,
+            RotationState::Zero,
+            0,
+            0
+        ));
+        assert!(!bounded_no_entry_on_minimum_board(
+            &template,
+            sealed,
+            index(0, 5)
+        ));
+    }
+
+    #[test]
+    fn bounded_no_entry_does_not_turn_budget_exhaustion_into_a_negative() {
+        let profile = KickTableProfileId::NoKick;
+        let template = ReachabilityTemplate::compile(10, 6, PieceKind::O, profile);
+        let target = state_index(
+            template.width,
+            template.ceiling,
+            State {
+                rotation: RotationState::Zero,
+                x: 0,
+                y: 0,
+            },
+        )
+        .unwrap();
+        // Only one cell is open in the roof. The wide cavity underneath
+        // contains more optimistic predecessors than the bounded proof allows.
+        let wide_cavity = 0x1ff_u64 << 40;
+        assert!(!bounded_no_entry_on_minimum_board(
+            &template,
+            wide_cavity,
+            target
+        ));
+        assert!(!oracle_lock(
+            10,
+            6,
+            wide_cavity,
+            PieceKind::O,
+            profile,
+            RotationState::Zero,
+            0,
+            0
+        ));
     }
 
     #[test]

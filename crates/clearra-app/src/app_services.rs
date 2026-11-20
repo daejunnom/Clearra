@@ -7,7 +7,9 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use clearra_build_coverage::query::build_coverage_query::BuildCoverageQuery;
+use clearra_build_coverage::{
+    coverage::BuildCoverageExecution, query::build_coverage_query::BuildCoverageQuery,
+};
 use clearra_core_domain::{
     execution_cancellation::{ExecutionCancellationToken, ExecutionControl},
     resource::ResourceReport as CoreResourceReport,
@@ -1690,12 +1692,125 @@ impl AppCoreExecutorService {
             AppCoreExecutorBackend::NativeCore => {
                 CoreExecutor::execute_build_coverage_with_control(problem, query, control)
             }
-            AppCoreExecutorBackend::WasmCpu => Err(CoreExecutionError::RuntimeUnavailable {
-                component: "wasm_cpu_build_coverage_not_connected",
-            }),
+            AppCoreExecutorBackend::WasmCpu => execute_rust_legacy_cover(problem, query, control),
         }
     }
 }
+
+fn execute_rust_legacy_cover(
+    problem: &SearchProblem,
+    query: &BuildCoverageQuery,
+    control: &ExecutionControl,
+) -> Result<CoreExecutionResult, CoreExecutionError> {
+    let unsupported = CoreExecutionError::RuntimeUnavailable {
+        component: "wasm_cpu_build_coverage_not_connected",
+    };
+    let bridge = problem
+        .build_query()
+        .ok_or(CoreExecutionError::UnsupportedProblem)?;
+    let template = query.template();
+    let limits = query.limits();
+    let size = template.board_size();
+    let pattern_count = query.pattern_count();
+    let max_supported_patterns =
+        clearra_profiles::search::search_defaults::SearchDefaults::MVP1.build_max_patterns();
+
+    // The canonical legacy bridge starts empty and fills whole active rows.
+    // One tetromino activates one 10-cell row; its four cells cannot fill it.
+    // This proves no packing candidates, not that a failed modern Build
+    // Probability request is equivalent to a completed legacy Cover request.
+    if size.width() != 10
+        || template.slots().len() != 1
+        || bridge.template().slot_count() != 1
+        || bridge.template().id() != template.id()
+        || bridge.template().label() != template.label()
+        || bridge.template().board_size() != size
+        || bridge.selected_pattern_id().is_some()
+        || bridge.pattern_count() != pattern_count
+        || bridge.limits().max_assignments() != limits.max_assignments()
+        || bridge.limits().max_patterns() != limits.max_patterns()
+        || pattern_count == 0
+        || pattern_count > limits.max_patterns()
+        || limits.max_patterns() > max_supported_patterns
+        || limits.max_assignments() == 0
+        || u32::try_from(limits.max_assignments()).is_err()
+    {
+        return Err(unsupported);
+    }
+    let canonical =
+        clearra_problem::ProblemCompiler::compile_build(bridge).map_err(|_| unsupported.clone())?;
+    if &canonical != problem {
+        return Err(unsupported);
+    }
+
+    // Both backends use the same assignment solver and union reducer. The
+    // existing entry point also owns reduction when the physical row set is
+    // empty; it needs no native call for this case.
+    let coverage = BuildCoverageExecution::from_c_buildup_rows(query, &[]);
+    if control.is_cancelled() {
+        return Err(CoreExecutionError::Cancelled);
+    }
+    let coverage =
+        coverage.map_err(|error| CoreExecutionError::Cover(format!("Coverage({error:?})")))?;
+
+    Ok(CoreExecutionResult::new(
+        vec![
+            ("status".into(), "cover-executed".into()),
+            ("template".into(), template.id().into()),
+            (
+                "template_label".into(),
+                template.label().unwrap_or("none").into(),
+            ),
+            ("board_width".into(), size.width().to_string()),
+            ("board_height".into(), size.height().to_string()),
+            ("slot_count".into(), template.slots().len().to_string()),
+            ("pattern_count".into(), pattern_count.to_string()),
+            (
+                "max_assignments".into(),
+                limits.max_assignments().to_string(),
+            ),
+            ("max_patterns".into(), limits.max_patterns().to_string()),
+            (
+                "assignment_count".into(),
+                coverage.assignments().len().to_string(),
+            ),
+            (
+                "assignment_exact_cover_complete".into(),
+                coverage.exact_cover_complete().to_string(),
+            ),
+            (
+                "assignment_exact_cover_searched_nodes".into(),
+                coverage.exact_cover_searched_nodes().to_string(),
+            ),
+            ("packing_candidate_count".into(), "0".into()),
+            ("core_buildup_variant_count".into(), "0".into()),
+            ("pattern_verified_execution_count".into(), "0".into()),
+            ("unique_trace_count".into(), "0".into()),
+            ("core_coverage_row_count".into(), "0".into()),
+            (
+                "coverage_matrix_row_count".into(),
+                coverage.matrix().matrix().rows().len().to_string(),
+            ),
+            (
+                "union_covered_patterns".into(),
+                coverage.union().covered_patterns().count_ones().to_string(),
+            ),
+            (
+                "build_coverage_probability".into(),
+                format!("{:.1}", coverage.result().probability().get()),
+            ),
+            ("coverage_row_source".into(), "exact-empty-packing".into()),
+            ("probability_complete".into(), "true".into()),
+            ("count_complete".into(), "true".into()),
+            ("resource_truncated".into(), "false".into()),
+        ],
+        Vec::new(),
+    ))
+}
+
+#[cfg(test)]
+#[path = "app_services_legacy_cover_tests.rs"]
+mod legacy_cover_tests;
 
 impl Default for AppCoreExecutorService {
     fn default() -> Self {

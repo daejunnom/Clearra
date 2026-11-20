@@ -77,6 +77,54 @@ use crate::solution_probability::{
     SolutionProbabilityReport,
 };
 
+#[cfg(any(test, feature = "local-search-ab"))]
+pub(crate) type SolutionCoverageCapture = Arc<
+    dyn Fn(StandardBoard64TilingIdentity, &PatternBitSet) -> Result<(), &'static str> + Send + Sync,
+>;
+
+/// Emit one exact per-candidate fragment while its worker's symbolic root is
+/// alive. Never store worker/epoch-local IDs in another worker or in the output.
+/// A recorder sorts fragments by canonical identity and ORs duplicates.
+#[cfg(any(test, feature = "local-search-ab"))]
+pub(super) fn capture_candidate_solution_coverage(
+    capture: &SolutionCoverageCapture,
+    identity: StandardBoard64TilingIdentity,
+    result: &super::buildup::CandidateBuildResult,
+    workspace: &BuildUpWorkspace,
+) -> Result<(), WasmExactSearchError> {
+    if !result.buildable {
+        return Ok(());
+    }
+    let mut symbolic = result
+        .symbolic_coverage_root
+        .map(|root| workspace.materialize_standard_bag_root(root))
+        .transpose()?;
+    let bits: &PatternBitSet = if let Some(symbolic) = symbolic.as_mut() {
+        if let Some(explicit) = result.covered_patterns.as_ref() {
+            symbolic.union_with(explicit).map_err(|_| {
+                WasmExactSearchError::InvalidProblem("solution_coverage_capture_universe_mismatch")
+            })?;
+        }
+        symbolic
+    } else {
+        result
+            .covered_patterns
+            .as_ref()
+            .ok_or(WasmExactSearchError::InvalidProblem(
+                "solution_coverage_capture_evidence_missing",
+            ))?
+    };
+    let count = bits.count_ones() as usize;
+    if count == 0
+        || (result.covered_patterns.is_none() && count != result.symbolic_covered_pattern_count)
+    {
+        return Err(WasmExactSearchError::InvalidProblem(
+            "solution_coverage_capture_cardinality_mismatch",
+        ));
+    }
+    capture(identity, bits).map_err(WasmExactSearchError::InvalidProblem)
+}
+
 // Keep browser-worker cancellation responsive without paying an ABI/event-loop
 // round trip after every tiny candidate batch.
 const MAX_BUILDUP_CANDIDATES_PER_ADVANCE: usize = 512;
@@ -874,6 +922,8 @@ pub(crate) struct WasmExactSearchSession {
     dense_pattern_preflight: DensePatternPreflight,
     _execution_admission: ExecutionAdmission,
     execution_control: ExecutionControl,
+    #[cfg(any(test, feature = "local-search-ab"))]
+    solution_coverage_capture: Option<SolutionCoverageCapture>,
     finished: bool,
     #[cfg(any(feature = "search-stage-profiling", feature = "wasm-stage-profiling"))]
     profile_geometry_advance_calls: usize,
@@ -1643,6 +1693,8 @@ impl WasmExactSearchSession {
             dense_pattern_preflight,
             _execution_admission: execution_admission,
             execution_control: ExecutionControl::default(),
+            #[cfg(any(test, feature = "local-search-ab"))]
+            solution_coverage_capture: None,
             finished: false,
             #[cfg(any(feature = "search-stage-profiling", feature = "wasm-stage-profiling"))]
             profile_geometry_advance_calls: 0,
@@ -1713,6 +1765,34 @@ impl WasmExactSearchSession {
         self.gpu_original_result_incomplete = original_result_incomplete;
     }
 
+    #[cfg(any(test, feature = "local-search-ab"))]
+    pub(crate) fn install_solution_coverage_capture(
+        &mut self,
+        capture: SolutionCoverageCapture,
+    ) -> Result<(), WasmExactSearchError> {
+        if !retains_buildable_identity_evidence(&self.problem)
+            || !matches!(
+                self.problem.objective().kind(),
+                ObjectiveKind::All | ObjectiveKind::Unique
+            )
+            || self.problem.count_policy() != clearra_pc_graph::request::PcCountPolicy::CountUnique
+            || self.problem.solution_probability_policy().requested()
+            || self.problem.objective().execution_constraints().requested()
+            || self.problem.objective().score().requested()
+            || self
+                .problem
+                .queue_observation_policy()
+                .requires_observation_policy()
+            || self.pc_chance_coverage_evidence_available
+        {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "solution_coverage_capture_requires_unique_full_future_omit_request",
+            ));
+        }
+        self.solution_coverage_capture = Some(capture);
+        Ok(())
+    }
+
     #[cfg(feature = "parallel")]
     pub fn execute_parallel_if_worthwhile(
         &mut self,
@@ -1740,6 +1820,8 @@ impl WasmExactSearchSession {
             control.clone(),
             worker_count,
             self.cpu_warmup_requested,
+            #[cfg(any(test, feature = "local-search-ab"))]
+            self.solution_coverage_capture.clone(),
         )? {
             ParallelSearchDecision::Serial { geometry, reason } => {
                 self.geometry = geometry;
@@ -2930,6 +3012,11 @@ impl WasmExactSearchSession {
         let solution_coverage_required = solution_probabilities_requested
             || self.problem.objective().kind() == ObjectiveKind::MinimumCover
             || self.problem.objective().execution_constraints().requested();
+        #[cfg(any(test, feature = "local-search-ab"))]
+        let exact_candidate_coverage =
+            solution_coverage_required || self.solution_coverage_capture.is_some();
+        #[cfg(not(any(test, feature = "local-search-ab")))]
+        let exact_candidate_coverage = solution_coverage_required;
         let coverage_already_known = self.buildup_workspace.standard_bag_coverage_complete()
             || self
                 .covered_patterns
@@ -2939,7 +3026,7 @@ impl WasmExactSearchSession {
             &self.problem,
             target,
             coverage_already_known,
-            solution_coverage_required,
+            exact_candidate_coverage,
         );
         if matches!(
             self.problem_retention,
@@ -3093,6 +3180,15 @@ impl WasmExactSearchSession {
             return self.complete().map(Some);
         }
         let mut solution_coverage = None;
+        #[cfg(any(test, feature = "local-search-ab"))]
+        if let Some(capture) = self.solution_coverage_capture.as_ref() {
+            capture_candidate_solution_coverage(
+                capture,
+                candidate.identity,
+                &result,
+                &self.buildup_workspace,
+            )?;
+        }
         if let Some(candidate_coverage) = result.covered_patterns.as_ref() {
             self.coverage_row_count += 1;
             self.pattern_verified_execution_count += candidate_coverage.count_ones() as usize;
@@ -5745,6 +5841,103 @@ mod tests {
     };
 
     #[test]
+    fn capture_candidate_solution_coverage_matches_explicit_product_rows() {
+        use std::{
+            collections::BTreeMap,
+            sync::{Arc, Mutex},
+        };
+
+        use clearra_pc_graph::request::{PcSolutionProbabilityPolicy, SupplyWindowSize};
+
+        let query = PcScenarioQuery::new(
+            PcScenarioBoard::standard_10(4, 0xfc3f_0fc3_f0),
+            PcQueueInput::standard_7_bag(),
+            PieceWindow::new(4),
+        )
+        .with_rule(clearra_rules::profile::builtin_rules::jstris_180())
+        .with_allow_hold(false)
+        .with_exact_pieces(Some(4))
+        .with_supply_window_size(SupplyWindowSize::new(4))
+        .with_count_policy(PcCountPolicy::CountUnique)
+        .with_objective(ObjectivePolicy::unique())
+        .with_execution_policy(PcExecutionPolicy::default().with_workers(1));
+        let reference_problem = ProblemCompiler::compile_scenario_pc(
+            &query
+                .clone()
+                .with_solution_probability_policy(PcSolutionProbabilityPolicy::Include),
+        )
+        .expect("explicit coverage problem");
+        let capture_problem = ProblemCompiler::compile_scenario_pc(
+            &query.with_solution_probability_policy(PcSolutionProbabilityPolicy::Omit),
+        )
+        .expect("capture problem");
+        let control = ExecutionControl::default();
+        let reference = WasmCpuSearchBackend::execute_with_control(&reference_problem, &control)
+            .expect("explicit product completes");
+        assert!(reference.solution_coverages().len() > 1);
+
+        for parallel in [
+            false,
+            #[cfg(feature = "parallel")]
+            true,
+        ] {
+            let rows = Arc::new(Mutex::new(BTreeMap::<
+                StandardBoard64TilingIdentity,
+                PatternBitSet,
+            >::new()));
+            let capture_rows = Arc::clone(&rows);
+            let capture = move |identity, bits: &PatternBitSet| {
+                let mut rows = capture_rows.lock().expect("fixture capture");
+                let row = rows
+                    .entry(identity)
+                    .or_insert_with(|| PatternBitSet::new(bits.pattern_count()));
+                row.union_with(bits)
+                    .map_err(|_| "fixture-universe-mismatch")
+            };
+            let captured = if parallel {
+                #[cfg(feature = "parallel")]
+                {
+                    let mut session =
+                        WasmExactSearchSession::new(&capture_problem).expect("capture session");
+                    session
+                        .install_solution_coverage_capture(Arc::new(capture))
+                        .expect("capture enabled");
+                    session
+                        .execute_parallel_if_worthwhile(2, &control)
+                        .expect("native search completes")
+                        .expect("the mixed-bag fixture has parallel work")
+                }
+                #[cfg(not(feature = "parallel"))]
+                unreachable!()
+            } else {
+                WasmCpuSearchBackend::execute_with_solution_coverage_capture(
+                    &capture_problem,
+                    &control,
+                    capture,
+                )
+                .expect("serial capture run completes")
+            };
+            assert!(captured.solution_coverages().is_empty());
+            assert_eq!(
+                reference.coverage_pattern_words(),
+                captured.coverage_pattern_words()
+            );
+            let rows = rows.lock().expect("captured fixture rows");
+            assert_eq!(rows.len(), reference.solution_coverages().len());
+            for row in reference.solution_coverages() {
+                assert_eq!(rows.get(&row.identity()), Some(row.covered_patterns()));
+            }
+        }
+        let error = WasmCpuSearchBackend::execute_with_solution_coverage_capture(
+            &capture_problem,
+            &control,
+            |_, _| Err("fixture-sink-failed"),
+        )
+        .expect_err("a sink error invalidates the search");
+        assert_eq!(error.reason(), "fixture-sink-failed");
+    }
+
+    #[test]
     fn v081_first_solution_row_preserves_shared_sparse_storage_and_duplicate_union_is_private() {
         let query = PcScenarioQuery::new(
             PcScenarioBoard::standard_10(2, 0xf3fcf),
@@ -6878,6 +7071,7 @@ mod tests {
                 ExecutionControl::default(),
                 2,
                 false,
+                None,
             )
             .expect("native source");
             let super::ParallelSearchDecision::Completed(mut outcome) = decision else {

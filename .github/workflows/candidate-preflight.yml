@@ -282,7 +282,7 @@ jobs:
           node-version: 22.23.2
       - name: Check release metadata and smoke wiring
         id: metadata
-        run: node scripts/release/validate-release-metadata.mjs --tag v0.8.0
+        run: node scripts/release/validate-release-metadata.mjs
       - name: Check independent publication fixture contracts
         id: fixtures
         if: ${{ !cancelled() && steps.node.outcome == 'success' }}

@@ -15,7 +15,7 @@ use super::{
     catalog::GeometryCatalog,
     exact_collections::ExactHashMap,
     geometry_component::{compile_component_plan, ComponentFamilyEntry, ComponentPlanResult},
-    geometry_domain::{hall_impossible, DomainPropagation, DomainStatus},
+    geometry_domain::{hall_impossible, DomainPropagation, DomainStatus, DomainSupportCache},
     geometry_family::{FamilyNodeKind, GeometrySolutionFamily, FAMILY_EMPTY, FAMILY_INVALID},
     geometry_projection::ProjectionReachabilityCache,
     mix_digest, piece_index, WasmExactSearchError, MAX_BOARD64_PIECES,
@@ -26,6 +26,16 @@ const RESIDUAL_ENTRY_CHUNK_CAPACITY: usize = 4096;
 const UNION_LEVEL_COUNT: usize = 32;
 const AVAILABLE_ROW_CACHE_MAX_ROWS: usize = 8 * 1024 * 1024;
 const TARGET_PATTERN_SCAN_WORK_BUDGET: usize = 8_192;
+
+fn incremental_domain_enabled() -> bool {
+    #[cfg(any(feature = "local-search-ab", test))]
+    {
+        static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *ENABLED.get_or_init(|| std::env::var("CLEARRA_INCREMENTAL_DOMAIN").as_deref() == Ok("1"))
+    }
+    #[cfg(not(any(feature = "local-search-ab", test)))]
+    false
+}
 
 #[derive(Clone, Copy, Debug)]
 pub(super) struct GeometryCandidate {
@@ -844,6 +854,7 @@ struct FamilyCompiler {
     used_counts: [u8; 7],
     stack: Vec<CompileFrame>,
     residual_memo: ResidualMemo,
+    domain_support_cache: DomainSupportCache,
     projection_cache: ProjectionReachabilityCache,
     family: GeometrySolutionFamily,
     component_entries: Vec<ComponentFamilyEntry>,
@@ -887,6 +898,7 @@ impl FamilyCompiler {
             used_counts: [0; 7],
             stack,
             residual_memo: ResidualMemo::disabled(),
+            domain_support_cache: DomainSupportCache::default(),
             projection_cache: ProjectionReachabilityCache::default(),
             family: GeometrySolutionFamily::new(),
             component_entries: Vec::new(),
@@ -916,6 +928,7 @@ impl FamilyCompiler {
             used_counts: [0; 7],
             stack: vec![CompileFrame::root(required_cells)],
             residual_memo: ResidualMemo::new(target_depth),
+            domain_support_cache: DomainSupportCache::default(),
             projection_cache: ProjectionReachabilityCache::default(),
             family: GeometrySolutionFamily::new(),
             component_entries: Vec::new(),
@@ -947,6 +960,7 @@ impl FamilyCompiler {
             used_counts,
             stack: vec![CompileFrame::child(remaining, depth, NO_ROW, 0)],
             residual_memo: state.residual_memo,
+            domain_support_cache: DomainSupportCache::default(),
             projection_cache: state.projection_cache,
             family: state.family,
             component_entries: Vec::new(),
@@ -1020,8 +1034,16 @@ impl FamilyCompiler {
                 advanced_analysis_enabled && self.compile_domain.allows_component_composition();
             let advanced_domain = advanced_analysis_enabled && catalog.initial_board() != 0;
             let (domain_status, domain, cell_piece_masks) = if advanced_domain {
-                let compilation =
-                    DomainPropagation::compile(catalog, remaining, feasible_piece_mask);
+                let compilation = if incremental_domain_enabled() {
+                    self.domain_support_cache.compile(
+                        catalog,
+                        depth,
+                        remaining,
+                        feasible_piece_mask,
+                    )
+                } else {
+                    DomainPropagation::compile(catalog, remaining, feasible_piece_mask)
+                };
                 (
                     compilation.status,
                     compilation.propagation,
@@ -1273,6 +1295,7 @@ impl FamilyCompiler {
             + self.admissible_prefixes.capacity() * core::mem::size_of::<u32>()
             + self.stack.capacity() * core::mem::size_of::<CompileFrame>()
             + self.residual_memo.retained_bytes()
+            + self.domain_support_cache.retained_bytes()
             + self.projection_cache.retained_bytes()
             + self.family.retained_bytes()
             + self.component_entries.capacity() * core::mem::size_of::<ComponentFamilyEntry>()

@@ -26,8 +26,27 @@ fn main() {
 }
 
 #[cfg(all(feature = "parallel", feature = "local-search-ab"))]
+#[path = "placement_graph_bench/solution_coverage_compare.rs"]
+mod solution_coverage_compare;
+#[cfg(all(feature = "parallel", feature = "local-search-ab"))]
+#[path = "placement_graph_bench/solution_coverage_spool.rs"]
+mod solution_coverage_spool;
+
+#[cfg(all(feature = "parallel", feature = "local-search-ab"))]
 mod run {
-    use std::{collections::BTreeMap, fs::File, io::Read, path::Path, time::Instant};
+    use std::{
+        collections::BTreeMap,
+        fs::{self, File, OpenOptions},
+        io::{self, BufReader, BufWriter, Read, Write},
+        path::{Path, PathBuf},
+        sync::{Arc, Mutex},
+        time::Instant,
+    };
+
+    use super::solution_coverage_compare::{
+        self, CoverageComparison, CoverageUniverse, CoverageWriter,
+    };
+    use super::solution_coverage_spool::{CoverageFragment, CoverageSpool, CoverageSpoolLimits};
 
     use clearra_core_domain::{
         execution_cancellation::ExecutionControl, pc::pc_target::PcTarget,
@@ -54,19 +73,33 @@ mod run {
         if args.first().is_some_and(|arg| arg == "--compare") {
             return compare(&args[1..]);
         }
+        if let [flag, reference, candidate] = args.as_slice() {
+            if flag == "--compare-coverage" {
+                return compare_coverage(Path::new(reference), Path::new(candidate));
+            }
+        }
         if args.as_slice() == ["--scalar-demo"] {
             return scalar_demo();
         }
-        let small = match args.as_slice() {
-            [] => false,
-            [flag] if flag == "--small" => true,
+        let (small, coverage_slot) = match args.as_slice() {
+            [] => (false, None),
+            [flag] if flag == "--small" => (true, None),
+            [flag, slot] if flag == "--coverage-slot" => (false, Some(slot.as_str())),
+            [small, flag, slot] if small == "--small" && flag == "--coverage-slot" => {
+                (true, Some(slot.as_str()))
+            }
             _ => return Err(
-                "usage: placement_graph_bench [--small | --scalar-demo | --compare FILE FILE ...]"
+                "usage: placement_graph_bench [[--small] [--coverage-slot SLOT] | --scalar-demo | --compare FILE FILE ... | --compare-coverage FILE FILE]"
                     .into(),
             ),
         };
-        if !small && std::env::var("CLEARRA_RUNTIME_SUPERVISED").as_deref() != Ok("1") {
-            return Err("large P7P4 must run under clearra-manage runtime run --producer benchmark --profile benchmark-search".into());
+        if (!small || coverage_slot.is_some())
+            && (std::env::var("CLEARRA_RUNTIME_SUPERVISED").as_deref() != Ok("1")
+                || std::env::var("CLEARRA_RUNTIME_PROFILE").as_deref() != Ok("benchmark-search"))
+        {
+            return Err(
+                "P7P4 and coverage capture require the supervised benchmark-search profile".into(),
+            );
         }
         let mode = std::env::var("CLEARRA_PLACEMENT_DEPENDENCY").unwrap_or_else(|_| "0".into());
         if !matches!(mode.as_str(), "0" | "1") {
@@ -87,6 +120,9 @@ mod run {
         if !matches!(translation_interval_mode.as_str(), "0" | "1") {
             return Err("CLEARRA_TRANSLATION_INTERVAL must be 0 or 1 at process start".into());
         }
+        let movement_clear_certificates_mode =
+            experiment_mode("CLEARRA_MOVEMENT_CLEAR_CERTIFICATES")?;
+        let incremental_domain_mode = experiment_mode("CLEARRA_INCREMENTAL_DOMAIN")?;
         let binary_sha = file_sha(&std::env::current_exe().map_err(|e| e.to_string())?)?;
         let capacity = CpuCapacity::current();
         let policy = PcExecutionPolicy::mvp_default()
@@ -117,15 +153,74 @@ mod run {
             translation_interval_mode,
             capacity.hard_limit(),
         );
+        let universe = if small {
+            CoverageUniverse::SmallI
+        } else {
+            CoverageUniverse::P7P4
+        };
+        let capture_path = coverage_slot.map(new_capture_directory).transpose()?;
         let search_started = Instant::now();
-        let result =
-            WasmCpuSearchBackend::execute_with_control(&problem, &ExecutionControl::default())
-                .map_err(|e| format!("exact core execution failed: {e:?}"))?;
+        let control = ExecutionControl::default();
+        let (result, spool) = if let Some(dir) = &capture_path {
+            let spool = Arc::new(Mutex::new(
+                CoverageSpool::create(&dir.join("runs"), universe, CoverageSpoolLimits::default())
+                    .map_err(|e| format!("coverage spool: {e}"))?,
+            ));
+            let owner = Arc::clone(&spool);
+            let failure = Arc::new(Mutex::new(None::<String>));
+            let capture_failure = Arc::clone(&failure);
+            let result = WasmCpuSearchBackend::execute_with_solution_coverage_capture(
+                &problem,
+                &control,
+                move |identity, bits| {
+                    let save = || -> Result<(), String> {
+                        let fragment = CoverageFragment::from_bitset(universe, bits)
+                            .map_err(|e| e.to_string())?;
+                        let key =
+                            NormalizedTilingSolutionKey::from_standard_board64_identity(identity);
+                        owner
+                            .lock()
+                            .map_err(|_| "spool lock poisoned".to_owned())?
+                            .push_fragment(key.as_str(), fragment)
+                            .map_err(|e| e.to_string())
+                    };
+                    save().map_err(|error| {
+                        if let Ok(mut first) = capture_failure.lock() {
+                            if first.is_none() {
+                                *first = Some(error);
+                            }
+                        }
+                        "solution_coverage_spool_write_failed"
+                    })
+                },
+            )
+            .map_err(|e| {
+                let cause = failure.lock().ok().and_then(|mut first| first.take());
+                format!("exact capture execution failed: {e:?}; spool diagnostic: {cause:?}")
+            })?;
+            let spool = Arc::try_unwrap(spool)
+                .map_err(|_| "coverage workers still hold the spool")?
+                .into_inner()
+                .map_err(|_| "coverage spool lock poisoned")?;
+            (result, Some(spool))
+        } else {
+            (
+                WasmCpuSearchBackend::execute_with_control(&problem, &control)
+                    .map_err(|e| format!("exact core execution failed: {e:?}"))?,
+                None,
+            )
+        };
         let search_ms = search_started.elapsed().as_secs_f64() * 1000.0;
         let structural_totals =
             clearra_core_executor::backend::structural_order_experiment_totals();
         let evidence_started = Instant::now();
         let errors = validate(&result, small, capacity.hard_limit());
+        let solution_coverage = match (capture_path, spool) {
+            (Some(dir), Some(spool)) if errors.is_empty() => {
+                finish_capture(dir, spool, universe, &result)?
+            }
+            _ => Value::Null,
+        };
         let fields: Vec<_> = result.summary_field_entries().collect();
         let summary: BTreeMap<_, _> = fields.iter().copied().collect();
         let words = result.coverage_pattern_words();
@@ -163,10 +258,15 @@ mod run {
             "schema": "clearra.placement-graph-benchmark.v1",
             "case": if small { "one-I-preflight" } else { "empty-4L-P7P4-jstris180" },
             "binary_sha256": binary_sha,
+            "supervisor_run_id": std::env::var("CLEARRA_RUNTIME_RUN_ID").ok(),
+            "output_mode": if coverage_slot.is_some() { "solution-coverage" } else { "global-only" },
+            "solution_coverage": solution_coverage,
             "mode": mode,
             "structural_mode": structural_mode,
             "static_influence_mode": static_influence_mode,
             "translation_interval_mode": translation_interval_mode,
+            "movement_clear_certificates_mode": movement_clear_certificates_mode,
+            "incremental_domain_mode": incremental_domain_mode,
             "variant": variant(&mode, &structural_mode, &static_influence_mode, &translation_interval_mode),
             "static_influence": {
                 "scope": "completed search, workspace counters aggregated after worker joins; null means metric not exposed",
@@ -191,6 +291,14 @@ mod run {
                 "translation_interval_attempts": structural_totals.translation_interval_attempts,
                 "translation_interval_guards": structural_totals.translation_interval_guards,
                 "translation_interval_row_steps": structural_totals.translation_interval_row_steps
+            },
+            "movement_clear": {
+                "frame_pose_attempts": structural_totals.movement_clear.frame_pose_attempts,
+                "frame_pose_proofs": structural_totals.movement_clear.frame_pose_proofs,
+                "reused_positive_locks": structural_totals.movement_clear.reused_positive_locks,
+                "reused_closed_locks": structural_totals.movement_clear.reused_closed_locks,
+                "point_pose_attempts": structural_totals.movement_clear.point_pose_attempts,
+                "point_pose_proofs": structural_totals.movement_clear.point_pose_proofs
             },
             "other_process_configuration": {
                 "CLEARRA_STANDARD_BAG_MEMO": std::env::var("CLEARRA_STANDARD_BAG_MEMO").ok(),
@@ -232,6 +340,196 @@ mod run {
             return Err("completed result failed benchmark validation; see JSON evidence".into());
         }
         Ok(())
+    }
+
+    fn experiment_mode(name: &str) -> Result<String, String> {
+        let value = std::env::var(name).unwrap_or_else(|_| "0".into());
+        if matches!(value.as_str(), "0" | "1") {
+            Ok(value)
+        } else {
+            Err(format!("{name} must be 0 or 1 at process start"))
+        }
+    }
+
+    fn new_capture_directory(slot: &str) -> Result<PathBuf, String> {
+        if slot.is_empty()
+            || slot.len() > 64
+            || !slot
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        {
+            return Err("coverage slot must be an ASCII alphanumeric/hyphen leaf".into());
+        }
+        let mut path = std::env::current_dir()
+            .and_then(|path| path.canonicalize())
+            .map_err(|e| e.to_string())?;
+        if !path.join("config/clearra-management.v1.json").is_file() {
+            return Err("run coverage capture from the Clearra repository root".into());
+        }
+        for component in [
+            "_local",
+            "artifacts",
+            "benchmarks",
+            "placement-graph-coverage",
+        ] {
+            path.push(component);
+            match fs::create_dir(&path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(error) => return Err(format!("coverage output root: {error}")),
+            }
+            let resolved = path.canonicalize().map_err(|e| e.to_string())?;
+            if resolved != path || !path.is_dir() {
+                return Err("coverage output root cannot follow symlinks or junctions".into());
+            }
+        }
+        path.push(slot);
+        fs::create_dir(&path).map_err(|e| format!("coverage slot must be new: {e}"))?;
+        Ok(path)
+    }
+
+    fn finish_capture(
+        dir: PathBuf,
+        spool: CoverageSpool,
+        universe: CoverageUniverse,
+        result: &CoreExecutionResult,
+    ) -> Result<Value, String> {
+        let path = dir.join("solution-coverage.clrcov");
+        let file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .map_err(|e| e.to_string())?;
+        let buffer = BufWriter::new(file);
+        let output = CoverageWriter::new(
+            LimitedOutput {
+                inner: buffer,
+                remaining: 8 * 1024 * 1024 * 1024,
+            },
+            universe,
+        )
+        .map_err(|e| e.to_string())?;
+        let mut result_keys: Vec<_> = result
+            .normalized_solution_identities()
+            .iter()
+            .copied()
+            .map(NormalizedTilingSolutionKey::from_standard_board64_identity)
+            .collect();
+        result_keys.sort_unstable_by(|left, right| left.as_str().cmp(right.as_str()));
+        let mut expected = result_keys.iter();
+        let summary = spool
+            .finish_checked(output, |key| {
+                if expected.next().is_some_and(|next| next.as_str() == key) {
+                    Ok(())
+                } else {
+                    Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "captured solution identity differs from exact product result",
+                    ))
+                }
+            })
+            .map_err(|e| format!("coverage evidence: {e}"))?;
+        if expected.next().is_some() {
+            return Err("captured solution family did not cover the exact product result".into());
+        }
+        drop(result_keys);
+        Ok(json!({
+            "sha256": file_sha(&path)?, "solution_count": summary.solutions,
+            "total_weight": universe.queue_count(), "covered_weight": summary.covered_queues,
+            "covered_pairs": summary.covered_pairs, "complete": true,
+        }))
+    }
+
+    struct LimitedOutput<W> {
+        inner: W,
+        remaining: u64,
+    }
+
+    impl<W: Write> Write for LimitedOutput<W> {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            if bytes.len() as u64 > self.remaining {
+                return Err(io::Error::other("coverage output exceeded its 8 GiB quota"));
+            }
+            let written = self.inner.write(bytes)?;
+            self.remaining -= written as u64;
+            Ok(written)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            self.inner.flush()
+        }
+    }
+
+    struct HashingReader<R> {
+        inner: R,
+        sha: Sha256,
+    }
+
+    impl<R: Read> Read for HashingReader<R> {
+        fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
+            let count = self.inner.read(bytes)?;
+            self.sha.update(&bytes[..count]);
+            Ok(count)
+        }
+    }
+
+    fn compare_coverage(reference: &Path, candidate: &Path) -> Result<(), String> {
+        let open = |path: &Path| {
+            File::open(path)
+                .map(BufReader::new)
+                .map(|inner| HashingReader {
+                    inner,
+                    sha: Sha256::new(),
+                })
+                .map_err(|e| e.to_string())
+        };
+        let mut reference = open(reference)?;
+        let mut candidate = open(candidate)?;
+        let comparison = solution_coverage_compare::compare(&mut reference, &mut candidate)
+            .map_err(|e| format!("coverage comparison: {e}"))?;
+        let mut report = json!({
+            "schema": "clearra.placement-graph-solution-coverage-comparison.v1",
+        });
+        match comparison {
+            CoverageComparison::Equal(summary) => {
+                report["left_sha256"] = json!(format!("{:x}", reference.sha.finalize()));
+                report["right_sha256"] = json!(format!("{:x}", candidate.sha.finalize()));
+                report["equivalent"] = json!(true);
+                report["complete"] = json!(true);
+                report["universe"] = json!(match summary.universe {
+                    CoverageUniverse::P7P4 => "p7p4",
+                    CoverageUniverse::SmallI => "small-i",
+                    #[cfg(test)]
+                    CoverageUniverse::Tiny => "synthetic",
+                });
+                report["solution_count"] = json!(summary.solutions);
+                report["total_weight"] = json!(summary.universe.queue_count());
+                report["covered_weight"] = json!(summary.covered_queues);
+                report["covered_pairs"] = json!(summary.covered_pairs);
+            }
+            CoverageComparison::Different(diff) => {
+                report["equivalent"] = json!(false);
+                report["complete"] = json!(false);
+                report["difference"] = json!({
+                    "reference_identity": diff.reference_identity,
+                    "candidate_identity": diff.candidate_identity,
+                    "first_missing_queue": diff.first_missing_queue,
+                    "first_added_queue": diff.first_added_queue,
+                    "reference_numerator": diff.reference_numerator,
+                    "candidate_numerator": diff.candidate_numerator,
+                    "denominator": diff.denominator,
+                });
+            }
+        }
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&report).map_err(|e| e.to_string())?
+        );
+        if report["equivalent"] == true {
+            Ok(())
+        } else {
+            Err("per-solution coverage differs".into())
+        }
     }
 
     fn compile_problem(small: bool, policy: PcExecutionPolicy) -> Result<SearchProblem, String> {
@@ -447,6 +745,7 @@ mod run {
                 "input",
                 "cpu",
                 "other_process_configuration",
+                "output_mode",
                 "coverage",
                 "materialized_identities",
             ] {
@@ -494,6 +793,7 @@ mod run {
             }
         };
         let mut times: BTreeMap<String, Vec<f64>> = BTreeMap::new();
+        let mut all_axes_times: BTreeMap<String, Vec<f64>> = BTreeMap::new();
         for report in &reports {
             let dependency_mode = report["mode"].as_str().ok_or("mode missing")?;
             let structural_mode = match report.get("structural_mode") {
@@ -531,7 +831,24 @@ mod run {
             if !ms.is_finite() || ms <= 0.0 {
                 return Err("search time must be finite and positive".into());
             }
-            times.entry(mode).or_default().push(ms);
+            let extra_mode = |key: &str| match report.get(key) {
+                None => Ok("0"),
+                Some(value) => value
+                    .as_str()
+                    .filter(|v| matches!(*v, "0" | "1"))
+                    .ok_or("extra result mode flags must be 0 or 1"),
+            };
+            let movement = extra_mode("movement_clear_certificates_mode")?;
+            let incremental = extra_mode("incremental_domain_mode")?;
+            all_axes_times
+                .entry(format!(
+                    "{mode},movement_clear={movement},incremental_domain={incremental}"
+                ))
+                .or_default()
+                .push(ms);
+            if movement == "0" && incremental == "0" {
+                times.entry(mode).or_default().push(ms);
+            }
         }
         let means: BTreeMap<String, f64> = times
             .iter()
@@ -622,6 +939,7 @@ mod run {
                 else if has_static_influence_mode { "dependency-structural-static-influence" }
                 else { "dependency-and-structural" },
             "search_times_ms_by_mode": times, "mean_search_ms_by_mode": means,
+            "search_times_ms_by_all_axes": all_axes_times,
             "treatment_time_change_percent": change,
             "primary_comparison": { "baseline": primary_baseline, "treatment": primary_treatment },
             "time_change_percent": {

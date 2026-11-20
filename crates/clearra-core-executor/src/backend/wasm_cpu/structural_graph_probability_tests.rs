@@ -732,9 +732,11 @@ fn count_all_same_current_and_held_piece_keeps_the_operation_graph() {
         WasmCpuSearchBackend::execute_with_control(&problem, &ExecutionControl::default()).unwrap()
     };
     let (baseline, _) = structural_order::with_mode(false, run);
-    let (treatment, metrics) = structural_order::with_mode(true, run);
+    let (treatment, metrics) =
+        structural_order::with_movement_clear_mode(true, || structural_order::with_mode(true, run));
     assert_parity(&baseline, &treatment);
     assert_eq!(metrics.skipped_build_graphs, 0);
+    assert_eq!(metrics.movement_clear, Default::default());
     assert_eq!(treatment.coverage_pattern_words(), &[1]);
     assert!(
         treatment
@@ -876,5 +878,126 @@ fn clear_can_close_a_translation_entry_and_requires_a_movement_predecessor() {
             0,
             "cold certificates must not run primitive traversal"
         );
+    }
+}
+
+#[test]
+fn movement_clear_certificate_matches_the_t_l_oracle_and_saves_primitive_search() {
+    use clearra_rules::profile::builtin_rules::{jstris_180, no_kick, srs, srs_plus, srs_x};
+    use placement_poset::MovementProof;
+
+    let _guard = product_guard();
+    let (catalog, candidate) = fixture(3, &[(PieceKind::T, 0x201c00), (PieceKind::L, 0xc02008)]);
+    for (profile, rule) in [
+        (KickTableProfileId::Srs90, srs()),
+        (KickTableProfileId::SrsPlus, srs_plus()),
+        (KickTableProfileId::SrsX, srs_x()),
+        (KickTableProfileId::Jstris180, jstris_180()),
+        (KickTableProfileId::NoKick, no_kick()),
+    ] {
+        let mut workspace = ReachabilityWorkspace::default();
+        workspace.configure_kick_profile(profile, false);
+        let mut negative_proofs = 0;
+        let certificate = structural_order::with_translation_interval_mode(true, || {
+            placement_poset::compile_with_movement_guard(&catalog, &candidate, true, |query| {
+                let frame = LocalRelationRowFrame::new(3, query.deleted);
+                match query.proof {
+                    MovementProof::Reachable { maximum } => workspace
+                        .try_translation_lock_interval(
+                            &catalog,
+                            query.minimum,
+                            maximum,
+                            query.piece,
+                            profile,
+                            query.realization,
+                            frame,
+                        )
+                        .is_some_and(|(proved, _)| proved),
+                    MovementProof::Closed => {
+                        let proved = workspace.try_prove_lock_pose_unreachable_at_minimum(
+                            &catalog,
+                            query.minimum,
+                            query.piece,
+                            profile,
+                            query.realization,
+                            frame,
+                        );
+                        negative_proofs += usize::from(proved);
+                        proved
+                    }
+                }
+            })
+        })
+        .unwrap_or_else(|| panic!("{profile:?}: movement/clear evidence must close T/L"));
+        let expected = operation_words(
+            certificate.pieces(),
+            &physical_transitions(&catalog, &candidate, profile),
+        );
+        let mut cache = PieceOrderLanguageCache::default();
+        let language = cache
+            .compile_poset_language(certificate.pieces(), certificate.predecessors(), 4096)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            language_words(&cache, language.root),
+            expected,
+            "{profile:?}"
+        );
+        assert_eq!(expected, BTreeSet::from([vec![PieceKind::T, PieceKind::L]]));
+        assert!(negative_proofs > 0, "{profile:?}");
+        assert_eq!(workspace.generated_state_count(), 0, "{profile:?}");
+
+        let query = PcScenarioQuery::new(
+            PcScenarioBoard::standard_10(3, catalog.initial_board()),
+            PcQueueInput::standard_7_bag(),
+            PieceWindow::new(2),
+        )
+        .with_rule(rule)
+        .with_allow_hold(false)
+        .with_exact_pieces(Some(2))
+        .with_supply_window_size(SupplyWindowSize::new(2))
+        .with_count_policy(PcCountPolicy::CountUnique)
+        .with_solution_probability_policy(PcSolutionProbabilityPolicy::Include)
+        .with_retained_trace_limit(0)
+        .with_execution_policy(policy());
+        let problem = ProblemCompiler::compile_scenario_pc(&query)
+            .unwrap()
+            .with_output_policy(SearchOutputPolicy::CoverageSummary);
+        let run = |movement, translation| {
+            structural_order::with_movement_clear_mode(movement, || {
+                structural_order::with_translation_interval_mode(translation, || {
+                    structural_order::with_mode(true, || {
+                        placement_dependency::with_mode(false, || {
+                            WasmCpuSearchBackend::execute_with_control(
+                                &problem,
+                                &ExecutionControl::default(),
+                            )
+                            .unwrap()
+                        })
+                        .0
+                    })
+                })
+            })
+        };
+        let (baseline, old) = run(false, false);
+        // Without a positive interval the full poset remains Unknown, but
+        // the closed-pose proof must still avoid a real exact graph query.
+        let (partial, fallback) = run(true, false);
+        let (completed, new) = run(true, true);
+        assert_parity(&baseline, &partial);
+        assert_parity(&baseline, &completed);
+        assert_eq!(old.movement_clear, Default::default());
+        assert!(
+            fallback.movement_clear.reused_closed_locks > 0,
+            "{profile:?}"
+        );
+        assert!(
+            new.skipped_build_graphs > fallback.skipped_build_graphs,
+            "{profile:?}"
+        );
+        let states =
+            |result: &CoreExecutionResult| result.usize_field("total_reachability_states").unwrap();
+        assert!(states(&partial) < states(&baseline), "{profile:?}");
+        assert!(states(&completed) < states(&baseline), "{profile:?}");
     }
 }

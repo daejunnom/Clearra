@@ -2,10 +2,10 @@
 use clearra_core_domain::{
     board::standard_pc_board::Board256Mask, objective::objective_kind::ObjectiveKind,
 };
-use clearra_core_ffi::rules::{kick_profile_code, rule_profile_code};
 use clearra_pc_graph::request::PcCountPolicy;
 use clearra_problem::{SearchOutputPolicy, SearchProblem, SearchProblemPreset};
 use clearra_replay::FullHeightExecutionBatch;
+use clearra_rules::profile::replay_encoding::{replay_kick_profile_id, replay_rule_profile_id};
 use sha2::{Digest, Sha256};
 
 use crate::pc_chance_coverage_evidence::{PcChanceCoverageEvidence, PcChanceProblemEvidence};
@@ -57,8 +57,8 @@ impl PcFullHeightReplayEvidence {
                 != problem.supply().projects_unplaced_lookahead()
             || execution.projects_standard_bag_lookahead()
                 != problem.supply().projects_standard_bag_lookahead()
-            || execution.kick_table_id() != u64::from(kick_profile_code(kick.profile_id()))
-            || execution.rule_profile_id() != u64::from(rule_profile_code(kick.source_rule()))
+            || execution.kick_table_id() != replay_kick_profile_id(kick.profile_id())
+            || execution.rule_profile_id() != replay_rule_profile_id(kick.source_rule())
             || execution.kick_table_id() == 0
             || execution.rule_profile_id() == 0
             || execution.patterns().len() != universe.pattern_count()

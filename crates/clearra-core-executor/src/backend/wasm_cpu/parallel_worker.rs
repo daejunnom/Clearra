@@ -15,6 +15,8 @@ use clearra_core_domain::{
 use clearra_coverage::pattern::pattern_bitset::PatternBitSet;
 use clearra_problem::SearchProblem;
 
+#[cfg(any(test, feature = "local-search-ab"))]
+use super::result::{capture_candidate_solution_coverage, SolutionCoverageCapture};
 use super::{
     buildup::{
         verify_candidate, BuildUpMemoryComponents, BuildUpWorkspace, CandidateBuildResult,
@@ -519,6 +521,8 @@ pub(super) struct ParallelWorkerResult {
 pub(super) struct SharedWorkerRequest {
     pub standard_bag: Option<Arc<SharedStandardBagRequest>>,
     pub reachability: Arc<SharedReachabilityTemplates>,
+    #[cfg(any(test, feature = "local-search-ab"))]
+    pub solution_coverage_capture: Option<SolutionCoverageCapture>,
 }
 
 pub(super) fn run_branch_worker(
@@ -559,6 +563,8 @@ pub(super) fn run_branch_worker(
             &mut workspace,
             &mut evaluator,
             &mut aggregate,
+            #[cfg(any(test, feature = "local-search-ab"))]
+            shared_request.solution_coverage_capture.as_ref(),
         )?;
         worker_candidate_count = worker_candidate_count.saturating_add(candidate_count);
         outcomes.try_reserve(1).map_err(|_| {
@@ -625,6 +631,9 @@ fn run_branch(
     workspace: &mut BuildUpWorkspace,
     evaluator: &mut CoverageProductEvaluator,
     aggregate: &mut WorkerAggregate,
+    #[cfg(any(test, feature = "local-search-ab"))] solution_coverage_capture: Option<
+        &SolutionCoverageCapture,
+    >,
 ) -> Result<(BranchSearchOutcome, usize), WasmExactSearchError> {
     let mut search = task.search;
     let mut candidate_digest = CandidateDigestEvidence::new(
@@ -668,13 +677,18 @@ fn run_branch(
                     ),
                 )?;
                 let solution_coverage_required = retains_solution_coverage_evidence(problem);
+                #[cfg(any(test, feature = "local-search-ab"))]
+                let exact_candidate_coverage =
+                    solution_coverage_required || solution_coverage_capture.is_some();
+                #[cfg(not(any(test, feature = "local-search-ab")))]
+                let exact_candidate_coverage = solution_coverage_required;
                 let coverage_already_known = workspace.standard_bag_coverage_complete()
                     || shared_coverage.is_superset(target.possible_patterns.as_ref());
                 let witness_mode = CandidateWitnessMode::for_candidate(
                     problem,
                     target,
                     coverage_already_known,
-                    solution_coverage_required,
+                    exact_candidate_coverage,
                 );
                 let result = verify_candidate(
                     problem,
@@ -689,6 +703,15 @@ fn run_branch(
                     control,
                 )?;
                 let mut solution_coverage = None;
+                #[cfg(any(test, feature = "local-search-ab"))]
+                if let Some(capture) = solution_coverage_capture {
+                    capture_candidate_solution_coverage(
+                        capture,
+                        candidate.identity,
+                        &result,
+                        workspace,
+                    )?;
+                }
                 if let Some(coverage) = result.covered_patterns.as_ref() {
                     shared_coverage.union(coverage)?;
                     if solution_coverage_required {

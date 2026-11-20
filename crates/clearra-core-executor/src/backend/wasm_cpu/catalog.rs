@@ -3,6 +3,8 @@ use clearra_core_domain::piece::{piece_kind::PieceKind, rotation::RotationState}
 use clearra_piece_registry::standard::tetromino_registry::standard_tetromino_registry;
 use clearra_problem::SearchProblem;
 
+#[cfg(any(test, feature = "local-search-ab"))]
+use super::placement_conditions::{PlacementConditionCatalog, MAX_CONDITION_HEIGHT};
 use super::{
     build_clear_rows::ClearRowDomain,
     geometry_apdp::ExactArmPairIndex,
@@ -41,8 +43,7 @@ pub(super) struct InstantiatedRealization {
 #[derive(Clone, Debug)]
 pub(super) struct GeometryCatalog {
     #[cfg(any(test, feature = "local-search-ab"))]
-    placement_conditions:
-        Option<std::sync::Arc<super::placement_conditions::PlacementConditionCatalog>>,
+    placement_conditions: Option<std::sync::Arc<PlacementConditionCatalog>>,
     width: u8,
     height: u8,
     initial_board: u64,
@@ -108,11 +109,12 @@ impl GeometryCatalog {
         let row_count = realization_count;
         let row_count_usize = usize::try_from(row_count).ok()?;
         #[cfg(any(test, feature = "local-search-ab"))]
-        let prototype_peak = if super::placement_dependency::enabled() {
-            super::placement_conditions::PlacementConditionCatalog::checked_compile_peak_upper_bound(row_count_usize)?
-        } else {
-            0
-        };
+        let prototype_peak =
+            if height <= MAX_CONDITION_HEIGHT && super::placement_dependency::enabled() {
+                PlacementConditionCatalog::checked_compile_peak_upper_bound(row_count_usize)?
+            } else {
+                0
+            };
         #[cfg(not(any(test, feature = "local-search-ab")))]
         let prototype_peak = 0;
         let clear_state_count = 1_u128.checked_shl(u32::from(height))?;
@@ -541,20 +543,18 @@ impl GeometryCatalog {
             let mut catalog = catalog;
             if super::placement_dependency::enabled() {
                 catalog.placement_conditions =
-                    super::placement_conditions::PlacementConditionCatalog::compile(&catalog)
-                        .filter(|conditions| conditions.matches_catalog(&catalog))
-                        .map(|conditions| {
-                            super::placement_dependency::record(|m| {
-                                m.catalogs_compiled += 1;
-                                m.catalog_placements += conditions.row_count() as u64;
-                                m.unique_clear_domains += conditions.domain_count() as u64;
-                                m.shared_clear_domains += conditions
-                                    .row_count()
-                                    .saturating_sub(conditions.domain_count())
-                                    as u64;
-                            });
-                            std::sync::Arc::new(conditions)
+                    PlacementConditionCatalog::compile(&catalog).map(|conditions| {
+                        super::placement_dependency::record(|m| {
+                            m.catalogs_compiled += 1;
+                            m.catalog_placements += conditions.row_count() as u64;
+                            m.unique_clear_domains += conditions.domain_count() as u64;
+                            m.shared_clear_domains += conditions
+                                .row_count()
+                                .saturating_sub(conditions.domain_count())
+                                as u64;
                         });
+                        std::sync::Arc::new(conditions)
+                    });
             }
             catalog
         };
@@ -562,9 +562,7 @@ impl GeometryCatalog {
     }
 
     #[cfg(any(test, feature = "local-search-ab"))]
-    pub fn placement_conditions(
-        &self,
-    ) -> Option<&std::sync::Arc<super::placement_conditions::PlacementConditionCatalog>> {
+    pub fn placement_conditions(&self) -> Option<&std::sync::Arc<PlacementConditionCatalog>> {
         self.placement_conditions.as_ref()
     }
 
@@ -649,13 +647,59 @@ impl GeometryCatalog {
         )
     }
 
+    /// Exact existential domain over the deleted-original-row masks supported
+    /// by a Board64 condition catalog. Table offsets already encode the
+    /// existential result, including exclusions that the requirement domain
+    /// cannot prove. If table allocation was declined, use the same raw
+    /// projection as enumeration, without consulting the condition being built.
+    #[cfg(any(test, feature = "local-search-ab"))]
+    pub(super) fn exact_clear_domain_mask(&self, row_id: u32) -> Option<u64> {
+        self.try_skeleton(row_id)?;
+        let state_count = self.clear_state_count;
+        if state_count > u64::BITS as usize {
+            return None;
+        }
+        if let Some(offsets) = &self.instantiation_offsets {
+            let start = row_id as usize * state_count;
+            return Some(
+                offsets[start..=start + state_count]
+                    .windows(2)
+                    .enumerate()
+                    .fold(0_u64, |mask, (deleted, pair)| {
+                        mask | (u64::from(pair[0] != pair[1]) << deleted)
+                    }),
+            );
+        }
+
+        let occupied = self.skeleton_occupied_rows(row_id);
+        let mut possible = self.skeleton_requirement_domains.as_ref()?[row_id as usize];
+        let mut exact = 0_u64;
+        while possible != 0 {
+            let deleted = possible.trailing_zeros() as u16;
+            let deleted_bit = 1_u64 << deleted;
+            possible &= possible - 1;
+            if deleted & occupied == 0
+                && self
+                    .unfiltered_instantiations(row_id, deleted)
+                    .next()
+                    .is_some()
+            {
+                exact |= deleted_bit;
+            }
+        }
+        Some(exact)
+    }
+
     pub fn instantiations(
         &self,
         row_id: u32,
         deleted_rows: u16,
     ) -> InstantiatedRealizationIter<'_> {
         #[cfg(any(test, feature = "local-search-ab"))]
-        if super::placement_dependency::enabled()
+        // A precomputed slice already answers this query exactly. The
+        // condition avoids raw projections only when that slice is absent.
+        if self.instantiation_offsets.is_none()
+            && super::placement_dependency::enabled()
             && self
                 .placement_conditions
                 .as_ref()
@@ -671,6 +715,14 @@ impl GeometryCatalog {
                 raw: None,
             };
         }
+        self.unfiltered_instantiations(row_id, deleted_rows)
+    }
+
+    fn unfiltered_instantiations(
+        &self,
+        row_id: u32,
+        deleted_rows: u16,
+    ) -> InstantiatedRealizationIter<'_> {
         if let Some(precomputed) = self.instantiated_realizations(row_id, deleted_rows) {
             InstantiatedRealizationIter {
                 catalog: self,
@@ -1126,6 +1178,44 @@ fn enumerate_row_projections(
             row_filter,
             clear_rows,
             output,
+        );
+    }
+}
+
+#[cfg(test)]
+mod exact_clear_domain_tests {
+    use super::*;
+
+    #[test]
+    fn exact_clear_domains_match_raw_projection_when_table_storage_is_unavailable() {
+        let table =
+            GeometryCatalog::compile_for_required_cells_on_dimensions(4, 4, 0, 0xffff).unwrap();
+        assert!(table.has_instantiation_table());
+        let mut raw = table.clone();
+        // Model the bounded table allocation declining without changing the
+        // admitted dimensions, skeletons, projections, or weak domains.
+        raw.instantiation_offsets = None;
+        raw.instantiated_realizations = Vec::new();
+
+        for row_id in 0..table.skeleton_count() as u32 {
+            assert_eq!(
+                table.exact_clear_domain_mask(row_id),
+                raw.exact_clear_domain_mask(row_id),
+                "row={row_id}"
+            );
+            for deleted in 0..16 {
+                let mut table_values: Vec<_> = table.instantiations(row_id, deleted).collect();
+                let mut raw_values: Vec<_> = raw.instantiations(row_id, deleted).collect();
+                table_values.sort_unstable();
+                table_values.dedup();
+                raw_values.sort_unstable();
+                raw_values.dedup();
+                assert_eq!(table_values, raw_values, "row={row_id} deleted={deleted}");
+            }
+        }
+        assert_eq!(
+            table.exact_clear_domain_mask(table.skeleton_count() as u32),
+            None
         );
     }
 }

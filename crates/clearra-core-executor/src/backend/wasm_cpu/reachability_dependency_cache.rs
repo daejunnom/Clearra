@@ -460,6 +460,7 @@ impl PlacementDependencyCache {
             return;
         };
         if let Some(influencing_placements) = owner.influencing_placements(
+            catalog,
             relation.mask,
             u16::from(relation.frame.deleted_original_rows()),
         ) {

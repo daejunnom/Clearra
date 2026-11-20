@@ -26,6 +26,36 @@ impl KickOffset {
     }
 }
 
+/// Converts one ordered kick candidate from a rotation-origin displacement
+/// to the displacement of normalized standard-tetromino anchors.
+///
+/// The anchors are the lower-left coordinates of the normalized shapes; a
+/// zero kick therefore need not mean that the anchor stays in place. Apply
+/// this conversion in kick-table order: it does not select a successful kick.
+#[inline]
+pub const fn normalized_kick_delta(
+    piece: PieceKind,
+    from: RotationState,
+    to: RotationState,
+    kick_dx: i8,
+    kick_dy: i8,
+) -> (i8, i8) {
+    let (from_x, from_y) = normalized_rotation_center(piece, from);
+    let (to_x, to_y) = normalized_rotation_center(piece, to);
+    (kick_dx + from_x - to_x, kick_dy + from_y - to_y)
+}
+
+const fn normalized_rotation_center(piece: PieceKind, rotation: RotationState) -> (i8, i8) {
+    const JLSTZ: [(i8, i8); 4] = [(1, 0), (0, 1), (1, 1), (1, 1)];
+    const I: [(i8, i8); 4] = [(0, 0), (-2, 2), (0, 1), (-1, 2)];
+    let index = rotation.quarter_turns() as usize;
+    match piece {
+        PieceKind::I => I[index],
+        PieceKind::O => (0, 0),
+        PieceKind::T | PieceKind::S | PieceKind::Z | PieceKind::J | PieceKind::L => JLSTZ[index],
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct KickOffsetSequence {
     offsets: Vec<KickOffset>,

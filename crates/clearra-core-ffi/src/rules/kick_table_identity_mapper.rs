@@ -73,3 +73,39 @@ pub(crate) fn spawn_profile_code(id: &str) -> u32 {
         _ => C_SPAWN_CUSTOM,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use clearra_rules::profile::replay_encoding::{replay_kick_profile_id, replay_rule_profile_id};
+
+    use super::*;
+
+    #[test]
+    fn replay_profile_encoding_keeps_all_existing_descriptor_numbers() {
+        for id in [
+            RuleProfileId::SrsPlus,
+            RuleProfileId::Srs,
+            RuleProfileId::SrsX,
+            RuleProfileId::Asc,
+            RuleProfileId::Ars,
+            RuleProfileId::NoKick,
+            RuleProfileId::Jstris180,
+            RuleProfileId::Custom,
+        ] {
+            assert_eq!(replay_rule_profile_id(id), u64::from(rule_profile_code(id)));
+        }
+        for id in [
+            KickTableProfileId::Srs90,
+            KickTableProfileId::NoKick,
+            KickTableProfileId::SrsPlus,
+            KickTableProfileId::SrsX,
+            KickTableProfileId::Asc,
+            KickTableProfileId::Ars,
+            KickTableProfileId::Imported,
+            KickTableProfileId::Jstris180,
+            KickTableProfileId::Custom,
+        ] {
+            assert_eq!(replay_kick_profile_id(id), u64::from(kick_profile_code(id)));
+        }
+    }
+}

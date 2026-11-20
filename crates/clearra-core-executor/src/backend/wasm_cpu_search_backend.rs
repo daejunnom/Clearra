@@ -7,10 +7,14 @@ use clearra_core_domain::{
     resource::{ExecutionAvailabilityReason, ExecutionAvailabilityState, ResourceReport},
     solution::normalized_tiling_solution::StandardBoard64TilingIdentity,
 };
+#[cfg(any(test, feature = "local-search-ab"))]
+use clearra_coverage::pattern::pattern_bitset::PatternBitSet;
 use clearra_problem::{SearchOutputPolicy, SearchProblem};
 
 use crate::{resource::WasmCpuTerminalResourceAuthority, CoreExecutionError, CoreExecutionResult};
 
+#[cfg(any(test, feature = "local-search-ab"))]
+use super::wasm_cpu::SolutionCoverageCapture;
 #[cfg(feature = "webgpu-search")]
 use super::wasm_cpu::WasmWebGpuSearchSession;
 use super::wasm_cpu::{
@@ -608,6 +612,51 @@ impl WasmCpuSearchBackend {
             Option<WasmCpuSearchTerminalAuthority<'_>>,
         ) -> R,
     ) -> R {
+        Self::execute_with_terminal_and_capture(
+            problem,
+            control,
+            terminal,
+            #[cfg(any(test, feature = "local-search-ab"))]
+            None,
+        )
+    }
+
+    /// Observe exact per-candidate coverage in a single compact CPU request
+    /// without retaining the product's per-solution table. Observers can run
+    /// concurrently and out of order; duplicate identities must be OR-merged.
+    /// Any sink error invalidates the run. The caller must verify complete
+    /// result and matching identity/union evidence before sealing its output.
+    #[cfg(any(test, feature = "local-search-ab"))]
+    pub fn execute_with_solution_coverage_capture(
+        problem: &SearchProblem,
+        control: &ExecutionControl,
+        capture: impl Fn(StandardBoard64TilingIdentity, &PatternBitSet) -> Result<(), &'static str>
+            + Send
+            + Sync
+            + 'static,
+    ) -> Result<CoreExecutionResult, WasmCpuSearchError> {
+        if control.partition().count() != 1 {
+            return Err(WasmCpuSearchError::InvalidProblem {
+                reason: "solution_coverage_capture_requires_one_complete_execution",
+            });
+        }
+        Self::execute_with_terminal_and_capture(
+            problem,
+            control,
+            |result, _| result,
+            Some(Arc::new(capture)),
+        )
+    }
+
+    fn execute_with_terminal_and_capture<R>(
+        problem: &SearchProblem,
+        control: &ExecutionControl,
+        terminal: impl FnOnce(
+            Result<CoreExecutionResult, WasmCpuSearchError>,
+            Option<WasmCpuSearchTerminalAuthority<'_>>,
+        ) -> R,
+        #[cfg(any(test, feature = "local-search-ab"))] capture: Option<SolutionCoverageCapture>,
+    ) -> R {
         if control.is_cancelled() {
             return terminal(Err(WasmCpuSearchError::Cancelled), None);
         }
@@ -622,6 +671,20 @@ impl WasmCpuSearchBackend {
             Ok(session) => session,
             Err(error) => return terminal(Err(error), None),
         };
+        #[cfg(any(test, feature = "local-search-ab"))]
+        if let Some(capture) = capture {
+            let WasmSearchSessionInner::Cpu(cpu) = &mut session.inner else {
+                return terminal(
+                    Err(WasmCpuSearchError::Unsupported {
+                        reason: "solution_coverage_capture_requires_compact_cpu",
+                    }),
+                    None,
+                );
+            };
+            if let Err(error) = cpu.install_solution_coverage_capture(capture) {
+                return terminal(Err(map_error(error)), None);
+            }
+        }
         #[cfg(feature = "parallel")]
         if worker_count > 1 {
             match session.execute_parallel_if_worthwhile(worker_count, control) {

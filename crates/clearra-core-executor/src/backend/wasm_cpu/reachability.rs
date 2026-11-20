@@ -1,7 +1,9 @@
 use clearra_core_domain::piece::{piece_kind::PieceKind, rotation::RotationState};
 use clearra_piece_registry::standard::tetromino_registry::standard_tetromino_registry;
 use clearra_replay::{RotationRequest, ScoringLockEvidence};
-use clearra_rules::kicks::{KickTableProfile, KickTableProfileId, KickTransition};
+use clearra_rules::kicks::{
+    normalized_kick_delta, KickTableProfile, KickTableProfileId, KickTransition,
+};
 use std::sync::{Arc, OnceLock};
 
 use crate::conditioned_local_product::LocalRelationProductLookup;
@@ -734,6 +736,48 @@ impl ReachabilityWorkspace {
             frame?,
         )?;
         Some((attempt.proven, usize::from(attempt.row_steps)))
+    }
+
+    /// Prove that this exact ILC pose has no entry on any board containing the
+    /// minimum occupancy in the same original-row frame. A miss is Unknown.
+    /// Only canonical sky entry is covered; callers requiring a full operation
+    /// must prove every concrete realization independently.
+    #[cfg(any(test, feature = "local-search-ab"))]
+    pub(super) fn try_prove_lock_pose_unreachable_at_minimum(
+        &mut self,
+        catalog: &GeometryCatalog,
+        minimum_board: u64,
+        piece: PieceKind,
+        profile: KickTableProfileId,
+        realization: InstantiatedRealization,
+        frame: Option<LocalRelationRowFrame>,
+    ) -> bool {
+        // Use the workspace's existing exact template, without reconfiguring
+        // its profile or lazily compiling a second transition graph.
+        if self.kick_profile_id != profile || builtin_kick_profile(profile).is_none() {
+            return false;
+        }
+        let Some(frame) = frame.filter(|frame| frame.target_height() == catalog.height()) else {
+            return false;
+        };
+        if !frame.accepts_physical_board(catalog.width(), minimum_board | realization.lock_mask)
+            || realization.lock_mask.count_ones() != 4
+        {
+            return false;
+        }
+        let template = self.template(catalog, piece);
+        let state = State {
+            rotation: realization.rotation,
+            x: realization.x,
+            y: realization.lock_y,
+        };
+        let Some(target) = state_index(template.width, template.ceiling, state) else {
+            return false;
+        };
+        if template.state_masks[target] != realization.lock_mask {
+            return false;
+        }
+        independence::bounded_no_entry_on_minimum_board(template, minimum_board, target)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2600,29 +2644,6 @@ fn source_ceiling(height: u8, piece: PieceKind, allow_180: bool, profile: &KickT
         .max()
         .unwrap_or(0);
     height.saturating_add(maximum_downward as u8) as i8
-}
-
-fn normalized_kick_delta(
-    piece: PieceKind,
-    from: RotationState,
-    to: RotationState,
-    kick_dx: i8,
-    kick_dy: i8,
-) -> (i8, i8) {
-    let (from_x, from_y) = normalized_rotation_center(piece, from);
-    let (to_x, to_y) = normalized_rotation_center(piece, to);
-    (kick_dx + from_x - to_x, kick_dy + from_y - to_y)
-}
-
-fn normalized_rotation_center(piece: PieceKind, rotation: RotationState) -> (i8, i8) {
-    const JLSTZ: [(i8, i8); 4] = [(1, 0), (0, 1), (1, 1), (1, 1)];
-    const I: [(i8, i8); 4] = [(0, 0), (-2, 2), (0, 1), (-1, 2)];
-    let index = rotation.quarter_turns() as usize;
-    match piece_index(piece) {
-        0 => I[index],
-        1 => (0, 0),
-        _ => JLSTZ[index],
-    }
 }
 
 #[cfg(test)]

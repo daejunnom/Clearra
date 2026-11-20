@@ -94,11 +94,16 @@ pub struct RunOutcome {
     pub return_code: i32,
     pub reason: String,
     pub error_code: Option<String>,
+    pub child_termination: ChildTermination,
+    pub supervisor_termination_reason: Option<String>,
     pub duration_ms: u128,
     pub timeout_seconds: u64,
     pub output_bytes: u64,
     pub output_limit_bytes: u64,
     pub peak_memory_bytes: Option<u64>,
+    pub kernel_memory_peak: Option<MemoryPeak>,
+    pub sampled_memory_peak: Option<MemoryPeak>,
+    pub inherited_linux_cgroup_memory: Option<InheritedLinuxCgroupMemory>,
     pub last_owned_memory_bytes: Option<u64>,
     pub owned_memory_soft_limit_bytes: u64,
     pub descendant_processes_at_exit: Option<u32>,
@@ -117,6 +122,89 @@ pub struct RunOutcome {
     pub last_memory_pressure_status: Option<MemoryPressureStatus>,
     pub automatic_retry: bool,
     pub receipt: PathBuf,
+}
+
+/// What the operating system reported for the direct child, independently of
+/// any action taken by the supervisor on the owned process tree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum ChildTermination {
+    Exit {
+        code: i32,
+    },
+    #[cfg(unix)]
+    UnixSignal {
+        signal: i32,
+        core_dumped: bool,
+    },
+    Unavailable,
+}
+
+impl ChildTermination {
+    fn from_status(status: ExitStatus) -> Self {
+        if let Some(code) = status.code() {
+            return Self::Exit { code };
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::ExitStatusExt;
+            if let Some(signal) = status.signal() {
+                return Self::UnixSignal {
+                    signal,
+                    core_dumped: status.core_dumped(),
+                };
+            }
+        }
+        Self::Unavailable
+    }
+
+    fn reporting_status(
+        self,
+        supervisor: Option<(&'static str, &'static str)>,
+    ) -> (i32, &'static str, Option<&'static str>) {
+        let (return_code, reason) = match self {
+            Self::Exit { code: 0 } => (0, "normal"),
+            Self::Exit { code } => (code, "nonzero"),
+            #[cfg(unix)]
+            Self::UnixSignal { signal, .. } => (128 + signal, "signal"),
+            Self::Unavailable => (125, "unknown-termination"),
+        };
+        match supervisor {
+            Some((reason, code)) => (
+                if return_code == 0 { 125 } else { return_code },
+                reason,
+                Some(code),
+            ),
+            None => (return_code, reason, None),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct MemoryPeak {
+    bytes: u64,
+    source: MemoryPeakSource,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "kebab-case")]
+enum MemoryPeakSource {
+    #[cfg(windows)]
+    WindowsJobObject,
+    #[cfg(windows)]
+    WindowsSampledTreePrivateUsage,
+    #[cfg(target_os = "linux")]
+    LinuxSampledProcessGroupRss,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct InheritedLinuxCgroupMemory {
+    /// Smallest finite memory.max observed on the supervisor cgroup's path.
+    /// This is not an exclusive process-tree budget.
+    observed_minimum_finite_limit_bytes: Option<u64>,
+    /// Change in the hierarchical oom_kill counter of the inherited cgroup.
+    /// A change cannot identify the killed process or its cause individually.
+    hierarchical_oom_kill_delta: Option<u64>,
 }
 
 pub fn audit(repository: &Path, policy: &Policy) -> Result<serde_json::Value> {
@@ -442,8 +530,13 @@ pub fn run(repository: &Path, policy: &Policy, options: RunOptions) -> Result<Ru
     for (key, value) in &options.extra_env {
         command.env(key, value);
     }
+    // The child can bind its evidence to this receipt; caller environment
+    // overrides cannot change the run identity selected by the supervisor.
+    command.env("CLEARRA_RUNTIME_RUN_ID", &run_id);
     platform_prepare_command(&mut command);
 
+    #[cfg(target_os = "linux")]
+    let cgroup_memory_start = LinuxCgroupMemoryStart::observe();
     let started = Instant::now();
     let mut child = command
         .spawn()
@@ -688,9 +781,13 @@ pub fn run(repository: &Path, policy: &Policy, options: RunOptions) -> Result<Ru
     let stderr = stderr_thread
         .join()
         .map_err(|_| Error::runtime("stderr collector panicked"))?;
-    let peak = containment
-        .peak_memory_bytes()
-        .or((observed_peak > 0).then_some(observed_peak));
+    let kernel_memory_peak = containment.kernel_memory_peak();
+    let sampled_memory_peak = sampled_memory_peak(observed_peak);
+    // Keep the existing convenience field, but retain the two provenances
+    // separately. An inherited cgroup high-water mark is not the tree peak.
+    let peak = kernel_memory_peak
+        .or(sampled_memory_peak)
+        .map(|measurement| measurement.bytes);
     let active = containment.active_processes();
     let mut tree_stopped = active.unwrap_or(0) == 0;
     if !tree_stopped {
@@ -701,23 +798,15 @@ pub fn run(repository: &Path, policy: &Policy, options: RunOptions) -> Result<Ru
             forced_reason = Some(("tree-not-stopped", "E_CLEARRA_PROCESS_TREE_NOT_STOPPED"));
         }
     }
-    let mut return_code = status.code().unwrap_or(125);
-    let (reason, error_code) = if let Some((reason, code)) = forced_reason {
-        if return_code == 0 {
-            return_code = 125;
-        }
-        (reason.to_owned(), Some(code.to_owned()))
-    } else if return_code == 0 {
-        ("normal".to_owned(), None)
-    } else if peak.is_some_and(|value| value >= admission.hard_limit_bytes.saturating_mul(98) / 100)
-    {
-        (
-            "memory-limit".to_owned(),
-            Some("E_CLEARRA_PROCESS_MEMORY_LIMIT".to_owned()),
-        )
-    } else {
-        ("nonzero".to_owned(), None)
-    };
+    // Neither a near-limit peak nor a SIGKILL proves an OOM. Only an explicit
+    // supervisor decision owns our memory-limit and pressure failure reasons.
+    let child_termination = ChildTermination::from_status(status);
+    let (return_code, reason, error_code) = child_termination.reporting_status(forced_reason);
+    #[cfg(target_os = "linux")]
+    let inherited_linux_cgroup_memory =
+        cgroup_memory_start.and_then(LinuxCgroupMemoryStart::finish);
+    #[cfg(not(target_os = "linux"))]
+    let inherited_linux_cgroup_memory = None;
 
     let receipts = receipt_root()?;
     fs::create_dir_all(&receipts).map_err(|error| Error::io("create receipt root", error))?;
@@ -729,13 +818,18 @@ pub fn run(repository: &Path, policy: &Policy, options: RunOptions) -> Result<Ru
         profile: options.profile,
         command: command_strings,
         return_code,
-        reason,
-        error_code,
+        reason: reason.to_owned(),
+        error_code: error_code.map(str::to_owned),
+        child_termination,
+        supervisor_termination_reason: forced_reason.map(|(reason, _)| reason.to_owned()),
         duration_ms: started.elapsed().as_millis(),
         timeout_seconds: timeout,
         output_bytes: total_output.load(Ordering::Relaxed),
         output_limit_bytes: profile.output_limit_bytes,
         peak_memory_bytes: peak,
+        kernel_memory_peak,
+        sampled_memory_peak,
+        inherited_linux_cgroup_memory,
         last_owned_memory_bytes,
         owned_memory_soft_limit_bytes,
         descendant_processes_at_exit: active,
@@ -969,9 +1063,7 @@ fn platform_hard_containment_available() -> Result<bool> {
 fn platform_hard_containment_available() -> Result<bool> {
     let membership = fs::read_to_string("/proc/self/cgroup")
         .map_err(|error| Error::io("read Linux cgroup membership", error))?;
-    let relative = membership
-        .lines()
-        .find_map(|line| line.strip_prefix("0::"))
+    let relative = linux_cgroup_v2_member(&membership)
         .ok_or_else(|| Error::runtime("cgroup v2 membership is unavailable"))?;
     let root = Path::new("/sys/fs/cgroup");
     let directory = root.join(relative.trim_start_matches('/'));
@@ -979,6 +1071,92 @@ fn platform_hard_containment_available() -> Result<bool> {
         inherited_finite_cgroup_limit(&directory, root, "memory.max")
             && inherited_finite_cgroup_limit(&directory, root, "pids.max"),
     )
+}
+
+#[cfg(target_os = "linux")]
+fn linux_cgroup_v2_member(membership: &str) -> Option<&str> {
+    membership.lines().find_map(|line| line.strip_prefix("0::"))
+}
+
+#[cfg(target_os = "linux")]
+struct LinuxCgroupMemoryStart {
+    directory: PathBuf,
+    observed_minimum_finite_limit_bytes: Option<u64>,
+    hierarchical_oom_kills: Option<u64>,
+}
+
+#[cfg(target_os = "linux")]
+impl LinuxCgroupMemoryStart {
+    fn observe() -> Option<Self> {
+        let directory = Self::directory()?;
+        let root = Path::new("/sys/fs/cgroup");
+        let observed_minimum_finite_limit_bytes = directory
+            .ancestors()
+            .take_while(|ancestor| ancestor.starts_with(root))
+            .filter_map(|ancestor| {
+                fs::read_to_string(ancestor.join("memory.max"))
+                    .ok()
+                    .and_then(|value| value.trim().parse::<u64>().ok())
+            })
+            .min();
+        let hierarchical_oom_kills = Self::oom_kills(&directory);
+        Some(Self {
+            directory,
+            observed_minimum_finite_limit_bytes,
+            hierarchical_oom_kills,
+        })
+    }
+
+    fn finish(self) -> Option<InheritedLinuxCgroupMemory> {
+        if Self::directory()?.as_path() != self.directory.as_path() {
+            return None;
+        }
+        let hierarchical_oom_kill_delta = memory_counter_delta(
+            self.hierarchical_oom_kills,
+            Self::oom_kills(&self.directory),
+        );
+        Some(InheritedLinuxCgroupMemory {
+            observed_minimum_finite_limit_bytes: self.observed_minimum_finite_limit_bytes,
+            hierarchical_oom_kill_delta,
+        })
+    }
+
+    fn directory() -> Option<PathBuf> {
+        let membership = fs::read_to_string("/proc/self/cgroup").ok()?;
+        let relative = Path::new(linux_cgroup_v2_member(&membership)?.strip_prefix('/')?);
+        if relative
+            .components()
+            .any(|part| !matches!(part, std::path::Component::Normal(_)))
+        {
+            return None;
+        }
+        Some(Path::new("/sys/fs/cgroup").join(relative))
+    }
+
+    fn oom_kills(directory: &Path) -> Option<u64> {
+        let content = fs::read_to_string(directory.join("memory.events")).ok()?;
+        cgroup_event_value(&content, "oom_kill")
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn memory_counter_delta(start: Option<u64>, end: Option<u64>) -> Option<u64> {
+    end?.checked_sub(start?)
+}
+
+#[cfg(target_os = "linux")]
+fn cgroup_event_value(content: &str, key: &str) -> Option<u64> {
+    let mut value = None;
+    for line in content.lines() {
+        let mut tokens = line.split_whitespace();
+        if tokens.next() == Some(key) {
+            let parsed = tokens.next()?.parse().ok()?;
+            if tokens.next().is_some() || value.replace(parsed).is_some() {
+                return None;
+            }
+        }
+    }
+    value
 }
 
 #[cfg(not(any(windows, target_os = "linux")))]
@@ -1070,6 +1248,20 @@ fn platform_prepare_command(command: &mut Command) {
 #[cfg(not(any(windows, unix)))]
 fn platform_prepare_command(_: &mut Command) {}
 
+#[cfg(any(windows, target_os = "linux"))]
+fn sampled_memory_peak(bytes: u64) -> Option<MemoryPeak> {
+    #[cfg(windows)]
+    let source = MemoryPeakSource::WindowsSampledTreePrivateUsage;
+    #[cfg(target_os = "linux")]
+    let source = MemoryPeakSource::LinuxSampledProcessGroupRss;
+    (bytes > 0).then_some(MemoryPeak { bytes, source })
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
+fn sampled_memory_peak(_: u64) -> Option<MemoryPeak> {
+    None
+}
+
 #[cfg(windows)]
 struct Containment {
     job: windows_sys::Win32::Foundation::HANDLE,
@@ -1128,7 +1320,7 @@ impl Containment {
         unsafe { windows_sys::Win32::System::JobObjects::TerminateJobObject(self.job, 125) };
     }
 
-    fn peak_memory_bytes(&self) -> Option<u64> {
+    fn kernel_memory_peak(&self) -> Option<MemoryPeak> {
         use std::mem::{size_of, zeroed};
         use windows_sys::Win32::System::JobObjects::{
             JobObjectExtendedLimitInformation, QueryInformationJobObject,
@@ -1144,7 +1336,10 @@ impl Containment {
                 std::ptr::null_mut(),
             )
         };
-        (ok != 0).then_some(value.PeakJobMemoryUsed as u64)
+        (ok != 0).then_some(MemoryPeak {
+            bytes: value.PeakJobMemoryUsed as u64,
+            source: MemoryPeakSource::WindowsJobObject,
+        })
     }
 
     fn current_memory_bytes(&self) -> Option<u64> {
@@ -1248,16 +1443,14 @@ impl Drop for Containment {
 #[cfg(unix)]
 struct Containment {
     process_group: i32,
-    hard_limit: u64,
     maximum_processes: u32,
 }
 
 #[cfg(unix)]
 impl Containment {
-    fn attach(child: &Child, hard_limit: u64, maximum_processes: u32) -> Result<Self> {
+    fn attach(child: &Child, _: u64, maximum_processes: u32) -> Result<Self> {
         Ok(Self {
             process_group: child.id() as i32,
-            hard_limit,
             maximum_processes,
         })
     }
@@ -1270,8 +1463,8 @@ impl Containment {
         unsafe { libc::kill(-self.process_group, libc::SIGKILL) };
     }
 
-    fn peak_memory_bytes(&self) -> Option<u64> {
-        let _ = self.hard_limit;
+    fn kernel_memory_peak(&self) -> Option<MemoryPeak> {
+        // The inherited cgroup also counts processes not owned by this lease.
         None
     }
 
@@ -1297,7 +1490,7 @@ impl Containment {
         let _ = child.kill();
     }
     fn force_terminate(&self) {}
-    fn peak_memory_bytes(&self) -> Option<u64> {
+    fn kernel_memory_peak(&self) -> Option<MemoryPeak> {
         None
     }
     fn current_memory_bytes(&self) -> Option<u64> {
@@ -1422,6 +1615,102 @@ mod tests {
             commit_limit_bytes: 32 * 1024 * MIB,
             commit_available_bytes: commit_available_mib * MIB,
         }
+    }
+
+    #[test]
+    fn managed_termination_is_distinct_from_the_child_result() {
+        let normal = ChildTermination::Exit { code: 0 };
+        assert_eq!(normal.reporting_status(None), (0, "normal", None));
+        assert_eq!(
+            normal.reporting_status(Some(("timeout", "E_CLEARRA_PROCESS_TIMEOUT"))),
+            (125, "timeout", Some("E_CLEARRA_PROCESS_TIMEOUT"))
+        );
+        let nonzero = ChildTermination::Exit { code: 11 };
+        assert_eq!(nonzero.reporting_status(None), (11, "nonzero", None));
+        assert_eq!(
+            nonzero.reporting_status(Some(("memory-limit", "E_CLEARRA_PROCESS_MEMORY_LIMIT"))),
+            (11, "memory-limit", Some("E_CLEARRA_PROCESS_MEMORY_LIMIT"))
+        );
+        assert_eq!(
+            ChildTermination::Unavailable.reporting_status(None),
+            (125, "unknown-termination", None)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_wait_status_distinguishes_signal_from_an_identical_numeric_exit() {
+        use std::os::unix::process::ExitStatusExt;
+
+        let portable = 128 + libc::SIGKILL;
+        let exit = ChildTermination::from_status(ExitStatus::from_raw(portable << 8));
+        assert_eq!(exit.reporting_status(None), (portable, "nonzero", None));
+        assert_eq!(
+            serde_json::to_value(exit).unwrap(),
+            json!({"kind": "exit", "code": portable})
+        );
+
+        let signal = ChildTermination::from_status(ExitStatus::from_raw(libc::SIGKILL));
+        assert_eq!(signal.reporting_status(None), (portable, "signal", None));
+        assert_eq!(
+            serde_json::to_value(signal).unwrap(),
+            json!({"kind": "unix-signal", "signal": libc::SIGKILL, "core_dumped": false})
+        );
+        assert_eq!(
+            signal.reporting_status(Some(("timeout", "E_CLEARRA_PROCESS_TIMEOUT"))),
+            (portable, "timeout", Some("E_CLEARRA_PROCESS_TIMEOUT"))
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_exception_exit_code_remains_unmodified() {
+        use std::os::windows::process::ExitStatusExt;
+
+        let code = 0xc000_0005_u32;
+        let termination = ChildTermination::from_status(ExitStatus::from_raw(code));
+        assert_eq!(
+            termination.reporting_status(None),
+            (code as i32, "nonzero", None)
+        );
+    }
+
+    #[cfg(any(windows, target_os = "linux"))]
+    #[test]
+    fn sampled_memory_peak_is_not_a_kernel_peak() {
+        #[cfg(target_os = "linux")]
+        let source = "linux-sampled-process-group-rss";
+        #[cfg(windows)]
+        let source = "windows-sampled-tree-private-usage";
+        assert!(sampled_memory_peak(0).is_none());
+        assert_eq!(
+            serde_json::to_value(sampled_memory_peak(4096)).unwrap(),
+            json!({"bytes": 4096, "source": source})
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn inherited_cgroup_counter_preserves_unavailable_and_observed_zero() {
+        assert_eq!(
+            linux_cgroup_v2_member("6:cpu:/legacy\n0::/scope\n"),
+            Some("/scope")
+        );
+        assert_eq!(linux_cgroup_v2_member("6:cpu:/legacy\n"), None);
+        assert_eq!(
+            cgroup_event_value("max 1\noom 1\noom_kill 0\n", "oom_kill"),
+            Some(0)
+        );
+        assert_eq!(cgroup_event_value("oom 3\n", "oom_kill"), None);
+        assert_eq!(
+            cgroup_event_value("oom_kill 2\noom_kill 3\n", "oom_kill"),
+            None
+        );
+        assert_eq!(cgroup_event_value("oom_kill invalid\n", "oom_kill"), None);
+        assert_eq!(memory_counter_delta(Some(7), Some(7)), Some(0));
+        assert_eq!(memory_counter_delta(Some(7), Some(9)), Some(2));
+        assert_eq!(memory_counter_delta(Some(7), Some(6)), None);
+        assert_eq!(memory_counter_delta(None, Some(6)), None);
     }
 
     #[test]

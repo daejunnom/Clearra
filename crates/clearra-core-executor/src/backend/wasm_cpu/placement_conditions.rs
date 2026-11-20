@@ -1,17 +1,15 @@
 // SRP rationale: compile target-frame placement and row-clear conditions once,
 // before tiling, and specialize those conditions without a placement-subset graph.
-use clearra_core_domain::piece::piece_kind::PieceKind;
-
 use super::catalog::GeometryCatalog;
+use crate::row_frame::CompactedRowFrame;
 
-const MAX_CONDITION_HEIGHT: u8 = 6;
+pub(super) const MAX_CONDITION_HEIGHT: u8 = 6;
 // This is a bounded prototype. The board64, six-row tetromino catalogs are much
 // smaller, but a future catalog extension must explicitly revisit this bound.
 const MAX_CONDITION_ROWS: usize = 128 * 1024;
 
 #[derive(Clone, Copy, Debug)]
 struct CanonicalPlacement {
-    piece: PieceKind,
     cells: u64,
     occupied_rows: u16,
     domain_id: u32,
@@ -32,30 +30,25 @@ pub(super) struct PlacementConditionCatalog {
     width: u8,
     height: u8,
     initial_board: u64,
-    required_cells: u64,
     placements: Vec<CanonicalPlacement>,
     clear_domains: Vec<u64>,
-    cell_support_offsets: Vec<u32>,
-    cell_support_rows: Vec<u32>,
 }
 
 impl PlacementConditionCatalog {
     /// Conservative additional compile peak for a row-count upper bound,
-    /// including temporary exact-domain sorting and retained incidence storage.
+    /// including temporary exact-domain sorting.
     /// A coarse caller bound can exceed the admission cap while the actual
     /// catalog fits. Clamp to that cap rather than treating such a bound as an
     /// unsupported, zero-cost compile. `compile` still rejects actual excess.
-    /// Dimension support is checked separately; offsets cover every board64.
+    /// Dimension support is checked separately.
     pub(super) fn checked_compile_peak_upper_bound(row_count: usize) -> Option<u128> {
         let row_count = row_count.min(MAX_CONDITION_ROWS);
         let per_row = core::mem::size_of::<CanonicalPlacement>()
             + core::mem::size_of::<(u64, u32)>()
-            + core::mem::size_of::<u64>()
-            + 4 * core::mem::size_of::<u32>();
+            + core::mem::size_of::<u64>();
         (row_count as u128)
             .checked_mul(per_row as u128)?
-            .checked_add(((u64::BITS as usize + 1) * core::mem::size_of::<u32>()) as u128)?
-            .checked_add(core::mem::size_of::<Self>() as u128)
+            .checked_add((core::mem::size_of::<Self>() + 2 * core::mem::size_of::<usize>()) as u128)
     }
 
     /// Unsupported dimensions or an unavailable bounded allocation leave the
@@ -84,22 +77,15 @@ impl PlacementConditionCatalog {
         let mut domains_by_row = Vec::new();
         placements.try_reserve_exact(row_count).ok()?;
         domains_by_row.try_reserve_exact(row_count).ok()?;
-        let clear_state_count = 1_u16 << height;
         for index in 0..row_count {
             let row_id = u32::try_from(index).ok()?;
             let row = catalog.try_skeleton(row_id)?;
             if row.cells.count_ones() != 4 || row.cells & !catalog.required_cells() != 0 {
                 return None;
             }
-            let mut domain = 0_u64;
-            for deleted in 0..clear_state_count {
-                if catalog.instantiations(row_id, deleted).next().is_some() {
-                    domain |= 1_u64 << deleted;
-                }
-            }
+            let domain = catalog.exact_clear_domain_mask(row_id)?;
             domains_by_row.push((domain, row_id));
             placements.push(CanonicalPlacement {
-                piece: row.piece,
                 cells: row.cells,
                 occupied_rows: catalog.skeleton_occupied_rows(row_id),
                 domain_id: 0,
@@ -124,53 +110,28 @@ impl PlacementConditionCatalog {
                 u32::try_from(clear_domains.len().checked_sub(1)?).ok()?;
         }
 
-        // Preserve the catalog's cell-to-placement incidence. Movement proofs
-        // can query a local physical footprint without scanning every row.
-        let mut cell_support_offsets = Vec::new();
-        let mut cell_support_rows = Vec::new();
-        cell_support_offsets
-            .try_reserve_exact(cell_count.checked_add(1)?)
-            .ok()?;
-        let mut support_count = 0_usize;
-        for cell in 0..cell_count {
-            support_count = support_count.checked_add(catalog.support(cell as u8).len())?;
-        }
-        if support_count != row_count.checked_mul(4)? {
-            return None;
-        }
-        cell_support_rows.try_reserve_exact(support_count).ok()?;
-        cell_support_offsets.push(0);
-        for cell in 0..cell_count {
-            cell_support_rows.extend_from_slice(catalog.support(cell as u8));
-            cell_support_offsets.push(u32::try_from(cell_support_rows.len()).ok()?);
-        }
-
         Some(Self {
             width,
             height,
             initial_board: catalog.initial_board(),
-            required_cells: catalog.required_cells(),
             placements,
             clear_domains,
-            cell_support_offsets,
-            cell_support_rows,
         })
     }
 
+    #[cfg(test)]
     pub(super) const fn width(&self) -> u8 {
         self.width
     }
 
+    #[cfg(test)]
     pub(super) const fn height(&self) -> u8 {
         self.height
     }
 
+    #[cfg(test)]
     pub(super) const fn initial_board(&self) -> u64 {
         self.initial_board
-    }
-
-    pub(super) const fn required_cells(&self) -> u64 {
-        self.required_cells
     }
 
     pub(super) fn row_count(&self) -> usize {
@@ -179,26 +140,6 @@ impl PlacementConditionCatalog {
 
     pub(super) fn domain_count(&self) -> usize {
         self.clear_domains.len()
-    }
-
-    pub(super) fn row_identity(&self, row_id: u32) -> Option<(PieceKind, u64)> {
-        let row = self.placements.get(row_id as usize)?;
-        Some((row.piece, row.cells))
-    }
-
-    /// Full identity confirmation at the single catalog attachment boundary.
-    /// Later queries use the pinned Arc owner rather than hashing these keys.
-    pub(super) fn matches_catalog(&self, catalog: &GeometryCatalog) -> bool {
-        self.width() == catalog.width()
-            && self.height() == catalog.height()
-            && self.initial_board() == catalog.initial_board()
-            && self.required_cells() == catalog.required_cells()
-            && self.row_count() == catalog.skeleton_count()
-            && (0..self.row_count()).all(|index| {
-                let row_id = index as u32;
-                let row = catalog.skeleton(row_id);
-                self.row_identity(row_id) == Some((row.piece, row.cells))
-            })
     }
 
     pub(super) fn exact_clear_domain(&self, row_id: u32) -> Option<u64> {
@@ -224,42 +165,49 @@ impl PlacementConditionCatalog {
     /// placement was selected or executed in a particular candidate.
     pub(super) fn influencing_placements(
         &self,
+        catalog: &GeometryCatalog,
         physical_mask: u64,
         deleted_rows: u16,
     ) -> Option<Vec<u32>> {
-        let all_cells = low_bits(u32::from(self.width) * u32::from(self.height));
-        if physical_mask & !all_cells != 0 || deleted_rows >= 1_u16 << self.height {
+        // Only the caller's pinned catalog can resolve the canonical IDs.
+        // Matching dimensions, counts or digests do not establish ownership.
+        if !catalog
+            .placement_conditions()
+            .is_some_and(|owner| core::ptr::eq(owner.as_ref(), self))
+        {
             return None;
         }
-        let row_bits = low_bits(u32::from(self.width));
-        let mut source_mask = 0_u64;
-        let mut physical_y = 0_u32;
-        for original_y in 0..u32::from(self.height) {
-            if deleted_rows & (1_u16 << original_y) != 0 {
-                continue;
+        let all_cells = low_bits(u32::from(self.width) * u32::from(self.height));
+        if physical_mask & !all_cells != 0 {
+            return None;
+        }
+        let frame = CompactedRowFrame::new(self.height, deleted_rows)?;
+        let mut source_mask = physical_mask;
+        if deleted_rows != 0 {
+            source_mask = 0;
+            let width = u32::from(self.width);
+            let row_bits = low_bits(width);
+            for original_y in 0..self.height {
+                if let Some(physical_y) = frame.physical_row_for_original(original_y) {
+                    let cells = (physical_mask >> (u32::from(physical_y) * width)) & row_bits;
+                    source_mask |= cells << (u32::from(original_y) * width);
+                }
             }
-            let cells = (physical_mask >> (physical_y * u32::from(self.width))) & row_bits;
-            source_mask |= cells << (original_y * u32::from(self.width));
-            physical_y += 1;
         }
 
         let mut support_count = 0_usize;
         let mut cells = source_mask;
         while cells != 0 {
-            let cell = cells.trailing_zeros() as usize;
+            let cell = cells.trailing_zeros() as u8;
             cells &= cells - 1;
-            support_count = support_count.checked_add(
-                (self.cell_support_offsets[cell + 1] - self.cell_support_offsets[cell]) as usize,
-            )?;
+            support_count = support_count.checked_add(catalog.support(cell).len())?;
         }
         let mut rows = Vec::new();
         rows.try_reserve_exact(support_count).ok()?;
         while source_mask != 0 {
-            let cell = source_mask.trailing_zeros() as usize;
+            let cell = source_mask.trailing_zeros() as u8;
             source_mask &= source_mask - 1;
-            let start = self.cell_support_offsets[cell] as usize;
-            let end = self.cell_support_offsets[cell + 1] as usize;
-            rows.extend_from_slice(&self.cell_support_rows[start..end]);
+            rows.extend_from_slice(catalog.support(cell));
         }
         rows.sort_unstable();
         rows.dedup();
@@ -339,8 +287,6 @@ impl PlacementConditionCatalog {
     pub(super) fn retained_bytes(&self) -> usize {
         self.placements.capacity() * core::mem::size_of::<CanonicalPlacement>()
             + self.clear_domains.capacity() * core::mem::size_of::<u64>()
-            + self.cell_support_offsets.capacity() * core::mem::size_of::<u32>()
-            + self.cell_support_rows.capacity() * core::mem::size_of::<u32>()
     }
 }
 
@@ -423,11 +369,16 @@ fn low_bits(count: u32) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clearra_core_domain::piece::piece_kind::PieceKind;
 
     fn catalog(width: u8, height: u8) -> GeometryCatalog {
         let required = low_bits(u32::from(width) * u32::from(height));
         GeometryCatalog::compile_for_required_cells_on_dimensions(width, height, 0, required)
             .unwrap()
+    }
+
+    fn attached_catalog(width: u8, height: u8) -> GeometryCatalog {
+        super::super::placement_dependency::with_mode(true, || catalog(width, height)).0
     }
 
     fn o_id(catalog: &GeometryCatalog, lower_row: u8, upper_row: u8, x: u8) -> u32 {
@@ -449,10 +400,7 @@ mod tests {
         let right = o_id(&catalog, 0, 2, 2);
         let lower = o_id(&catalog, 0, 1, 0);
         assert_ne!(left, right);
-        assert_ne!(
-            conditions.row_identity(left),
-            conditions.row_identity(right)
-        );
+        assert_ne!(catalog.skeleton(left).cells, catalog.skeleton(right).cells);
         assert_eq!(
             conditions.exact_clear_domain(left),
             Some((1_u64 << 0b0010) | (1_u64 << 0b1010))
@@ -469,6 +417,7 @@ mod tests {
         assert_eq!(conditions.supports_deleted_rows(left, 0b1010), Some(true));
         assert_eq!(conditions.supports_deleted_rows(left, 0b0000), Some(false));
         // The minimum ILC gap is present, but an occupied target row is gone.
+        assert!(catalog.realization_requirement_is_satisfied(left, 0b0110));
         assert_eq!(conditions.supports_deleted_rows(left, 0b0110), Some(false));
         assert!(conditions.domain_count() < conditions.row_count());
     }
@@ -479,14 +428,21 @@ mod tests {
         let conditions = PlacementConditionCatalog::compile(&catalog).unwrap();
         for row_id in 0..catalog.skeleton_count() as u32 {
             let row = catalog.skeleton(row_id);
-            assert_eq!(
-                conditions.row_identity(row_id),
-                Some((row.piece, row.cells))
-            );
             for deleted in 0..16 {
+                // Bypass both the compact table and the optional domain cache
+                // so a missing table interval cannot validate itself.
+                let directly_projected = catalog.realizations(row_id).iter().any(|&realization| {
+                    catalog
+                        .instantiate_realization(row.cells, realization, deleted)
+                        .is_some()
+                });
+                assert_eq!(
+                    catalog.instantiations(row_id, deleted).next().is_some(),
+                    directly_projected
+                );
                 assert_eq!(
                     conditions.supports_deleted_rows(row_id, deleted),
-                    Some(catalog.instantiations(row_id, deleted).next().is_some()),
+                    Some(directly_projected),
                     "row={row_id} deleted={deleted}"
                 );
             }
@@ -495,36 +451,40 @@ mod tests {
 
     #[test]
     fn executed_survivors_influence_even_when_pending_instantiation_is_impossible() {
-        let catalog = catalog(4, 4);
-        let conditions = PlacementConditionCatalog::compile(&catalog).unwrap();
+        let catalog = attached_catalog(4, 4);
+        let conditions = catalog.placement_conditions().unwrap();
         let split = o_id(&catalog, 0, 2, 0);
         assert_eq!(conditions.supports_deleted_rows(split, 0b0001), Some(false));
         // Deleting original row 0 leaves the piece's original row 2 at physical 1.
-        let influences = conditions.influencing_placements(3 << 4, 0b0001).unwrap();
+        let influences = conditions
+            .influencing_placements(&catalog, 3 << 4, 0b0001)
+            .unwrap();
         assert!(influences.contains(&split));
         assert!(!conditions
-            .influencing_placements(3, 0b0001)
+            .influencing_placements(&catalog, 3, 0b0001)
             .unwrap()
             .contains(&split));
         assert!(!conditions
-            .influencing_placements(0xffff, 0b0101)
+            .influencing_placements(&catalog, 0xffff, 0b0101)
             .unwrap()
             .contains(&split));
         assert!(conditions
-            .influencing_placements(0xf000, 0b0001)
+            .influencing_placements(&catalog, 0xf000, 0b0001)
             .unwrap()
             .is_empty());
     }
 
     #[test]
     fn influence_incidence_matches_surviving_cell_projection_for_every_row_frame() {
-        let catalog = catalog(4, 4);
-        let conditions = PlacementConditionCatalog::compile(&catalog).unwrap();
+        let catalog = attached_catalog(4, 4);
+        let conditions = catalog.placement_conditions().unwrap();
         // Each physical cell independently witnesses the exact incidence set.
         for deleted in 0..16 {
             for cell in 0..16 {
                 let mask = 1_u64 << cell;
-                let actual = conditions.influencing_placements(mask, deleted).unwrap();
+                let actual = conditions
+                    .influencing_placements(&catalog, mask, deleted)
+                    .unwrap();
                 let expected: Vec<u32> = (0..catalog.skeleton_count() as u32)
                     .filter(|&row_id| {
                         super::super::buildup::compact_target_board(
@@ -539,6 +499,22 @@ mod tests {
                 assert_eq!(actual, expected, "cell={cell} deleted={deleted}");
             }
         }
+    }
+
+    #[test]
+    fn influence_incidence_rejects_a_separately_compiled_owner_even_with_identical_rows() {
+        let catalog = attached_catalog(4, 4);
+        let same_rows = attached_catalog(4, 4);
+        let other_frame = attached_catalog(4, 5);
+        let conditions = catalog.placement_conditions().unwrap();
+        assert_eq!(catalog.identity_digest(), same_rows.identity_digest());
+        assert!(conditions.influencing_placements(&catalog, 1, 0).is_some());
+        assert!(conditions
+            .influencing_placements(&same_rows, 1, 0)
+            .is_none());
+        assert!(conditions
+            .influencing_placements(&other_frame, 1, 0)
+            .is_none());
     }
 
     #[test]
@@ -593,7 +569,7 @@ mod tests {
         let conditions = PlacementConditionCatalog::compile(&catalog).unwrap();
         let rows = conditions.specialize(&[o_id(&catalog, 0, 1, 2)]).unwrap();
         assert_eq!(conditions.initial_board(), initial);
-        assert_eq!(conditions.required_cells(), required);
+        assert_eq!(catalog.required_cells(), required);
         assert_eq!(rows.group_count(), 1);
         assert_eq!(rows.atomic_group_count(), 1);
         assert_eq!(rows.deleted_rows(0), 0);
@@ -603,8 +579,8 @@ mod tests {
     #[test]
     fn unsupported_and_mismatched_inputs_return_fallback_without_aliasing() {
         let tall = catalog(4, 7);
-        let catalog = catalog(4, 4);
-        let conditions = PlacementConditionCatalog::compile(&catalog).unwrap();
+        let catalog = attached_catalog(4, 4);
+        let conditions = catalog.placement_conditions().unwrap();
         let left = o_id(&catalog, 0, 1, 0);
         let overlapping = o_id(&catalog, 0, 1, 1);
         let missing = catalog.skeleton_count() as u32;
@@ -615,12 +591,15 @@ mod tests {
         assert!(conditions
             .specialize(&[left; super::super::MAX_BOARD64_PIECES + 1])
             .is_none());
-        assert_eq!(conditions.row_identity(missing), None);
         assert_eq!(conditions.exact_clear_domain(missing), None);
         assert_eq!(conditions.supports_deleted_rows(left, 0b1_0000), None);
         assert_eq!(conditions.supports_deleted_rows(missing, 0), None);
-        assert!(conditions.influencing_placements(1 << 16, 0).is_none());
-        assert!(conditions.influencing_placements(1, 0b1_0000).is_none());
+        assert!(conditions
+            .influencing_placements(&catalog, 1 << 16, 0)
+            .is_none());
+        assert!(conditions
+            .influencing_placements(&catalog, 1, 0b1_0000)
+            .is_none());
         assert!(PlacementConditionCatalog::compile(&tall).is_none());
     }
 
@@ -638,18 +617,20 @@ mod tests {
         assert_eq!(low_bits(64), u64::MAX);
         // The owning geometry projection currently supports width at most 10.
         // Exercise its actual largest six-row frame as well as bit 63 in D.
-        let six = catalog(10, 6);
-        let six_conditions = PlacementConditionCatalog::compile(&six).unwrap();
+        let six = attached_catalog(10, 6);
+        let six_conditions = six.placement_conditions().unwrap();
         assert_eq!(six_conditions.width(), 10);
         assert_eq!(six_conditions.height(), 6);
         assert!(six_conditions
-            .influencing_placements(low_bits(60), 0)
+            .influencing_placements(&six, low_bits(60), 0)
             .is_some());
         assert!(six_conditions
-            .influencing_placements(low_bits(60), 63)
+            .influencing_placements(&six, low_bits(60), 63)
             .unwrap()
             .is_empty());
-        assert!(six_conditions.influencing_placements(1 << 60, 0).is_none());
+        assert!(six_conditions
+            .influencing_placements(&six, 1 << 60, 0)
+            .is_none());
         for row in 0..six.skeleton_count() as u32 {
             assert_eq!(six_conditions.supports_deleted_rows(row, 63), Some(false));
         }

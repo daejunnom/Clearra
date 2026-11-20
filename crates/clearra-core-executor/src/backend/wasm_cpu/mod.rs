@@ -120,6 +120,8 @@ pub(crate) use reachability::{
     exact_entry_lock_anchors, exact_local_relation, exact_spawn_lock_anchors,
     DocumentLockReachability, DocumentReachabilityEngine,
 };
+#[cfg(any(test, feature = "local-search-ab"))]
+pub(crate) use result::SolutionCoverageCapture;
 pub(crate) use result::{ExactSearchAdvance, WasmExactSearchSession};
 pub(crate) use setup_finder::{WasmSetupSearchAdvance, WasmSetupSearchSession};
 #[cfg(not(target_family = "wasm"))]

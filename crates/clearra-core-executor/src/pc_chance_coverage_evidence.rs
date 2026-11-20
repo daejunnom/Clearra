@@ -5,7 +5,6 @@ use clearra_core_domain::{
     probability::probability_value::ProbabilityValue,
     solution::StandardBoard64ColoredTilingIdentity,
 };
-use clearra_core_ffi::rules::{kick_profile_code, rule_profile_code};
 use clearra_coverage::{
     pattern::{
         pattern_bitset::{PatternBitSet, PatternBitSetError},
@@ -33,7 +32,10 @@ use clearra_problem::{
 };
 use clearra_rules::{
     kicks::{KickOffset, KickTableProfileId, KickTransition},
-    profile::rule_profile::RuleProfile,
+    profile::{
+        replay_encoding::{replay_kick_profile_id, replay_rule_profile_id},
+        rule_profile::RuleProfile,
+    },
     spawn::SpawnProfile,
 };
 use clearra_supply::{
@@ -680,8 +682,8 @@ impl PcScoreReplayProblemEvidence {
         problem: &SearchProblem,
     ) -> Result<Self, PcChanceProblemEvidenceError> {
         let kick_profile = problem.kick_profile();
-        let kick_table_id = u64::from(kick_profile_code(kick_profile.profile_id()));
-        let rule_profile_id = u64::from(rule_profile_code(kick_profile.source_rule()));
+        let kick_table_id = replay_kick_profile_id(kick_profile.profile_id());
+        let rule_profile_id = replay_rule_profile_id(kick_profile.source_rule());
         if kick_table_id == 0 {
             return Err(PcChanceProblemEvidenceError::ZeroReplayKickTableId);
         }
@@ -698,8 +700,8 @@ impl PcScoreReplayProblemEvidence {
     fn matches_search_problem(&self, problem: &SearchProblem) -> bool {
         let kick_profile = problem.kick_profile();
         self.problem.matches_search_problem(problem)
-            && self.kick_table_id == u64::from(kick_profile_code(kick_profile.profile_id()))
-            && self.rule_profile_id == u64::from(rule_profile_code(kick_profile.source_rule()))
+            && self.kick_table_id == replay_kick_profile_id(kick_profile.profile_id())
+            && self.rule_profile_id == replay_rule_profile_id(kick_profile.source_rule())
     }
 
     fn checked_storage_retained_bytes(&self) -> Option<u128> {

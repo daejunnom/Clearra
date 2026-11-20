@@ -1,0 +1,72 @@
+name: Placement Dependency Qualification
+
+on:
+  push:
+    branches: [codex/v090-relation-rust-integration]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: placement-dependency-qualification-${{ github.sha }}
+  cancel-in-progress: false
+
+env:
+  CARGO_PROFILE_TEST_DEBUG: '0'
+  RUST_MIN_STACK: '16777216'
+
+jobs:
+  relation-and-mapping:
+    if: github.ref == 'refs/heads/codex/v090-relation-rust-integration'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Check exact source
+        run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+      - name: Compare CEGIS, ILC, APDP and coverage capture with focused references
+        shell: bash
+        run: |
+          set -eu
+          cargo test --locked -p clearra-core-executor --features parallel,local-search-ab --lib --no-run
+          status=0
+          for filter in structural_graph_probability_tests bounded_no_entry reachability::reference_tests incremental_domain_ exact_clear_domain_tests placement_conditions::tests capture_candidate_solution_coverage_matches_explicit_product_rows; do
+            cargo test --locked -p clearra-core-executor --features parallel,local-search-ab --lib "$filter" || status=1
+          done
+          exit "$status"
+      - name: Test the bounded solution stream and exact comparison
+        if: ${{ !cancelled() }}
+        run: cargo test --locked -p clearra-core-executor --features parallel,local-search-ab --example placement_graph_bench
+  receipts-and-adoption:
+    if: github.ref == 'refs/heads/codex/v090-relation-rust-integration'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Check exact source
+        run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+      - name: Test native exit and memory receipt classification
+        run: cargo test --locked -p clearra-manage --bin clearra-manage runtime::tests
+      - name: Test the local adoption evaluator
+        if: ${{ !cancelled() }}
+        run: node --test scripts/tools/placement-graph-adoption.test.mjs
+  operation-reuse:
+    if: github.ref == 'refs/heads/codex/v090-relation-rust-integration'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Check exact source
+        run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+      - name: Test normalized ordered kicks and stable replay identifiers
+        run: cargo test --locked -p clearra-rules -p clearra-finesse -p clearra-core-ffi --lib --no-fail-fast
+      - name: Test the legacy Cover Rust service boundary
+        if: ${{ !cancelled() }}
+        run: cargo test --locked -p clearra-app --features native-c-core --lib legacy_cover_tests

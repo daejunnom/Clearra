@@ -27,12 +27,52 @@ pub struct StructuralOrderMetrics {
     pub translation_interval_attempts: u64,
     pub translation_interval_guards: u64,
     pub translation_interval_row_steps: u64,
+    pub movement_clear: MovementClearMetrics,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct MovementClearMetrics {
+    pub frame_pose_attempts: u64,
+    pub frame_pose_proofs: u64,
+    pub reused_positive_locks: u64,
+    pub reused_closed_locks: u64,
+    pub point_pose_attempts: u64,
+    pub point_pose_proofs: u64,
+}
+
+impl MovementClearMetrics {
+    fn add(&mut self, delta: Self) {
+        self.frame_pose_attempts += delta.frame_pose_attempts;
+        self.frame_pose_proofs += delta.frame_pose_proofs;
+        self.reused_positive_locks += delta.reused_positive_locks;
+        self.reused_closed_locks += delta.reused_closed_locks;
+        self.point_pose_attempts += delta.point_pose_attempts;
+        self.point_pose_proofs += delta.point_pose_proofs;
+    }
 }
 
 thread_local! {
     static MODE: Cell<Option<bool>> = const { Cell::new(None) };
     static TRANSLATION_MODE: Cell<Option<bool>> = const { Cell::new(None) };
+    static MOVEMENT_CLEAR_MODE: Cell<Option<bool>> = const { Cell::new(None) };
     static METRICS: Cell<StructuralOrderMetrics> = Cell::new(StructuralOrderMetrics::default());
+}
+
+pub(super) fn movement_clear_certificates_enabled() -> bool {
+    if let Some(mode) = MOVEMENT_CLEAR_MODE.with(Cell::get) {
+        return mode;
+    }
+    #[cfg(feature = "local-search-ab")]
+    {
+        static MODE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *MODE.get_or_init(|| {
+            std::env::var("CLEARRA_MOVEMENT_CLEAR_CERTIFICATES").is_ok_and(|value| value == "1")
+        })
+    }
+    #[cfg(not(feature = "local-search-ab"))]
+    {
+        false
+    }
 }
 
 pub(super) fn translation_intervals_enabled() -> bool {
@@ -73,7 +113,7 @@ pub(super) fn enabled() -> bool {
 mod process_totals {
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    use super::StructuralOrderMetrics;
+    use super::{MovementClearMetrics, StructuralOrderMetrics};
 
     // Bypass totals count successful certificates. Analytic totals also count
     // failed candidates, once per candidate rather than per row or primitive
@@ -88,6 +128,12 @@ mod process_totals {
     static TRANSLATION_ATTEMPTS: AtomicU64 = AtomicU64::new(0);
     static TRANSLATION_GUARDS: AtomicU64 = AtomicU64::new(0);
     static TRANSLATION_ROWS: AtomicU64 = AtomicU64::new(0);
+    static FRAME_ATTEMPTS: AtomicU64 = AtomicU64::new(0);
+    static FRAME_PROOFS: AtomicU64 = AtomicU64::new(0);
+    static REUSED_POSITIVE: AtomicU64 = AtomicU64::new(0);
+    static REUSED_CLOSED: AtomicU64 = AtomicU64::new(0);
+    static POINT_ATTEMPTS: AtomicU64 = AtomicU64::new(0);
+    static POINT_PROOFS: AtomicU64 = AtomicU64::new(0);
 
     pub(super) fn record(delta: StructuralOrderMetrics) {
         BYPASSES.fetch_add(delta.skipped_build_graphs, Ordering::Relaxed);
@@ -108,6 +154,14 @@ mod process_totals {
             translation_interval_attempts: TRANSLATION_ATTEMPTS.load(Ordering::Relaxed),
             translation_interval_guards: TRANSLATION_GUARDS.load(Ordering::Relaxed),
             translation_interval_row_steps: TRANSLATION_ROWS.load(Ordering::Relaxed),
+            movement_clear: MovementClearMetrics {
+                frame_pose_attempts: FRAME_ATTEMPTS.load(Ordering::Relaxed),
+                frame_pose_proofs: FRAME_PROOFS.load(Ordering::Relaxed),
+                reused_positive_locks: REUSED_POSITIVE.load(Ordering::Relaxed),
+                reused_closed_locks: REUSED_CLOSED.load(Ordering::Relaxed),
+                point_pose_attempts: POINT_ATTEMPTS.load(Ordering::Relaxed),
+                point_pose_proofs: POINT_PROOFS.load(Ordering::Relaxed),
+            },
         }
     }
 
@@ -121,6 +175,15 @@ mod process_totals {
         TRANSLATION_ATTEMPTS.fetch_add(attempts, Ordering::Relaxed);
         TRANSLATION_GUARDS.fetch_add(guards, Ordering::Relaxed);
         TRANSLATION_ROWS.fetch_add(rows, Ordering::Relaxed);
+    }
+
+    pub(super) fn record_movement_clear(delta: MovementClearMetrics) {
+        FRAME_ATTEMPTS.fetch_add(delta.frame_pose_attempts, Ordering::Relaxed);
+        FRAME_PROOFS.fetch_add(delta.frame_pose_proofs, Ordering::Relaxed);
+        REUSED_POSITIVE.fetch_add(delta.reused_positive_locks, Ordering::Relaxed);
+        REUSED_CLOSED.fetch_add(delta.reused_closed_locks, Ordering::Relaxed);
+        POINT_ATTEMPTS.fetch_add(delta.point_pose_attempts, Ordering::Relaxed);
+        POINT_PROOFS.fetch_add(delta.point_pose_proofs, Ordering::Relaxed);
     }
 }
 
@@ -178,6 +241,19 @@ pub(super) fn record_translation_intervals(attempts: usize, guards: usize, rows:
     process_totals::record_translation(attempts as u64, guards as u64, rows as u64);
 }
 
+pub(super) fn record_movement_clear(delta: MovementClearMetrics) {
+    if delta == MovementClearMetrics::default() {
+        return;
+    }
+    METRICS.with(|slot| {
+        let mut value = slot.get();
+        value.movement_clear.add(delta);
+        slot.set(value);
+    });
+    #[cfg(feature = "local-search-ab")]
+    process_totals::record_movement_clear(delta);
+}
+
 /// Diagnostic totals since process start. Read after all experiment workers
 /// have joined; this is not a multi-search session statistics interface.
 #[cfg(feature = "local-search-ab")]
@@ -217,5 +293,17 @@ pub(super) fn with_translation_interval_mode<T>(enabled: bool, action: impl FnOn
         }
     }
     let _restore = Restore(TRANSLATION_MODE.with(|slot| slot.replace(Some(enabled))));
+    action()
+}
+
+#[cfg(test)]
+pub(super) fn with_movement_clear_mode<T>(enabled: bool, action: impl FnOnce() -> T) -> T {
+    struct Restore(Option<bool>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            MOVEMENT_CLEAR_MODE.with(|slot| slot.set(self.0));
+        }
+    }
+    let _restore = Restore(MOVEMENT_CLEAR_MODE.with(|slot| slot.replace(Some(enabled))));
     action()
 }

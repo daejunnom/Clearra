@@ -1,8 +1,10 @@
 use std::sync::OnceLock;
 
-use clearra_core_ffi::rules::{kick_profile_code, rule_profile_code};
 use clearra_problem::SearchProblem;
-use clearra_rules::kicks::{KickTableProfile, KickTableProfileId, NoKick, SrsKicks};
+use clearra_rules::{
+    kicks::{KickTableProfile, KickTableProfileId, NoKick, SrsKicks},
+    profile::replay_encoding::{replay_kick_profile_id, replay_rule_profile_id},
+};
 
 pub(super) fn builtin_kick_profile(
     profile_id: KickTableProfileId,
@@ -38,7 +40,7 @@ pub(super) fn builtin_kick_profile(
 pub(super) fn replay_profile_ids(problem: &SearchProblem) -> (u64, u64) {
     let profile = problem.kick_profile();
     (
-        u64::from(kick_profile_code(profile.profile_id())),
-        u64::from(rule_profile_code(profile.source_rule())),
+        replay_kick_profile_id(profile.profile_id()),
+        replay_rule_profile_id(profile.source_rule()),
     )
 }

@@ -6,7 +6,7 @@ const BUMPER_DOMAIN_MAX_RESIDUAL_CELLS: u32 = 24;
 
 const ALL_STANDARD_PIECES: u8 = 0x7f;
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct DomainPropagation {
     pub pivot_required_cells: u64,
     pub pivot_piece_mask: u8,
@@ -16,7 +16,7 @@ pub(super) struct DomainPropagation {
     apdp_required_cells: u64,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct DomainCompilation {
     pub status: DomainStatus,
     pub propagation: DomainPropagation,
@@ -27,6 +27,136 @@ pub(super) struct DomainCompilation {
 pub(super) enum DomainStatus {
     Supported,
     Empty,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct CellSupport {
+    // The catalog indexes every full parent with a u32 row ID.
+    count: u32,
+    pieces: u8,
+    common_owner_cells: u64,
+}
+
+impl CellSupport {
+    fn compile(catalog: &GeometryCatalog, cell: u8, remaining: u64, piece_mask: u8) -> Self {
+        let mut support = Self {
+            common_owner_cells: remaining,
+            ..Self::default()
+        };
+        for &row_id in catalog.support(cell) {
+            let row = catalog.skeleton(row_id);
+            let piece_bit = 1_u8 << piece_index(row.piece);
+            if row.cells & remaining == row.cells && piece_mask & piece_bit != 0 {
+                support.count += 1;
+                support.pieces |= piece_bit;
+                support.common_owner_cells &= row.cells;
+            }
+        }
+        support
+    }
+}
+
+#[derive(Debug)]
+struct DomainSupportSnapshot {
+    depth: u8,
+    remaining: u64,
+    piece_mask: u8,
+    cells: [CellSupport; 64],
+}
+
+impl DomainSupportSnapshot {
+    fn dirty_cells(&self, catalog: &GeometryCatalog, remaining: u64, piece_mask: u8) -> u64 {
+        // Restored/expanded row eligibility is never evaluated using a
+        // descendant's intersections.
+        if remaining & !self.remaining != 0 || piece_mask & !self.piece_mask != 0 {
+            return remaining;
+        }
+
+        let removed_pieces = self.piece_mask & !piece_mask;
+        let mut dirty = 0;
+        if removed_pieces != 0 {
+            let mut active = remaining;
+            while active != 0 {
+                let cell = active.trailing_zeros() as usize;
+                let bit = active.isolate_lowest_one();
+                active &= active - 1;
+                if self.cells[cell].pieces & removed_pieces != 0 {
+                    dirty |= bit;
+                }
+            }
+        }
+
+        let removed = self.remaining & !remaining;
+        let mut deleted = removed;
+        while deleted != 0 && dirty != remaining {
+            let cell = deleted.trailing_zeros() as u8;
+            let bit = deleted.isolate_lowest_one();
+            deleted &= deleted - 1;
+            for &row_id in catalog.support(cell) {
+                let row = catalog.skeleton(row_id);
+                if row.cells & self.remaining == row.cells
+                    && (row.cells & removed).isolate_lowest_one() == bit
+                    && piece_mask & (1_u8 << piece_index(row.piece)) != 0
+                {
+                    dirty |= row.cells & remaining;
+                }
+            }
+        }
+        dirty
+    }
+}
+
+/// Exact full-parent cell summaries along one geometry compiler's DFS, over
+/// the same immutable catalog as its residual memo. These snapshots are
+/// optional scratch: allocation failure just leaves us using fresh sums.
+#[derive(Debug, Default)]
+pub(super) struct DomainSupportCache {
+    ancestors: Vec<DomainSupportSnapshot>,
+}
+
+impl DomainSupportCache {
+    pub fn compile(
+        &mut self,
+        catalog: &GeometryCatalog,
+        depth: u8,
+        remaining: u64,
+        piece_mask: u8,
+    ) -> DomainCompilation {
+        while self
+            .ancestors
+            .last()
+            .is_some_and(|parent| parent.depth >= depth)
+        {
+            self.ancestors.pop();
+        }
+        let parent = self.ancestors.last();
+        let dirty = parent.map_or(remaining, |parent| {
+            parent.dirty_cells(catalog, remaining, piece_mask)
+        });
+        let mut cells = [CellSupport::default(); 64];
+        let result =
+            DomainPropagation::compile_with_support(catalog, remaining, piece_mask, |cell| {
+                let support = match parent {
+                    Some(parent) if dirty & (1_u64 << cell) == 0 => parent.cells[cell as usize],
+                    _ => CellSupport::compile(catalog, cell, remaining, piece_mask),
+                };
+                cells[cell as usize] = support;
+                support
+            });
+        if result.status == DomainStatus::Supported && self.ancestors.try_reserve(1).is_ok() {
+            self.ancestors.push(DomainSupportSnapshot {
+                depth,
+                remaining,
+                piece_mask,
+                cells,
+            });
+        }
+        result
+    }
+
+    pub fn retained_bytes(&self) -> usize {
+        self.ancestors.capacity() * core::mem::size_of::<DomainSupportSnapshot>()
+    }
 }
 
 impl DomainPropagation {
@@ -46,6 +176,17 @@ impl DomainPropagation {
         remaining: u64,
         feasible_piece_mask: u8,
     ) -> DomainCompilation {
+        Self::compile_with_support(catalog, remaining, feasible_piece_mask, |cell| {
+            CellSupport::compile(catalog, cell, remaining, feasible_piece_mask)
+        })
+    }
+
+    fn compile_with_support(
+        catalog: &GeometryCatalog,
+        remaining: u64,
+        feasible_piece_mask: u8,
+        mut support_for: impl FnMut(u8) -> CellSupport,
+    ) -> DomainCompilation {
         let mut result = Self {
             pivot_required_cells: 0,
             pivot_piece_mask: 0,
@@ -62,20 +203,10 @@ impl DomainPropagation {
         while cells != 0 {
             let cell = cells.trailing_zeros() as u8;
             cells &= cells - 1;
-            let mut support_count = 0;
-            let mut piece_mask = 0_u8;
-            let mut common = remaining;
-            for row_id in catalog.support(cell).iter().copied() {
-                if !row_feasible(catalog, row_id, remaining, feasible_piece_mask) {
-                    continue;
-                }
-                let row = catalog.skeleton(row_id);
-                support_count += 1;
-                piece_mask |= 1_u8 << piece_index(row.piece);
-                common &= row.cells;
-            }
-            cell_piece_masks[cell as usize] = piece_mask;
-            common_owner_cells[cell as usize] = common;
+            let support = support_for(cell);
+            let support_count = support.count as usize;
+            cell_piece_masks[cell as usize] = support.pieces;
+            common_owner_cells[cell as usize] = support.common_owner_cells;
             if support_count == 0 {
                 result.pivot_cell = cell;
                 result.pivot_required_cells = 1_u64 << cell;
@@ -90,7 +221,7 @@ impl DomainPropagation {
                 result.pivot_cell = cell;
                 result.pivot_required_cells = 1_u64 << cell;
                 result.pivot_support_count = support_count;
-                result.pivot_piece_mask = piece_mask;
+                result.pivot_piece_mask = support.pieces;
             }
         }
 
@@ -487,4 +618,226 @@ fn union_cells(parents: &mut [u8; 64], left: u8, right: u8) {
         core::mem::swap(&mut left_root, &mut right_root);
     }
     parents[right_root as usize] = left_root;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clearra_core_domain::piece::piece_kind::PieceKind;
+
+    // Separated 4x4 chambers have both local parent changes and cells
+    // guaranteed unaffected by a choice in the other chamber. The initial
+    // board is nonempty, and the 32-cell root is an eight-piece residual.
+    const LEFT: u64 = 0x0f | (0x0f << 10) | (0x0f << 20) | (0x0f << 30);
+    const RIGHT: u64 = LEFT << 6;
+    const REMAINING: u64 = LEFT | RIGHT;
+    const LEFT_O: u64 = 0x03 | (0x03 << 10);
+    const RIGHT_O: u64 = LEFT_O << 6;
+
+    fn catalog() -> GeometryCatalog {
+        GeometryCatalog::compile_build_stage(4, 1 << 4, REMAINING).unwrap()
+    }
+
+    // Scan the whole catalog, rather than relying on reverse cell incidence
+    // or the delta dependency calculation used by the implementation.
+    fn exhaustive_cell_support(
+        catalog: &GeometryCatalog,
+        cell: u8,
+        remaining: u64,
+        piece_mask: u8,
+    ) -> CellSupport {
+        let mut support = CellSupport {
+            common_owner_cells: remaining,
+            ..CellSupport::default()
+        };
+        for raw_id in 0..catalog.skeleton_count() {
+            let row = catalog.skeleton(raw_id as u32);
+            let piece_bit = 1_u8 << piece_index(row.piece);
+            if row.cells & (1_u64 << cell) != 0
+                && row.cells & remaining == row.cells
+                && piece_mask & piece_bit != 0
+            {
+                support.count += 1;
+                support.pieces |= piece_bit;
+                support.common_owner_cells &= row.cells;
+            }
+        }
+        support
+    }
+
+    fn assert_matches_full(
+        cache: &mut DomainSupportCache,
+        catalog: &GeometryCatalog,
+        depth: u8,
+        remaining: u64,
+        piece_mask: u8,
+    ) -> DomainCompilation {
+        let actual = cache.compile(catalog, depth, remaining, piece_mask);
+        let expected =
+            DomainPropagation::compile_with_support(catalog, remaining, piece_mask, |cell| {
+                exhaustive_cell_support(catalog, cell, remaining, piece_mask)
+            });
+        assert_eq!(
+            actual, expected,
+            "remaining {remaining:#x}, pieces {piece_mask:#x}"
+        );
+        if actual.status == DomainStatus::Supported {
+            let mut active = remaining;
+            let snapshot = cache.ancestors.last().unwrap();
+            while active != 0 {
+                let cell = active.trailing_zeros() as u8;
+                active &= active - 1;
+                assert_eq!(
+                    snapshot.cells[cell as usize],
+                    exhaustive_cell_support(catalog, cell, remaining, piece_mask)
+                );
+            }
+            let legal_parent_ids = |domain: DomainPropagation| -> Vec<_> {
+                (0..catalog.skeleton_count())
+                    .map(|raw_id| raw_id as u32)
+                    .filter(|&row_id| domain.row_allowed(catalog, row_id, remaining, piece_mask))
+                    .collect()
+            };
+            assert_eq!(
+                legal_parent_ids(actual.propagation),
+                legal_parent_ids(expected.propagation)
+            );
+        }
+        actual
+    }
+
+    #[test]
+    fn incremental_domain_updates_only_impacted_chamber_and_undoes_siblings() {
+        let catalog = catalog();
+        let mut cache = DomainSupportCache::default();
+        assert_eq!(cache.retained_bytes(), 0);
+        let root = assert_matches_full(&mut cache, &catalog, 0, REMAINING, ALL_STANDARD_PIECES);
+        assert_eq!(root.status, DomainStatus::Supported);
+        let dirty =
+            cache.ancestors[0].dirty_cells(&catalog, REMAINING & !LEFT_O, ALL_STANDARD_PIECES);
+        assert_ne!(dirty, 0);
+        assert_eq!(dirty & RIGHT, 0, "right chamber support must be reused");
+        let left = assert_matches_full(
+            &mut cache,
+            &catalog,
+            1,
+            REMAINING & !LEFT_O,
+            ALL_STANDARD_PIECES,
+        );
+        assert_eq!(left.status, DomainStatus::Supported);
+        assert_matches_full(
+            &mut cache,
+            &catalog,
+            2,
+            REMAINING & !(LEFT_O | RIGHT_O),
+            ALL_STANDARD_PIECES,
+        );
+        let right = assert_matches_full(
+            &mut cache,
+            &catalog,
+            1,
+            REMAINING & !RIGHT_O,
+            ALL_STANDARD_PIECES,
+        );
+        assert_eq!(right.status, DomainStatus::Supported);
+        assert_eq!(cache.ancestors.len(), 2);
+        assert_eq!(
+            assert_matches_full(&mut cache, &catalog, 0, REMAINING, ALL_STANDARD_PIECES),
+            root
+        );
+    }
+
+    #[test]
+    fn incremental_domain_invalidates_removed_and_restored_piece_kinds() {
+        let catalog = catalog();
+        let mut cache = DomainSupportCache::default();
+        let o_kind = 1 << piece_index(PieceKind::O);
+        let full = assert_matches_full(&mut cache, &catalog, 0, REMAINING, ALL_STANDARD_PIECES);
+        assert_eq!(full.status, DomainStatus::Supported);
+        let reduced = assert_matches_full(
+            &mut cache,
+            &catalog,
+            1,
+            REMAINING & !LEFT_O,
+            ALL_STANDARD_PIECES & !o_kind,
+        );
+        assert_eq!(reduced.status, DomainStatus::Supported);
+        assert_eq!(full.cell_piece_masks[9] & o_kind, o_kind);
+        assert_eq!(reduced.cell_piece_masks[9] & o_kind, 0);
+        let restored = assert_matches_full(
+            &mut cache,
+            &catalog,
+            2,
+            REMAINING & !LEFT_O,
+            ALL_STANDARD_PIECES,
+        );
+        assert_eq!(restored.cell_piece_masks[9] & o_kind, o_kind);
+        let unsupported = assert_matches_full(&mut cache, &catalog, 2, REMAINING & !LEFT_O, 0);
+        assert_eq!(unsupported.status, DomainStatus::Empty);
+        assert_eq!(cache.ancestors.len(), 2);
+        assert_matches_full(
+            &mut cache,
+            &catalog,
+            1,
+            REMAINING & !RIGHT_O,
+            ALL_STANDARD_PIECES,
+        );
+    }
+
+    #[test]
+    fn incremental_domain_matches_full_over_pivot_generated_branches() {
+        fn visit(
+            cache: &mut DomainSupportCache,
+            catalog: &GeometryCatalog,
+            depth: u8,
+            remaining: u64,
+            piece_mask: u8,
+        ) -> usize {
+            let compilation = assert_matches_full(cache, catalog, depth, remaining, piece_mask);
+            if depth == 3 || compilation.status != DomainStatus::Supported {
+                return 1;
+            }
+            let mut visited = 1;
+            for &row_id in catalog
+                .support(compilation.propagation.pivot_cell)
+                .iter()
+                .filter(|&&row_id| {
+                    compilation
+                        .propagation
+                        .row_allowed(catalog, row_id, remaining, piece_mask)
+                })
+                .take(4)
+            {
+                let row = catalog.skeleton(row_id);
+                // Alternate unchanged supply with a last-instance removal;
+                // a later sibling must see the original supply restored.
+                let child_piece_mask = if depth.is_multiple_of(2) {
+                    piece_mask
+                } else {
+                    piece_mask & !(1 << piece_index(row.piece))
+                };
+                visited += visit(
+                    cache,
+                    catalog,
+                    depth + 1,
+                    remaining ^ row.cells,
+                    child_piece_mask,
+                );
+            }
+            visited
+        }
+
+        let catalog = catalog();
+        let visited = visit(
+            &mut DomainSupportCache::default(),
+            &catalog,
+            0,
+            REMAINING,
+            ALL_STANDARD_PIECES,
+        );
+        assert!(
+            visited > 4,
+            "the differential must visit descendants and siblings"
+        );
+    }
 }

@@ -75,19 +75,53 @@ pub(super) fn compile(
     compile_with_guard(catalog, candidate, |_, _, _, _, _| false)
 }
 
-/// Extend the hard-drop certificate with exact positive interval guards.
-///
-/// The callback receives kind, the exact ILC target pose, original deleted-row
-/// mask, minimum physical board and maximum physical board. It may return true
-/// only if a sound analytic rule or one existing positive certificate covers
-/// the entire occupancy interval under this catalog, kick profile and row
-/// frame. Independent successful point queries at the two bounds are
-/// insufficient. The callback must not start a primitive traversal; a miss
-/// remains Unknown / fallback.
+#[cfg(test)]
 pub(super) fn compile_with_guard(
     catalog: &GeometryCatalog,
     candidate: &GeometryCandidate,
     mut interval_guard: impl FnMut(PieceKind, InstantiatedRealization, u16, u64, u64) -> bool,
+) -> Option<CertifiedPlacementPoset> {
+    compile_with_movement_guard(catalog, candidate, false, |query| {
+        let MovementProof::Reachable { maximum } = query.proof else {
+            return false;
+        };
+        interval_guard(
+            query.piece,
+            query.realization,
+            query.deleted,
+            query.minimum,
+            maximum,
+        )
+    })
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum MovementProof {
+    /// Existence of an exact edge on every board in [minimum, maximum].
+    Reachable { maximum: u64 },
+    /// Nonexistence of this exact pose on all supersets of minimum in
+    /// the same physical frame. This does not assert reachability is monotone.
+    Closed,
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct MovementProofQuery {
+    pub(super) piece: PieceKind,
+    pub(super) realization: InstantiatedRealization,
+    pub(super) deleted: u16,
+    pub(super) minimum: u64,
+    pub(super) proof: MovementProof,
+}
+
+/// Extend the hard-drop certificate with scoped movement evidence.
+/// A guard miss is Unknown. Only closed proofs for *all* realizations remove a
+/// frame from the necessary-order calculation. Positive endpoint samples alone
+/// cannot certify an interval under ordered kicks.
+pub(super) fn compile_with_movement_guard(
+    catalog: &GeometryCatalog,
+    candidate: &GeometryCandidate,
+    infer_closed_frames: bool,
+    mut movement_guard: impl FnMut(MovementProofQuery) -> bool,
 ) -> Option<CertifiedPlacementPoset> {
     let geometry = CandidateGeometry::compile(catalog, candidate)?;
     if geometry.has_unprovable_initial_support_disjunction(catalog, candidate) {
@@ -100,6 +134,7 @@ pub(super) fn compile_with_guard(
     let mut instantiation_domains = [0_u64; MAX_BOARD64_PIECES];
     let mut required_by_frame = [0_u16; MAX_CLEAR_FRAMES];
     let mut possible_frames = 0_u64;
+    let mut possibly_before = [0_u16; MAX_BOARD64_PIECES];
 
     for deleted in 0..1_u16 << geometry.height {
         let Some(required) = geometry.required_for_frame(deleted) else {
@@ -108,6 +143,16 @@ pub(super) fn compile_with_guard(
         required_by_frame[usize::from(deleted)] = required;
         possible_frames |= 1_u64 << deleted;
         let (initial, physical_cells) = geometry.project_frame(deleted);
+        let minimum_board = if infer_closed_frames && deleted != 0 {
+            board_for_operations(initial, &physical_cells, required)
+        } else {
+            initial
+        };
+        let may_be_placed = if infer_closed_frames {
+            geometry.possible_operations_in_frame(deleted, required)
+        } else {
+            0
+        };
         for operation in 0..geometry.operation_count {
             let operation_bit = 1_u16 << operation;
             if required & operation_bit != 0 {
@@ -117,6 +162,7 @@ pub(super) fn compile_with_guard(
             }
             let lock_mask = physical_cells[operation];
             let mut has_instantiation = false;
+            let mut all_closed = infer_closed_frames && deleted != 0;
             for realization in catalog.instantiations(candidate.row_ids()[operation], deleted) {
                 // ILC projects the physical lock back to precisely these
                 // original cells. Keep this as an explicit certificate gate
@@ -125,8 +171,17 @@ pub(super) fn compile_with_guard(
                     return None;
                 }
                 has_instantiation = true;
+                if all_closed {
+                    all_closed = movement_guard(MovementProofQuery {
+                        piece: geometry.pieces[operation],
+                        realization,
+                        deleted,
+                        minimum: minimum_board,
+                        proof: MovementProof::Closed,
+                    });
+                }
             }
-            if !has_instantiation {
+            if !has_instantiation || all_closed {
                 continue;
             }
             instantiation_domains[operation] |= 1_u64 << deleted;
@@ -134,6 +189,7 @@ pub(super) fn compile_with_guard(
             if placement_is_grounded(geometry.width, initial, lock_mask) {
                 predecessors[operation] &= required;
                 saw_grounding_witness |= operation_bit;
+                possibly_before[operation] |= may_be_placed;
                 continue;
             }
             let support_cells = lock_mask >> geometry.width;
@@ -151,6 +207,28 @@ pub(super) fn compile_with_guard(
                 // can weaken this intersection but cannot make it unsound.
                 predecessors[operation] &= branch_required;
                 saw_grounding_witness |= operation_bit;
+                possibly_before[operation] |= may_be_placed;
+            }
+        }
+    }
+    if infer_closed_frames {
+        // Every physically executable p has one of the frames and grounding
+        // witnesses considered above. If q is absent even from the union of
+        // all those overapproximated prefixes, p must precede q in every
+        // complete execution. The order is not inferred from one failed D.
+        for (operation, allowed_before) in possibly_before[..geometry.operation_count]
+            .iter()
+            .copied()
+            .enumerate()
+        {
+            if saw_grounding_witness & (1_u16 << operation) == 0 {
+                continue;
+            }
+            let mut must_follow = geometry.all_operations & !(allowed_before | (1 << operation));
+            while must_follow != 0 {
+                let after = must_follow.trailing_zeros() as usize;
+                must_follow &= must_follow - 1;
+                predecessors[after] |= 1 << operation;
             }
         }
     }
@@ -223,13 +301,15 @@ pub(super) fn compile_with_guard(
                 let guarded = catalog
                     .instantiations(candidate.row_ids()[operation], deleted)
                     .any(|realization| {
-                        interval_guard(
-                            geometry.pieces[operation],
+                        movement_guard(MovementProofQuery {
+                            piece: geometry.pieces[operation],
                             realization,
                             deleted,
-                            minimum_board,
-                            maximum_board,
-                        )
+                            minimum: minimum_board,
+                            proof: MovementProof::Reachable {
+                                maximum: maximum_board,
+                            },
+                        })
                     });
                 if !guarded {
                     return None;
@@ -395,6 +475,21 @@ impl CandidateGeometry {
             required |= self.row_contributors[original_row];
         }
         (self.deleted_rows(required) == deleted).then_some(required)
+    }
+
+    fn possible_operations_in_frame(&self, deleted: u16, required: u16) -> u16 {
+        let mut possible = required;
+        let mut pending = self.all_operations & !required;
+        while pending != 0 {
+            let bit = 1_u16 << pending.trailing_zeros();
+            pending &= pending - 1;
+            // If even this smallest prefix clears another original row,
+            // no superset can still have the given deleted-row mask.
+            if self.deleted_rows(required | bit) == deleted {
+                possible |= bit;
+            }
+        }
+        possible
     }
 
     fn project_frame(&self, deleted: u16) -> (u64, [u64; MAX_BOARD64_PIECES]) {

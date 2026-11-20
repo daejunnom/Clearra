@@ -12,6 +12,8 @@ use clearra_problem::SearchProblem;
 
 use crate::{cpu_worker_pool, solution_probability::SolutionCoverage, CorePathStep};
 
+#[cfg(any(test, feature = "local-search-ab"))]
+use super::result::SolutionCoverageCapture;
 use super::{
     buildup::{verify_candidate, BuildUpWorkspace, CandidateWitnessMode},
     catalog::GeometryCatalog,
@@ -85,6 +87,9 @@ pub(super) fn execute_if_worthwhile(
     control: ExecutionControl,
     requested_workers: usize,
     cpu_warmup_requested: bool,
+    #[cfg(any(test, feature = "local-search-ab"))] solution_coverage_capture: Option<
+        SolutionCoverageCapture,
+    >,
 ) -> Result<ParallelSearchDecision, WasmExactSearchError> {
     let serial_reason = if requested_workers <= 1 {
         Some("single-worker-request")
@@ -126,6 +131,8 @@ pub(super) fn execute_if_worthwhile(
         control,
         balanced_workers,
         cpu_warmup_requested,
+        #[cfg(any(test, feature = "local-search-ab"))]
+        solution_coverage_capture,
     )
     .map(ParallelSearchDecision::Completed)
 }
@@ -163,6 +170,9 @@ fn execute_plan(
     control: ExecutionControl,
     requested_workers: usize,
     cpu_warmup_requested: bool,
+    #[cfg(any(test, feature = "local-search-ab"))] solution_coverage_capture: Option<
+        SolutionCoverageCapture,
+    >,
 ) -> Result<ParallelSearchOutcome, WasmExactSearchError> {
     let workers_used = requested_workers.min(plan.searches.len()).max(1);
     let pool = if cpu_warmup_requested {
@@ -192,6 +202,8 @@ fn execute_plan(
             catalog.height(),
             problem.kick_profile().profile_id(),
         )),
+        #[cfg(any(test, feature = "local-search-ab"))]
+        solution_coverage_capture,
     };
     let branch_count = plan.searches.len();
     let queue = Arc::new(ParallelBranchQueue::new(branch_tasks(plan.searches)));

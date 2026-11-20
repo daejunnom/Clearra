@@ -1483,25 +1483,35 @@ fn verify_candidate_for_completion_mode(
     if RealizationFeasibilityWorkspace::dependency_relaxation_is_infeasible(catalog, candidate) {
         return Ok(infeasible_candidate_result(0));
     }
+    let movement_proofs = CandidateMovementProofs::default();
     #[cfg(any(test, feature = "local-search-ab"))]
-    if super::structural_order::enabled()
-        && problem.count_policy() == PcCountPolicy::CountUnique
-        && matches!(completion, BuildCompletion::ClearToEmpty)
-        && !retain_trace
-        && !finesse_requested
-        && !finesse_spin_coverage_requested
-        && !witness_mode.enabled()
-        && !problem.objective().execution_constraints().requested()
-        && !problem
-            .queue_observation_policy()
-            .requires_observation_policy()
-    {
-        if let Some(result) =
-            verify_certified_poset(problem, catalog, candidate, workspace, control)?
-        {
-            return Ok(result);
+    let movement_proofs = {
+        let eligible = problem.count_policy() == PcCountPolicy::CountUnique
+            && matches!(completion, BuildCompletion::ClearToEmpty)
+            && !retain_trace
+            && !finesse_requested
+            && !finesse_spin_coverage_requested
+            && !witness_mode.enabled()
+            && !problem.objective().execution_constraints().requested()
+            && !problem
+                .queue_observation_policy()
+                .requires_observation_policy();
+        let mut proofs = movement_proofs;
+        proofs.enabled = eligible && super::structural_order::movement_clear_certificates_enabled();
+        if eligible && super::structural_order::enabled() {
+            if let Some(result) = verify_certified_poset(
+                problem,
+                catalog,
+                candidate,
+                workspace,
+                &mut proofs,
+                control,
+            )? {
+                return Ok(result);
+            }
         }
-    }
+        proofs
+    };
     workspace.reachability.configure(candidate.row_ids().len());
     workspace.reachability.configure_kick_profile(
         kick_profile_id,
@@ -1539,10 +1549,62 @@ fn verify_candidate_for_completion_mode(
         completion,
         finesse_requested,
         finesse_spin_coverage_requested,
+        &movement_proofs,
         control,
     );
     workspace.recycle_projection(projection);
     result
+}
+
+// Evidence lives only until this candidate's fallback graph is constructed.
+// The owning call fixes catalog, kick profile, shape and evidence capability.
+// A full buffer is a cache miss, not failure or negative authority.
+#[derive(Default)]
+struct CandidateMovementProofs {
+    #[cfg(any(test, feature = "local-search-ab"))]
+    enabled: bool,
+    #[cfg(any(test, feature = "local-search-ab"))]
+    intervals: [Option<super::placement_poset::MovementProofQuery>; 16],
+    #[cfg(any(test, feature = "local-search-ab"))]
+    len: usize,
+}
+
+#[cfg(any(test, feature = "local-search-ab"))]
+impl CandidateMovementProofs {
+    fn remember(&mut self, query: super::placement_poset::MovementProofQuery) {
+        if self.enabled && self.len < self.intervals.len() {
+            self.intervals[self.len] = Some(query);
+            self.len += 1;
+        }
+    }
+
+    fn answer(
+        &self,
+        piece: PieceKind,
+        realization: super::catalog::InstantiatedRealization,
+        deleted: u16,
+        board: u64,
+    ) -> Option<bool> {
+        use super::placement_poset::MovementProof;
+
+        self.intervals[..self.len]
+            .iter()
+            .flatten()
+            .find_map(|query| {
+                if query.piece != piece
+                    || query.realization != realization
+                    || query.deleted != deleted
+                    || query.minimum & !board != 0
+                {
+                    return None;
+                }
+                match query.proof {
+                    MovementProof::Reachable { maximum } if board & !maximum == 0 => Some(true),
+                    MovementProof::Closed => Some(false),
+                    MovementProof::Reachable { .. } => None,
+                }
+            })
+    }
 }
 
 /// Exact, proof-gated language production before allocating a candidate's
@@ -1554,8 +1616,11 @@ fn verify_certified_poset(
     catalog: &GeometryCatalog,
     candidate: &GeometryCandidate,
     workspace: &mut BuildUpWorkspace,
+    movement_proofs: &mut CandidateMovementProofs,
     control: &ExecutionControl,
 ) -> Result<Option<CandidateBuildResult>, WasmExactSearchError> {
+    use super::placement_poset::MovementProof;
+
     if control.is_cancelled() {
         return Err(WasmExactSearchError::Cancelled);
     }
@@ -1571,18 +1636,53 @@ fn verify_certified_poset(
     let mut translation_attempts = 0;
     let mut translation_guards = 0;
     let mut translation_row_steps = 0;
-    let poset = super::placement_poset::compile_with_guard(
+    let mut movement_metrics = super::structural_order::MovementClearMetrics::default();
+    let profile = problem.kick_profile().profile_id();
+    if movement_proofs.enabled {
+        workspace.reachability.configure_kick_profile(
+            profile,
+            problem.backend_policy().conditioned_reachability_enabled(),
+        );
+    }
+    let poset = super::placement_poset::compile_with_movement_guard(
         catalog,
         candidate,
-        |piece, realization, deleted, minimum, maximum| {
+        movement_proofs.enabled,
+        |query| {
+            let super::placement_poset::MovementProofQuery {
+                piece,
+                realization,
+                deleted,
+                minimum,
+                proof,
+            } = query;
+            let frame = LocalRelationRowFrame::new(catalog.height(), deleted);
+            let MovementProof::Reachable { maximum } = proof else {
+                movement_metrics.frame_pose_attempts += 1;
+                let closed = workspace
+                    .reachability
+                    .try_prove_lock_pose_unreachable_at_minimum(
+                        catalog,
+                        minimum,
+                        piece,
+                        profile,
+                        realization,
+                        frame,
+                    );
+                if closed {
+                    movement_metrics.frame_pose_proofs += 1;
+                    movement_proofs.remember(query);
+                }
+                return closed;
+            };
             let o_attempt = workspace.reachability.try_monotone_lock_interval(
                 catalog,
                 minimum,
                 maximum,
                 piece,
-                problem.kick_profile().profile_id(),
+                profile,
                 realization,
-                LocalRelationRowFrame::new(catalog.height(), deleted),
+                frame,
             );
             // An admitted O proof already solves this translation subgraph;
             // do not repeat it. Other pieces use a positive-only witness.
@@ -1594,9 +1694,9 @@ fn verify_certified_poset(
                         minimum,
                         maximum,
                         piece,
-                        problem.kick_profile().profile_id(),
+                        profile,
                         realization,
-                        LocalRelationRowFrame::new(catalog.height(), deleted),
+                        frame,
                     ),
                     true,
                 ),
@@ -1611,18 +1711,23 @@ fn verify_certified_poset(
                 }
                 if proven {
                     algebraic_guards += 1;
+                    movement_proofs.remember(query);
                     return true;
                 }
             }
-            workspace.reachability.proves_lock_for_interval(
+            let proven = workspace.reachability.proves_lock_for_interval(
                 catalog,
                 minimum,
                 maximum,
                 piece,
-                problem.kick_profile().profile_id(),
+                profile,
                 realization,
-                LocalRelationRowFrame::new(catalog.height(), deleted),
-            )
+                frame,
+            );
+            if proven {
+                movement_proofs.remember(query);
+            }
+            proven
         },
     );
     // Include failed candidates and failed interval attempts in this cost.
@@ -1637,6 +1742,7 @@ fn verify_certified_poset(
         translation_guards,
         translation_row_steps,
     );
+    super::structural_order::record_movement_clear(movement_metrics);
     let Some(poset) = poset else {
         return Ok(None);
     };
@@ -1704,6 +1810,7 @@ fn verify_candidate_with_projection(
     completion: BuildCompletion,
     finesse_requested: bool,
     finesse_spin_coverage_requested: bool,
+    movement_proofs: &CandidateMovementProofs,
     control: &ExecutionControl,
 ) -> Result<CandidateBuildResult, WasmExactSearchError> {
     let universe = problem.piece_source().materialized_universe().ok_or(
@@ -1765,6 +1872,7 @@ fn verify_candidate_with_projection(
         } else {
             BuildReachabilityMode::Existing
         },
+        movement_proofs,
     )?;
     graph_span.finish(graph.nodes.len() as u64);
     if let Some(span) = finesse_geometry_span {
@@ -3178,6 +3286,7 @@ impl BuildOrderGraph {
         completion: BuildCompletion,
         feasibility: Option<RealizationFeasibility>,
         reachability_mode: BuildReachabilityMode,
+        movement_proofs: &CandidateMovementProofs,
     ) -> Result<Self, WasmExactSearchError> {
         let legal_board_eligible = catalog.width() == 10
             && catalog.height() == 4
@@ -3196,6 +3305,7 @@ impl BuildOrderGraph {
             feasibility,
             reachability_mode,
             legal_board_eligible,
+            movement_proofs,
         )
     }
 
@@ -3213,6 +3323,7 @@ impl BuildOrderGraph {
         feasibility: Option<RealizationFeasibility>,
         reachability_mode: BuildReachabilityMode,
         legal_board_eligible: bool,
+        _movement_proofs: &CandidateMovementProofs,
     ) -> Result<Self, WasmExactSearchError> {
         if candidate.row_ids().len() > 15 {
             return Err(WasmExactSearchError::InvalidProblem(
@@ -3266,6 +3377,8 @@ impl BuildOrderGraph {
         });
         #[cfg(any(test, feature = "local-search-ab"))]
         let mut accepting_reached = false;
+        #[cfg(any(test, feature = "local-search-ab"))]
+        let mut movement_metrics = super::structural_order::MovementClearMetrics::default();
         let mut subset_cursor = 0usize;
         while subset_cursor < subset_queue.len() {
             let subset = usize::from(subset_queue[subset_cursor]);
@@ -3350,6 +3463,8 @@ impl BuildOrderGraph {
                 } else if piece_language_projection_only {
                     let scratch_start = edge_scratch.len();
                     let mut harddrop_edge = None;
+                    #[cfg(any(test, feature = "local-search-ab"))]
+                    let mut certified_edge = None;
                     for realization in catalog.instantiations(row_id, deleted_rows) {
                         // A normal lock must touch the floor or an occupied
                         // cell directly below it. This is the same necessary
@@ -3391,7 +3506,50 @@ impl BuildOrderGraph {
                             harddrop_edge = Some(edge);
                             break;
                         }
+                        #[cfg(any(test, feature = "local-search-ab"))]
+                        if _movement_proofs.enabled && certified_edge.is_none() {
+                            match _movement_proofs.answer(
+                                row.piece,
+                                realization,
+                                deleted_rows,
+                                board,
+                            ) {
+                                Some(true) => {
+                                    movement_metrics.reused_positive_locks += 1;
+                                    certified_edge = Some(edge);
+                                }
+                                Some(false) => {
+                                    movement_metrics.reused_closed_locks += 1;
+                                    let _ = edge_scratch.pop();
+                                }
+                                None if deleted_rows != 0 => {
+                                    movement_metrics.point_pose_attempts += 1;
+                                    if workspace
+                                        .reachability
+                                        .try_prove_lock_pose_unreachable_at_minimum(
+                                            catalog,
+                                            board,
+                                            row.piece,
+                                            problem.kick_profile().profile_id(),
+                                            realization,
+                                            LocalRelationRowFrame::new(
+                                                catalog.height(),
+                                                deleted_rows,
+                                            ),
+                                        )
+                                    {
+                                        movement_metrics.point_pose_proofs += 1;
+                                        let _ = edge_scratch.pop();
+                                    }
+                                }
+                                None => {}
+                            }
+                        }
                     }
+                    // Keep a valid hard-drop edge preferred. Otherwise a
+                    // positive proof can supply this Boolean operation edge.
+                    #[cfg(any(test, feature = "local-search-ab"))]
+                    let harddrop_edge = harddrop_edge.or(certified_edge);
                     let selected = if let Some(edge) = harddrop_edge {
                         Some(edge)
                     } else if edge_scratch.len() == scratch_start {
@@ -3536,6 +3694,8 @@ impl BuildOrderGraph {
                 piece_edges.len() as u32 - nodes[node_index].piece_edge_start
             };
         }
+        #[cfg(any(test, feature = "local-search-ab"))]
+        super::structural_order::record_movement_clear(movement_metrics);
         #[cfg(any(test, feature = "local-search-ab"))]
         let fuse_language = super::placement_dependency::enabled()
             && piece_language_projection_only
@@ -4147,6 +4307,7 @@ pub(super) fn exact_scoring_execution_graph_for_completion(
         completion,
         None,
         BuildReachabilityMode::Existing,
+        &CandidateMovementProofs::default(),
     ) {
         Ok(graph) => graph,
         Err(error) => {
@@ -4980,6 +5141,7 @@ mod v081_legal_child_admission_tests {
                 None,
                 mode,
                 true,
+                &CandidateMovementProofs::default(),
             )
             .unwrap();
             let generation = workspace.graph_generation;
@@ -5045,6 +5207,7 @@ mod v081_legal_child_admission_tests {
                 None,
                 mode,
                 true,
+                &CandidateMovementProofs::default(),
             )
             .unwrap();
             assert_eq!(graph.nodes.len(), 1);
@@ -5092,6 +5255,7 @@ mod v081_legal_child_admission_tests {
                         None,
                         mode,
                         true,
+                        &CandidateMovementProofs::default(),
                     )
                     .unwrap();
                     // Invert only reached IDs; pending admission is not a node.

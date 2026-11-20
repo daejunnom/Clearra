@@ -50,6 +50,33 @@ fn kick_table_wraps_offset_sequence_without_losing_order() {
 }
 
 #[test]
+fn normalized_kicks_preserve_the_ordered_anchor_destinations() {
+    use crate::kicks::SrsKicks;
+    use RotationState::{Right, Two, Zero};
+
+    let profile = SrsKicks::srs_plus_profile();
+    let anchors = |piece, from, to| {
+        profile
+            .sequence_for(KickTransition::new(piece, from, to))
+            .expect("supported transition")
+            .offsets()
+            .iter()
+            .map(|offset| normalized_kick_delta(piece, from, to, offset.dx(), offset.dy()))
+            .collect::<Vec<_>>()
+    };
+
+    assert_eq!(
+        anchors(PieceKind::I, Zero, Right),
+        [(2, -2), (3, -2), (0, -2), (0, -3), (3, 0)]
+    );
+    assert_eq!(
+        anchors(PieceKind::J, Zero, Two),
+        [(0, -1), (0, 0), (1, 0), (-1, 0), (1, -1), (-1, -1)]
+    );
+    assert_eq!(anchors(PieceKind::O, Zero, Right), [(0, 0)]);
+}
+
+#[test]
 fn kick_table_profile_reports_180_support_and_duplicates() {
     let transition = KickTransition::new(PieceKind::T, RotationState::Zero, RotationState::Two);
     let sequence = KickOffsetSequence::new(vec![KickOffset::new(0, 0)]);
