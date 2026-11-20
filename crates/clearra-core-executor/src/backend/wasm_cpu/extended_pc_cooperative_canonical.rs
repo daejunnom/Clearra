@@ -14,7 +14,7 @@ use clearra_core_domain::{
     solution::{ExtendedTilingSolutionKey, NormalizedTilingSolutionSetHasher},
 };
 
-use crate::resource::ExecutionMemoryBound;
+use crate::resource::{ExecutionMemoryBound, ExecutionMemoryOwner};
 
 use super::{
     super::{super::extended_board::ExtendedBoard, ExtendedTilingKey},
@@ -35,13 +35,24 @@ struct CanonicalFamily {
 }
 
 #[derive(Clone, Copy)]
-enum SourceKey<'a> {
+pub(super) enum SourceKey<'a> {
     Concrete(&'a ExtendedTilingKey),
     // Independent lexical/codec oracle, not an input to the product.
     Fixture(&'a str),
 }
 
-struct CanonicalReduction {
+enum MemoryAccount {
+    // Standalone bounded conformance. Count the cursor header here.
+    Standalone {
+        fixed_outside: u128,
+        bound: ExecutionMemoryBound,
+    },
+    // Same aggregate memory account and same request admission as the workers.
+    // The coordinator already charged the inline cursor header.
+    Shared(ExecutionMemoryOwner),
+}
+
+pub(super) struct CanonicalReduction {
     // All heap slots and all output slots are pre-admitted; moving a key from
     // one to the other does not copy or reallocate its text.
     pending: BinaryHeap<Reverse<String>>,
@@ -55,10 +66,7 @@ struct CanonicalReduction {
     height: u8,
     depth: usize,
     key_len: usize,
-    // Conservative bound on everything the caller keeps live for this phase.
-    // It must include source-row storage and exclude the cursor's storage.
-    fixed_outside: u128,
-    memory_bound: ExecutionMemoryBound,
+    account: MemoryAccount,
     key_bytes: u128,
 }
 
@@ -70,6 +78,41 @@ impl CanonicalReduction {
         depth: usize,
         fixed_outside: u128,
         memory_bound: ExecutionMemoryBound,
+    ) -> Result<Self, WasmExactSearchError> {
+        Self::new_with_account(
+            expected_rows,
+            height,
+            initial,
+            depth,
+            MemoryAccount::Standalone {
+                fixed_outside,
+                bound: memory_bound,
+            },
+        )
+    }
+
+    pub(super) fn new_shared(
+        expected_rows: usize,
+        height: u8,
+        initial: Board256Mask,
+        depth: usize,
+        owner: ExecutionMemoryOwner,
+    ) -> Result<Self, WasmExactSearchError> {
+        Self::new_with_account(
+            expected_rows,
+            height,
+            initial,
+            depth,
+            MemoryAccount::Shared(owner),
+        )
+    }
+
+    fn new_with_account(
+        expected_rows: usize,
+        height: u8,
+        initial: Board256Mask,
+        depth: usize,
+        account: MemoryAccount,
     ) -> Result<Self, WasmExactSearchError> {
         let cells = u16::from(height) * STANDARD_PC_BOARD_WIDTH;
         if !(STANDARD_PC_EXTENDED_MIN_LINES..=STANDARD_PC_MAX_LINES).contains(&height)
@@ -94,8 +137,7 @@ impl CanonicalReduction {
             height,
             depth,
             key_len,
-            fixed_outside,
-            memory_bound,
+            account,
             key_bytes: 0,
         };
         let slots = (expected_rows as u128)
@@ -115,16 +157,9 @@ impl CanonicalReduction {
     }
 
     fn guard(&self, future: u128) -> Result<(), WasmExactSearchError> {
-        let observed = self
-            .fixed_outside
-            .checked_add(size_of::<Self>() as u128)
+        let observed = (self.pending.capacity() as u128)
+            .checked_mul(size_of::<Reverse<String>>() as u128)
             .and_then(|bytes| bytes.checked_add(self.key_bytes))
-            .and_then(|bytes| {
-                bytes.checked_add(
-                    (self.pending.capacity() as u128)
-                        .checked_mul(size_of::<Reverse<String>>() as u128)?,
-                )
-            })
             .and_then(|bytes| {
                 bytes.checked_add(
                     (self.unique.capacity() as u128).checked_mul(size_of::<String>() as u128)?,
@@ -134,9 +169,22 @@ impl CanonicalReduction {
                 bytes.checked_add(self.hash.as_ref().map_or(0, |hash| hash.capacity()) as u128)
             })
             .ok_or_else(contract_error)?;
-        self.memory_bound
-            .ensure(observed, future)
-            .map_err(WasmExactSearchError::resource_admission)
+        match &self.account {
+            MemoryAccount::Standalone {
+                fixed_outside,
+                bound,
+            } => {
+                let observed = fixed_outside
+                    .checked_add(size_of::<Self>() as u128)
+                    .and_then(|bytes| bytes.checked_add(observed))
+                    .ok_or_else(contract_error)?;
+                bound.ensure(observed, future)
+            }
+            MemoryAccount::Shared(owner) => {
+                owner.ensure(observed.checked_add(future).ok_or_else(contract_error)?)
+            }
+        }
+        .map_err(WasmExactSearchError::resource_admission)
     }
 
     fn check_control(&self, control: &ExecutionControl) -> Result<(), WasmExactSearchError> {
@@ -152,7 +200,7 @@ impl CanonicalReduction {
     /// One source row per debit and at most one fixed-width string allocation.
     /// Use the concrete key's existing encoder after charging its exact format
     /// length, not a caller-supplied render callback or arbitrary iterator.
-    fn collect_one(
+    pub(super) fn collect_one(
         &mut self,
         remaining: &mut usize,
         control: &ExecutionControl,
@@ -216,7 +264,7 @@ impl CanonicalReduction {
     /// At most one lexically smallest source key per debit, even when it is a
     /// duplicate. Heap work per key grows logarithmically with admitted rows;
     /// there is no whole-family sort, dedup, hash, or retained-storage recount.
-    fn advance_output(
+    pub(super) fn advance_output(
         &mut self,
         remaining: &mut usize,
         control: &ExecutionControl,
@@ -248,6 +296,8 @@ impl CanonicalReduction {
                     .key_bytes
                     .checked_sub(key.capacity() as u128)
                     .ok_or_else(contract_error)?;
+                drop(key);
+                self.guard(0)?;
             } else {
                 let parsed = ExtendedTilingSolutionKey::parse_canonical(&key)
                     .map_err(|_| contract_error())?;
@@ -264,6 +314,17 @@ impl CanonicalReduction {
         self.guard(0)?;
         self.phase = Phase::Complete;
         Ok(true)
+    }
+
+    pub(super) fn family(&self) -> Option<(&[String], &str)> {
+        if self.phase != Phase::Complete {
+            return None;
+        }
+        Some((&self.unique, self.hash.as_deref()?))
+    }
+
+    pub(super) fn imported_rows(&self) -> usize {
+        self.accepted_rows
     }
 
     fn into_family(
@@ -292,6 +353,7 @@ fn storage_error() -> WasmExactSearchError {
 mod tests {
     use super::*;
     use crate::backend::wasm_cpu::extended_build_probability::ExtendedBuildProbabilitySession;
+    use crate::resource::SharedExecutionMemoryBudget;
     use clearra_core_domain::{
         execution_cancellation::ExecutionCancellationToken, piece::piece_kind::PieceKind,
     };
@@ -548,5 +610,53 @@ mod tests {
         assert!(!accepted.advance_output(&mut 1, &control).unwrap());
         assert!(accepted.advance_output(&mut 1, &control).unwrap());
         assert_eq!(accepted.into_family(&control).unwrap().keys, [key]);
+    }
+
+    #[test]
+    fn cooperative_canonical_reduction_charges_source_output_overlap() {
+        let control = ExecutionControl::default();
+        let key = horizontal();
+        let shared = size_of::<CanonicalReduction>() as u128;
+        let bookkeeping =
+            (size_of::<SharedExecutionMemoryBudget>() + 2 * size_of::<u128>() + 32) as u128;
+        let source_bytes = 128;
+        let simultaneous = shared
+            + bookkeeping
+            + source_bytes
+            + (size_of::<String>() + size_of::<Reverse<String>>() + key.len()) as u128;
+        for (cap, must_fit) in [(simultaneous - 1, false), (simultaneous, true)] {
+            let aggregate = SharedExecutionMemoryBudget::new(
+                ExecutionMemoryBound::for_test_cap(cap),
+                shared,
+                2,
+            )
+            .unwrap();
+            let source = aggregate.owner(0);
+            source.ensure(source_bytes).unwrap();
+            let mut cursor = CanonicalReduction::new_shared(
+                1,
+                HEIGHT,
+                fixture_initial(),
+                DEPTH,
+                aggregate.owner(1),
+            )
+            .unwrap();
+            let admitted = cursor.collect_one(&mut 1, &control, SourceKey::Fixture(&key));
+            assert!(cursor.family().is_none());
+            if must_fit {
+                assert!(admitted.unwrap());
+                assert_eq!(aggregate.admitted_peak_bytes(), simultaneous);
+                // Equivalent to the caller dropping the concrete source row.
+                source.ensure(0).unwrap();
+                assert!(!cursor.advance_output(&mut 1, &control).unwrap());
+                assert!(cursor.advance_output(&mut 1, &control).unwrap());
+                assert_eq!(cursor.family().unwrap().0, std::slice::from_ref(&key));
+            } else {
+                assert!(matches!(
+                    admitted,
+                    Err(WasmExactSearchError::ResourceAdmission(_))
+                ));
+            }
+        }
     }
 }

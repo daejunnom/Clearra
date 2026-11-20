@@ -32,25 +32,156 @@ struct WorkerResult {
     engine: ExtendedBuildProbabilitySession,
     digests: Vec<DigestSegment>,
     private_peak_bytes: u128,
+    #[cfg(test)]
+    bounded_rows: Option<BoundedWorkerRows>,
+    #[cfg(test)]
+    terminal_base: Option<u128>,
+}
+
+#[cfg(test)]
+const ROW_BLOCK_WIDTH: usize = 16;
+
+// Fixed-width blocks avoid whole-Vec copies during candidate reduction. The
+// one-key HashSet is only the immediate producer hand-off; its iterator never
+// becomes a terminal work cursor.
+#[cfg(test)]
+struct WorkerRowBlock {
+    next: Option<Box<Self>>,
+    keys: [Option<super::ExtendedTilingKey>; ROW_BLOCK_WIDTH],
+    used: usize,
+}
+
+#[cfg(test)]
+#[derive(Default)]
+struct BoundedWorkerRows {
+    head: Option<Box<WorkerRowBlock>>,
+    len: usize,
+    retained: u128,
+}
+
+#[cfg(test)]
+impl BoundedWorkerRows {
+    fn growth(&self) -> u128 {
+        if self
+            .head
+            .as_ref()
+            .is_none_or(|head| head.used == ROW_BLOCK_WIDTH)
+        {
+            size_of::<WorkerRowBlock>() as u128
+        } else {
+            0
+        }
+    }
+
+    fn nested_bytes(key: &super::ExtendedTilingKey) -> u128 {
+        (key.retained_bytes() - size_of::<super::ExtendedTilingKey>()) as u128
+    }
+
+    fn push_admitted(&mut self, key: super::ExtendedTilingKey) -> Result<(), WasmExactSearchError> {
+        let growth = self.growth();
+        let retained = self
+            .retained
+            .checked_add(growth)
+            .and_then(|bytes| bytes.checked_add(Self::nested_bytes(&key)))
+            .ok_or_else(projection_error)?;
+        let len = self.len.checked_add(1).ok_or_else(projection_error)?;
+        if growth != 0 {
+            self.head = Some(Box::new(WorkerRowBlock {
+                next: self.head.take(),
+                keys: std::array::from_fn(|_| None),
+                used: 0,
+            }));
+        }
+        let head = self.head.as_mut().ok_or_else(contract_error)?;
+        head.keys[head.used] = Some(key);
+        head.used += 1;
+        self.len = len;
+        self.retained = retained;
+        Ok(())
+    }
+
+    fn last(&self) -> Option<&super::ExtendedTilingKey> {
+        let head = self.head.as_ref()?;
+        head.keys.get(head.used.checked_sub(1)?)?.as_ref()
+    }
+
+    fn pop(&mut self) -> Result<super::ExtendedTilingKey, WasmExactSearchError> {
+        let head = self.head.as_mut().ok_or_else(contract_error)?;
+        head.used = head.used.checked_sub(1).ok_or_else(contract_error)?;
+        let key = head.keys[head.used].take().ok_or_else(contract_error)?;
+        self.len = self.len.checked_sub(1).ok_or_else(contract_error)?;
+        self.retained = self
+            .retained
+            .checked_sub(Self::nested_bytes(&key))
+            .ok_or_else(projection_error)?;
+        if head.used == 0 {
+            // This block is empty. Drop just it, not the rest of the chain.
+            self.head = head.next.take();
+            self.retained = self
+                .retained
+                .checked_sub(size_of::<WorkerRowBlock>() as u128)
+                .ok_or_else(projection_error)?;
+        }
+        Ok(key)
+    }
+}
+
+#[cfg(test)]
+impl Drop for BoundedWorkerRows {
+    fn drop(&mut self) {
+        // Cancellation may leave arbitrarily many blocks: never recurse.
+        while let Some(mut head) = self.head.take() {
+            self.head = head.next.take();
+        }
+    }
 }
 
 impl WorkerResult {
-    fn checked_retained_bytes(&self) -> Option<u128> {
-        let mut bytes = self.engine.checked_retained_bytes()?.checked_add(
-            (self.digests.capacity() as u128).checked_mul(size_of::<DigestSegment>() as u128)?,
-        )?;
+    fn checked_auxiliary_retained_bytes(&self) -> Option<u128> {
+        let mut bytes =
+            (self.digests.capacity() as u128).checked_mul(size_of::<DigestSegment>() as u128)?;
         for segment in &self.digests {
             bytes = bytes.checked_add(
                 (segment.values.capacity() as u128).checked_mul(size_of::<u64>() as u128)?,
             )?;
         }
+        #[cfg(test)]
+        if let Some(rows) = self.bounded_rows.as_ref() {
+            bytes = bytes.checked_add(rows.retained)?;
+        }
         Some(bytes)
     }
 
-    fn digest_retained_bytes(&self) -> Result<u128, WasmExactSearchError> {
-        self.checked_retained_bytes()
-            .and_then(|bytes| bytes.checked_sub(self.engine.checked_retained_bytes()?))
-            .ok_or_else(projection_error)
+    fn checked_retained_bytes(&self) -> Option<u128> {
+        self.engine
+            .checked_retained_bytes()?
+            .checked_add(self.checked_auxiliary_retained_bytes()?)
+    }
+
+    #[cfg(test)]
+    fn take_private_candidate_row(
+        &mut self,
+        probe: super::ExtendedTilingKey,
+    ) -> Result<(), WasmExactSearchError> {
+        if self.engine.buildable_tilings.is_empty() {
+            return Ok(());
+        }
+        // The preceding single ordinary Omit call may have produced only
+        // the matching exact key. Fail closed on a different producer shape.
+        if self.engine.buildable_tilings.len() != 1
+            || self.engine.buildable_tilings.capacity() > ROW_BLOCK_WIDTH
+        {
+            return Err(contract_error());
+        }
+        let rows = self.bounded_rows.as_mut().ok_or_else(contract_error)?;
+        self.engine.ensure_memory_bound(rows.growth())?;
+        let row = self
+            .engine
+            .buildable_tilings
+            .take(&probe)
+            .ok_or_else(contract_error)?;
+        drop(probe);
+        rows.push_admitted(row)
     }
 
     fn memory_owner(&self) -> Result<&ExecutionMemoryOwner, WasmExactSearchError> {
@@ -126,18 +257,40 @@ impl WorkerResult {
                     .ok_or_else(projection_error)?,
             )
             .map_err(WasmExactSearchError::resource_admission)?;
-        let digest =
-            super::ExtendedTilingKey::from_candidate(&self.engine.catalog, &candidate).digest();
+        let tiling = super::ExtendedTilingKey::from_candidate(&self.engine.catalog, &candidate);
+        let digest = tiling.digest();
+        #[cfg(not(test))]
+        drop(tiling);
+        #[cfg(test)]
+        let row_probe = self.bounded_rows.is_some().then_some(tiling);
         let before_nodes = self.engine.searched_build_nodes;
-        self.engine.coexisting_retained_bytes = self
-            .digest_retained_bytes()?
+        let auxiliary = self
+            .checked_auxiliary_retained_bytes()
+            .ok_or_else(projection_error)?
             .checked_add(branch.private_retained_bytes() as u128)
             .ok_or_else(projection_error)?;
+        #[cfg(test)]
+        let auxiliary = auxiliary
+            .checked_add(row_probe.as_ref().map_or(0, |key| key.retained_bytes()) as u128)
+            .ok_or_else(projection_error)?;
+        #[cfg(test)]
+        if row_probe.is_some() && !self.engine.buildable_tilings.is_empty() {
+            return Err(contract_error());
+        }
+        self.engine.coexisting_retained_bytes = auxiliary;
         self.engine.ensure_memory_bound(0)?;
         self.engine
             .process_candidate(candidate, Some(ordinal), control)?;
         if let Some(reason) = self.engine.truncated_reason {
             return Err(self.engine.pc_resource_stop_error(reason));
+        }
+        #[cfg(test)]
+        if let Some(key) = row_probe {
+            self.take_private_candidate_row(key)?;
+            self.engine.coexisting_retained_bytes = self
+                .checked_auxiliary_retained_bytes()
+                .and_then(|bytes| bytes.checked_add(branch.private_retained_bytes() as u128))
+                .ok_or_else(projection_error)?;
         }
         self.digests[digest_index].values.push(digest);
         self.engine.ensure_memory_bound(0)?;
@@ -704,6 +857,10 @@ fn run_worker(
         engine,
         digests: Vec::new(),
         private_peak_bytes: 0,
+        #[cfg(test)]
+        bounded_rows: None,
+        #[cfg(test)]
+        terminal_base: None,
     };
     let mut assigned = first;
     loop {
@@ -792,8 +949,13 @@ mod cooperative {
     };
     use crate::backend::wasm_cpu::extended_pc_search::checked_pc_family_problem_nested_retained_bytes;
     use crate::resource::{admit_budget_bound_search_execution, ExecutionAdmission};
-    use clearra_core_domain::resource::ResourceLeaseToken;
+    use clearra_core_domain::{
+        board::standard_pc_board::Board256Mask, objective::objective_kind::ObjectiveKind,
+        resource::ResourceLeaseToken,
+    };
     use clearra_problem::{BuildProbabilityField, SearchProblem};
+
+    use super::cooperative_canonical::{CanonicalReduction, SourceKey};
 
     pub(super) struct WorkerCursor {
         result: WorkerResult,
@@ -812,11 +974,18 @@ mod cooperative {
                     engine,
                     digests: Vec::new(),
                     private_peak_bytes: 0,
+                    bounded_rows: None,
+                    terminal_base: None,
                 },
                 branch: first,
                 digest: None,
                 done: false,
             }
+        }
+
+        fn retain_bounded_rows(mut self) -> Self {
+            self.result.bounded_rows = Some(BoundedWorkerRows::default());
+            self
         }
 
         fn advance(
@@ -1149,6 +1318,10 @@ mod cooperative {
         CollectSlots,
         Bind,
         Fold,
+        SettleCanonicalSources,
+        AdmitCanonical,
+        ImportCanonical,
+        FoldCanonical,
         Complete,
         Failed,
     }
@@ -1157,6 +1330,14 @@ mod cooperative {
         first: u128,
         count: u128,
         returned: Option<DigestSegment>,
+    }
+
+    pub(super) struct CompletedFacts<'a> {
+        pub(super) digest: u64,
+        pub(super) candidate_count: u128,
+        pub(super) workers: &'a [WorkerResult],
+        pub(super) keys: &'a [String],
+        pub(super) hash: &'a str,
     }
 
     /// Silent exact conformance only. Workers and the complete ordinal proof
@@ -1172,6 +1353,9 @@ mod cooperative {
         active_worker: Option<(WorkerResult, u128)>,
         workers: Vec<WorkerResult>,
         ranges: Vec<Range>,
+        canonical: Option<CanonicalReduction>,
+        source_rows: usize,
+        row_worker: usize,
         phase: DryPhase,
         width: usize,
         candidate_count: u128,
@@ -1192,6 +1376,7 @@ mod cooperative {
         ) -> Result<Self, WasmExactSearchError> {
             let width = problem.backend_policy().workers();
             if width < 2
+                || problem.objective().kind() != ObjectiveKind::All
                 || problem
                     .queue_observation_policy()
                     .requires_observation_policy()
@@ -1240,6 +1425,9 @@ mod cooperative {
                 active_worker: None,
                 workers: Vec::new(),
                 ranges: Vec::new(),
+                canonical: None,
+                source_rows: 0,
+                row_worker: 0,
                 phase: DryPhase::Prepare,
                 width,
                 candidate_count: 0,
@@ -1324,6 +1512,19 @@ mod cooperative {
                         }
                         self.phase = DryPhase::CollectSlots;
                     }
+                    DryPhase::ImportCanonical => {
+                        self.import_canonical_step(&mut remaining, control)?;
+                    }
+                    DryPhase::FoldCanonical => {
+                        if self
+                            .canonical
+                            .as_mut()
+                            .ok_or_else(contract_error)?
+                            .advance_output(&mut remaining, control)?
+                        {
+                            self.phase = DryPhase::Complete;
+                        }
+                    }
                     _ => {
                         // Every carrier transfer, branch registration, worker
                         // admission and terminal digest update spends a unit.
@@ -1393,7 +1594,8 @@ mod cooperative {
                             )
                             .map_err(WasmExactSearchError::resource_admission)?;
                     }
-                    self.slots.push(Some(WorkerCursor::new(worker, first)));
+                    self.slots
+                        .push(Some(WorkerCursor::new(worker, first).retain_bounded_rows()));
                     if self.slots.len() == self.width {
                         self.phase = DryPhase::StartWaves;
                     }
@@ -1429,6 +1631,8 @@ mod cooperative {
                 }
                 DryPhase::Bind => self.bind_step(),
                 DryPhase::Fold => self.fold_step(),
+                DryPhase::SettleCanonicalSources => self.settle_canonical_source(),
+                DryPhase::AdmitCanonical => self.admit_canonical_cursor(),
                 _ => Err(contract_error()),
             }
         }
@@ -1499,7 +1703,7 @@ mod cooperative {
             let admitted = SharedExecutionMemoryBudget::new(
                 self.root.memory_bound,
                 fixed,
-                self.width.checked_add(1).ok_or_else(projection_error)?,
+                self.width.checked_add(2).ok_or_else(projection_error)?,
             )
             .map_err(WasmExactSearchError::resource_admission)?;
             admitted
@@ -1536,6 +1740,18 @@ mod cooperative {
                     if count != worker.engine.processed_candidate_count as u128 {
                         return Err(contract_error());
                     }
+                    let rows = worker.bounded_rows.as_ref().ok_or_else(contract_error)?;
+                    if rows.len as u128 > count
+                        || !worker.engine.buildable_tilings.is_empty()
+                        || !worker.engine.supply_projection_complete
+                        || !worker.engine.pc_build_variant_count_complete
+                    {
+                        return Err(contract_error());
+                    }
+                    self.source_rows = self
+                        .source_rows
+                        .checked_add(rows.len)
+                        .ok_or_else(projection_error)?;
                     self.bound_candidates = self
                         .bound_candidates
                         .checked_add(count)
@@ -1557,13 +1773,13 @@ mod cooperative {
                 }
                 self.phase = DryPhase::Fold;
             }
-            // Segment backing moves, never clones. The original worker
-            // slot stays charged until this silent owner is dropped.
+            // Segment backing moves, never clones. The original worker slot
+            // stays charged until the segments are dropped after ordinal fold.
             Ok(())
         }
 
         fn fold_step(&mut self) -> Result<(), WasmExactSearchError> {
-            if let Some(range) = self.ranges.get(self.fold_range) {
+            if let Some(range) = self.ranges.get_mut(self.fold_range) {
                 let segment = range.returned.as_ref().ok_or_else(contract_error)?;
                 if let Some(value) = segment.values.get(self.fold_offset) {
                     if range.first.checked_add(self.fold_offset as u128)
@@ -1578,6 +1794,7 @@ mod cooperative {
                         .ok_or_else(projection_error)?;
                     self.fold_offset += 1;
                 } else {
+                    drop(range.returned.take());
                     self.fold_range += 1;
                     self.fold_offset = 0;
                 }
@@ -1588,17 +1805,120 @@ mod cooperative {
                 self.root.geometry.complete_parallel_enumeration(
                     usize::try_from(self.candidate_count).map_err(|_| projection_error())?,
                 )?;
-                self.phase = DryPhase::Complete;
+                self.phase = DryPhase::SettleCanonicalSources;
             }
             Ok(())
         }
 
-        pub(super) fn completed(&self) -> Option<(u64, u128, &[WorkerResult])> {
-            (self.phase == DryPhase::Complete).then_some((
-                self.digest,
-                self.candidate_count,
-                self.workers.as_slice(),
-            ))
+        fn settle_canonical_source(&mut self) -> Result<(), WasmExactSearchError> {
+            let Some(worker) = self.workers.get_mut(self.row_worker) else {
+                self.row_worker = 0;
+                self.phase = DryPhase::AdmitCanonical;
+                return Ok(());
+            };
+            let rows = worker.bounded_rows.as_ref().ok_or_else(contract_error)?;
+            // One source inventory phase per worker after all digest ranges
+            // are gone. Bind validated shared immutable ownership, so there
+            // is no need to rewalk the common problem here. The fixed-queue
+            // Omit worker has no retained observation, coverage-row, or
+            // score/replay graph collections.
+            let retained = worker
+                .engine
+                .checked_non_problem_retained_bytes()
+                .and_then(|bytes| bytes.checked_add(worker.checked_auxiliary_retained_bytes()?))
+                .ok_or_else(projection_error)?;
+            let base = retained
+                .checked_sub(rows.retained)
+                .ok_or_else(projection_error)?;
+            worker
+                .memory_owner()?
+                .ensure(retained)
+                .map_err(WasmExactSearchError::resource_admission)?;
+            worker.terminal_base = Some(base);
+            self.row_worker += 1;
+            Ok(())
+        }
+
+        fn admit_canonical_cursor(&mut self) -> Result<(), WasmExactSearchError> {
+            let aggregate = self.admitted_memory.as_ref().ok_or_else(contract_error)?;
+            let owner = aggregate.owner(self.width.checked_add(1).ok_or_else(projection_error)?);
+            self.canonical = Some(CanonicalReduction::new_shared(
+                self.source_rows,
+                self.root.field.height(),
+                Board256Mask::from_words(self.root.catalog.initial_board().words()),
+                self.root
+                    .problem
+                    .exact_pieces()
+                    .ok_or_else(contract_error)?,
+                owner,
+            )?);
+            self.phase = DryPhase::ImportCanonical;
+            Ok(())
+        }
+
+        fn import_canonical_step(
+            &mut self,
+            remaining: &mut usize,
+            control: &ExecutionControl,
+        ) -> Result<(), WasmExactSearchError> {
+            let Some(worker) = self.workers.get_mut(self.row_worker) else {
+                *remaining -= 1;
+                self.phase = DryPhase::FoldCanonical;
+                return Ok(());
+            };
+            let rows = worker.bounded_rows.as_mut().ok_or_else(contract_error)?;
+            if let Some(row) = rows.last() {
+                if !self
+                    .canonical
+                    .as_mut()
+                    .ok_or_else(contract_error)?
+                    .collect_one(remaining, control, SourceKey::Concrete(row))?
+                {
+                    return Err(contract_error());
+                }
+                // The aggregate reserved space for both source and encoded
+                // row. Release the worker's old credit only once dropped.
+                drop(rows.pop()?);
+            } else {
+                if rows.len != 0 || rows.retained != 0 {
+                    return Err(contract_error());
+                }
+                *remaining -= 1;
+                self.row_worker += 1;
+            }
+            let retained = worker
+                .terminal_base
+                .and_then(|base| base.checked_add(rows.retained))
+                .ok_or_else(projection_error)?;
+            // Only the live row backing can change here. Avoid re-inventory
+            // of the source problem or worker scratch for every emitted row.
+            worker
+                .memory_owner()?
+                .ensure(retained)
+                .map_err(WasmExactSearchError::resource_admission)
+        }
+
+        pub(super) fn completed(&self) -> Option<CompletedFacts<'_>> {
+            if self.phase != DryPhase::Complete {
+                return None;
+            }
+            let (keys, hash) = self.canonical.as_ref()?.family()?;
+            Some(CompletedFacts {
+                digest: self.digest,
+                candidate_count: self.candidate_count,
+                workers: &self.workers,
+                keys,
+                hash,
+            })
+        }
+
+        pub(super) fn canonical_last_row_imported(&self) -> bool {
+            self.phase == DryPhase::ImportCanonical
+                && self.source_rows != 0
+                && self
+                    .canonical
+                    .as_ref()
+                    .is_some_and(|cursor| cursor.imported_rows() == self.source_rows)
         }
 
         pub(super) fn catalog(&self) -> &Arc<super::super::ExtendedInverseCatalog> {

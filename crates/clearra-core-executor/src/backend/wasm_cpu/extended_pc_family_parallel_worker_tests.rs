@@ -349,20 +349,25 @@ fn assert_exact_composed_dry_run(
         terminal
     });
     assert!(done && pending > 10 && multi_unit);
-    let (digest, candidate_count, workers) = owner.completed().unwrap();
+    let completed = owner.completed().unwrap();
+    let workers = completed.workers;
     assert_eq!(workers.len(), WORKERS);
     assert_eq!(
         expected.field("packing_candidate_digest"),
-        Some(format!("{digest:016x}").as_str())
+        Some(format!("{:016x}", completed.digest).as_str())
     );
     assert_eq!(
         expected.usize_field("packing_candidate_count"),
-        Some(candidate_count as usize)
+        Some(completed.candidate_count as usize)
     );
 
-    // Read the already completed exact worker-owned data for differential
-    // evidence. This does not render or mint a public cooperative result.
-    let mut keys = std::collections::BTreeSet::new();
+    // Keys were transferred one at a time into the canonical cursor under
+    // this admission; there is no test-side re-reduction of worker sets.
+    assert_eq!(completed.keys, expected.normalized_solution_keys());
+    assert_eq!(
+        Some(completed.hash),
+        expected.field("normalized_solution_set_hash")
+    );
     let catalog = owner.catalog();
     let mut covered = PatternBitSet::new(workers[0].engine.covered_patterns.pattern_count());
     let mut variants = 0;
@@ -371,14 +376,11 @@ fn assert_exact_composed_dry_run(
         assert!(worker.engine.pc_build_variant_count_complete);
         variants += worker.engine.pc_build_variant_count;
         covered.union_with(&worker.engine.covered_patterns).unwrap();
-        for key in &worker.engine.buildable_tilings {
-            keys.insert(key.canonical_key(catalog.initial_board(), HEIGHT));
-        }
+        assert!(worker.engine.buildable_tilings.is_empty());
+        let rows = worker.bounded_rows.as_ref().unwrap();
+        assert_eq!((rows.len, rows.retained), (0, 0));
+        assert!(rows.head.is_none());
     }
-    assert_eq!(
-        keys.into_iter().collect::<Vec<_>>().as_slice(),
-        expected.normalized_solution_keys()
-    );
     assert_eq!(
         Some(variants.to_string().as_str()),
         expected.field("build_variant_count")
@@ -396,11 +398,17 @@ fn assert_exact_composed_dry_run(
     let mut owner = DryRunOwner::new(problem, field).unwrap();
     let token = ExecutionCancellationToken::new();
     let control = ExecutionControl::new(token.clone());
-    assert_eq!(owner.advance(1, &control).unwrap(), (false, 1));
+    assert!((0..100_000).any(|_| {
+        assert_eq!(owner.advance(1, &control).unwrap(), (false, 1));
+        owner.canonical_last_row_imported()
+    }));
+    assert!(owner.completed().is_none(), "last source row is not a seal");
     token.handle().cancel();
     assert!(matches!(
         owner.advance(2, &control),
         Err(WasmExactSearchError::Cancelled)
     ));
     assert!(owner.completed().is_none());
+    drop(owner);
+    assert!(admit_budget_bound_search_execution(problem, WORKERS).is_ok());
 }
