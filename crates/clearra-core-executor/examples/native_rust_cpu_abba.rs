@@ -2,7 +2,12 @@
 //!
 //! The C reference and Rust CPU consume the same compiled PC request, with
 //! external accelerators disabled. Do not link this target into a release.
+//! `--family-output` is for untimed diagnosis only. Verify its absolute path
+//! with `clearra-manage storage verify` before starting the supervised run.
 
+use std::fs::OpenOptions;
+use std::io::{self, BufWriter, Write};
+use std::path::{Component, Path, PathBuf};
 use std::{env, thread, time::Instant};
 
 use clearra_core_domain::{
@@ -22,6 +27,11 @@ use clearra_rules::profile::builtin_rules::srs_plus;
 use clearra_supply::queue::fixed_sequence::FixedSequence;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+
+const FAMILY_SCHEMA: &str = "clearra.native-rust-family.v1";
+const MAX_FAMILY_ROWS: usize = 1_000_000;
+const MAX_FAMILY_KEY_BYTES: usize = 1024;
+const MAX_FAMILY_BYTES: usize = 128 * 1024 * 1024;
 
 #[derive(Clone, Copy)]
 enum Arm {
@@ -219,6 +229,221 @@ fn report(
     })
 }
 
+struct FamilyOutput {
+    path: PathBuf,
+    source_commit: &'static str,
+}
+
+impl FamilyOutput {
+    fn prepare(path: &Path) -> Result<Self, String> {
+        let source_commit = option_env!("CLEARRA_SOURCE_COMMIT")
+            .filter(|commit| is_lower_hex(commit, 40))
+            .ok_or("family capture requires a compiled source commit")?;
+        if !path.is_absolute()
+            || path
+                .components()
+                .any(|component| matches!(component, Component::CurDir | Component::ParentDir))
+        {
+            return Err("family output requires a verified absolute path".into());
+        }
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .filter(|name| valid_family_filename(name))
+            .ok_or("family output requires a simple .ndjson filename")?;
+        let repo = env::current_dir()
+            .and_then(|dir| dir.canonicalize())
+            .map_err(|error| format!("resolve repository root: {error}"))?;
+        if !repo.join("config/clearra-management.v1.json").is_file() {
+            return Err("run family capture from the Clearra repository root".into());
+        }
+        let root = repo.join("_local/artifacts/benchmarks");
+        if root.canonicalize().ok().as_ref() != Some(&root) {
+            return Err("family capture requires an existing managed benchmark root".into());
+        }
+        let parent = path
+            .parent()
+            .ok_or("family output requires a parent directory")?
+            .canonicalize()
+            .map_err(|error| format!("resolve family output directory: {error}"))?;
+        if !parent.is_dir() || !parent.starts_with(root) {
+            return Err("family output must stay within the managed benchmark root".into());
+        }
+        let path = parent.join(name);
+        match path.symlink_metadata() {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(format!("inspect family output path: {error}")),
+            Ok(_) => return Err("family output file must not already exist".into()),
+        }
+        Ok(Self {
+            path,
+            source_commit,
+        })
+    }
+
+    fn write(
+        self,
+        case: &str,
+        arm: Arm,
+        workers: usize,
+        available_workers: usize,
+        result: &CoreExecutionResult,
+    ) -> Result<(), String> {
+        if result.bool_field("count_complete") != Some(true)
+            || result.bool_field("resource_truncated") != Some(false)
+            || result.bool_field("backend_fallback_used") != Some(false)
+        {
+            return Err(
+                "family capture requires complete, untruncated results without fallback".into(),
+            );
+        }
+        let expected_backend = match arm {
+            Arm::NativeC => "cpu",
+            Arm::RustCpu => "wasm-cpu",
+        };
+        let backend = result
+            .field("backend_selected")
+            .filter(|&backend| backend == expected_backend)
+            .ok_or("family capture backend does not match the requested arm")?;
+        let reported_workers = result
+            .usize_field("workers_used")
+            .filter(|width| (1..=workers).contains(width))
+            .ok_or("family capture lacks a valid reported worker width")?;
+        let keys = result.normalized_solution_keys();
+        if keys.is_empty()
+            || result.usize_field("normalized_unique_solution_count") != Some(keys.len())
+        {
+            return Err("family capture requires the entire materialized key family".into());
+        }
+        let set_hash = result
+            .field("normalized_solution_set_hash")
+            .filter(|hash| {
+                hash.strip_prefix("cts1:")
+                    .is_some_and(|hex| is_lower_hex(hex, 16))
+            })
+            .ok_or("family capture lacks a valid normalized solution set hash")?;
+        let keys = sorted_family_keys(keys)?;
+        let header = json!({
+            "kind": "header",
+            "schema": FAMILY_SCHEMA,
+            "source_commit": self.source_commit,
+            "arm": arm.label(),
+            "case": case,
+            "requested_workers": workers,
+            "available_parallelism": available_workers,
+            "backend_selected": backend,
+            "reported_workers": reported_workers,
+            "count_complete": true,
+            "resource_truncated": false,
+        });
+        write_family_file(&self.path, &header, &keys, set_hash)
+            .map_err(|error| format!("write family capture: {error}"))
+    }
+}
+
+fn is_lower_hex(value: &str, length: usize) -> bool {
+    value.len() == length
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn valid_family_filename(name: &str) -> bool {
+    name.strip_suffix(".ndjson").is_some_and(|stem| {
+        !stem.is_empty()
+            && stem
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    })
+}
+
+fn sorted_family_keys(keys: &[String]) -> Result<Vec<&str>, String> {
+    if keys.len() > MAX_FAMILY_ROWS {
+        return Err("family capture row limit exceeded".into());
+    }
+    if keys.iter().any(|key| {
+        key.is_empty() || key.len() > MAX_FAMILY_KEY_BYTES || key.chars().any(char::is_control)
+    }) {
+        return Err("family capture contains an invalid normalized key".into());
+    }
+    let mut sorted: Vec<&str> = keys.iter().map(String::as_str).collect();
+    sorted.sort_unstable();
+    if sorted.windows(2).any(|pair| pair[0] == pair[1]) {
+        return Err("family capture contains duplicate normalized keys".into());
+    }
+    Ok(sorted)
+}
+
+struct BoundedOutput<W> {
+    inner: W,
+    remaining: usize,
+}
+
+impl<W: Write> Write for BoundedOutput<W> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        if buf.len() > self.remaining {
+            return Err(io::Error::other("family capture exceeds byte limit"));
+        }
+        let written = self.inner.write(buf)?;
+        self.remaining -= written;
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+fn write_family_file(path: &Path, header: &Value, keys: &[&str], set_hash: &str) -> io::Result<()> {
+    // The solver may run for minutes between preflight and opening the file.
+    let parent = path
+        .parent()
+        .ok_or_else(|| io::Error::other("missing output directory"))?;
+    if parent.canonicalize()? != parent {
+        return Err(io::Error::other(
+            "family output directory changed after preflight",
+        ));
+    }
+    let file = OpenOptions::new().write(true).create_new(true).open(path)?;
+    let mut output = BoundedOutput {
+        inner: BufWriter::new(file),
+        remaining: MAX_FAMILY_BYTES,
+    };
+    write_family_records(&mut output, header, keys, set_hash)?;
+    output.flush()?;
+    output.inner.get_ref().sync_all()
+}
+
+fn write_family_records(
+    mut output: impl Write,
+    header: &Value,
+    keys: &[&str],
+    set_hash: &str,
+) -> io::Result<()> {
+    serde_json::to_writer(&mut output, header)?;
+    output.write_all(b"\n")?;
+    let mut hash = Sha256::new();
+    for &key in keys {
+        output.write_all(b"{\"kind\":\"key\",\"key\":")?;
+        serde_json::to_writer(&mut output, key)?;
+        output.write_all(b"}\n")?;
+        // Keys are UTF-8 byte ordered. Length prefixes avoid concatenation
+        // ambiguity and agree with the sequence digest's framing.
+        hash.update((key.len() as u64).to_le_bytes());
+        hash.update(key.as_bytes());
+    }
+    serde_json::to_writer(
+        &mut output,
+        &json!({
+            "kind": "footer",
+            "count": keys.len(),
+            "keys_sha256": format!("{:x}", hash.finalize()),
+            "solution_set_hash": set_hash,
+        }),
+    )?;
+    output.write_all(b"\n")
+}
+
 fn main() -> Result<(), String> {
     if env::var("CLEARRA_RUNTIME_SUPERVISED").as_deref() != Ok("1")
         || env::var("CLEARRA_RUNTIME_PROFILE").as_deref() != Ok("benchmark-search")
@@ -227,26 +452,102 @@ fn main() -> Result<(), String> {
             "run this example under clearra-manage runtime run --profile benchmark-search".into(),
         );
     }
-    let [arm, case, workers]: [String; 3] = env::args()
-        .skip(1)
-        .collect::<Vec<_>>()
-        .try_into()
-        .map_err(|_| "expected <arm> <case> <workers>".to_owned())?;
-    let arm = Arm::parse(&arm)?;
+    let args: Vec<_> = env::args().skip(1).collect();
+    let (arm, case, workers, family_output) = match args.as_slice() {
+        [arm, case, workers] => (arm, case, workers, None),
+        [arm, case, workers, option, path] if option == "--family-output" => {
+            let output = FamilyOutput::prepare(Path::new(path))?;
+            (arm, case, workers, Some(output))
+        }
+        _ => {
+            return Err(
+                "expected <arm> <case> <workers> [--family-output <absolute .ndjson path>]".into(),
+            )
+        }
+    };
+    let arm = Arm::parse(arm)?;
     let available_workers = thread::available_parallelism().map_or(1, |available| available.get());
     let workers = workers
         .parse::<usize>()
         .ok()
         .filter(|&workers| (1..=available_workers).contains(&workers))
         .ok_or_else(|| format!("workers must be 1..={available_workers}"))?;
-    let problem = compile_case(&case, workers)?;
+    if family_output.is_some() && workers > 256 {
+        return Err("family capture supports at most 256 requested workers".into());
+    }
+    let problem = compile_case(case, workers)?;
     let control = ExecutionControl::default();
     let started = Instant::now();
     let result = arm.execute(&problem, &control)?;
     let solve_ns = started.elapsed().as_nanos();
-    println!(
-        "{}",
-        report(&case, arm, workers, available_workers, solve_ns, &result)
-    );
+    let sample = report(case, arm, workers, available_workers, solve_ns, &result);
+    if let Some(output) = family_output {
+        output.write(case, arm, workers, available_workers, &result)?;
+    }
+    println!("{sample}");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn capture_filename_disallows_alternate_streams_and_hidden_paths() {
+        assert!(valid_family_filename("native-c_full-p7p4.ndjson"));
+        assert!(!valid_family_filename(".env.ndjson"));
+        assert!(!valid_family_filename("data:stream.ndjson"));
+        assert!(!valid_family_filename("capture.json"));
+    }
+
+    #[test]
+    fn capture_keys_are_byte_sorted_and_unique() {
+        let keys = ["z", "β", "aa", "α", "a"].map(String::from);
+        assert_eq!(
+            sorted_family_keys(&keys).unwrap(),
+            ["a", "aa", "z", "α", "β"]
+        );
+        assert!(sorted_family_keys(&["key".to_owned(), "key".to_owned()]).is_err());
+        assert!(sorted_family_keys(&["two\nlines".to_owned()]).is_err());
+        assert!(sorted_family_keys(&["x".repeat(MAX_FAMILY_KEY_BYTES + 1)]).is_err());
+    }
+
+    #[test]
+    fn capture_footer_is_final_lf_terminated_and_hashes_framed_utf8() {
+        let mut out = Vec::new();
+        let header = json!({"kind": "header"});
+        write_family_records(&mut out, &header, &["ab", "é"], "cts1:0123456789abcdef").unwrap();
+        let output = String::from_utf8(out).unwrap();
+        assert!(output.ends_with('\n'));
+        let lines: Vec<Value> = output
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let expected = Sha256::digest(b"\x02\0\0\0\0\0\0\0ab\x02\0\0\0\0\0\0\0\xc3\xa9");
+        assert_eq!(
+            lines,
+            [
+                header,
+                json!({"kind": "key", "key": "ab"}),
+                json!({"kind": "key", "key": "é"}),
+                json!({
+                    "kind": "footer",
+                    "count": 2,
+                    "keys_sha256": format!("{expected:x}"),
+                    "solution_set_hash": "cts1:0123456789abcdef",
+                }),
+            ]
+        );
+    }
+
+    #[test]
+    fn family_write_rejects_overflow_without_writing_excess_bytes() {
+        let mut limited = BoundedOutput {
+            inner: Vec::new(),
+            remaining: 2,
+        };
+        limited.write_all(b"ab").unwrap();
+        assert!(limited.write_all(b"c").is_err());
+        assert_eq!(limited.inner, b"ab");
+    }
 }
