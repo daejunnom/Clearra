@@ -531,6 +531,29 @@ pub(super) struct ReachabilityWorkspace {
     metrics: ReachabilityMetrics,
 }
 
+/// Which part of the original ordered kick list may supply the last edge.
+#[cfg(any(test, feature = "local-search-ab"))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum KickWitnessOrder {
+    RawFirst,
+    LaterOnly,
+    // Product experiments currently attribute first and later kicks
+    // separately. Keep the inclusive policy available to independent tests.
+    #[allow(dead_code)]
+    Any,
+}
+
+/// Sufficient occupancy bounds for one exact Boolean lock. The owner must
+/// keep the catalog, piece, pose, ordered kick profile and deleted-row frame
+/// fixed; neither a different target nor a different evidence mode inherits
+/// the proof.
+#[cfg(any(test, feature = "local-search-ab"))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct KickWitnessGuard {
+    pub(super) minimum: u64,
+    pub(super) maximum: u64,
+}
+
 #[derive(Clone, Copy)]
 struct PreparedRelationWindows {
     contexts: [Result<PreparedRelationContext, crate::legal_board::ProviderStatus>; 3],
@@ -757,7 +780,7 @@ impl ReachabilityWorkspace {
         realization: InstantiatedRealization,
         frame: Option<LocalRelationRowFrame>,
     ) -> bool {
-        self.try_prove_last_kick_lock_interval::<false>(
+        self.try_last_kick_lock_interval::<false>(
             catalog,
             minimum_board,
             maximum_board,
@@ -765,7 +788,9 @@ impl ReachabilityWorkspace {
             profile,
             realization,
             frame,
+            KickWitnessOrder::RawFirst,
         )
+        .is_some()
     }
 
     /// Prove Boolean reachability by a raw kick index strictly above zero.
@@ -784,7 +809,7 @@ impl ReachabilityWorkspace {
         realization: InstantiatedRealization,
         frame: Option<LocalRelationRowFrame>,
     ) -> bool {
-        self.try_prove_last_kick_lock_interval::<true>(
+        self.try_last_kick_lock_interval::<false>(
             catalog,
             minimum_board,
             maximum_board,
@@ -792,12 +817,17 @@ impl ReachabilityWorkspace {
             profile,
             realization,
             frame,
+            KickWitnessOrder::LaterOnly,
         )
+        .is_some()
     }
 
+    /// Return a reusable witness guard rather than only acknowledging the
+    /// input interval. It can accept incomparable occupancies, but only while
+    /// holding the same physical pose and original-row frame fixed.
     #[cfg(any(test, feature = "local-search-ab"))]
     #[allow(clippy::too_many_arguments)]
-    fn try_prove_last_kick_lock_interval<const LATER_ONLY: bool>(
+    pub(super) fn try_kick_witness_guard(
         &mut self,
         catalog: &GeometryCatalog,
         minimum_board: u64,
@@ -806,38 +836,68 @@ impl ReachabilityWorkspace {
         profile: KickTableProfileId,
         realization: InstantiatedRealization,
         frame: Option<LocalRelationRowFrame>,
-    ) -> bool {
+        order: KickWitnessOrder,
+    ) -> Option<KickWitnessGuard> {
+        self.try_last_kick_lock_interval::<true>(
+            catalog,
+            minimum_board,
+            maximum_board,
+            piece,
+            profile,
+            realization,
+            frame,
+            order,
+        )
+    }
+
+    #[cfg(any(test, feature = "local-search-ab"))]
+    #[allow(clippy::too_many_arguments)]
+    fn try_last_kick_lock_interval<const RETAIN_GUARD: bool>(
+        &mut self,
+        catalog: &GeometryCatalog,
+        minimum_board: u64,
+        maximum_board: u64,
+        piece: PieceKind,
+        profile: KickTableProfileId,
+        realization: InstantiatedRealization,
+        frame: Option<LocalRelationRowFrame>,
+        order: KickWitnessOrder,
+    ) -> Option<KickWitnessGuard> {
         if self.kick_profile_id != profile
             || builtin_kick_profile(profile).is_none()
             || minimum_board & !maximum_board != 0
         {
-            return false;
+            return None;
         }
-        let Some(frame) = frame.filter(|frame| frame.target_height() == catalog.height()) else {
-            return false;
-        };
+        let frame = frame.filter(|frame| frame.target_height() == catalog.height())?;
         if !frame.accepts_physical_board(catalog.width(), maximum_board | realization.lock_mask)
             || realization.lock_mask.count_ones() != 4
         {
-            return false;
+            return None;
         }
+        let frame_mask = if RETAIN_GUARD {
+            let live_bits = u32::from(catalog.width()) * u32::from(frame.surviving_rows());
+            1_u64.checked_shl(live_bits)? - 1
+        } else {
+            maximum_board
+        };
         let template = self.template(catalog, piece);
         let state = State {
             rotation: realization.rotation,
             x: realization.x,
             y: realization.lock_y,
         };
-        let Some(target) = state_index(template.width, template.ceiling, state) else {
-            return false;
-        };
+        let target = state_index(template.width, template.ceiling, state)?;
         if template.state_masks[target] != realization.lock_mask {
-            return false;
+            return None;
         }
-        monotone_reachability::proves_last_kick_lock_interval::<LATER_ONLY>(
+        monotone_reachability::last_kick_lock_interval::<RETAIN_GUARD>(
             template,
             minimum_board,
             maximum_board,
             target,
+            frame_mask,
+            order,
         )
     }
 

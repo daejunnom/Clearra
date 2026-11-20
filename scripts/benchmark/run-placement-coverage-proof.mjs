@@ -32,6 +32,7 @@ const MODES = Object.freeze({
   CLEARRA_CONDITIONAL_ORDER: "0",
   CLEARRA_TERMINAL_IDENTITY_MOVE: "0",
   CLEARRA_ORDERED_KICK_INTERVAL: "0",
+  CLEARRA_ORDERED_KICK_GUARD_REUSE: "0",
   CLEARRA_ILC_LAZY_FRAME: "0",
   CLEARRA_NO_ENTRY_COMPONENTS: "0",
   CLEARRA_SAME_TILE_PARENT_REUSE: "0",
@@ -126,6 +127,7 @@ function summaryEquals(value, expected) {
 
 export function validatedProofArm(report, receipt, step, options, binarySha, outputMode = "solution-coverage") {
   const fixture = options.fixture;
+  const neutralFollowOn = (name) => !Object.hasOwn(report, name) || report[name] === "0";
   requireThat(report?.schema === "clearra.placement-graph-benchmark.v1" &&
     report.case === fixture.name && report.valid === true &&
     Array.isArray(report.validation_errors) && report.validation_errors.length === 0 &&
@@ -134,10 +136,10 @@ export function validatedProofArm(report, receipt, step, options, binarySha, out
     report.mode === "1" && report.structural_mode === "1" &&
     report.static_influence_mode === "0" && report.translation_interval_mode === "0" &&
     report.incremental_domain_mode === "0" && report.first_kick_interval_mode === "0" &&
-    (report.minimum_domain_cutoff_mode ?? "0") === "0" &&
-    (report.minimum_domain_work_mode ?? "0") === "0" &&
+    neutralFollowOn("minimum_domain_cutoff_mode") && neutralFollowOn("minimum_domain_work_mode") &&
     report.conditional_order_mode === "0" && report.terminal_identity_move_mode === "0" &&
     (report.ordered_kick_interval_mode ?? "0") === "0" &&
+    neutralFollowOn("ordered_kick_guard_reuse_mode") &&
     (report.ilc_lazy_frame_mode ?? "0") === "0" &&
     (report.no_entry_components_mode ?? "0") === "0" &&
     (report.same_tile_parent_reuse_mode ?? "0") === "0",

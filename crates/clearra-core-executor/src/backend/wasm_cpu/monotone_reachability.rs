@@ -29,8 +29,8 @@ use crate::conditioned_local_relation::LocalRelationRowFrame;
 
 use super::{
     builtin_kick_profile, grounded_index, normalized_kick_delta, piece_index,
-    reverse_rotation_is_first_success, state_from_index, state_index, ReachabilityTemplate, State,
-    INVALID_STATE_INDEX, INVALID_STATE_MASK,
+    reverse_rotation_is_first_success, state_from_index, state_index, KickWitnessGuard,
+    KickWitnessOrder, ReachabilityTemplate, State, INVALID_STATE_INDEX, INVALID_STATE_MASK,
 };
 
 /// A positive-only proof attempt using no rotations. Failure means Unknown for
@@ -229,11 +229,10 @@ pub(super) fn proves_translation_lock_interval(
     })
 }
 
-/// The original narrow mode admits only raw kick index zero, even if the
-/// first geometrically retained edge has a later raw index. The ordered mode
-/// admits only raw kick indices above zero, when every earlier geometrically
-/// valid candidate is blocked on minimum. All other earlier kicks were
-/// removed by the template's occupancy-independent geometry checks.
+/// The raw-first and later-only modes retain separate experimental scopes.
+/// The unrestricted mode can accept either, but it still requires an actual
+/// first-success path. Geometrically invalid candidates have already been
+/// removed by the exact template's occupancy-independent compilation.
 ///
 /// The exact template provides the sky seeds and every movement edge. Follow
 /// only straight downward translations to the source, checking occupancy on
@@ -241,79 +240,137 @@ pub(super) fn proves_translation_lock_interval(
 /// remains first-success on every intermediate board. The final lock is
 /// grounded on minimum, and the precursor need not itself be grounded. No
 /// board, pose graph, or visited set is allocated or retained by this check.
-pub(super) fn proves_last_kick_lock_interval<const LATER_ONLY: bool>(
+///
+/// For reuse, retain one actual occupied bit per earlier valid destination
+/// (shared bits can serve more than one) and, when needed, one grounding bit.
+/// Forbid exactly the selected descent and final-pose footprints. These
+/// sufficient conditions give an interval wider than the observed boards
+/// without assuming the ordered-kick system itself is monotone.
+pub(super) fn last_kick_lock_interval<const RETAIN_GUARD: bool>(
     template: &ReachabilityTemplate,
     minimum: u64,
     maximum: u64,
     target: usize,
-) -> bool {
-    let Some(&target_mask) = template.state_masks.get(target) else {
-        return false;
-    };
-    if target_mask == INVALID_STATE_MASK
-        || maximum & target_mask != 0
-        || !grounded_index(template, minimum, target)
-    {
-        return false;
+    frame_mask: u64,
+    order: KickWitnessOrder,
+) -> Option<KickWitnessGuard> {
+    let target_mask = *template.state_masks.get(target)?;
+    if target_mask == INVALID_STATE_MASK || maximum & target_mask != 0 {
+        return None;
     }
+    let grounding = if RETAIN_GUARD {
+        let down = template.translation_targets[target][0];
+        if down == INVALID_STATE_INDEX {
+            0
+        } else {
+            let supported = minimum & template.state_masks[usize::from(down)];
+            if supported == 0 {
+                return None;
+            }
+            one_set_bit(supported)
+        }
+    } else {
+        if !grounded_index(template, minimum, target) {
+            return None;
+        }
+        0
+    };
     let begin = template.reverse_rotation_offsets[target] as usize;
     let end = template.reverse_rotation_offsets[target + 1] as usize;
-    for &edge in &template.reverse_rotation_sources[begin..end] {
+    'edge: for &edge in &template.reverse_rotation_sources[begin..end] {
         let source = usize::from(edge.source);
         let transition = source * 3 + usize::from(edge.slot);
         let first = template.rotation_target_offsets[transition] as usize;
-        if LATER_ONLY {
-            let chosen = first + usize::from(edge.prior_target_count);
-            if usize::from(template.rotation_targets[chosen]) != target
-                || template.rotation_kick_indices[chosen] == 0
-                || !reverse_rotation_is_first_success(template, minimum, edge)
-            {
-                continue;
-            }
-        } else if edge.prior_target_count != 0
-            || template.rotation_kick_indices[first] != 0
-            || usize::from(template.rotation_targets[first]) != target
-        {
+        let chosen = first + usize::from(edge.prior_target_count);
+        if usize::from(template.rotation_targets[chosen]) != target {
             continue;
         }
-        if has_straight_descent_from_sky(template, maximum, source) {
-            return true;
+        let raw_index = template.rotation_kick_indices[chosen];
+        match order {
+            KickWitnessOrder::RawFirst if raw_index != 0 || chosen != first => continue,
+            KickWitnessOrder::LaterOnly if raw_index == 0 => continue,
+            KickWitnessOrder::RawFirst | KickWitnessOrder::LaterOnly | KickWitnessOrder::Any => {}
         }
+        let mut required = grounding;
+        if RETAIN_GUARD {
+            for &earlier in &template.rotation_targets[first..chosen] {
+                let blockers = minimum & template.state_masks[usize::from(earlier)];
+                if blockers == 0 {
+                    continue 'edge;
+                }
+                if required & blockers == 0 {
+                    required |= one_set_bit(blockers);
+                }
+            }
+        } else if chosen != first && !reverse_rotation_is_first_success(template, minimum, edge) {
+            continue;
+        }
+        let Some(path) = straight_descent_clear_mask::<RETAIN_GUARD>(template, maximum, source)
+        else {
+            continue;
+        };
+        if !RETAIN_GUARD {
+            return Some(KickWitnessGuard { minimum, maximum });
+        }
+        let allowed = frame_mask & !(path | target_mask);
+        if required & !allowed != 0 || maximum & !allowed != 0 {
+            continue;
+        }
+        debug_assert_eq!(required & !minimum, 0);
+        return Some(KickWitnessGuard {
+            minimum: required,
+            maximum: allowed,
+        });
     }
-    false
+    None
 }
 
+fn one_set_bit(nonzero: u64) -> u64 {
+    nonzero & nonzero.wrapping_neg()
+}
+
+#[cfg(test)]
 fn has_straight_descent_from_sky(
     template: &ReachabilityTemplate,
     maximum: u64,
     source: usize,
 ) -> bool {
+    straight_descent_clear_mask::<false>(template, maximum, source).is_some()
+}
+
+fn straight_descent_clear_mask<const RETAIN_GUARD: bool>(
+    template: &ReachabilityTemplate,
+    maximum: u64,
+    source: usize,
+) -> Option<u64> {
     let source_pose = state_from_index(template.width, template.ceiling, source);
     let seed_pose = State {
         y: source_pose.y.max(template.height as i8),
         ..source_pose
     };
-    let Some(mut pose) = state_index(template.width, template.ceiling, seed_pose) else {
-        return false;
-    };
+    let mut pose = state_index(template.width, template.ceiling, seed_pose)?;
     if !template.is_sky_seed(pose) {
-        return false;
+        return None;
     }
+    let mut footprint = 0;
     for _ in source_pose.y..=seed_pose.y {
         let mask = template.state_masks[pose];
         if mask == INVALID_STATE_MASK || maximum & mask != 0 {
-            return false;
+            return None;
+        }
+        if RETAIN_GUARD {
+            footprint |= mask;
         }
         if pose == source {
-            return true;
+            return Some(footprint);
         }
         let down = template.translation_targets[pose][0];
         if down == INVALID_STATE_INDEX {
-            return false;
+            return None;
         }
         pose = usize::from(down);
     }
-    false
+    None
 }
 
 /// Constructible only after the registry/profile monotonicity proof succeeds.
@@ -704,6 +761,138 @@ mod tests {
     }
 
     #[test]
+    fn ordered_kick_witness_guard_reuses_incomparable_boards_without_weakening_first_success() {
+        use crate::reachability_reference::reference_spawn_lock_anchors;
+
+        const TARGET: u64 = 0x201c;
+        const LEFT_PRIOR: u64 = 1 << 11;
+        const RIGHT_PRIOR: u64 = 1 << 14;
+        const BLOCKERS: u64 = LEFT_PRIOR | RIGHT_PRIOR;
+        const BASE: u64 = 0x4802;
+        const OBSERVED: u64 = BASE | (1 << 28);
+        const SIBLING: u64 = BASE | (1 << 29);
+        const PATH_CELL: u64 = 1 << 22;
+        let profile = KickTableProfileId::Srs90;
+        let catalog = super::super::GeometryCatalog::compile_for_required_cells_on_dimensions(
+            10, 3, BASE, TARGET,
+        )
+        .unwrap();
+        let lock = super::super::InstantiatedRealization {
+            lock_mask: TARGET,
+            rotation: RotationState::Zero,
+            x: 2,
+            lock_y: 0,
+        };
+        let frame = LocalRelationRowFrame::new(3, 0);
+        let mut workspace = super::super::ReachabilityWorkspace::default();
+        workspace.configure_kick_profile(profile, false);
+        let mut witness = |minimum, maximum, order| {
+            workspace.try_kick_witness_guard(
+                &catalog,
+                minimum,
+                maximum,
+                PieceKind::T,
+                profile,
+                lock,
+                frame,
+                order,
+            )
+        };
+        let guard = witness(OBSERVED, OBSERVED, KickWitnessOrder::LaterOnly).unwrap();
+        assert_eq!(guard.minimum, BLOCKERS);
+        assert_eq!(
+            Some(guard),
+            witness(OBSERVED, OBSERVED, KickWitnessOrder::Any),
+        );
+        assert_eq!(
+            None,
+            witness(OBSERVED, OBSERVED, KickWitnessOrder::RawFirst),
+        );
+        let guard_accepts = |board| guard.minimum & !board == 0 && board & !guard.maximum == 0;
+        assert_ne!(OBSERVED & !SIBLING, 0);
+        assert_ne!(SIBLING & !OBSERVED, 0);
+        for board in [OBSERVED, SIBLING, BLOCKERS, BASE] {
+            assert!(guard_accepts(board), "board {board:#x}");
+            let exact = reference_spawn_lock_anchors(10, 3, board, PieceKind::T, profile).unwrap();
+            assert_ne!(exact[0] & (1 << 2), 0, "board {board:#x}");
+        }
+        for blocker in [LEFT_PRIOR, RIGHT_PRIOR] {
+            let without = SIBLING & !blocker;
+            assert!(!guard_accepts(without));
+            assert_eq!(None, witness(without, SIBLING, KickWitnessOrder::Any));
+        }
+        // A successful endpoint is existential evidence only. The lower
+        // endpoint lacks the necessary first blocker despite upper success.
+        let missing_left = SIBLING & !LEFT_PRIOR;
+        let exact =
+            reference_spawn_lock_anchors(10, 3, missing_left, PieceKind::T, profile).unwrap();
+        assert_eq!(exact[0] & (1 << 2), 0);
+        assert_eq!(SIBLING & PATH_CELL, 0);
+        assert_eq!(TARGET & PATH_CELL, 0);
+        assert!(!guard_accepts(SIBLING | PATH_CELL));
+        assert!(!guard_accepts(SIBLING | (1 << 30)), "outside frame");
+    }
+
+    #[test]
+    fn ordered_kick_witness_guard_retains_naturally_nonfloor_support() {
+        use crate::reachability_reference::reference_spawn_lock_anchors;
+
+        // Translate the same ordered-kick cavity up one row and leave the
+        // concrete target supported by a single unrelated cell beneath it.
+        const SUPPORT: u64 = 1 << 2;
+        const BASE: u64 = (0x4802_u64 << 10) | SUPPORT;
+        const TARGET: u64 = 0x201c_u64 << 10;
+        let profile = KickTableProfileId::Srs90;
+        let catalog = super::super::GeometryCatalog::compile_for_required_cells_on_dimensions(
+            10, 4, BASE, TARGET,
+        )
+        .unwrap();
+        let lock = super::super::InstantiatedRealization {
+            lock_mask: TARGET,
+            rotation: RotationState::Zero,
+            x: 2,
+            lock_y: 1,
+        };
+        let frame = LocalRelationRowFrame::new(4, 0);
+        let mut workspace = super::super::ReachabilityWorkspace::default();
+        workspace.configure_kick_profile(profile, false);
+        let guard = workspace
+            .try_kick_witness_guard(
+                &catalog,
+                BASE,
+                BASE,
+                PieceKind::T,
+                profile,
+                lock,
+                frame,
+                KickWitnessOrder::LaterOnly,
+            )
+            .unwrap();
+        assert_eq!(guard.minimum, ((1 << 11 | 1 << 14) << 10) | SUPPORT);
+        assert_eq!(BASE & !guard.maximum, 0);
+        let exact = reference_spawn_lock_anchors(10, 4, BASE, PieceKind::T, profile).unwrap();
+        assert_ne!(exact[0] & (1 << 12), 0);
+        let unsupported = BASE & !SUPPORT;
+        assert_ne!(guard.minimum & !unsupported, 0);
+        assert_eq!(
+            None,
+            workspace.try_kick_witness_guard(
+                &catalog,
+                unsupported,
+                BASE,
+                PieceKind::T,
+                profile,
+                lock,
+                frame,
+                KickWitnessOrder::Any,
+            ),
+        );
+        let exact =
+            reference_spawn_lock_anchors(10, 4, unsupported, PieceKind::T, profile).unwrap();
+        assert_eq!(exact[0] & (1 << 12), 0);
+    }
+
+    #[test]
     fn first_kick_interval_preserves_the_discovered_t_lock_on_both_boards() {
         use crate::reachability_reference::reference_spawn_lock_anchors;
 
@@ -751,6 +940,20 @@ mod tests {
                 lock,
                 frame,
             ));
+            let guard = workspace
+                .try_kick_witness_guard(
+                    &catalog,
+                    INITIAL,
+                    INITIAL | O,
+                    PieceKind::T,
+                    profile,
+                    lock,
+                    frame,
+                    KickWitnessOrder::RawFirst,
+                )
+                .unwrap();
+            assert_eq!(guard.minimum, 0, "raw first kick and floor support");
+            assert_eq!((INITIAL | O) & !guard.maximum, 0);
             for board in [INITIAL, INITIAL | O] {
                 let exact = reference_spawn_lock_anchors(10, 3, board, PieceKind::T, profile)
                     .expect("supported independent oracle");

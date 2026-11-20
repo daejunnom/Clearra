@@ -1515,6 +1515,9 @@ fn verify_candidate_for_completion_mode(
             eligible && super::structural_order::first_kick_intervals_enabled();
         proofs.ordered_kick_enabled =
             eligible && super::structural_order::ordered_kick_intervals_enabled();
+        proofs.kick_guard_reuse_enabled = (proofs.first_kick_enabled
+            || proofs.ordered_kick_enabled)
+            && super::structural_order::ordered_kick_guard_reuse_enabled();
         if eligible && super::structural_order::enabled() {
             if let Some(result) = verify_certified_poset(
                 problem,
@@ -1597,6 +1600,8 @@ struct CandidateMovementProofs {
     #[cfg(any(test, feature = "local-search-ab"))]
     ordered_kick_enabled: bool,
     #[cfg(any(test, feature = "local-search-ab"))]
+    kick_guard_reuse_enabled: bool,
+    #[cfg(any(test, feature = "local-search-ab"))]
     intervals: [Option<(
         super::placement_poset::MovementProofQuery,
         MovementProofSource,
@@ -1617,6 +1622,165 @@ enum PositiveEdgeProof {
     Reused,
     FirstKick,
     OrderedKick,
+    ReusedKickGuard,
+}
+
+#[cfg(any(test, feature = "local-search-ab"))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct KickGuardKey {
+    piece: PieceKind,
+    realization: super::catalog::InstantiatedRealization,
+    deleted: u16,
+    order: super::reachability::KickWitnessOrder,
+}
+
+#[cfg(any(test, feature = "local-search-ab"))]
+#[derive(Clone, Copy)]
+struct KickGuardEntry {
+    key: KickGuardKey,
+    guard: super::reachability::KickWitnessGuard,
+}
+
+// Keep this candidate's graph witnesses separate from certificates retained
+// by partial poset/conditional admission. Neither can evict the other's proof.
+#[cfg(any(test, feature = "local-search-ab"))]
+#[derive(Default)]
+struct CandidateKickGuardLedger {
+    entries: [Option<KickGuardEntry>; 16],
+    len: usize,
+    conflicted: bool,
+}
+
+#[cfg(any(test, feature = "local-search-ab"))]
+impl CandidateKickGuardLedger {
+    fn proves(&self, key: KickGuardKey, board: u64) -> bool {
+        !self.conflicted
+            && self.entries[..self.len].iter().flatten().any(|entry| {
+                entry.key == key
+                    && entry.guard.minimum & !board == 0
+                    && board & !entry.guard.maximum == 0
+            })
+    }
+
+    fn remember(
+        &mut self,
+        entry: KickGuardEntry,
+        source: &CandidateMovementProofs,
+        board: u64,
+    ) -> bool {
+        use super::placement_poset::MovementProof;
+        if self.conflicted {
+            return false;
+        }
+        if entry.guard.minimum & !board != 0
+            || board & !entry.guard.maximum != 0
+            || source.intervals[..source.len]
+                .iter()
+                .flatten()
+                .any(|(query, _)| {
+                    query.piece == entry.key.piece
+                        && query.realization == entry.key.realization
+                        && query.deleted == entry.key.deleted
+                        && matches!(query.proof, MovementProof::Closed)
+                        // The negative holds on every superset of its minimum.
+                        // There is a contradictory point if the joined minima
+                        // fit wholly within the positive interval's maximum.
+                        && (query.minimum | entry.guard.minimum) & !entry.guard.maximum == 0
+                })
+        {
+            self.len = 0;
+            self.conflicted = true;
+            return false;
+        }
+        if self.len == self.entries.len()
+            || self.entries[..self.len].iter().flatten().any(|prior| {
+                prior.key == entry.key
+                    && prior.guard.minimum & !entry.guard.minimum == 0
+                    && entry.guard.maximum & !prior.guard.maximum == 0
+            })
+        {
+            return false;
+        }
+        self.entries[self.len] = Some(entry);
+        self.len += 1;
+        true
+    }
+}
+
+#[cfg(any(test, feature = "local-search-ab"))]
+#[allow(clippy::too_many_arguments)]
+fn try_kick_interval_edge(
+    reachability: &mut ReachabilityWorkspace,
+    catalog: &GeometryCatalog,
+    board: u64,
+    piece: PieceKind,
+    profile: clearra_rules::kicks::KickTableProfileId,
+    realization: super::catalog::InstantiatedRealization,
+    frame: LocalRelationRowFrame,
+    order: super::reachability::KickWitnessOrder,
+    source: &CandidateMovementProofs,
+    ledger: &mut CandidateKickGuardLedger,
+    axis_metrics: &mut super::structural_order::KickIntervalMetrics,
+    guard_metrics: &mut super::structural_order::KickGuardReuseMetrics,
+) -> Option<PositiveEdgeProof> {
+    use super::reachability::KickWitnessOrder;
+
+    let kind = match order {
+        KickWitnessOrder::RawFirst => PositiveEdgeProof::FirstKick,
+        KickWitnessOrder::LaterOnly => PositiveEdgeProof::OrderedKick,
+        KickWitnessOrder::Any => return None,
+    };
+    if source.kick_guard_reuse_enabled {
+        let key = KickGuardKey {
+            piece,
+            realization,
+            deleted: u16::from(frame.deleted_original_rows()),
+            order,
+        };
+        if ledger.proves(key, board) {
+            return Some(PositiveEdgeProof::ReusedKickGuard);
+        }
+        axis_metrics.attempts += 1;
+        let guard = reachability.try_kick_witness_guard(
+            catalog,
+            board,
+            board,
+            piece,
+            profile,
+            realization,
+            Some(frame),
+            order,
+        )?;
+        axis_metrics.proofs += 1;
+        guard_metrics.constructed += 1;
+        let stored = ledger.remember(KickGuardEntry { key, guard }, source, board);
+        guard_metrics.stored += u64::from(stored);
+        return (!ledger.conflicted).then_some(kind);
+    }
+    axis_metrics.attempts += 1;
+    let proved = match order {
+        KickWitnessOrder::RawFirst => reachability.try_prove_first_kick_lock_interval(
+            catalog,
+            board,
+            board,
+            piece,
+            profile,
+            realization,
+            Some(frame),
+        ),
+        KickWitnessOrder::LaterOnly => reachability.try_prove_ordered_kick_lock_interval(
+            catalog,
+            board,
+            board,
+            piece,
+            profile,
+            realization,
+            Some(frame),
+        ),
+        KickWitnessOrder::Any => return None,
+    };
+    axis_metrics.proofs += u64::from(proved);
+    proved.then_some(kind)
 }
 
 #[cfg(any(test, feature = "local-search-ab"))]
@@ -3624,8 +3788,85 @@ impl BuildOrderGraph {
         feasibility: Option<RealizationFeasibility>,
         reachability_mode: BuildReachabilityMode,
         legal_board_eligible: bool,
-        _movement_proofs: &CandidateMovementProofs,
+        movement_proofs: &CandidateMovementProofs,
     ) -> Result<Self, WasmExactSearchError> {
+        #[cfg(any(test, feature = "local-search-ab"))]
+        let states_before = movement_proofs
+            .kick_guard_reuse_enabled
+            .then(|| workspace.reachability.generated_state_count());
+        let graph = Self::build_pass(
+            problem,
+            catalog,
+            candidate,
+            projection,
+            workspace,
+            piece_language_projection_only,
+            completion,
+            feasibility,
+            reachability_mode,
+            legal_board_eligible,
+            movement_proofs,
+        )?;
+        #[cfg(not(any(test, feature = "local-search-ab")))]
+        {
+            graph.ok_or(WasmExactSearchError::InvalidProblem(
+                "wasm_exact_build_pass_witness_conflict",
+            ))
+        }
+        #[cfg(any(test, feature = "local-search-ab"))]
+        {
+            if let Some(graph) = graph {
+                return Ok(graph);
+            }
+            let states_before = states_before.ok_or(WasmExactSearchError::InvalidProblem(
+                "wasm_exact_build_pass_witness_conflict",
+            ))?;
+            // A conflict may invalidate an earlier edge. Start one fresh
+            // graph generation without any candidate proof shortcut.
+            super::structural_order::record_ordered_kick_guard_reuse(
+                super::structural_order::KickGuardReuseMetrics {
+                    exact_retries: 1,
+                    ..super::structural_order::KickGuardReuseMetrics::default()
+                },
+            );
+            let mut graph = Self::build_pass(
+                problem,
+                catalog,
+                candidate,
+                projection,
+                workspace,
+                piece_language_projection_only,
+                completion,
+                feasibility,
+                reachability_mode,
+                legal_board_eligible,
+                &CandidateMovementProofs::default(),
+            )?
+            .ok_or(WasmExactSearchError::InvalidProblem(
+                "wasm_exact_build_pass_witness_conflict",
+            ))?;
+            graph.reachability_states = workspace
+                .reachability
+                .generated_state_count()
+                .saturating_sub(states_before);
+            Ok(graph)
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build_pass(
+        problem: &SearchProblem,
+        catalog: &GeometryCatalog,
+        candidate: &GeometryCandidate,
+        projection: &mut CandidateProjection,
+        workspace: &mut BuildUpWorkspace,
+        piece_language_projection_only: bool,
+        completion: BuildCompletion,
+        feasibility: Option<RealizationFeasibility>,
+        reachability_mode: BuildReachabilityMode,
+        legal_board_eligible: bool,
+        _movement_proofs: &CandidateMovementProofs,
+    ) -> Result<Option<Self>, WasmExactSearchError> {
         if candidate.row_ids().len() > 15 {
             return Err(WasmExactSearchError::InvalidProblem(
                 "wasm_buildup_operation_count_exceeds_bitset",
@@ -3686,8 +3927,13 @@ impl BuildOrderGraph {
         let mut ordered_kick_metrics = super::structural_order::KickIntervalMetrics::default();
         #[cfg(any(test, feature = "local-search-ab"))]
         let mut conditional_metrics = super::structural_order::ConditionalOrderMetrics::default();
+        #[cfg(any(test, feature = "local-search-ab"))]
+        let mut kick_guards = CandidateKickGuardLedger::default();
+        #[cfg(any(test, feature = "local-search-ab"))]
+        let mut kick_guard_metrics = super::structural_order::KickGuardReuseMetrics::default();
         let mut subset_cursor = 0usize;
-        while subset_cursor < subset_queue.len() {
+        #[allow(unused_labels)]
+        'build_subsets: while subset_cursor < subset_queue.len() {
             let subset = usize::from(subset_queue[subset_cursor]);
             subset_cursor += 1;
             let node_index = workspace.graph_subset_node_ids[subset] as usize;
@@ -3854,45 +4100,48 @@ impl BuildOrderGraph {
                                     let frame =
                                         LocalRelationRowFrame::new(catalog.height(), deleted_rows);
                                     let profile = problem.kick_profile().profile_id();
-                                    if _movement_proofs.first_kick_enabled && frame.is_some() {
-                                        first_kick_metrics.attempts += 1;
-                                        if workspace
-                                            .reachability
-                                            .try_prove_first_kick_lock_interval(
+                                    if let Some(frame) = frame {
+                                        use super::reachability::KickWitnessOrder;
+                                        for (enabled, order, metrics) in [
+                                            (
+                                                _movement_proofs.first_kick_enabled,
+                                                KickWitnessOrder::RawFirst,
+                                                &mut first_kick_metrics,
+                                            ),
+                                            (
+                                                _movement_proofs.ordered_kick_enabled,
+                                                KickWitnessOrder::LaterOnly,
+                                                &mut ordered_kick_metrics,
+                                            ),
+                                        ] {
+                                            if !enabled {
+                                                continue;
+                                            }
+                                            let proof = try_kick_interval_edge(
+                                                &mut workspace.reachability,
                                                 catalog,
-                                                board,
                                                 board,
                                                 row.piece,
                                                 profile,
                                                 realization,
                                                 frame,
-                                            )
-                                        {
-                                            first_kick_metrics.proofs += 1;
-                                            certified_edge =
-                                                Some((edge, PositiveEdgeProof::FirstKick));
-                                            continue;
+                                                order,
+                                                _movement_proofs,
+                                                &mut kick_guards,
+                                                metrics,
+                                                &mut kick_guard_metrics,
+                                            );
+                                            if kick_guards.conflicted {
+                                                break 'build_subsets;
+                                            }
+                                            if let Some(proof) = proof {
+                                                certified_edge = Some((edge, proof));
+                                                break;
+                                            }
                                         }
                                     }
-                                    if _movement_proofs.ordered_kick_enabled && frame.is_some() {
-                                        ordered_kick_metrics.attempts += 1;
-                                        if workspace
-                                            .reachability
-                                            .try_prove_ordered_kick_lock_interval(
-                                                catalog,
-                                                board,
-                                                board,
-                                                row.piece,
-                                                profile,
-                                                realization,
-                                                frame,
-                                            )
-                                        {
-                                            ordered_kick_metrics.proofs += 1;
-                                            certified_edge =
-                                                Some((edge, PositiveEdgeProof::OrderedKick));
-                                            continue;
-                                        }
+                                    if certified_edge.is_some() {
+                                        continue;
                                     }
                                     if _movement_proofs.enabled && deleted_rows != 0 {
                                         movement_metrics.point_pose_attempts += 1;
@@ -3927,6 +4176,9 @@ impl BuildOrderGraph {
                                 }
                                 PositiveEdgeProof::OrderedKick => {
                                     ordered_kick_metrics.selected_locks += 1;
+                                }
+                                PositiveEdgeProof::ReusedKickGuard => {
+                                    kick_guard_metrics.reused_selected += 1;
                                 }
                             }
                             edge
@@ -4085,6 +4337,24 @@ impl BuildOrderGraph {
         #[cfg(any(test, feature = "local-search-ab"))]
         super::structural_order::record_conditional_order(conditional_metrics);
         #[cfg(any(test, feature = "local-search-ab"))]
+        {
+            if kick_guards.conflicted {
+                // Recycle un-published graph scratch, but keep only exact
+                // template/reachability caches and exact physical projection.
+                workspace.graph_nodes = nodes;
+                workspace.graph_edges = edges;
+                workspace.graph_piece_edges = piece_edges;
+                workspace.graph_subset_queue = subset_queue;
+                workspace.graph_edge_scratch = edge_scratch;
+                kick_guard_metrics.conflicts += 1;
+                // Reuses in an aborted pass are not selected output edges.
+                kick_guard_metrics.reused_selected = 0;
+                super::structural_order::record_ordered_kick_guard_reuse(kick_guard_metrics);
+                return Ok(None);
+            }
+            super::structural_order::record_ordered_kick_guard_reuse(kick_guard_metrics);
+        }
+        #[cfg(any(test, feature = "local-search-ab"))]
         let fuse_language = super::placement_dependency::enabled()
             && piece_language_projection_only
             && problem.count_policy() == PcCountPolicy::CountUnique
@@ -4156,7 +4426,7 @@ impl BuildOrderGraph {
             }
             graph
         };
-        Ok(graph)
+        Ok(Some(graph))
     }
 
     pub fn max_depth(&self) -> usize {
@@ -5287,6 +5557,237 @@ fn occupied_rows(width: u8, mut cells: u64) -> u16 {
         rows |= 1_u16 << (cell / width as usize);
     }
     rows
+}
+
+#[cfg(test)]
+mod kick_guard_reuse_tests {
+    use super::*;
+    use clearra_pc_graph::request::{
+        PcExecutionPolicy, PcQueueInput, PcScenarioBoard, PcScenarioQuery,
+        PcSolutionProbabilityPolicy, PieceWindow, RequestedSearchBackend, SupplyWindowSize,
+    };
+    use clearra_problem::{ProblemCompiler, SearchOutputPolicy};
+    use clearra_rules::{kicks::KickTableProfileId, profile::builtin_rules::srs};
+
+    use super::super::{placement_dependency, structural_order};
+
+    const BOARD: u64 = 0x3f0f_83f4;
+    const PLACEMENTS: [(PieceKind, u64); 3] = [
+        (PieceKind::I, 0x00f0_0000),
+        (PieceKind::O, 0x0c03),
+        (PieceKind::T, 0x7008),
+    ];
+
+    fn problem() -> SearchProblem {
+        let query = PcScenarioQuery::new(
+            PcScenarioBoard::standard_10(3, BOARD),
+            PcQueueInput::standard_7_bag(),
+            PieceWindow::new(3),
+        )
+        .with_rule(srs())
+        .with_allow_hold(false)
+        .with_exact_pieces(Some(3))
+        .with_supply_window_size(SupplyWindowSize::new(3))
+        .with_count_policy(PcCountPolicy::CountUnique)
+        .with_solution_probability_policy(PcSolutionProbabilityPolicy::Include)
+        .with_retained_trace_limit(0)
+        .with_execution_policy(
+            PcExecutionPolicy::mvp_default()
+                .with_requested_backend(RequestedSearchBackend::Cpu)
+                .with_allow_backend_fallback(false)
+                .with_workers(1)
+                .with_exact_legal_board_enabled(false)
+                .with_conditioned_reachability_enabled(false)
+                .with_tablebase_requested(false)
+                .with_max_memory_mib(Some(256)),
+        );
+        ProblemCompiler::compile_scenario_pc(&query)
+            .unwrap()
+            .with_output_policy(SearchOutputPolicy::CoverageSummary)
+    }
+
+    #[test]
+    fn candidate_kick_guard_reuse_replaces_raw_attempts_without_changing_coverage() {
+        let problem = problem();
+        let run = |first, reuse| {
+            structural_order::with_ordered_kick_guard_reuse_mode(reuse, || {
+                structural_order::with_ordered_kick_interval_mode(false, || {
+                    structural_order::with_first_kick_interval_mode(first, || {
+                        structural_order::with_conditional_order_mode(false, || {
+                            structural_order::with_movement_clear_mode(false, || {
+                                structural_order::with_mode(false, || {
+                                    placement_dependency::with_mode(false, || {
+                                        crate::WasmCpuSearchBackend::execute_with_control(
+                                            &problem,
+                                            &ExecutionControl::default(),
+                                        )
+                                        .unwrap()
+                                    })
+                                    .0
+                                })
+                            })
+                        })
+                    })
+                })
+            })
+        };
+        let (_, reuse_alone) = run(false, true);
+        let (baseline, before) = run(true, false);
+        let (candidate, after) = run(true, true);
+        assert_eq!(reuse_alone.ordered_kick_guard_reuse, Default::default());
+        assert_eq!(before.ordered_kick_guard_reuse, Default::default());
+        assert_eq!(after.ordered_kick_interval, Default::default());
+        assert_eq!(
+            baseline.coverage_pattern_words(),
+            candidate.coverage_pattern_words()
+        );
+        assert!(!baseline.solution_coverages().is_empty());
+        assert_eq!(
+            baseline.solution_coverages(),
+            candidate.solution_coverages()
+        );
+        let guard = after.ordered_kick_guard_reuse;
+        assert!(guard.constructed >= guard.stored && guard.stored > 0);
+        assert!(guard.reused_selected > 0);
+        assert!(after.first_kick_interval.attempts < before.first_kick_interval.attempts);
+        assert_eq!(guard.conflicts, 0);
+        assert_eq!(guard.exact_retries, 0);
+    }
+
+    #[test]
+    fn candidate_kick_guard_conflict_discards_the_provisional_graph_and_retries_once() {
+        use super::super::{
+            placement_poset::{MovementProof, MovementProofQuery},
+            reachability::{KickWitnessGuard, KickWitnessOrder},
+        };
+
+        let profile = KickTableProfileId::Srs90;
+        let problem = problem();
+        let required = PLACEMENTS.iter().fold(0, |mask, &(_, cells)| mask | cells);
+        let catalog =
+            GeometryCatalog::compile_for_required_cells_on_dimensions(10, 3, BOARD, required)
+                .unwrap();
+        let row_ids = PLACEMENTS.map(|(piece, cells)| catalog.skeleton_id(piece, cells).unwrap());
+        let candidate = GeometryCandidate::from_rows(&catalog, 0, &row_ids).unwrap();
+        let realization = catalog
+            .instantiations(row_ids[2], 0)
+            .find(|pose| pose.rotation == RotationState::Two)
+            .unwrap();
+        let mut checker = ReachabilityWorkspace::default();
+        checker.configure_kick_profile(profile, false);
+        let frame = LocalRelationRowFrame::new(3, 0);
+        let guard = checker
+            .try_kick_witness_guard(
+                &catalog,
+                BOARD,
+                BOARD,
+                PieceKind::T,
+                profile,
+                realization,
+                frame,
+                KickWitnessOrder::RawFirst,
+            )
+            .unwrap();
+        let later_board = BOARD | PLACEMENTS[1].1;
+        assert_eq!(guard.minimum & !later_board, 0);
+        assert_eq!(later_board & !guard.maximum, 0);
+
+        let mut ledger = CandidateKickGuardLedger::default();
+        let key = KickGuardKey {
+            piece: PieceKind::T,
+            realization,
+            deleted: 0,
+            order: KickWitnessOrder::RawFirst,
+        };
+        assert!(ledger.remember(
+            KickGuardEntry { key, guard },
+            &CandidateMovementProofs::default(),
+            BOARD,
+        ));
+        assert!(ledger.proves(key, later_board));
+        assert!(!ledger.proves(KickGuardKey { deleted: 1, ..key }, later_board));
+        assert!(!ledger.proves(
+            KickGuardKey {
+                order: KickWitnessOrder::LaterOnly,
+                ..key
+            },
+            later_board
+        ));
+        assert!(!ledger.proves(key, guard.maximum | realization.lock_mask));
+        assert!(!ledger.remember(
+            KickGuardEntry {
+                key,
+                guard: KickWitnessGuard {
+                    minimum: !BOARD,
+                    maximum: BOARD
+                }
+            },
+            &CandidateMovementProofs::default(),
+            BOARD,
+        ));
+        assert!(ledger.conflicted && !ledger.proves(key, later_board));
+
+        let mut disputed = CandidateMovementProofs {
+            first_kick_enabled: true,
+            kick_guard_reuse_enabled: true,
+            ..CandidateMovementProofs::default()
+        };
+        // Inject an intentionally invalid, previously retained Closed fact
+        // whose minimum does not match the initial point but intersects the
+        // later board interval. Detect it when first constructing the guard,
+        // discard any partially built edges, and rerun the ordinary graph.
+        disputed.insert(
+            MovementProofQuery {
+                piece: PieceKind::T,
+                realization,
+                deleted: 0,
+                minimum: PLACEMENTS[1].1,
+                proof: MovementProof::Closed,
+            },
+            MovementProofSource::ConditionalOrder,
+        );
+        let run = |proofs| {
+            structural_order::with_mode(false, || {
+                placement_dependency::with_mode(false, || {
+                    let mut workspace = BuildUpWorkspace::default();
+                    workspace
+                        .reachability
+                        .configure_kick_profile(profile, false);
+                    let mut projection = CandidateProjection::compile(
+                        &catalog,
+                        &candidate,
+                        &mut workspace,
+                        BuildCompletion::ClearToEmpty,
+                    )
+                    .unwrap();
+                    let graph = BuildOrderGraph::build_with_legal_board_admission(
+                        &problem,
+                        &catalog,
+                        &candidate,
+                        &mut projection,
+                        &mut workspace,
+                        true,
+                        BuildCompletion::ClearToEmpty,
+                        None,
+                        BuildReachabilityMode::Existing,
+                        false,
+                        proofs,
+                    )
+                    .unwrap();
+                    assert!(graph.is_live());
+                    (graph.nodes.len(), graph.edges)
+                })
+                .0
+            })
+        };
+        let (expected, _) = run(&CandidateMovementProofs::default());
+        let (actual, observed) = run(&disputed);
+        assert_eq!(actual, expected);
+        let metrics = observed.ordered_kick_guard_reuse;
+        assert_eq!(metrics.conflicts, 1);
+        assert_eq!(metrics.exact_retries, 1);
+        assert_eq!(metrics.reused_selected, 0);
+    }
 }
 
 #[cfg(test)]

@@ -30,7 +30,17 @@ pub struct StructuralOrderMetrics {
     pub movement_clear: MovementClearMetrics,
     pub first_kick_interval: KickIntervalMetrics,
     pub ordered_kick_interval: KickIntervalMetrics,
+    pub ordered_kick_guard_reuse: KickGuardReuseMetrics,
     pub conditional_order: ConditionalOrderMetrics,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct KickGuardReuseMetrics {
+    pub constructed: u64,
+    pub stored: u64,
+    pub reused_selected: u64,
+    pub conflicts: u64,
+    pub exact_retries: u64,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -96,6 +106,7 @@ thread_local! {
     static MOVEMENT_CLEAR_MODE: Cell<Option<bool>> = const { Cell::new(None) };
     static FIRST_KICK_INTERVAL_MODE: Cell<Option<bool>> = const { Cell::new(None) };
     static ORDERED_KICK_INTERVAL_MODE: Cell<Option<bool>> = const { Cell::new(None) };
+    static KICK_GUARD_REUSE_MODE: Cell<Option<bool>> = const { Cell::new(None) };
     static CONDITIONAL_ORDER_MODE: Cell<Option<bool>> = const { Cell::new(None) };
     static METRICS: Cell<StructuralOrderMetrics> = Cell::new(StructuralOrderMetrics::default());
 }
@@ -143,6 +154,23 @@ pub(super) fn ordered_kick_intervals_enabled() -> bool {
         static MODE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
         *MODE.get_or_init(|| {
             std::env::var("CLEARRA_ORDERED_KICK_INTERVAL").is_ok_and(|value| value == "1")
+        })
+    }
+    #[cfg(not(feature = "local-search-ab"))]
+    {
+        false
+    }
+}
+
+pub(super) fn ordered_kick_guard_reuse_enabled() -> bool {
+    if let Some(mode) = KICK_GUARD_REUSE_MODE.with(Cell::get) {
+        return mode;
+    }
+    #[cfg(feature = "local-search-ab")]
+    {
+        static MODE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *MODE.get_or_init(|| {
+            std::env::var("CLEARRA_ORDERED_KICK_GUARD_REUSE").is_ok_and(|value| value == "1")
         })
     }
     #[cfg(not(feature = "local-search-ab"))]
@@ -207,7 +235,8 @@ mod process_totals {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use super::{
-        ConditionalOrderMetrics, KickIntervalMetrics, MovementClearMetrics, StructuralOrderMetrics,
+        ConditionalOrderMetrics, KickGuardReuseMetrics, KickIntervalMetrics, MovementClearMetrics,
+        StructuralOrderMetrics,
     };
 
     // Bypass totals count successful certificates. Analytic totals also count
@@ -235,6 +264,11 @@ mod process_totals {
     static ORDERED_KICK_ATTEMPTS: AtomicU64 = AtomicU64::new(0);
     static ORDERED_KICK_PROOFS: AtomicU64 = AtomicU64::new(0);
     static ORDERED_KICK_SELECTED: AtomicU64 = AtomicU64::new(0);
+    static KICK_GUARDS_CONSTRUCTED: AtomicU64 = AtomicU64::new(0);
+    static KICK_GUARDS_STORED: AtomicU64 = AtomicU64::new(0);
+    static KICK_GUARDS_REUSED: AtomicU64 = AtomicU64::new(0);
+    static KICK_GUARD_CONFLICTS: AtomicU64 = AtomicU64::new(0);
+    static KICK_GUARD_EXACT_RETRIES: AtomicU64 = AtomicU64::new(0);
     static CONDITIONAL_ATTEMPTS: AtomicU64 = AtomicU64::new(0);
     static CONDITIONAL_CERTIFIED: AtomicU64 = AtomicU64::new(0);
     static CONDITIONAL_EMPTY: AtomicU64 = AtomicU64::new(0);
@@ -282,6 +316,13 @@ mod process_totals {
                 proofs: ORDERED_KICK_PROOFS.load(Ordering::Relaxed),
                 selected_locks: ORDERED_KICK_SELECTED.load(Ordering::Relaxed),
             },
+            ordered_kick_guard_reuse: KickGuardReuseMetrics {
+                constructed: KICK_GUARDS_CONSTRUCTED.load(Ordering::Relaxed),
+                stored: KICK_GUARDS_STORED.load(Ordering::Relaxed),
+                reused_selected: KICK_GUARDS_REUSED.load(Ordering::Relaxed),
+                conflicts: KICK_GUARD_CONFLICTS.load(Ordering::Relaxed),
+                exact_retries: KICK_GUARD_EXACT_RETRIES.load(Ordering::Relaxed),
+            },
             conditional_order: ConditionalOrderMetrics {
                 attempted_candidates: CONDITIONAL_ATTEMPTS.load(Ordering::Relaxed),
                 certified_candidates: CONDITIONAL_CERTIFIED.load(Ordering::Relaxed),
@@ -327,6 +368,14 @@ mod process_totals {
         ORDERED_KICK_ATTEMPTS.fetch_add(delta.attempts, Ordering::Relaxed);
         ORDERED_KICK_PROOFS.fetch_add(delta.proofs, Ordering::Relaxed);
         ORDERED_KICK_SELECTED.fetch_add(delta.selected_locks, Ordering::Relaxed);
+    }
+
+    pub(super) fn record_ordered_kick_guard_reuse(delta: KickGuardReuseMetrics) {
+        KICK_GUARDS_CONSTRUCTED.fetch_add(delta.constructed, Ordering::Relaxed);
+        KICK_GUARDS_STORED.fetch_add(delta.stored, Ordering::Relaxed);
+        KICK_GUARDS_REUSED.fetch_add(delta.reused_selected, Ordering::Relaxed);
+        KICK_GUARD_CONFLICTS.fetch_add(delta.conflicts, Ordering::Relaxed);
+        KICK_GUARD_EXACT_RETRIES.fetch_add(delta.exact_retries, Ordering::Relaxed);
     }
 
     pub(super) fn record_conditional_order(delta: ConditionalOrderMetrics) {
@@ -439,6 +488,24 @@ pub(super) fn record_ordered_kick_interval(delta: KickIntervalMetrics) {
     process_totals::record_ordered_kick_interval(delta);
 }
 
+pub(super) fn record_ordered_kick_guard_reuse(delta: KickGuardReuseMetrics) {
+    if delta == KickGuardReuseMetrics::default() {
+        return;
+    }
+    METRICS.with(|slot| {
+        let mut value = slot.get();
+        let metrics = &mut value.ordered_kick_guard_reuse;
+        metrics.constructed += delta.constructed;
+        metrics.stored += delta.stored;
+        metrics.reused_selected += delta.reused_selected;
+        metrics.conflicts += delta.conflicts;
+        metrics.exact_retries += delta.exact_retries;
+        slot.set(value);
+    });
+    #[cfg(feature = "local-search-ab")]
+    process_totals::record_ordered_kick_guard_reuse(delta);
+}
+
 pub(super) fn record_conditional_order(delta: ConditionalOrderMetrics) {
     if delta == ConditionalOrderMetrics::default() {
         return;
@@ -527,6 +594,21 @@ pub(super) fn with_ordered_kick_interval_mode<T>(enabled: bool, action: impl FnO
         }
     }
     let _restore = Restore(ORDERED_KICK_INTERVAL_MODE.with(|slot| slot.replace(Some(enabled))));
+    action()
+}
+
+#[cfg(test)]
+pub(super) fn with_ordered_kick_guard_reuse_mode<T>(
+    enabled: bool,
+    action: impl FnOnce() -> T,
+) -> T {
+    struct Restore(Option<bool>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            KICK_GUARD_REUSE_MODE.with(|slot| slot.set(self.0));
+        }
+    }
+    let _restore = Restore(KICK_GUARD_REUSE_MODE.with(|slot| slot.replace(Some(enabled))));
     action()
 }
 
