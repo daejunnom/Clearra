@@ -42,7 +42,7 @@ pub(super) fn verify_compact_five_lock_replay(
     representative: &[CorePathStep],
 ) -> Option<Pc2ReplayProof> {
     let profile = verified_profile.profile();
-    let profile_id = verified_profile.profile_id();
+    let profile_id = profile.id();
     if catalog.width() != WIDTH
         || catalog.height() != HEIGHT
         || catalog.initial_board() != 0
