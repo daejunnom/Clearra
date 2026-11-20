@@ -247,6 +247,39 @@ complete lock/hold/clear witnesses in a restricted verifier. This
 rules out per-key C kick/BuildUp rejection for those four and leaves
 the entire-family C Geometry generation/task path to diagnose.
 
+The original C graph-only run (`90021f1f`, unchanged C engine) built
+243,639 nodes in 306.60 s. Full one-task and 32-task raw traversals both
+emitted 29,823,777 paths, with a shared C-accepted right-wall-I control
+present and all four sampled exclusive keys absent in both. Thus this
+sampled deficit predates splitting, transport, BuildUp and reduction;
+it is not evidence of a dropped parallel output batch.
+
+One witness has an inverse-clear T spanning original rows 0, 2 and 3.
+On the exact 8-cell remainder its forced three-cell elbow is contained
+in an admitted C row, but no second static partial spans all four
+cells in the original frame. The C APDP analysis previously used that
+as a negative, despite the existing catalog realization after clearing
+row 1. The fail-open change keeps the complete feasible SameTile
+domain whenever an admitted row has no such static pair. It preserves
+kick data and other pruning. This is a soundness correction to the C
+reference; full repaired-family agreement and timings are separate
+observations and must come from the corrected exact-source run.
+
+The bounded C regression is red at `fa43471e` (only the actual
+inverse-clear candidate membership assertion failed) and green at
+`f6d3a800` (`packing_tests` passed). The corrected 8-worker P7P4
+ABBA was started at `f6d3a800` with binary SHA-256
+`0e5fa71ba0f77c19e200201936df81da8205b9acdb9e42e92989d783aa389d63`.
+This locally supervised run remains distinct from the old timing
+receipts. Require its terminal summary, four clean samples, and the
+same complete count, set hash, and ordered key digest on every arm.
+
+The candidate's Rust `clearra-wasm-abi` completed an offline
+`wasm32-unknown-unknown` compile check at `375ffdf5`. The native
+witness, C-only correction and notes do not change that Rust target's
+production code. No current browser execution or latency is inferred
+from compilation.
+
 Check the build recipe as well as the binary name when interpreting
 future results. The Windows release CLI uses `wasm-cpu-runtime`, as do
 the Rust product tests above. The current canonical ProductE2E producer
