@@ -6,10 +6,10 @@ import { basename, dirname, join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { acquireBuildOwner } from './clearra-build-owner.mjs';
+import { acquireBuildOwner, buildCompilerSnapshot, retainProductBuildGenerations } from './clearra-build-owner.mjs';
 import { acquireManagedTransientDirectory } from './managed-transient-directory.mjs';
 import { assertDefaultBenchmarkRustEnvironment } from './benchmark-rust-environment.mjs';
-import { assertBuildPathWithin, assertCargoOutputArguments, assertManagedBuildTransaction, buildPathIdentity, canonicalBuildRoot, canonicalNativeBuildPath, nativeBuildPath } from './clearra-build-policy.mjs';
+import { BUILD_TRANSACTION_MARKER, assertBuildPathWithin, assertCargoOutputArguments, assertManagedBuildTransaction, buildPathIdentity, buildSourceId, canonicalBuildRoot, canonicalNativeBuildPath, nativeBuildPath } from './clearra-build-policy.mjs';
 
 function cleanBuildEnvironment() {
   const environment = { ...process.env };
@@ -35,6 +35,33 @@ async function fixture(t) {
   const environment = { LOCALAPPDATA: join(temporary, 'cache'), XDG_CACHE_HOME: join(temporary, 'cache'), HOME: temporary,
     GITHUB_ACTIONS: '', RUNNER_TEMP: '', GITHUB_WORKSPACE: '' };
   return { temporary, sourceRoot, environment };
+}
+
+async function completedRetentionFixture(options, { purpose, index, snapshot }) {
+  const root = canonicalBuildRoot(options.environment);
+  const sourceRoot = canonicalNativeBuildPath(options.sourceRoot);
+  const sourceId = buildSourceId(sourceRoot);
+  const sessionId = (index + 1).toString(16).padStart(32, '0');
+  const time = new Date(Date.UTC(2026, 10, 20, 0, 0, index)).toISOString();
+  const transactionRoot = purpose === 'experiment'
+    ? join(root, 'experiments', sourceId, 'current')
+    : join(root, 'products', `${time.replace(/[-:.]/gu, '')}-${sessionId}`);
+  const target = join(transactionRoot, 'cargo-target');
+  await mkdir(target, { recursive: true });
+  await mkdir(join(root, '.leases'), { recursive: true });
+  const marker = {
+    schema_version: snapshot ? 4 : 3, purpose, source_root: sourceRoot, source_id: sourceId,
+    session_id: sessionId, transaction_root: transactionRoot, cargo_target_dir: target,
+    owner_pid: process.pid, status: 'complete', created_utc: time, completed_utc: time,
+  };
+  if (snapshot) Object.assign(marker, {
+    compiler_snapshot_sha256: snapshot.sourceSha256, compiler_input_file_count: snapshot.inputFileCount,
+    incremental_cache_mode: 'enabled', incremental_context_sha256: snapshot.contextSha256,
+    incremental_seed_session_id: null, incremental_seed_snapshot_sha256: null,
+  });
+  await writeFile(join(transactionRoot, BUILD_TRANSACTION_MARKER), JSON.stringify(marker));
+  await writeFile(join(target, 'Cargo.lock'), 'fixture compiler input');
+  return { root, transactionRoot, target, marker };
 }
 
 test('path identity is stable across Windows, WSL mounts, and WSL-native sources', () => {
@@ -218,6 +245,57 @@ test('product keeps five complete generations and zero failed generations', asyn
   const experiment = await acquireBuildOwner(options);
   await experiment.finish(true);
   assert.equal((await readdir(productRoot)).length, 5);
+});
+
+test('product retirement preflights all eligible generations before deleting any', async t => {
+  const options = await fixture(t);
+  const generations = [];
+  for (let index = 0; index < 7; index += 1) {
+    generations.push(await completedRetentionFixture(options, { purpose: 'product', index }));
+  }
+  const [oldest, sibling] = generations;
+  const foreign = join(options.temporary, 'foreign');
+  await mkdir(foreign);
+  await writeFile(join(foreign, 'preserve'), 'outside generation');
+  const nested = join(oldest.target, 'nested');
+  await mkdir(nested);
+  const link = join(nested, 'link');
+  await symlink(foreign, link, process.platform === 'win32' ? 'junction' : 'dir');
+  await assert.rejects(retainProductBuildGenerations(oldest.root), /nested symlink or junction/u);
+  assert.equal(await readFile(join(sibling.target, 'Cargo.lock'), 'utf8'), 'fixture compiler input');
+  assert.equal(await readFile(join(link, 'preserve'), 'utf8'), 'outside generation');
+  assert.deepEqual(await readdir(join(oldest.root, '.leases')), []);
+
+  // Removing only the injected link, then marking a different old generation
+  // leased, leaves that generation intact while normal retirement resumes.
+  await rm(link);
+  const lease = join(oldest.root, '.leases', `product-${sibling.marker.session_id}.lock`);
+  const otherOwner = { schema_version: 1, purpose: 'product', source_id: sibling.marker.source_id,
+    session_id: sibling.marker.session_id, owner_pid: process.pid };
+  await writeFile(lease, JSON.stringify(otherOwner));
+  await retainProductBuildGenerations(oldest.root);
+  await assert.rejects(stat(oldest.transactionRoot), { code: 'ENOENT' });
+  assert.equal(await readFile(join(sibling.target, 'Cargo.lock'), 'utf8'), 'fixture compiler input');
+  assert.deepEqual(JSON.parse(await readFile(lease, 'utf8')), otherOwner);
+  assert.equal(await readFile(join(foreign, 'preserve'), 'utf8'), 'outside generation');
+});
+
+test('experiment cache retirement preserves every scratch sibling on foreign nested ownership', async t => {
+  const options = await fixture(t);
+  const snapshot = await buildCompilerSnapshot(options.sourceRoot, options.environment);
+  const previous = await completedRetentionFixture(options, { purpose: 'experiment', index: 0, snapshot });
+  const early = join(previous.transactionRoot, 'a-scratch');
+  const nested = join(previous.transactionRoot, 'z-scratch', 'nested');
+  await mkdir(early);
+  await mkdir(nested, { recursive: true });
+  await writeFile(join(early, 'still-owned'), 'preserve early scratch');
+  await writeFile(join(nested, BUILD_TRANSACTION_MARKER), JSON.stringify({ status: 'active' }));
+  await assert.rejects(acquireBuildOwner(options), /foreign nested ownership/u);
+  assert.equal(await readFile(join(early, 'still-owned'), 'utf8'), 'preserve early scratch');
+  assert.equal(JSON.parse(await readFile(join(previous.transactionRoot, BUILD_TRANSACTION_MARKER), 'utf8')).status, 'complete');
+  assert.equal(JSON.parse(await readFile(join(nested, BUILD_TRANSACTION_MARKER), 'utf8')).status, 'active');
+  assert.equal(await readFile(join(previous.target, 'Cargo.lock'), 'utf8'), 'fixture compiler input');
+  assert.deepEqual(await readdir(join(previous.root, '.leases')), []);
 });
 
 test('unknown current directory and junctions are never replaced', async t => {

@@ -2,7 +2,7 @@
 // Lease and marker schemas are shared with clearra-build-transaction.ps1.
 import { createHash, randomBytes } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { lstat, mkdir, open, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, open, opendir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { basename, dirname, extname, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { prepareRustcLauncher } from './prepare-clearra-rustc-launcher.mjs';
@@ -15,6 +15,8 @@ const buildInputRoots = ['apps', 'assets', 'core-c', 'crates', 'packages', 'scri
 const buildInputFiles = ['Cargo.toml', 'Cargo.lock', 'CMakeLists.txt', 'package.json', 'rust-toolchain.toml', '.cargo/config.toml'];
 const generatedDirectories = new Set(['.git', '.cache', '.svelte-kit', '.vite-temp', '_local', 'dist', 'dist-server',
   'node_modules', 'build', 'models', 'checkpoints']);
+const retirementEntryLimit = 1_000_000;
+const retirementDepthLimit = 64;
 
 function secretOrGeneratedInput(path) {
   const name = basename(path);
@@ -127,20 +129,64 @@ async function releaseLease(path, identity) {
   if (Object.keys(identity).some(key => current[key] !== identity[key])) throw new Error('Refusing to release another build owner lease');
   await rm(path);
 }
-async function removeOwnedGeneration(marker, root) {
+async function validateRetirement(marker, root, identity) {
   const transactionRoot = nativeBuildPath(marker.transaction_root);
   assertBuildRecord(marker, root, transactionRoot);
   assertBuildPathWithin(transactionRoot, root);
   assertNoBuildLinks(transactionRoot);
   const current = await readJson(resolve(transactionRoot, BUILD_TRANSACTION_MARKER));
-  for (const key of ['schema_version', 'purpose', 'source_root', 'source_id', 'session_id', 'transaction_root', 'cargo_target_dir', 'owner_pid']) {
-    if (current[key] !== marker[key]) throw new Error('Build generation ownership changed before retirement');
+  assertBuildRecord(current, root, transactionRoot);
+  if (Object.keys(marker).some(key => current[key] !== marker[key]) || current.status === 'active') {
+    throw new Error('Build generation ownership changed before retirement');
   }
   if (buildPathIdentity(marker.transaction_root) === buildPathIdentity(root)) throw new Error('Cannot remove the whole build root');
   await assertManagedTransientSlotsRetired(transactionRoot);
+  const lease = await readJson(leasePath(root, marker));
+  if (identity.owner_pid !== process.pid || identity.purpose !== marker.purpose || identity.source_id !== marker.source_id ||
+      (marker.purpose === 'product' && identity.session_id !== marker.session_id) ||
+      Object.keys(identity).some(key => lease[key] !== identity[key])) {
+    throw new Error('Build cleanup requires the current source/purpose owner lease');
+  }
+  return transactionRoot;
+}
+async function inspectRetirementTree(path, transactionRoot, inventory, depth = 0) {
+  if (++inventory.entries > retirementEntryLimit || depth > retirementDepthLimit) {
+    throw new Error(`Managed build cleanup inventory exceeds its bound: ${transactionRoot}`);
+  }
+  const stat = await lstat(path);
+  if (stat.isSymbolicLink()) throw new Error(`Managed build cleanup refuses a nested symlink or junction: ${path}`);
+  const name = basename(path);
+  const parent = dirname(path);
+  const directlyOwnedScratch = parent === transactionRoot || parent === resolve(transactionRoot, 'transient');
+  // The root marker and defined scratch sidecars have already been checked.
+  // Do not mistake compiler lockfiles for Clearra ownership metadata.
+  if ((name === BUILD_TRANSACTION_MARKER && parent !== transactionRoot) || name === '.leases' ||
+      ((name.endsWith('.owner.json') || name.endsWith('.owner.json.pending')) && !directlyOwnedScratch)) {
+    throw new Error(`Managed build cleanup refuses foreign nested ownership metadata: ${path}`);
+  }
+  if (stat.isDirectory()) {
+    const directory = await opendir(path);
+    for await (const child of directory) {
+      await inspectRetirementTree(resolve(path, child.name), transactionRoot, inventory, depth + 1);
+    }
+  } else if (!stat.isFile()) {
+    throw new Error(`Managed build cleanup refuses an unknown filesystem entry: ${path}`);
+  }
+  return stat.isDirectory();
+}
+async function preflightOwnedGeneration(marker, root, identity, inventory) {
+  const transactionRoot = await validateRetirement(marker, root, identity);
+  await inspectRetirementTree(transactionRoot, transactionRoot, inventory);
+}
+async function removePreflightedGeneration(marker, root, identity) {
+  const transactionRoot = await validateRetirement(marker, root, identity);
   await rm(transactionRoot, { recursive: true, force: false });
 }
-async function retainExperimentCompilerCache(marker, root) {
+async function removeOwnedGeneration(marker, root, identity) {
+  await preflightOwnedGeneration(marker, root, identity, { entries: 0 });
+  await removePreflightedGeneration(marker, root, identity);
+}
+async function retainExperimentCompilerCache(marker, root, identity) {
   const transactionRoot = nativeBuildPath(marker.transaction_root);
   assertBuildRecord(marker, root, transactionRoot);
   if (marker.schema_version !== BUILD_TRANSACTION_SCHEMA || marker.purpose !== 'experiment' || marker.status !== 'complete') return false;
@@ -150,12 +196,20 @@ async function retainExperimentCompilerCache(marker, root) {
   catch (error) { if (error.code === 'ENOENT') return false; throw error; }
   assertNoBuildLinks(target);
   if (!metadata.isDirectory() || metadata.isSymbolicLink()) return false;
-  await assertManagedTransientSlotsRetired(transactionRoot);
+  await validateRetirement(marker, root, identity);
+  const scratch = [];
+  const inventory = { entries: 0 };
   for (const entry of await readdir(transactionRoot, { withFileTypes: true })) {
     if ([BUILD_TRANSACTION_MARKER, 'cargo-target'].includes(entry.name)) continue;
     const path = resolve(transactionRoot, entry.name);
+    const recursive = await inspectRetirementTree(path, transactionRoot, inventory);
+    scratch.push({ path, recursive });
+  }
+  // Do not retire an early sibling before a later sibling has passed preflight.
+  await validateRetirement(marker, root, identity);
+  for (const { path, recursive } of scratch) {
     assertNoBuildLinks(path);
-    await rm(path, { recursive: entry.isDirectory(), force: false });
+    await rm(path, { recursive, force: false });
   }
   return true;
 }
@@ -165,7 +219,7 @@ export async function retainProductBuildGenerations(root) {
   const entries = await readdir(productRoot, { withFileTypes: true }).catch(error => { if (error.code === 'ENOENT') return []; throw error; });
   const complete = [];
   for (const entry of entries) {
-    if (!entry.isDirectory() || entry.isSymbolicLink()) continue;
+    if (!entry.isDirectory() || entry.isSymbolicLink()) throw new Error('Unowned product catalog entry; refusing retention');
     const directory = resolve(productRoot, entry.name);
     const marker = await readJson(resolve(directory, BUILD_TRANSACTION_MARKER));
     assertBuildRecord(marker, root, directory);
@@ -173,13 +227,26 @@ export async function retainProductBuildGenerations(root) {
     if (marker.status === 'complete' && Number.isFinite(Date.parse(marker.completed_utc))) complete.push(marker);
   }
   complete.sort((a, b) => b.completed_utc.localeCompare(a.completed_utc) || b.session_id.localeCompare(a.session_id));
-  for (const marker of complete.slice(5)) {
-    const path = leasePath(root, marker);
-    const identity = leaseIdentity(marker, process.pid);
-    try { await claimLease(path, identity); }
-    catch (error) { if (error.code === 'EEXIST') continue; throw error; }
-    try { await removeOwnedGeneration(marker, root); }
-    finally { await releaseLease(path, identity); }
+  const claims = [];
+  try {
+    for (const marker of complete.slice(5)) {
+      const path = leasePath(root, marker);
+      const identity = leaseIdentity(marker, process.pid);
+      assertNoBuildLinks(path);
+      try { await claimLease(path, identity); }
+      catch (error) { if (error.code === 'EEXIST') continue; throw error; }
+      claims.push({ marker, path, identity });
+    }
+    const inventory = { entries: 0 };
+    for (const { marker, identity } of claims) await preflightOwnedGeneration(marker, root, identity, inventory);
+    for (const { marker, identity } of claims) await removePreflightedGeneration(marker, root, identity);
+  } finally {
+    let releaseError;
+    for (const { path, identity } of claims) {
+      try { await releaseLease(path, identity); }
+      catch (error) { releaseError ??= error; }
+    }
+    if (releaseError) throw releaseError;
   }
 }
 async function assertCleanProductCatalog(root) {
@@ -259,12 +326,12 @@ export async function acquireBuildOwner({ sourceRoot, purpose = 'experiment', en
         if (previous.source_id !== sourceId || previous.purpose !== purpose || buildPathIdentity(previous.transaction_root) !== buildPathIdentity(transactionRoot)) throw new Error('Experimental current slot has a different owner');
         const reusable = previous.schema_version === BUILD_TRANSACTION_SCHEMA && previous.status === 'complete' &&
           previous.incremental_cache_mode === 'enabled' && previous.incremental_context_sha256 === compilerSnapshot.contextSha256 &&
-          await retainExperimentCompilerCache(previous, root);
+          await retainExperimentCompilerCache(previous, root, identity);
         if (reusable) {
           marker.incremental_seed_session_id = previous.session_id;
           marker.incremental_seed_snapshot_sha256 = previous.compiler_snapshot_sha256;
         } else {
-          await removeOwnedGeneration(previous, root);
+          await removeOwnedGeneration(previous, root, identity);
         }
       } else {
         try { await stat(transactionRoot); throw new Error('Experimental slot exists without ownership metadata'); }
@@ -307,7 +374,7 @@ export async function acquireBuildOwner({ sourceRoot, purpose = 'experiment', en
     try {
       try {
         await writeMarker(marker);
-        if (purpose === 'product' && !success) await removeOwnedGeneration(marker, root);
+        if (purpose === 'product' && !success) await removeOwnedGeneration(marker, root, identity);
       } finally { await releaseLease(path, identity); }
       if (purpose === 'product' && success) await retainProductBuildGenerations(root);
     } finally { if (catalogOwned) await releaseLease(catalogPath, identity); }
