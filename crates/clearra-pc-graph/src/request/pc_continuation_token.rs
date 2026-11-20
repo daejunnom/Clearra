@@ -5,8 +5,8 @@ use super::{
     opening_continuation_token::{encode_opening_continuation, parse_opening_v2},
     pc_scenario_query::PcScenarioQuery,
     scenario_continuation_token::{
-        encode_scenario_continuation, encode_scenario_replay, parse_scenario_continuation_v2,
-        parse_scenario_replay_v2,
+        encode_scenario_continuation, encode_scenario_replay, parse_scenario_continuation,
+        parse_scenario_replay,
     },
     OpeningPcSearchQuery,
 };
@@ -61,17 +61,17 @@ impl PcContinuationTokenCodec {
         if token.starts_with("pc1:") {
             return parse_opening_v1(token).map(PcContinuationToken::Opening);
         }
-        if token.starts_with("sc2:") {
-            return parse_scenario_continuation_v2(token).map(PcContinuationToken::Scenario);
+        if token.starts_with("sc2:") || token.starts_with("sc3:") {
+            return parse_scenario_continuation(token).map(PcContinuationToken::Scenario);
         }
-        if token.starts_with("sr2:") {
-            return parse_scenario_replay_v2(token).map(PcContinuationToken::ScenarioReplay);
+        if token.starts_with("sr2:") || token.starts_with("sr3:") {
+            return parse_scenario_replay(token).map(PcContinuationToken::ScenarioReplay);
         }
         if token.starts_with("sc1:") {
             return parse_scenario_v1(token).map(PcContinuationToken::ScenarioReplay);
         }
         Err(PcContinuationTokenError::new(
-            "continuation token must start with pc2:, pc1:, sc2:, sr2:, or sc1:",
+            "continuation token must start with pc2:, pc1:, sc3:, sc2:, sr3:, sr2:, or sc1:",
         ))
     }
 }

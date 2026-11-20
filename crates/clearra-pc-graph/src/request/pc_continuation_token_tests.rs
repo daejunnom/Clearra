@@ -181,6 +181,67 @@ fn scenario_replay_token_is_separate_from_continuation_token() {
 }
 
 #[test]
+fn full_height_scenario_tokens_preserve_board_and_scenario_semantics() {
+    let words = [0x8000_0000_0000_000a, 0x102, 0x10, 1 << 47];
+    let query = PcScenarioQuery::new(
+        PcScenarioBoard::standard_10_from_words(24, words).expect("24L board"),
+        PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::I, PieceKind::O])),
+        PieceWindow::new(2),
+    )
+    .with_hold_piece(Some(PieceKind::T))
+    .with_rule(no_kick())
+    .with_exact_pieces(Some(1))
+    .with_min_remaining_queue(1)
+    .with_count_policy(PcCountPolicy::CountUnique)
+    .with_retained_trace_limit(2)
+    .with_queue_observation_policy(QueueObservationPolicy::VisibleSeven);
+
+    let continuation = PcContinuationTokenCodec::encode_scenario_continuation(&query)
+        .expect("full-height continuation");
+    let replay =
+        PcContinuationTokenCodec::encode_scenario_replay(&query).expect("full-height replay");
+    assert!(continuation.starts_with("sc3:"));
+    assert!(replay.starts_with("sr3:"));
+    assert_eq!(
+        PcContinuationTokenCodec::parse(&continuation).unwrap(),
+        PcContinuationToken::Scenario(query.clone())
+    );
+    assert_eq!(
+        PcContinuationTokenCodec::parse(&replay).unwrap(),
+        PcContinuationToken::ScenarioReplay(query)
+    );
+}
+
+#[test]
+fn full_height_scenario_tokens_reject_invalid_extent_and_unrepresentable_semantics() {
+    let query = PcScenarioQuery::new(
+        PcScenarioBoard::standard_10_from_words(7, [0, 0x20, 0, 0]).unwrap(),
+        PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::I])),
+        PieceWindow::new(1),
+    );
+    let token = PcContinuationTokenCodec::encode_scenario_replay(&query).unwrap();
+    for invalid in [
+        token.replacen(":w10:", ":w9:", 1),
+        token.replacen(":v7:", ":v6:", 1),
+        token.replacen(":v7:", ":v25:", 1),
+        token.replacen("0x0000000000000020,", "0x0000000000000040,", 1),
+        token.replacen("0x0000000000000020,", "0x20,", 1),
+        token.replacen("0x0000000000000020,", "", 1),
+        token.replacen("0x0000000000000020,", "0x0000000000000000,", 1),
+        token.replacen("sr3:", "sr2:", 1),
+    ] {
+        assert!(
+            PcContinuationTokenCodec::parse(&invalid).is_err(),
+            "{invalid}"
+        );
+    }
+    assert!(PcContinuationTokenCodec::encode_scenario_replay(
+        &query.with_objective(ObjectivePolicy::minimum_cover())
+    )
+    .is_err());
+}
+
+#[test]
 fn scenario_v2_token_preserves_verified_kick_profile_override() {
     let verified = VerifiedKickTableProfile::try_new(NoKick::profile()).expect("verified no-kick");
     let query = PcScenarioQuery::new(

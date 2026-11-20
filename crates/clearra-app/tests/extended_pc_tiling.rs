@@ -390,6 +390,79 @@ fn full_height_tiling_uses_the_real_app_product_in_all_profiles() {
 }
 
 #[test]
+fn full_height_fixed_queue_scenario_replay_reuses_the_same_rust_family() {
+    use clearra_app::{AppRenderModel, ContinueAppCommand};
+    use clearra_pc_graph::request::{PcContinuationToken, PcContinuationTokenCodec};
+    use clearra_supply::QueueObservationPolicy;
+
+    let context = AppContext::new(
+        AppServices::default().with_core_executor(AppCoreExecutorService::wasm_cpu()),
+    );
+    for (height, observation) in [
+        (7, QueueObservationPolicy::VisibleSeven),
+        (24, QueueObservationPolicy::FullQueueOracle),
+    ] {
+        let (base, initial, _) = ordinary_request(height, false);
+        let AppCommand::Scenario(scenario) = base.command() else {
+            panic!("scenario fixture");
+        };
+        let query = scenario
+            .query()
+            .clone()
+            .with_queue_observation_policy(observation);
+        let direct = context.run(AppRequest::new(AppCommand::Scenario(
+            ScenarioAppCommand::new(query),
+        )));
+        assert_eq!(direct.status(), AppStatus::Success, "{direct:?}");
+        let core = direct.render_model().unwrap().core_result().unwrap();
+        assert_eq!(core.field("actual_backend"), Some("wasm-cpu-pc-extended"));
+        assert_eq!(core.field("unique_solution_count"), Some("1"));
+        assert_eq!(core.field("scenario_replay_token_version"), Some("sr3"));
+        let token = core.field("scenario_replay_token").unwrap();
+        let PcContinuationToken::ScenarioReplay(decoded) =
+            PcContinuationTokenCodec::parse(token).unwrap()
+        else {
+            panic!("expected input replay, not a continuation");
+        };
+        assert_eq!(decoded.initial_board().occupied_words(), initial.words());
+        assert_eq!(decoded.queue_observation_policy(), observation);
+
+        let replay = context.run(AppRequest::new(AppCommand::Continue(
+            ContinueAppCommand::new(Some(token.to_owned())),
+        )));
+        assert_eq!(replay.status(), AppStatus::Success, "{replay:?}");
+        let Some(AppRenderModel::Continue(message)) = replay.render_model() else {
+            panic!("expected scenario replay result");
+        };
+        let field = |key: &str| {
+            message
+                .fields()
+                .iter()
+                .find(|field| field.key() == key)
+                .unwrap()
+                .value()
+                .as_text()
+        };
+        assert_eq!(field("continuation_kind"), "scenario-replay");
+        if observation.requires_observation_policy() {
+            assert_eq!(core.bool_field("observation_policy_evaluated"), Some(true));
+            assert_eq!(field("queue_knowledge"), observation.keyword());
+            assert_eq!(field("observation_policy_evaluated"), "true");
+        }
+        for key in [
+            "actual_backend",
+            "unique_solution_count",
+            "normalized_solution_set_hash",
+            "coverage_pattern_count",
+            "covered_pattern_count",
+            "count_complete",
+        ] {
+            assert_eq!(field(key), core.field(key).unwrap(), "{height}L: {key}");
+        }
+    }
+}
+
+#[test]
 fn full_height_replay_direct_cooperative_and_lazy_pages_preserve_all_words() {
     use clearra_app::{PcPathIngressOrigin, PcReplayPageStore};
     use std::collections::BTreeSet;

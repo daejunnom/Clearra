@@ -4,10 +4,10 @@ use clearra_build_coverage::{
     template::{BuildSlot, BuildSlotId, BuildTemplate, TemplateImport},
 };
 use clearra_core_domain::{
-    board::cell::CellCoord,
+    board::{board_size::BoardSize, cell::CellCoord},
     execution_cancellation::{ExecutionCancellationToken, ExecutionControl},
     piece::piece_kind::PieceKind,
-    solution::{PiecePlacementMask, StandardBoard64TilingIdentity},
+    solution::{NormalizedTilingSolutionKey, PiecePlacementMask, StandardBoard64TilingIdentity},
 };
 use clearra_core_executor::WasmCpuSearchBackend;
 use clearra_pc_graph::request::{
@@ -171,6 +171,205 @@ fn native_legacy_cover_rejects_the_positive_four_column_fixture() {
     let error = PackingRunner::run(&legacy_problem)
         .expect_err("native packing must reject this specific legacy request");
     assert!(matches!(error, PackingRunnerError::Native(_)), "{error:?}");
+}
+
+// Original-row masks of the independently verified hard-drop witness.
+// The ten locks clear original rows [1], [3], and [0, 2].
+const LEGACY_FOUR_LINE_WITNESS: [(PieceKind, u64); 10] = [
+    (PieceKind::I, 0x78),
+    (PieceKind::O, 0xc0300),
+    (PieceKind::T, 0x100e000),
+    (PieceKind::S, 0x1803),
+    (PieceKind::Z, 0x6030000),
+    (PieceKind::J, 0xc0100400),
+    (PieceKind::L, 0x3008000080),
+    (PieceKind::I, 0xf00000000),
+    (PieceKind::O, 0xc030000000),
+    (PieceKind::T, 0xe00004),
+];
+
+fn four_line_legacy_problem_and_exact_identity() -> (SearchProblem, StandardBoard64TilingIdentity) {
+    let mut domains = Vec::new();
+    let mut slots = Vec::new();
+    for (index, (piece, mask)) in LEGACY_FOUR_LINE_WITNESS.iter().copied().enumerate() {
+        let id = BuildSlotId::new(u32::try_from(index).expect("fixture slot fits u32"));
+        let cells = (0..40_u16)
+            .filter(|&cell| mask & (1_u64 << cell) != 0)
+            .map(|cell| CellCoord::new_unchecked(cell % 10, cell / 10))
+            .collect();
+        slots.push(BuildSlot::new(id, cells).with_allowed_pieces(vec![piece]));
+        domains.push(SlotDomain::new(id, vec![piece]));
+    }
+    let query = BuildCoverageQuery::new(
+        BuildTemplate::new("legacy-four-line-ordinal-zero", slots)
+            .with_board_size(BoardSize::new(10, 4).expect("standard four-line board")),
+        domains,
+        Vec::new(),
+        1,
+        BuildCoverageLimits::default(),
+    );
+    assert!(
+        !clearra_validation::validators::build_query_validator::validate_build_coverage_query(
+            &query,
+        )
+        .has_errors()
+    );
+    let problem = compile(&query);
+    let identity = StandardBoard64TilingIdentity::from_placements(
+        0,
+        LEGACY_FOUR_LINE_WITNESS.map(|(piece, mask)| PiecePlacementMask::new(piece, mask)),
+    )
+    .expect("known four-line witness");
+    (problem, identity)
+}
+
+fn fixed_ordinal_pc_problem(
+    board: PcScenarioBoard,
+    pieces: Vec<PieceKind>,
+    rule: clearra_rules::profile::rule_profile::RuleProfile,
+) -> SearchProblem {
+    let count = pieces.len();
+    ProblemCompiler::compile_scenario_pc(
+        &PcScenarioQuery::new(
+            board,
+            PcQueueInput::fixed_sequence(FixedSequence::new(pieces)),
+            PieceWindow::new(count),
+        )
+        .with_rule(rule)
+        .with_allow_hold(false)
+        .with_exact_pieces(Some(count))
+        .with_count_policy(PcCountPolicy::CountAll)
+        .with_solution_probability_policy(PcSolutionProbabilityPolicy::Include)
+        .with_execution_policy(PcExecutionPolicy::mvp_default().with_workers(1)),
+    )
+    .expect("explicit ordinal PC problem")
+}
+
+fn rust_covered_ordinal_word(
+    problem: &SearchProblem,
+    identity: StandardBoard64TilingIdentity,
+) -> u64 {
+    let result = WasmCpuSearchBackend::execute_with_control(problem, &ExecutionControl::default())
+        .expect("existing Rust PC provider must execute this fixed ordinal");
+    assert_eq!(result.bool_field("count_complete"), Some(true));
+    assert_eq!(
+        result.bool_field("solution_probability_complete"),
+        Some(true)
+    );
+    assert_eq!(result.usize_field("coverage_pattern_count"), Some(1));
+    assert!(result.normalized_solution_identities().contains(&identity));
+    let key = NormalizedTilingSolutionKey::from_standard_board64_identity(identity);
+    let coverage = result
+        .normalized_solution_coverages()
+        .iter()
+        .find(|coverage| coverage.solution_key() == key.as_str())
+        .expect("Rust coverage row bound to the exact colored placement identity");
+    assert_eq!(coverage.covered_patterns().pattern_count(), 1);
+    coverage.covered_patterns().word_at(0)
+}
+
+fn four_line_fixed_ordinal_problem(legacy_problem: &SearchProblem) -> SearchProblem {
+    let ordinal_zero = LEGACY_FOUR_LINE_WITNESS.map(|(piece, _)| piece);
+    let universe = legacy_problem
+        .piece_source()
+        .materialized_universe()
+        .unwrap();
+    assert_eq!(
+        universe.sequence_at(0).as_ref(),
+        ordinal_zero.as_slice(),
+        "legacy observed ordinal zero must match the independently replayed fixed queue"
+    );
+    assert_eq!(legacy_problem.build_query().unwrap().pattern_count(), 1);
+    fixed_ordinal_pc_problem(
+        PcScenarioBoard::standard_10(4, 0),
+        ordinal_zero.to_vec(),
+        legacy_problem.rule_profile_value(),
+    )
+}
+
+#[test]
+fn positive_four_line_legacy_ordinal_zero_is_solved_by_the_rust_kernel() {
+    let _resource = crate::execution_resource_test_support::execution_resource_test_guard();
+    let (legacy_problem, identity) = four_line_legacy_problem_and_exact_identity();
+    let fixed = four_line_fixed_ordinal_problem(&legacy_problem);
+    assert_eq!(rust_covered_ordinal_word(&fixed, identity), 1);
+}
+
+#[cfg(feature = "native-c-core")]
+fn native_covered_ordinal_word(
+    problem: &SearchProblem,
+    identity: StandardBoard64TilingIdentity,
+) -> u64 {
+    use clearra_core_executor::{packing::PackingRunner, BuildUpRunner};
+
+    let packing = PackingRunner::run(problem).expect("native packing must admit the request");
+    let initial = problem.initial_board().occupied_mask();
+    let matching_ids: std::collections::BTreeSet<_> = (0..packing.candidate_count())
+        .filter_map(|index| {
+            let candidate = packing.candidate_view_at(index).expect("stored candidate");
+            let key = candidate
+                .standard_board64_tiling_identity(initial)
+                .expect("native candidate identity");
+            (key == identity).then(|| candidate.candidate_id())
+        })
+        .collect();
+    assert!(
+        !matching_ids.is_empty(),
+        "native packing omitted the known witness"
+    );
+    let buildup = BuildUpRunner::run_for_coverage(problem, &packing)
+        .expect("native BuildUp must produce raw coverage rows");
+    assert!(buildup.materialized_coverage_complete());
+    let mut coverage_word = 0;
+    let mut found = false;
+    for row in buildup.coverage_rows() {
+        if matching_ids.contains(&row.candidate_id()) {
+            assert_eq!(row.pattern_count(), 1);
+            coverage_word |= row.coverage_bits().word_at(0);
+            found = true;
+        }
+    }
+    assert!(
+        found,
+        "native BuildUp omitted the known candidate's coverage row"
+    );
+    coverage_word
+}
+
+#[cfg(feature = "native-c-core")]
+#[test]
+fn positive_native_and_rust_fixed_queue_control_join_coverage_by_candidate_identity() {
+    let _resource = crate::execution_resource_test_support::execution_resource_test_guard();
+    let fixed = fixed_ordinal_pc_problem(
+        PcScenarioBoard::standard_10(1, 0x3f0),
+        vec![PieceKind::I],
+        compile(&horizontal_i_import()).rule_profile_value(),
+    );
+    let identity = StandardBoard64TilingIdentity::from_placements(
+        0x3f0,
+        [PiecePlacementMask::new(PieceKind::I, 0xf)],
+    )
+    .expect("horizontal I covers the empty cells in the initial row");
+    let rust_word = rust_covered_ordinal_word(&fixed, identity);
+    assert_eq!(rust_word, 1);
+    assert_eq!(native_covered_ordinal_word(&fixed, identity), rust_word);
+}
+
+#[cfg(feature = "native-c-core")]
+#[test]
+#[ignore = "run explicitly to qualify native Legacy Cover admission"]
+fn positive_four_line_legacy_native_ordinal_join_qualification() {
+    let _resource = crate::execution_resource_test_support::execution_resource_test_guard();
+    let (legacy_problem, identity) = four_line_legacy_problem_and_exact_identity();
+    let fixed = four_line_fixed_ordinal_problem(&legacy_problem);
+    let rust_word = rust_covered_ordinal_word(&fixed, identity);
+    assert_eq!(rust_word, 1);
+    // Check only the known ordinal and geometry, not the completeness of the
+    // entire truncated observed source or its positional assignment matrix.
+    assert_eq!(
+        native_covered_ordinal_word(&legacy_problem, identity),
+        rust_word
+    );
 }
 
 #[test]

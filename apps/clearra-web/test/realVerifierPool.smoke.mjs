@@ -54,6 +54,8 @@ for (const [entry, suffix] of [[manifest.bindings, 'js'], [manifest.wasm, 'wasm'
 installFileArtifactSurface(wasmRoot, [manifest.bindings.path, manifest.wasm.path]);
 const wasm = await loadClearraWasmModule(undefined, caps);
 const transports = [];
+const verifierConsumes = () => transports.reduce((count, transport) =>
+  count + transport.sent.filter(type => type === 'consume').length, 0);
 let cancelOnConsume = null;
 let nextPrewarmDelayMs = 0;
 class NodeVerifierTransport {
@@ -205,9 +207,25 @@ function productProjection(terminal) {
     keys: report.normalized_solution_keys,
     hash: report.normalized_solution_set_hash,
     count: report.unique_solution_count,
+    total: coverageOnly ? report.total_possible_pattern_count : null,
     covered: report.covered_pattern_count,
     probability: report.coverage_probability
   };
+}
+function assertFixedQueueCoverage(projection, kind, missedQueue, label) {
+  const covered = missedQueue === null ? 1 : 0;
+  assert.equal(projection.kind, kind, label);
+  assert.equal(projection.total, '1', label);
+  assert.equal(projection.covered, covered, label);
+  assert.equal(projection.probability, String(covered), label);
+  if (kind === 'pc-failed-queue.v2') {
+    const fields = projection.coverageProduct;
+    assert.equal(fields.failed_pattern_count, String(1 - covered), label);
+    assert.equal(Number(fields.failed_queue_probability), 1 - covered, label);
+    assert.equal(fields.failed_pattern_count_complete, 'true', label);
+    assert.equal(fields.failed_pattern_examples_truncated, 'false', label);
+    assert.equal(fields.failed_pattern_0 ?? null, missedQueue, label);
+  }
 }
 async function productProjectionWithLazyCopy(terminal) {
   const projection = productProjection(terminal);
@@ -472,11 +490,10 @@ try {
       assert.ok(baseline.keys.every(key => key.startsWith(`ctk2|height=${height}|initial=`)),
         'full-height keys retain all four words instead of using a compact truncation');
       if (profile === 'srs-plus') scoreSourceKeys = baseline.keys;
-      const sentBefore = transports.reduce((count, transport) => count + transport.sent.filter(type => type === 'consume').length, 0);
+      const sentBefore = verifierConsumes();
       const actual = await distributed(`${base} --workers 3`, { synopsis: null, pack: null }, { expectedFullHeight: true });
       assert.deepEqual(actual, baseline, `${id}/${profile}/full-height Web family`);
-      const sentAfter = transports.reduce((count, transport) => count + transport.sent.filter(type => type === 'consume').length, 0);
-      assert.ok(sentAfter > sentBefore, 'an actual full-height verifier task must cross the Worker transport');
+      assert.ok(verifierConsumes() > sentBefore, 'an actual full-height verifier task must cross the Worker transport');
       console.log(`real_web_full_height_family=passed fixture=${id} profile=${profile} workers=3`);
       if (profile === 'srs-plus') {
         // All supplied 2-6 pieces fit within the visible window, so the policy
@@ -531,6 +548,7 @@ try {
       const parallel = buildWorkspaceCommand({ ...request, workers: 3 });
       const baseline = await productProjectionWithLazyCopy(await new WasmJobRunner(wasm).run(serial, () => {}));
       assert.equal(baseline.kind, kind, `${id}/${mode} must reach its exact typed product presenter`);
+      if (mode === 'failed-queue') assertFixedQueueCoverage(baseline, kind, null, `${id}/solvable failed-queue`);
       if (mode === 'score' || mode === 'score-finder' || mode === 'score-minimals') {
         assertFullHeightScoreReadback(baseline, scoreSourceKeys);
       }
@@ -541,6 +559,30 @@ try {
           projectTerminal: productProjectionWithLazyCopy });
       assert.deepEqual(actual, baseline, `${id}/${mode}/full-height Web product and export`);
       console.log(`real_web_full_height_product=passed fixture=${id} mode=${mode} workers=3`);
+    }
+    // Chance remains a canonical command, not the GUI's ordinary PC mode.
+    // Pair it with the exact failed-queue complement on the same fixed-supply
+    // universe. Changing only the supply to O makes these I-column holes
+    // impossible; a complete empty candidate stream need not consume a task.
+    const missedQueue = 'O'.repeat(queue.length);
+    for (const [mode, kind, supply, missed] of [
+      ['chance', 'pc-probability.v2', queue, null],
+      ['chance', 'pc-probability.v2', missedQueue, missedQueue],
+      ['failed-queue', 'pc-failed-queue.v2', missedQueue, missedQueue]
+    ]) {
+      const base = `clearra pc ${mode} --lines ${height} --height ${height} --board-mask 0x${boardHex} ` +
+        `--pieces ${pieces} --queue ${supply} --no-hold --backend cpu --rule srs-plus ` +
+        '--no-tablebase --no-legal-board --no-conditioned-reachability' +
+        (mode === 'failed-queue' ? ' --failed-count 1' : '');
+      const label = `${id}/${mode}/${missed === null ? 'solvable' : 'impossible'}`;
+      const baseline = productProjection(await new WasmJobRunner(wasm).run(`${base} --workers 1`, () => {}));
+      assertFixedQueueCoverage(baseline, kind, missed, label);
+      const sentBefore = verifierConsumes();
+      const actual = await distributed(`${base} --workers 3`, { synopsis: null, pack: null },
+        { expectedFullHeight: true, projectTerminal: productProjection });
+      assert.deepEqual(actual, baseline, label);
+      if (missed === null) assert.ok(verifierConsumes() > sentBefore, `${label}/actual remote coverage task`);
+      console.log(`real_web_full_height_coverage=passed case=${label} workers_requested=3`);
     }
     if (height === '7') {
       const request = { ...createDefaultWorkspaceRequest(), lines: 7, boardMask: BigInt(`0x${boardHex}`),

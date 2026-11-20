@@ -1,3 +1,4 @@
+use clearra_objectives::policy::objective_policy::ObjectivePolicy;
 use clearra_profiles::{
     bag::bag_profile::BagProfileId, pieces::piece_set_profile::PieceSetProfileId,
 };
@@ -15,7 +16,7 @@ use super::{
     },
     pc_queue_input::PcQueueInput,
     pc_scenario_query::{PcCompletionGoal, PcScenarioBoard, PcScenarioQuery, PieceWindow},
-    PcSolutionProbabilityPolicy,
+    PcCountPolicy, PcSolutionProbabilityPolicy,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -25,19 +26,12 @@ pub(crate) enum ScenarioContinuationTokenKind {
 }
 
 impl ScenarioContinuationTokenKind {
-    fn prefix(self) -> &'static str {
-        match self {
-            Self::Continuation => "sc2",
-            Self::Replay => "sr2",
-        }
-    }
-}
-impl ScenarioContinuationTokenKind {
-    fn from_prefix(prefix: &str) -> Option<Self> {
-        match prefix {
-            "sc2" => Some(Self::Continuation),
-            "sr2" => Some(Self::Replay),
-            _ => None,
+    fn prefix(self, extended: bool) -> &'static str {
+        match (self, extended) {
+            (Self::Continuation, false) => "sc2",
+            (Self::Continuation, true) => "sc3",
+            (Self::Replay, false) => "sr2",
+            (Self::Replay, true) => "sr3",
         }
     }
 }
@@ -54,16 +48,16 @@ pub(crate) fn encode_scenario_replay(
     encode_scenario_query_with_kind(ScenarioContinuationTokenKind::Replay, query)
 }
 
-pub(crate) fn parse_scenario_continuation_v2(
+pub(crate) fn parse_scenario_continuation(
     token: &str,
 ) -> Result<PcScenarioQuery, PcContinuationTokenError> {
-    parse_scenario_v2(token, ScenarioContinuationTokenKind::Continuation)
+    parse_scenario(token, ScenarioContinuationTokenKind::Continuation)
 }
 
-pub(crate) fn parse_scenario_replay_v2(
+pub(crate) fn parse_scenario_replay(
     token: &str,
 ) -> Result<PcScenarioQuery, PcContinuationTokenError> {
-    parse_scenario_v2(token, ScenarioContinuationTokenKind::Replay)
+    parse_scenario(token, ScenarioContinuationTokenKind::Replay)
 }
 
 fn encode_scenario_query_with_kind(
@@ -79,13 +73,35 @@ fn encode_scenario_query_with_kind(
             )
         })?
         .pieces();
-    let prefix = kind.prefix();
+    let board = query.initial_board();
+    let extended = board.has_extended_occupancy();
+    let prefix = kind.prefix(extended);
+    let board_mask = if extended {
+        // A token replays scenario semantics, not execution preferences. Do
+        // not offer a full-height token for a query with additional search
+        // constraints this wire format cannot reproduce.
+        let objective = match query.count_policy() {
+            PcCountPolicy::CountUnique => ObjectivePolicy::unique(),
+            PcCountPolicy::FirstSolution | PcCountPolicy::CountAll => ObjectivePolicy::all(),
+        };
+        if query.objective() != objective
+            || query.supply_window_size().is_some()
+            || query.allowed_colored_solution_identities().is_some()
+        {
+            return Err(PcContinuationTokenError::new(
+                "full-height scenario token cannot preserve this scenario's search constraints",
+            ));
+        }
+        let [word0, word1, word2, word3] = board.occupied_words();
+        format!("m0x{word0:016x},0x{word1:016x},0x{word2:016x},0x{word3:016x}")
+    } else {
+        format!("m0x{:016x}", board.occupied_mask())
+    };
     let kick_profile = format_kick_profile(query.verified_kick_profile())?;
     Ok(format!(
-        "{prefix}:w{}:v{}:m0x{:016x}:ps{}:bg{}:r{}:h{}:q{}:p{}:x{}:n{}:a{}:z{}:g{}:c{}:t{}:k{}:u{}:o{}",
-        query.initial_board().width(),
-        query.initial_board().visible_height(),
-        query.initial_board().occupied_mask(),
+        "{prefix}:w{}:v{}:{board_mask}:ps{}:bg{}:r{}:h{}:q{}:p{}:x{}:n{}:a{}:z{}:g{}:c{}:t{}:k{}:u{}:o{}",
+        board.width(),
+        board.visible_height(),
         query.piece_set().id().as_str(),
         query.bag().id().as_str(),
         query.rule().id().as_str(),
@@ -105,16 +121,16 @@ fn encode_scenario_query_with_kind(
     ))
 }
 
-fn parse_scenario_v2(
+fn parse_scenario(
     token: &str,
     expected_kind: ScenarioContinuationTokenKind,
 ) -> Result<PcScenarioQuery, PcContinuationTokenError> {
     let parts = token.split(':').collect::<Vec<_>>();
-    if !(parts.len() == 17 || parts.len() == 18 || parts.len() == 19 || parts.len() == 20)
-        || ScenarioContinuationTokenKind::from_prefix(parts[0]) != Some(expected_kind)
-    {
+    let extended = parts[0] == expected_kind.prefix(true);
+    let min_fields = if extended { 20 } else { 17 };
+    if !(min_fields..=20).contains(&parts.len()) || parts[0] != expected_kind.prefix(extended) {
         return Err(PcContinuationTokenError::new(
-            "scenario token must use sc2|sr2:w10:v2:m0x...:psPROFILE:bgPROFILE:rRULE:hnone:qPIECES:pN:xN|none:nN:a0|1:z0|1:gclear-to-empty:cPOLICY:tN:kPROFILE:u0|1:ooracle|visible-7 format",
+            "invalid scenario token version or field count (expected sc2|sc3 or sr2|sr3)",
         ));
     }
     require_value(
@@ -129,12 +145,15 @@ fn parse_scenario_v2(
     )?;
     let completion_goal = parse_completion_goal(prefixed_value(parts[14], "g")?)?;
 
+    let width = parse_u16_prefixed(parts[1], "w")?;
+    let height = parse_u16_prefixed(parts[2], "v")?;
+    let board = if extended {
+        parse_extended_scenario_board(width, height, parts[3])?
+    } else {
+        PcScenarioBoard::new(width, height, parse_mask_prefixed(parts[3])?)
+    };
     let mut query = PcScenarioQuery::new(
-        PcScenarioBoard::new(
-            parse_u16_prefixed(parts[1], "w")?,
-            parse_u16_prefixed(parts[2], "v")?,
-            parse_mask_prefixed(parts[3])?,
-        ),
+        board,
         PcQueueInput::fixed_sequence(FixedSequence::new(parse_queue(parts[8])?)),
         PieceWindow::new(parse_usize_prefixed(parts[9], "p")?),
     )
@@ -170,4 +189,39 @@ fn parse_scenario_v2(
     }
 
     Ok(query)
+}
+
+fn parse_extended_scenario_board(
+    width: u16,
+    height: u16,
+    part: &str,
+) -> Result<PcScenarioBoard, PcContinuationTokenError> {
+    let invalid_words = || {
+        PcContinuationTokenError::new("full-height scenario mask requires four 16-digit hex words")
+    };
+    let mut parts = prefixed_value(part, "m")?.split(',');
+    let mut words = [0; 4];
+    for word in &mut words {
+        let digits = parts
+            .next()
+            .and_then(|value| value.strip_prefix("0x"))
+            .filter(|digits| {
+                digits.len() == 16 && digits.bytes().all(|byte| byte.is_ascii_hexdigit())
+            })
+            .ok_or_else(invalid_words)?;
+        *word = u64::from_str_radix(digits, 16).map_err(|_| invalid_words())?;
+    }
+    if parts.next().is_some() {
+        return Err(invalid_words());
+    }
+    if width != 10 || matches!(words, [_, 0, 0, 0]) {
+        return Err(PcContinuationTokenError::new(
+            "full-height scenario mask requires a standard-width board with high occupancy",
+        ));
+    }
+    PcScenarioBoard::standard_10_from_words(height, words).map_err(|_| {
+        PcContinuationTokenError::new(
+            "full-height scenario occupancy does not fit the declared field",
+        )
+    })
 }

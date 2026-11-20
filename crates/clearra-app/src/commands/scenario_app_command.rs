@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use clearra_core_domain::solution::StandardBoard64ColoredTilingIdentity;
-use clearra_pc_graph::request::PcScenarioQuery;
+use clearra_pc_graph::request::{PcContinuationTokenCodec, PcScenarioQuery};
 use clearra_problem::ProblemCompiler;
 use clearra_validation::diagnostic::diagnostic_report::DiagnosticReport;
 use clearra_validation::validators::pc_query_validator::validate_pc_scenario_query;
@@ -491,6 +491,19 @@ impl RunnableAppCommand for ScenarioAppCommand {
                     None => None,
                 };
                 let result = project_pc_allspin_result(result, result_projection);
+                // The ordinary Rust full-height producer has no compact
+                // scenario replay renderer. Publish input replay here after
+                // execution, without treating typed reducer evidence as a
+                // generic scenario or claiming an output-state continuation.
+                let result = if result_projection.projection().is_standard()
+                    && self.query.initial_board().has_extended_occupancy()
+                    && problem.visible_height() > 6
+                    && result.field("scenario_replay_token").is_none()
+                {
+                    attach_full_height_replay(result, &self.query)
+                } else {
+                    result
+                };
                 if let Some(contract) = self.render_contract {
                     return contract.success_response(result);
                 }
@@ -503,4 +516,27 @@ impl RunnableAppCommand for ScenarioAppCommand {
             Err(error) => core_execution_error_response(error),
         }
     }
+}
+
+fn attach_full_height_replay(
+    result: clearra_core_executor::CoreExecutionResult,
+    query: &PcScenarioQuery,
+) -> clearra_core_executor::CoreExecutionResult {
+    let Ok(token) = PcContinuationTokenCodec::encode_scenario_replay(query) else {
+        return result;
+    };
+    let Some((version, _)) = token.split_once(':') else {
+        return result;
+    };
+    result.with_replaced_fields(vec![
+        (
+            "scenario_replay_token_version".to_owned(),
+            version.to_owned(),
+        ),
+        (
+            "replay_hint".to_owned(),
+            format!("clearra continue {token}"),
+        ),
+        ("scenario_replay_token".to_owned(), token),
+    ])
 }

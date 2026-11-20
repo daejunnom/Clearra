@@ -223,6 +223,67 @@ fn compare_score_winner(host: &Value, native: &Value, family: &Value) {
     );
 }
 
+fn compare_coverage(event: &Value, native: &Value, product: &str, failed_queue: Option<&str>) {
+    let report = &event["search_report"];
+    let summary = &native["summary"];
+    let covered = usize::from(failed_queue.is_none());
+    let missed = 1 - covered;
+    let summary_fields = report["summary_fields"].as_array().unwrap();
+    let field = |name: &str| {
+        summary_fields
+            .iter()
+            .find(|pair| pair[0].as_str() == Some(name))
+            .and_then(|pair| pair[1].as_str())
+    };
+    assert_eq!(report["total_possible_pattern_count"], "1");
+    assert_eq!(report["covered_pattern_count"], covered);
+    assert_eq!(
+        report["coverage_probability"],
+        if covered == 1 { "1" } else { "0" }
+    );
+    assert_eq!(field("search_output_policy"), Some("coverage-summary"));
+    for flag in [
+        "coverage_calculated",
+        "probability_calculated",
+        "probability_complete",
+        "count_complete",
+    ] {
+        assert_eq!(report[flag], true, "{product}/{flag}");
+    }
+    for flag in [
+        "solution_count_calculated",
+        "solution_set_materialized",
+        "solution_keys_complete",
+    ] {
+        assert_eq!(report[flag], false, "{product}/{flag}");
+    }
+    assert_eq!(report["normalized_solution_keys"], json!([]));
+    assert!(event["response"]["solution_set_artifact"].is_null());
+    if product == "chance" {
+        assert_eq!(summary["covered_pattern_count"], covered);
+        assert_eq!(summary["coverage_probability"], covered as f64);
+        assert_eq!(summary["probability_complete"], true);
+        assert!(summary.get("probability").is_none());
+    } else {
+        assert_eq!(
+            field("failed_queue_contract"),
+            Some("exact-coverage-complement")
+        );
+        assert_eq!(
+            field("failed_pattern_count"),
+            Some(if missed == 1 { "1" } else { "0" })
+        );
+        assert_eq!(field("failed_pattern_0"), failed_queue);
+        assert_eq!(summary["failed_pattern_count"], missed);
+        assert_eq!(summary["failed_queue_probability"], missed as f64);
+        assert_eq!(summary["failed_pattern_examples_truncated"], false);
+        assert_eq!(
+            summary.get("failed_pattern_0").and_then(Value::as_str),
+            failed_queue
+        );
+    }
+}
+
 fn compare_payload(event: &Value, native: &Value, input: &[&str], product: &str, b2b: bool) {
     let report = &event["search_report"];
     let summary = &native["summary"];
@@ -334,20 +395,7 @@ fn compare_payload(event: &Value, native: &Value, input: &[&str], product: &str,
                 input,
             );
         }
-        "chance" | "failed-queue" => {
-            assert_eq!(report["covered_pattern_count"], 1);
-            assert_eq!(report["coverage_probability"], "1");
-            assert_eq!(report["probability_complete"], true);
-            if product == "chance" {
-                assert_eq!(summary["covered_pattern_count"], 1);
-                assert_eq!(summary["coverage_probability"], 1.0);
-                assert_eq!(summary["probability_complete"], true);
-                assert!(summary.get("probability").is_none());
-            } else {
-                assert_eq!(summary["failed_pattern_count"], 0);
-                assert_eq!(summary["failed_queue_probability"], 0.0);
-            }
-        }
+        "chance" | "failed-queue" => compare_coverage(event, native, product, None),
         "" => {
             assert_eq!(report["solution_keys_complete"], true);
             assert_eq!(
@@ -424,5 +472,24 @@ fn actual_desktop_jobs_preserve_all_full_height_cli_products_and_exact_empty_min
         }
     }
     assert_eq!(cases, 200);
-    eprintln!("source={source}: 200 actual full-height CLI/Desktop product pairs; release_authority=false");
+    for input in &inputs {
+        // The tracked fields have column-shaped holes and no O packing;
+        // changing the fixed supply must fail that queue, not lose the universe.
+        let queue = "O".repeat(input[4].len());
+        let impossible = [input[0], input[1], input[2], input[3], queue.as_str()];
+        for (product, kind) in [
+            ("chance", "pc-probability.v2"),
+            ("failed-queue", "pc-failed-queue.v2"),
+        ] {
+            let args = arguments(&impossible, "srs-plus", product, false);
+            let native = cli(&args, &source, kind);
+            let event = job(&mut bridge, &args, &source, kind);
+            compare_coverage(&event, &native, product, Some(&queue));
+            cases += 1;
+        }
+    }
+    assert_eq!(cases, 208);
+    eprintln!(
+        "source={source}: {cases} actual full-height CLI/Desktop product pairs; release_authority=false"
+    );
 }
