@@ -39,6 +39,7 @@ type WorkerMessage = {
   session?: number;
   reservedBytes?: number;
   requestId?: number;
+  profileWasmStages?: true;
   batch?: ArrayBuffer;
   offer?: {
     taskId: string;
@@ -1579,6 +1580,58 @@ for (const size of [1, 3, 11]) {
   await profiled.initialize(new ArrayBuffer(0), size, undefined, `profiled-${size}`);
   assert.equal(profiled.finishTransportProfile().timings['initialize.prewarm_reuse'].count, size);
   profiled.cancel();
+}
+
+{
+  // Snapshot each separate realm only after ordinary finish has committed.
+  // A missing profiler or corrupt/unbounded diagnostic must not undo valid
+  // solver bytes or present an incomplete profile as full peer coverage.
+  class StageVerifierWorker extends FakeVerifierWorker {
+    private stagesRequested = false;
+    constructor(private readonly workerIndex: number) { super(false); }
+
+    protected override handleExecutable(message: WorkerMessage) {
+      if (message.type === 'initialize') {
+        this.stagesRequested = message.profileWasmStages === true;
+      }
+      if (message.type === 'finish' && this.stagesRequested) {
+        const stage = { name: 'wasm.candidate.build_order_reachability',
+          duration_ns: (this.workerIndex + 1) * 100, invocation_count: 2, work_item_count: 8 };
+        this.emit({
+          type: 'finished', requestId: message.requestId, partial: Uint8Array.of(6).buffer,
+          wasmStageProfile: { schema_version: 1,
+            stages: this.workerIndex === 2 ? [stage, stage] : [stage] }
+        });
+        return;
+      }
+      super.handleExecutable(message);
+    }
+  }
+  let workerIndex = 0;
+  const pool = new ClearraVerifierPool(() => new StageVerifierWorker(workerIndex++) as unknown as Worker);
+  pool.beginTransportProfile(true);
+  await pool.initialize('test', 3);
+  const received: number[] = [];
+  assert.equal(await pool.finish((partial) => received.push(new Uint8Array(partial)[0])), 3);
+  assert.deepEqual(received, [6, 6, 6]);
+  const report = pool.finishTransportProfile();
+  assert.equal(report.core?.scope, 'finished-geometry-verifiers');
+  assert.equal(report.core?.sampled_workers, 2);
+  assert.equal(report.core?.expected_workers, 3);
+  assert.deepEqual(report.core?.stages, [{
+    name: 'wasm.candidate.build_order_reachability', duration_ns: 300,
+    invocation_count: 4, work_item_count: 16
+  }]);
+  assert.equal(pool.finishTransportProfile().core, undefined);
+  pool.beginTransportProfile();
+  await pool.initialize('test ordinary query', 1);
+  const ordinary: number[] = [];
+  await pool.finish((partial) => ordinary.push(new Uint8Array(partial)[0]));
+  assert.deepEqual(ordinary, [0]);
+  assert.equal(pool.finishTransportProfile().core, undefined);
+  pool.beginTransportProfile(true);
+  pool.cancel();
+  assert.equal(pool.finishTransportProfile().core, undefined);
 }
 
 class StalledConsumeVerifierWorker extends FakeVerifierWorker {

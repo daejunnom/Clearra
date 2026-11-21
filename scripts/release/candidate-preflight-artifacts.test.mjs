@@ -11,7 +11,20 @@ const SOURCE = '7'.repeat(40);
 const MANIFEST = 'clearra_wasm.manifest.json';
 const hash = (bytes) => createHash('sha256').update(bytes).digest('hex');
 
-async function fixture(t, built = true) {
+function profileWasm() {
+  const names = ['clearra_wasm_profile_start', 'clearra_wasm_profile_finish'].map((name) => Buffer.from(name));
+  // Two exports of one empty function. All sections fit in one ULEB128 byte.
+  const exports = [names.length, ...names.flatMap((name) => [name.length, ...name, 0, 0])];
+  return Buffer.from([
+    0, 97, 115, 109, 1, 0, 0, 0,
+    1, 4, 1, 0x60, 0, 0, // type: () -> ()
+    3, 2, 1, 0, // function: type 0
+    7, exports.length, ...exports,
+    10, 4, 1, 2, 0, 0x0b, // function body: no locals, end
+  ]);
+}
+
+async function fixture(t, built = true, wasm = Buffer.from([0, 97, 115, 109, 1, 0, 0, 0])) {
   const root = await mkdtemp(resolve(tmpdir(), 'clearra-unqualified-ci-'));
   const previous = [process.env.CLEARRA_SOURCE_COMMIT, process.env.CLEARRA_ENGINE_BUILD_ID];
   process.env.CLEARRA_SOURCE_COMMIT = SOURCE;
@@ -33,7 +46,6 @@ async function fixture(t, built = true) {
   await writeFile(resolve(options.repositoryRoot, 'Cargo.lock'), 'version = 4\n');
   if (built) {
     const bindings = Buffer.from('export const candidate = true;\n');
-    const wasm = Buffer.from([0, 97, 115, 109, 1, 0, 0, 0]);
     const descriptor = (bytes, prefix, extension) => ({ path: `${prefix}.${hash(bytes).slice(0, 24)}.${extension}`, bytes: bytes.length, sha256: hash(bytes) });
     const manifest = {
       schema_version: 1, build: await createClearraWasmBuildContract(options.repositoryRoot),
@@ -62,6 +74,24 @@ test('an earlier gate failure with no WASM emits not-built, not verified', async
   const options = await fixture(t, false);
   assert.deepEqual(await preserveCandidateWasm(options), { ready: false, reason: 'wasm-not-built' });
   await assert.rejects(readdir(options.outputDirectory), { code: 'ENOENT' });
+});
+
+test('diagnostic mode preserves only a byte-verified WASM with profiling exports', async (t) => {
+  const options = await fixture(t, true, profileWasm());
+  assert.deepEqual(await preserveCandidateWasm({ ...options, requireStageProfile: true }),
+    { ready: true, copiedFiles: 5 });
+});
+
+test('diagnostic mode rejects an ordinary valid candidate before staging', async (t) => {
+  const options = await fixture(t);
+  await assert.rejects(preserveCandidateWasm({ ...options, requireStageProfile: true }),
+    /lacks the required stage profiling exports/u);
+  await assert.rejects(readdir(options.outputDirectory), { code: 'ENOENT' });
+});
+
+test('diagnostic mode rejects missing WASM rather than succeeding without an artifact', async (t) => {
+  const options = await fixture(t, false);
+  await assert.rejects(preserveCandidateWasm({ ...options, requireStageProfile: true }), /Diagnostic WASM was not built/u);
 });
 
 test('one artifact owner appends UTF-8 readiness and path records without PowerShell encoding', async (t) => {

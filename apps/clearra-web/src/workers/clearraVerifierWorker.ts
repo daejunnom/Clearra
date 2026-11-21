@@ -10,6 +10,8 @@ import { listenForWasmOwnerTermination } from '@clearra/ui/wasm-lifecycle';
 import type { ClearraWorkerExecutionKind } from './ClearraVerifierPool';
 import { createWorkerHostYield } from './workerHostYield';
 import { takeVerifierBatch } from './verifierBatchOwnership';
+import { normalizeVerifierWasmStageRows, type VerifierWasmStage } from './VerifierWasmStageProfile';
+import { isLocalSearchProfileMode } from '../lib/localSearchProfile';
 import {
   WORKER_HEARTBEAT_INTERVAL_MS,
   sha256Hex,
@@ -39,6 +41,7 @@ type VerifierRequest =
       type: 'initialize';
       initialization: string | ArrayBuffer;
       executionKind?: ClearraWorkerExecutionKind;
+      profileWasmStages?: true;
       lifecycleOwnerId?: string;
       hostCapabilities?: ClearraWasmHostCapabilities;
       delegation: ExecutableDelegationPermit;
@@ -89,12 +92,14 @@ type VerifierResponse =
       progress: ClearraDistributedVerifierProgress;
     }
   | { type: 'partial'; requestId: number; partial: ArrayBuffer }
-  | { type: 'finished'; requestId: number; partial: ArrayBuffer }
+  | { type: 'finished'; requestId: number; partial: ArrayBuffer;
+      wasmStageProfile?: { schema_version: 1; stages: VerifierWasmStage[] } }
   | { type: 'failed'; requestId?: number; code: string; message: string };
 
 let wasm: ClearraWasmModule | null = null;
 let initialized = false;
 let executionKind: ClearraWorkerExecutionKind = 'geometry-verifier';
+let stageProfilingActive = false;
 const cancelledExactRequests = new Set<number>();
 let lifecycleOwnerId = '';
 let closeLifecycleListener: (() => void) | null = null;
@@ -258,6 +263,7 @@ async function handleRequest(request: VerifierRequest) {
     } catch {
       // The parent pool terminates this worker after receiving the failure.
     }
+    finishWasmStageProfile();
     post({
       type: 'failed',
       requestId: 'requestId' in failureRequest ? failureRequest.requestId : undefined,
@@ -302,6 +308,15 @@ async function executeAuthorized(request: ExecutableVerifierRequest): Promise<vo
       }
       wasm.distributed_finish_parallel_worker_init(request.initialization);
     } else {
+      if (request.profileWasmStages && isLocalSearchProfileMode(import.meta.env.MODE) &&
+          wasm.profile_start && wasm.profile_finish) {
+        try {
+          wasm.profile_start();
+          stageProfilingActive = true;
+        } catch {
+          // A profiling exporter cannot reject a solver or a durable reply.
+        }
+      }
       wasm.distributed_verifier_start(request.initialization);
     }
     initialized = true;
@@ -395,7 +410,22 @@ async function executeAuthorized(request: ExecutableVerifierRequest): Promise<vo
   postHeartbeat(request.requestId, wasm);
   const partial = wasm.distributed_verifier_finish();
   initialized = false;
-  post({ type: 'finished', requestId: request.requestId, partial }, [partial]);
+  const stages = finishWasmStageProfile();
+  post({
+    type: 'finished', requestId: request.requestId, partial,
+    ...(stages ? { wasmStageProfile: { schema_version: 1, stages } } : {})
+  }, [partial]);
+}
+
+function finishWasmStageProfile(): VerifierWasmStage[] | null {
+  if (!stageProfilingActive) return null;
+  stageProfilingActive = false;
+  try {
+    return normalizeVerifierWasmStageRows(wasm?.profile_finish?.());
+  } catch {
+    // The exact result was already taken from the ABI. Timing is best effort.
+    return null;
+  }
 }
 
 function flushConditionedQueries() {
@@ -534,6 +564,7 @@ function bindLifecycleOwner(ownerId: string) {
 
 function disposeVerifierRuntime() {
   initialized = false;
+  stageProfilingActive = false;
   activeConditionedProfile = null;
   activeSynopsisProfile = null;
   try {

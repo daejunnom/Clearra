@@ -18,6 +18,7 @@ import {
   type ExecutableDelegationPermit
 } from './DurableDelegationJournal';
 import { VerifierTransportProfile, type TransportOperation } from './VerifierTransportProfile';
+import { VerifierWasmStageProfile } from './VerifierWasmStageProfile';
 import { createWorkerHostYield } from './workerHostYield';
 
 type VerifierResponse =
@@ -54,7 +55,7 @@ type VerifierResponse =
       progress: ClearraDistributedVerifierProgress;
     }
   | { type: 'partial'; requestId: number; partial: ArrayBuffer }
-  | { type: 'finished'; requestId: number; partial: ArrayBuffer }
+  | { type: 'finished'; requestId: number; partial: ArrayBuffer; wasmStageProfile?: unknown }
   | { type: 'failed'; requestId?: number; code: string; message: string };
 
 type PendingRequest = {
@@ -315,7 +316,8 @@ class VerifierClient {
     hostCapabilities?: ClearraWasmHostCapabilities,
     executionKind: ClearraWorkerExecutionKind = 'geometry-verifier',
     legalBoardSynopsis?: AcceleratorWorkerSynopsis | null,
-    conditionedPack?: AcceleratorWorkerRelation | null
+    conditionedPack?: AcceleratorWorkerRelation | null,
+    profileWasmStages = false
   ): Promise<void> {
     this.initialized = false;
     this.exactCancellationRequested = false;
@@ -391,6 +393,7 @@ class VerifierClient {
               lifecycleOwnerId: this.lifecycleOwnerId,
               hostCapabilities,
               executionKind,
+              ...(profileWasmStages ? { profileWasmStages: true } : {}),
               delegation: delegation.permit
             },
             workerInitialization instanceof ArrayBuffer ? [workerInitialization] : []
@@ -1094,8 +1097,21 @@ class VerifierClient {
 
 export class ClearraVerifierPool {
   private readonly transportProfile = new VerifierTransportProfile();
-  beginTransportProfile() { this.transportProfile.begin(); }
-  finishTransportProfile() { return this.transportProfile.finish(); }
+  private verifierCoreProfile: VerifierWasmStageProfile | null = null;
+
+  beginTransportProfile(captureWasmStages = false) {
+    this.transportProfile.begin();
+    this.verifierCoreProfile = captureWasmStages ? new VerifierWasmStageProfile() : null;
+  }
+
+  finishTransportProfile(): ReturnType<VerifierTransportProfile['finish']> & {
+    core?: ReturnType<VerifierWasmStageProfile['finish']>;
+  } {
+    const verifier = this.verifierCoreProfile;
+    this.verifierCoreProfile = null;
+    const transport = this.transportProfile.finish();
+    return verifier ? { ...transport, core: verifier.finish() } : transport;
+  }
   private clients: VerifierClient[] = [];
   private waiters: PoolWaiter[] = [];
   private inFlight = new Set<Promise<void>>();
@@ -1205,6 +1221,7 @@ export class ClearraVerifierPool {
         this.clients.push(this.createClient());
       }
       const relation = conditionedPack && size <= conditionedPack.maximumPeers ? conditionedPack : null;
+      const captureWasmStages = this.verifierCoreProfile !== null && executionKind === 'geometry-verifier';
       const initializations = this.clients.map(async (client) => {
         const initializationTask = withTimeout(
           client.initialize(
@@ -1214,7 +1231,8 @@ export class ClearraVerifierPool {
             hostCapabilities,
             executionKind,
             legalBoardSynopsis,
-            relation
+            relation,
+            captureWasmStages
           ),
           this.initializationTimeoutMs,
           'distributed verifier initialization'
@@ -1324,6 +1342,7 @@ export class ClearraVerifierPool {
     options: ClearraVerifierPoolFinishOptions = {}
   ): Promise<number> {
     const generation = this.generation;
+    const profile = this.verifierCoreProfile;
     this.assertActive(generation);
     this.closeIssuance();
     await this.waitForIdle();
@@ -1338,6 +1357,7 @@ export class ClearraVerifierPool {
           // Keep coordinator mutation and durable receipts in one ordered queue;
           // a rejected commit poisons the queue instead of applying later results.
           await this.commitResult(value, consumePartial, generation);
+          if (profile && value.response.type === 'finished') return value.response.wasmStageProfile;
         } catch (error) {
           if (this.active && generation === this.generation) this.fail(error);
           throw error;
@@ -1345,6 +1365,12 @@ export class ClearraVerifierPool {
       })
     );
     this.assertActive(generation);
+    if (profile && profile === this.verifierCoreProfile) {
+      // Report only peers that survived the current generation's terminal
+      // boundary. Optional timing data is not part of sealed solver evidence.
+      profile.expectedWorkers = finished.length;
+      for (const rows of finished) profile.append(rows);
+    }
     this.active = false;
     return finished.length;
   }
@@ -1462,6 +1488,7 @@ export class ClearraVerifierPool {
 
   cancel() {
     this.active = false;
+    this.verifierCoreProfile = null;
     this.issuanceClosed = true;
     this.failure = null;
     this.generation++;
@@ -1837,6 +1864,7 @@ function canonicalVerifierReply(response: VerifierResponse): unknown {
     };
   }
   if (response.type === 'finished') {
+    // Peer profiling is optional telemetry, not a digest input or proof.
     return { type: 'finished', request_id: response.requestId };
   }
   throw new Error(`response ${response.type} cannot be sealed as a final verifier result`);

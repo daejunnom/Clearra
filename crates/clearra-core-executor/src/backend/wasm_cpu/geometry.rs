@@ -2975,7 +2975,7 @@ pub(super) struct GeometrySearch {
     column_pruned_states: usize,
     component_compositions: usize,
     tablebase_pruned_states: usize,
-    external_targets: Option<Arc<[TargetGroup]>>,
+    external_targets: Option<SharedTargetGroups>,
     resource_authoritative: bool,
 }
 
@@ -3435,7 +3435,8 @@ fn max_covered_sequence_len(
 #[cfg(test)]
 mod target_group_memory_admission_tests {
     use clearra_core_domain::{
-        piece::piece_kind::PieceKind, probability::probability_value::ProbabilityValue,
+        pc::pc_target::PcTarget, piece::piece_kind::PieceKind,
+        probability::probability_value::ProbabilityValue,
     };
     use clearra_coverage::{
         pattern::pattern_bitset::PatternBitSet,
@@ -3443,6 +3444,8 @@ mod target_group_memory_admission_tests {
             pattern_universe_id::PatternUniverseId, pattern_weight_model_id::PatternWeightModelId,
         },
     };
+    use clearra_pc_graph::request::OpeningPcSearchQuery;
+    use clearra_problem::ProblemCompiler;
     use clearra_supply::{
         hold_automaton::{HoldAutomatonState, SupplyProvenanceId},
         pattern_universe::{
@@ -3452,9 +3455,10 @@ mod target_group_memory_admission_tests {
     };
 
     use super::{
-        checked_target_group_build_peak_additional_bytes, compile_target_groups,
-        compile_target_groups_with_memory_limit, max_covered_sequence_len,
-        TargetGroupCompileAdvance, TargetGroupCompileSession, WasmExactSearchError,
+        checked_target_group_build_peak_additional_bytes, checked_target_nested_retained_bytes,
+        compile_target_groups, compile_target_groups_with_memory_limit, max_covered_sequence_len,
+        target_bytes, GeometryAdvance, GeometryCatalog, GeometrySearch, TargetGroupCompileAdvance,
+        TargetGroupCompileSession, WasmExactSearchError,
     };
 
     #[test]
@@ -3534,6 +3538,58 @@ mod target_group_memory_admission_tests {
         .expect("exact cap admits target construction");
         assert_eq!(targets.len(), family.len());
         assert!(retained_bytes > 0);
+
+        // Once the bounded compiler hands off its immutable target owner,
+        // retained-size checks must charge the same bytes as a fresh walk.
+        let problem =
+            ProblemCompiler::compile_opening_pc(&OpeningPcSearchQuery::new(PcTarget::two_lines()))
+                .expect("two-line problem");
+        let catalog = GeometryCatalog::compile(&problem).expect("two-line catalog");
+        let mut deferred = GeometrySearch::external_deferred(
+            &universe,
+            &family,
+            true,
+            Some((already_retained, already_retained + peak)),
+        )
+        .expect("deferred external targets");
+        assert!(deferred.target_preparation_pending());
+        for _ in 0..16 {
+            if !deferred.target_preparation_pending() {
+                break;
+            }
+            assert!(matches!(
+                deferred.advance_with_retained_limit(&catalog, peak),
+                GeometryAdvance::Pending
+            ));
+        }
+        assert!(!deferred.target_preparation_pending());
+        let live = deferred.retained_bytes() as u128;
+        assert!(matches!(
+            deferred.advance_with_retained_limit(&catalog, live - 1),
+            GeometryAdvance::ResourceIncomplete("geometry_memory_capacity_exceeded")
+        ));
+        assert!(matches!(
+            deferred.advance_with_retained_limit(&catalog, live),
+            GeometryAdvance::Complete
+        ));
+        for search in [
+            deferred,
+            GeometrySearch::external_deferred(&universe, &family, false, None)
+                .expect("eager external targets"),
+        ] {
+            let live_targets = search.targets().expect("external owner is published");
+            let nested = checked_target_nested_retained_bytes(live_targets)
+                .expect("checked external target size");
+            assert!(nested > 0);
+            assert_eq!(
+                search.checked_active_target_nested_retained_bytes(),
+                Some(nested)
+            );
+            assert_eq!(
+                search.retained_bytes() as u128,
+                nested + target_bytes(live_targets) as u128
+            );
+        }
     }
 
     #[test]
@@ -3910,7 +3966,7 @@ impl GeometrySearch {
         })
     }
 
-    pub fn external(targets: Vec<TargetGroup>, group_pattern_index_bytes: usize) -> Self {
+    fn external(targets: Vec<TargetGroup>, group_pattern_index_bytes: usize) -> Self {
         let shared = SharedTargetGroups {
             targets: targets.into(),
             group_pattern_index_bytes,
@@ -4009,7 +4065,7 @@ impl GeometrySearch {
             column_pruned_states: 0,
             component_compositions: 0,
             tablebase_pruned_states: 0,
-            external_targets: Some(Arc::clone(&shared.targets)),
+            external_targets: Some(shared.clone()),
             resource_authoritative: false,
         }
     }
@@ -4079,7 +4135,7 @@ impl GeometrySearch {
                             };
                         }
                         TargetGroupPreparationMode::External => {
-                            self.external_targets = Some(Arc::clone(&shared.targets));
+                            self.external_targets = Some(shared);
                         }
                     }
                     // Do not enter the recursive family compiler in the same
@@ -4090,24 +4146,14 @@ impl GeometrySearch {
         }
         let internal_limit = match retained_limit_bytes {
             Some(total_limit) => {
-                let live_targets = self
-                    .compiler
-                    .as_ref()
-                    .map(|compiler| compiler.targets.as_ref())
-                    .or_else(|| {
-                        self.enumerator
-                            .as_ref()
-                            .map(|enumerator| enumerator.targets.as_ref())
-                    })
-                    .or(self.external_targets.as_deref());
-                let fixed = live_targets
-                    .map_or(Some(0_u128), checked_target_nested_retained_bytes)
+                let fixed = self
+                    .checked_active_target_nested_retained_bytes()
                     .and_then(|bytes| bytes.checked_add(self.shared_family_bytes as u128))
                     .and_then(|bytes| {
                         bytes.checked_add(
                             self.external_targets
                                 .as_ref()
-                                .map_or(0_u128, |targets| target_bytes(targets) as u128),
+                                .map_or(0_u128, |owner| target_bytes(owner.targets()) as u128),
                         )
                     });
                 let Some(limit) = fixed.and_then(|fixed| total_limit.checked_sub(fixed)) else {
@@ -4599,7 +4645,11 @@ impl GeometrySearch {
         self.enumerator
             .as_ref()
             .map(|enumerator| enumerator.targets.as_ref())
-            .or(self.external_targets.as_deref())?
+            .or_else(|| {
+                self.external_targets
+                    .as_ref()
+                    .map(SharedTargetGroups::targets)
+            })?
             .get(target_index as usize)
     }
 
@@ -4607,7 +4657,11 @@ impl GeometrySearch {
         self.enumerator
             .as_ref()
             .map(|enumerator| enumerator.targets.as_ref())
-            .or(self.external_targets.as_deref())
+            .or_else(|| {
+                self.external_targets
+                    .as_ref()
+                    .map(SharedTargetGroups::targets)
+            })
     }
 
     pub fn finish_external(
@@ -4639,13 +4693,8 @@ impl GeometrySearch {
         self.component_compositions = summary.component_compositions;
     }
 
-    pub fn retained_bytes(&self) -> usize {
-        if let Some(preparation) = self.target_preparation.as_ref() {
-            return preparation
-                .retained_upper_bound_bytes()
-                .saturating_add(self.shared_family_bytes);
-        }
-        let current_target_nested_bytes = self
+    fn checked_active_target_nested_retained_bytes(&self) -> Option<u128> {
+        let internal = self
             .compiler
             .as_ref()
             .map(|compiler| compiler.targets.as_ref())
@@ -4653,30 +4702,49 @@ impl GeometrySearch {
                 self.enumerator
                     .as_ref()
                     .map(|enumerator| enumerator.targets.as_ref())
-            })
-            .or(self.external_targets.as_deref())
-            .and_then(checked_target_nested_retained_bytes)
-            .and_then(|bytes| usize::try_from(bytes).ok())
-            .unwrap_or_else(|| {
-                usize::from(
-                    self.compiler.is_some()
-                        || self.enumerator.is_some()
-                        || self.external_targets.is_some(),
-                ) * usize::MAX
             });
-        current_target_nested_bytes.saturating_add(self.shared_family_bytes)
-            + self
-                .compiler
-                .as_ref()
-                .map_or(0, FamilyCompiler::retained_bytes)
-            + self
-                .enumerator
-                .as_ref()
-                .map_or(0, FamilyEnumerator::retained_bytes)
-            + self
-                .external_targets
-                .as_ref()
-                .map_or(0, |targets| target_bytes(targets))
+        if let Some(targets) = internal {
+            checked_target_nested_retained_bytes(targets)
+        } else {
+            // The external worker borrows its immutable target groups for
+            // every candidate. Reuse the owner's checked, alias-deduplicated
+            // size instead of rescanning every prior target's Arc twice per
+            // candidate. Keep the count attached to the target owner.
+            Some(
+                self.external_targets
+                    .as_ref()
+                    .map_or(0, |owner| owner.group_pattern_index_bytes as u128),
+            )
+        }
+    }
+
+    pub fn retained_bytes(&self) -> usize {
+        if let Some(preparation) = self.target_preparation.as_ref() {
+            return preparation
+                .retained_upper_bound_bytes()
+                .saturating_add(self.shared_family_bytes);
+        }
+        let current_target_nested_bytes = self
+            .checked_active_target_nested_retained_bytes()
+            .and_then(|bytes| usize::try_from(bytes).ok())
+            .unwrap_or(usize::MAX);
+        current_target_nested_bytes
+            .saturating_add(self.shared_family_bytes)
+            .saturating_add(
+                self.compiler
+                    .as_ref()
+                    .map_or(0, FamilyCompiler::retained_bytes),
+            )
+            .saturating_add(
+                self.enumerator
+                    .as_ref()
+                    .map_or(0, FamilyEnumerator::retained_bytes),
+            )
+            .saturating_add(
+                self.external_targets
+                    .as_ref()
+                    .map_or(0, |owner| target_bytes(owner.targets())),
+            )
     }
 }
 

@@ -35,6 +35,7 @@ assert.equal(localSearchProfileText({ event: 'final_response', search_profile: {
 const text = localSearchProfileText({ event: 'final_response', search_profile: {
   input: 'private', verifier_transport: { timings: {
     'consume.prepare': { count: 2, failed: 0, total_ms: 1.23456, max_ms: 1, input: 'private' },
+    'consume.accepted_and_published': { count: 2, total_ms: 2.12345, input: 'private' },
     'unknown': { count: 1 }, 'finish.completed': { count: Infinity, total_ms: -1 }
   } }, minimum_parallel: { wave_count: 200, omitted_wave_count: 72,
     waves: Array.from({ length: 200 }, () => ({ wave: 1, first_receipt_ms: null, query_prepare_ms: NaN, input: 'private' })) }
@@ -42,6 +43,7 @@ const text = localSearchProfileText({ event: 'final_response', search_profile: {
 assert.ok(text);
 const parsed = JSON.parse(text!);
 assert.equal(parsed.verifier_transport['consume.prepare'].total_ms, 1.235);
+assert.deepEqual(parsed.verifier_transport['consume.accepted_and_published'], { count: 2, total_ms: 2.123 });
 assert.deepEqual(parsed.verifier_transport['finish.completed'], {});
 assert.equal(parsed.minimum_parallel.waves.length, 128);
 assert.deepEqual(parsed.minimum_parallel.waves[0], { wave: 1, first_receipt_ms: null });
@@ -51,3 +53,15 @@ const hostText = localSearchProfileText({ event: 'final_response', search_profil
   host_execution: { source_ms: 1.23456, parse_ms: Infinity, drain_ms: -1, input: 'private', unknown: 7 }
 } });
 assert.deepEqual(JSON.parse(hostText!).host_execution, { source_ms: 1.235 });
+const peers = JSON.parse(localSearchProfileText({ event: 'final_response', search_profile: {
+  verifier_core: { schema_version: 1, scope: 'finished-geometry-verifiers', sampled_workers: 2,
+    expected_workers: 3, stages: [
+      { name: 'wasm.geometry.advance', duration_ns: 123, invocation_count: 4, work_item_count: 5, input: 'private' },
+      { name: 'wasm.invalid.counter', duration_ns: -1, invocation_count: 4, work_item_count: 5 },
+      { name: 'private/location', duration_ns: 123, invocation_count: 4, work_item_count: 5 },
+    ] }
+} })!);
+assert.deepEqual(peers.verifier_core, {
+  schema_version: 1, scope: 'finished-geometry-verifiers', sampled_workers: 2, expected_workers: 3,
+  stages: [{ name: 'wasm.geometry.advance', duration_ns: 123, invocation_count: 4, work_item_count: 5 }]
+});

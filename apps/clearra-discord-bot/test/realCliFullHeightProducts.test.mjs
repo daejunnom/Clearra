@@ -39,11 +39,17 @@ function processFailure(result) {
     const payload = JSON.parse(result.stdout);
     error = payload.summary?.error ?? payload.error;
   } catch {}
-  const code = /^[A-Z][A-Z0-9_]{1,63}$/u.test(error?.code ?? '') ? error.code : null;
+  // Parse-time errors are plain typed stderr even with `--format json`.
+  // Extract only the stable code and a strictly allowlisted worker rejection.
+  const parseError = /^error ([A-Z][A-Z0-9_]{1,63}) ([^\r\n]*)/u.exec(result.stderr ?? '');
+  const code = /^[A-Z][A-Z0-9_]{1,63}$/u.test(error?.code ?? '') ? error.code
+    : parseError?.[1] ?? null;
   const message = typeof error?.message === 'string' && error.message.length <= 160 &&
-    /^(?:pc chance (?:result|compiled authority) rejected: [a-z0-9._ -]+|wasm_[a-z0-9_]+|the (?:operation could not be completed|requested operation is not supported))$/u
+    /^(?:pc (?:chance|tiling) (?:result|compiled authority) rejected: [a-z0-9._ -]+|wasm_[a-z0-9_]+|the (?:operation could not be completed|requested operation is not supported))$/u
       .test(error.message)
-    ? error.message : null;
+    ? error.message
+    : /^--(?:auto-)?workers [1-9][0-9]{0,9} (?:uses the reserved logical processor; pass --use-all-cpu-threads explicitly|exceeds the hard limit of [1-9][0-9]{0,9} logical processors)$/u
+      .test(parseError?.[2] ?? '') ? parseError[2] : null;
   const processCode = /^E[A-Z0-9_]{1,63}$/u.test(result.error?.code ?? '')
     ? result.error.code : null;
   return [`exit=${result.status ?? result.exitCode ?? 'none'}`,
@@ -232,10 +238,12 @@ function verifyCompactTilingWorkerParity(cliPath) {
   // an auto limit could appear to pass by silently taking the serial path.
   const args = ['pc', 'tiling', '--board-mask', '0x3c0f03c0f', '--height', '4',
     '--lines', '4', '--pieces', '6', '--patterns', 'P7', '--hold', 'empty',
-    '--backend', 'cpu', '--no-backend-fallback'];
+    '--backend', 'cpu', '--no-backend-fallback', '--use-all-cpu-threads'];
   const run = workers => JSON.parse(invoke(cliPath, [
     '--format', 'json', '--include-solution-data', ...args, '--workers', String(workers),
   ], {
+    // This reduced hardware envelope equals the requested workers. Explicit
+    // opt-in above authorizes using the otherwise-reserved logical CPU.
     env: { ...process.env, CLEARRA_EXPECTED_VCPUS: String(workers) },
     label: `direct compact PC Tiling, ${workers} worker(s)`,
   }));

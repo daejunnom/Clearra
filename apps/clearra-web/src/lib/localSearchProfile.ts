@@ -4,7 +4,7 @@ export function isLocalSearchProfileMode(mode: string): boolean {
 }
 
 const stages = ['ready_client_wait', 'prewarm_new', 'prewarm_reuse', 'payload_hash',
-  'prepare', 'offered', 'offer_round_trip', 'accepted', 'published', 'posted_to_start_notice',
+  'prepare', 'offered', 'offer_round_trip', 'accepted', 'published', 'accepted_and_published', 'posted_to_start_notice',
   'running_commit', 'run_grant_to_reply', 'result_hash', 'result_sealed', 'result_apply',
   'result_applied', 'completed'];
 const waveKeys = ['wave', 'query_prepare_ms', 'upstream_gap_ms', 'initialize_all_ready_ms',
@@ -69,6 +69,31 @@ export function localSearchProfileText(event: unknown): string | null {
       }
     }
     result.verifier_transport = timings;
+  }
+  const verifierCore = record(profile.verifier_core);
+  if (verifierCore?.schema_version === 1 && verifierCore.scope === 'finished-geometry-verifiers') {
+    const { sampled_workers, expected_workers } = verifierCore;
+    if (
+      typeof sampled_workers === 'number' && Number.isSafeInteger(sampled_workers) &&
+      typeof expected_workers === 'number' && Number.isSafeInteger(expected_workers) &&
+      sampled_workers >= 0 && sampled_workers <= expected_workers
+    ) {
+      const counters = ['duration_ns', 'invocation_count', 'work_item_count'] as const;
+      const rows = Array.isArray(verifierCore.stages) && verifierCore.stages.length <= 96
+        ? verifierCore.stages.flatMap(value => {
+            const row = record(value);
+            if (!row || typeof row.name !== 'string' || row.name.length > 128 ||
+                !/^[a-z][a-z0-9_]*(?:\.[a-z0-9_]+)+$/u.test(row.name) ||
+                !counters.every(key => typeof row[key] === 'number' &&
+                  Number.isSafeInteger(row[key]) && (row[key] as number) >= 0)) return [];
+            const { name, duration_ns, invocation_count, work_item_count } = row;
+            return [{ name, duration_ns, invocation_count, work_item_count }];
+          })
+        : [];
+      result.verifier_core = {
+        schema_version: 1, scope: verifierCore.scope, sampled_workers, expected_workers, stages: rows
+      };
+    }
   }
   const minimum = record(profile.minimum_parallel);
   if (minimum) {

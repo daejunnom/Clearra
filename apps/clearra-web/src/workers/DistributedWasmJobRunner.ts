@@ -312,7 +312,7 @@ export class DistributedWasmJobRunner {
         hostTiming.source_merge_ms += performance.now() - started;
       }
     };
-    if (transportProfiling) this.pool.beginTransportProfile();
+    if (transportProfiling) this.pool.beginTransportProfile(options.transportProfile === true);
     // A natural-root coordinator only hands out immutable roots and merges
     // their summaries; it is not one of the admitted compute workers. Legacy
     // streaming producers still perform Geometry locally and therefore keep
@@ -849,12 +849,13 @@ export class DistributedWasmJobRunner {
         };
       }
       if (transportProfiling) {
-        const transport = this.pool.finishTransportProfile();
+        const { core, ...transport } = this.pool.finishTransportProfile();
         transportProfiling = false;
         searchProfile = {
           ...(searchProfile !== null && typeof searchProfile === 'object' && !Array.isArray(searchProfile)
             ? searchProfile : { core_profile: searchProfile }),
-          verifier_transport: transport
+          verifier_transport: transport,
+          ...(core ? { verifier_core: core } : {})
         };
       }
       if (captureSchedulingProfile) {

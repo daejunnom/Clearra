@@ -491,12 +491,14 @@ impl WasmDistributedVerifier {
         candidate: GeometryCandidate,
         ordinal: u64,
         control: &ExecutionControl,
-    ) -> Result<(), &'static str> {
+    ) -> Result<u64, &'static str> {
         self.prepare_for_consumption(control)?;
-        Self::check_consume_outcome(
-            self.session
-                .process_local_geometry_candidate_with_ordinal(candidate, ordinal, control),
-        )
+        let (advance, hash) = self
+            .session
+            .process_local_geometry_candidate_with_ordinal(candidate, ordinal, control)
+            .map_err(map_error)?;
+        Self::check_consume_outcome(Ok(advance))?;
+        Ok(hash)
     }
 
     fn prepare_for_consumption(&mut self, control: &ExecutionControl) -> Result<(), &'static str> {

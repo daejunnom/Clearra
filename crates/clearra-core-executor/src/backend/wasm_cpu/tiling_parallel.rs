@@ -10,6 +10,8 @@ use clearra_supply::pattern_universe::{
     MaterializedPatternUniverseStructure, PackingMultisetFamily,
 };
 
+#[cfg(any(feature = "search-stage-profiling", feature = "wasm-stage-profiling"))]
+use crate::performance::{profile_sample_scale, ExecutorSearchStage, SearchStageSpan};
 use crate::tiling_solution_store::{pack_canonical_tiling_row_ids, PackedTilingRows};
 
 use super::{
@@ -1135,6 +1137,8 @@ pub struct WasmTilingRootWorker {
     completed_roots: usize,
     expanded_nodes: usize,
     peak_frontier: usize,
+    #[cfg(any(feature = "search-stage-profiling", feature = "wasm-stage-profiling"))]
+    geometry_advance_calls: usize,
 }
 
 struct TilingRootWorkerPass {
@@ -1300,6 +1304,8 @@ impl WasmTilingRootWorker {
             completed_roots: 0,
             expanded_nodes: 0,
             peak_frontier: 0,
+            #[cfg(any(feature = "search-stage-profiling", feature = "wasm-stage-profiling"))]
+            geometry_advance_calls: 0,
         }
     }
 
@@ -1431,7 +1437,20 @@ impl WasmTilingRootWorker {
                     .passes
                     .get(usize::from(active.task.pass_index))
                     .ok_or("wasm_tiling_root_pass_invalid")?;
-                match active.search.advance(&pass.catalog) {
+                #[cfg(any(feature = "search-stage-profiling", feature = "wasm-stage-profiling"))]
+                let geometry_span = {
+                    // The root worker resumes in small ABI slices. Sample
+                    // over the worker lifetime, not over each resumed slice.
+                    self.geometry_advance_calls = self.geometry_advance_calls.saturating_add(1);
+                    SearchStageSpan::begin_scaled(
+                        ExecutorSearchStage::WasmGeometryAdvance,
+                        profile_sample_scale(self.geometry_advance_calls),
+                    )
+                };
+                let advancement = active.search.advance(&pass.catalog);
+                #[cfg(any(feature = "search-stage-profiling", feature = "wasm-stage-profiling"))]
+                geometry_span.finish(1);
+                match advancement {
                     GeometryAdvance::Pending => RootGeometryStep::Pending,
                     GeometryAdvance::Candidate(candidate) => {
                         // The serial session filters before candidate rank,
@@ -1447,17 +1466,8 @@ impl WasmTilingRootWorker {
                                 if candidate.target_index != active.task.family_index {
                                     return Err("wasm_pc_root_candidate_target_mismatch");
                                 }
-                                let ordinal = u32::try_from(active.pc_candidate_count)
-                                    .map_err(|_| "wasm_pc_root_local_ordinal_overflow")?;
-                                active.pc_candidate_count = active
-                                    .pc_candidate_count
-                                    .checked_add(1)
-                                    .ok_or("wasm_pc_root_candidate_count_overflow")?;
-                                active.pc_candidate_digest = mix_order_independent_candidate_digest(
-                                    active.pc_candidate_digest,
-                                    candidate.identity.bucket_hash(),
-                                );
-                                ordinal
+                                u32::try_from(active.pc_candidate_count)
+                                    .map_err(|_| "wasm_pc_root_local_ordinal_overflow")?
                             } else {
                                 let packed_rows = pack_canonical_tiling_row_ids(
                                     candidate.row_ids(),
@@ -1501,11 +1511,26 @@ impl WasmTilingRootWorker {
                     if let Some(verifier) = self.pc_verifier.as_mut() {
                         let ordinal = (u64::from(task.ordinal) << PC_ROOT_LOCAL_ORDINAL_BITS)
                             | u64::from(local_ordinal);
-                        verifier.consume_local_geometry_candidate(
+                        let candidate_hash = verifier.consume_local_geometry_candidate(
                             geometry.ok_or("wasm_pc_root_candidate_geometry_missing")?,
                             ordinal,
                             control,
                         )?;
+                        // The verifier hashes the same locally admitted
+                        // identity. Accumulate a separate root transcript
+                        // without rescanning its placement masks.
+                        let active = self
+                            .active_root
+                            .as_mut()
+                            .ok_or("wasm_tiling_root_search_missing")?;
+                        active.pc_candidate_count = active
+                            .pc_candidate_count
+                            .checked_add(1)
+                            .ok_or("wasm_pc_root_candidate_count_overflow")?;
+                        active.pc_candidate_digest = mix_order_independent_candidate_digest(
+                            active.pc_candidate_digest,
+                            candidate_hash,
+                        );
                         verified_candidates = verified_candidates.saturating_add(1);
                     }
                     self.candidate_count = self.candidate_count.saturating_add(1);
@@ -1820,6 +1845,9 @@ mod tests {
             "normalized_solution_set_hash",
             "covered_pattern_count",
             "count_complete",
+            "representative_candidate_ordinal",
+            "representative_candidate_id",
+            "representative_pattern_id",
         ] {
             assert_eq!(distributed.field(key), serial.field(key), "field {key}");
         }

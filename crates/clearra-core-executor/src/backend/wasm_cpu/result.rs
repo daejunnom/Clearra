@@ -3356,9 +3356,23 @@ impl WasmExactSearchSession {
         candidate: GeometryCandidate,
         ordinal: u64,
         control: &ExecutionControl,
-    ) -> Result<Option<ExactSearchAdvance>, WasmExactSearchError> {
+    ) -> Result<(Option<ExactSearchAdvance>, u64), WasmExactSearchError> {
         self.bind_distributed_candidate_control(control)?;
-        self.process_candidate_ranked(candidate, Some(ordinal), control)
+        // This realm's root worker filters before assigning ordinals. A
+        // disagreement is a failed transcript, not a silent skip.
+        if !self.problem.allows_solution_identity(&candidate.identity) {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "wasm_pc_root_candidate_not_admitted",
+            ));
+        }
+        let candidate_hash = candidate.identity.bucket_hash();
+        let advance = self.process_admitted_candidate_ranked(
+            candidate,
+            Some(ordinal),
+            candidate_hash,
+            control,
+        )?;
+        Ok((advance, candidate_hash))
     }
 
     fn bind_distributed_candidate_control(
@@ -3405,18 +3419,23 @@ impl WasmExactSearchSession {
         if !self.problem.allows_solution_identity(&candidate.identity) {
             return Ok(None);
         }
+        let candidate_hash = candidate.identity.bucket_hash();
+        self.process_admitted_candidate_ranked(candidate, external_ordinal, candidate_hash, control)
+    }
+
+    fn process_admitted_candidate_ranked(
+        &mut self,
+        candidate: GeometryCandidate,
+        external_ordinal: Option<u64>,
+        candidate_hash: u64,
+        control: &ExecutionControl,
+    ) -> Result<Option<ExactSearchAdvance>, WasmExactSearchError> {
         let candidate_ordinal = external_ordinal.unwrap_or(self.packing_candidate_count as u64);
         self.packing_candidate_count += 1;
         self.packing_candidate_digest = if self.order_independent_candidate_digest {
-            mix_order_independent_candidate_digest(
-                self.packing_candidate_digest,
-                candidate.identity.bucket_hash(),
-            )
+            mix_order_independent_candidate_digest(self.packing_candidate_digest, candidate_hash)
         } else {
-            mix_digest(
-                self.packing_candidate_digest,
-                candidate.identity.bucket_hash(),
-            )
+            mix_digest(self.packing_candidate_digest, candidate_hash)
         };
         if self.problem.objective().kind() == ObjectiveKind::Tiling {
             return self.observe_tiling_candidate(candidate, candidate_ordinal);
@@ -3444,7 +3463,7 @@ impl WasmExactSearchSession {
                     compact_pc_failed_queue::mix_candidate_commitment(
                         self.compact_failed_queue_worker_commitment,
                         ordinal,
-                        candidate.identity.bucket_hash(),
+                        candidate_hash,
                     );
             }
         }
@@ -3633,7 +3652,7 @@ impl WasmExactSearchSession {
                     "wasm_compact_failed_queue_candidate_ordinal_overflow",
                 ))?
         } else {
-            candidate.identity.bucket_hash()
+            candidate_hash
         };
         let mut solution_coverage = None;
         #[cfg(any(test, feature = "local-search-ab"))]
@@ -3712,7 +3731,10 @@ impl WasmExactSearchSession {
             if retains_buildable_identity_evidence(&self.problem)
                 || self.solution_coverage_capture_retains_identities()
             {
-                let identity = TilingIdentityEntry::new(candidate.identity);
+                let identity = TilingIdentityEntry {
+                    bucket_hash: candidate_hash,
+                    identity: candidate.identity,
+                };
                 if !self.buildable_identities.contains(&identity)
                     && self.buildable_identities.try_reserve(1).is_err()
                 {
@@ -3734,7 +3756,7 @@ impl WasmExactSearchSession {
                 self.representative_path = result.representative_path;
                 self.representative_rank = Some(candidate_ordinal);
                 self.representative_identity = Some(candidate.identity);
-                self.representative_candidate_id = Some(candidate.identity.bucket_hash());
+                self.representative_candidate_id = Some(candidate_hash);
                 self.representative_pattern_id = result.witness_pattern_id.or_else(|| {
                     result
                         .covered_patterns

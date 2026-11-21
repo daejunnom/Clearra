@@ -16,6 +16,8 @@ import { readChromiumGateWasmInput } from './chromium-gate-wasm-input.mjs';
 import { acquireManagedTransientDirectory } from './managed-transient-directory.mjs';
 import { COMPACT_REPLAY_PROBE_COMMAND, STANDARD_BAG_REPLAY_PROBE_COMMAND, compactReplayProbeIdentity }
   from './paired-compact-replay-probe.mjs';
+import { pairedP7P4StageArgs, P7P4_STAGE_TIMEOUT_MS, requireLocalP7P4StageProbe }
+  from './paired-p7p4-stage-probe.mjs';
 
 const SELF = fileURLToPath(import.meta.url);
 const repository = resolve(fileURLToPath(new URL('../..', import.meta.url)));
@@ -48,6 +50,13 @@ assert.equal(process.env.CLEARRA_ENGINE_BUILD_ID, source);
 
 function pairedProbeOptions(args) {
   if (!args.length) return null;
+  if (args.length === 3 && args[0] === '--paired-p7p4' && args[1] === '--workers') {
+    requireLocalP7P4StageProbe();
+    assert.match(args[2], /^(?:[2-9]|1[01])$/u);
+    const workers = Number(args[2]);
+    const command = ['clearra', ...pairedP7P4StageArgs(workers)].join(' ');
+    return { command, workers, largeP7P4: true };
+  }
   assert.ok(args.length === 5 && args[0] === '--paired-probe' &&
     args[1] === '--workers' && args[3] === '--command',
   'expected --paired-probe --workers N --command "clearra pc ..."');
@@ -339,7 +348,7 @@ async function readbackChromiumSmoke(page) {
   }
 }
 
-async function readbackPairedProbe(page, { workers, command, compactReplay = false }) {
+async function readbackPairedProbe(page, { workers, command, compactReplay = false, largeP7P4 = false }) {
   const browser = await page.evaluate(() => ({
     logical_processors: navigator.hardwareConcurrency,
     cross_origin_isolated: self.crossOriginIsolated,
@@ -347,11 +356,12 @@ async function readbackPairedProbe(page, { workers, command, compactReplay = fal
   const runnerProcessors = availableParallelism();
   const availableWorkers = Math.max(1, Math.min(runnerProcessors, browser.logical_processors) - 1);
   assert.ok(workers <= availableWorkers, 'paired worker count exceeds this browser host capacity');
-  const label = compactReplay ? 'compact-1l-typed-replay' : 'existing-field-4l-p7';
+  const label = compactReplay ? 'compact-1l-typed-replay' : largeP7P4 ? 'empty-4l-p7p4' : 'existing-field-4l-p7';
+  const timeoutMs = largeP7P4 ? P7P4_STAGE_TIMEOUT_MS : PAIRED_TIMEOUT_MS;
   console.log('chromium_cpu_paired_config=' + JSON.stringify({
     source, wasm_sha256: manifest.wasm.sha256, runner_logical_processors: runnerProcessors,
-    browser, workers_requested: workers, command, timeout_ms: PAIRED_TIMEOUT_MS,
-    core_stage_scope: workers === 1 ? 'single-root-worker' : 'root-coordinator-only-no-peer-rust-stages',
+    browser, workers_requested: workers, command, timeout_ms: timeoutMs,
+    core_stage_scope: workers === 1 ? 'single-root-worker' : 'coordinator-and-disjoint-peer-profile',
     timing_scope: 'fresh Worker post-to-terminal; excludes Chromium launch and JS bundle',
     memory_scope: 'solver-reported peak and terminal-root WASM linear capacity; not idle-process RSS',
     idle_rss_measured: false, autonomous_peer_drain_measured: false,
@@ -359,7 +369,7 @@ async function readbackPairedProbe(page, { workers, command, compactReplay = fal
   }));
   const before = verifierLoads;
   const execution = await page.evaluate(runWorker, {
-    rootWorker: ROOT_WORKER, command, workers, timeoutMs: PAIRED_TIMEOUT_MS, label, benchmarkProbe: true,
+    rootWorker: ROOT_WORKER, command, workers, timeoutMs, label, benchmarkProbe: true,
     compactReplayProbe: compactReplay,
   });
   console.log('chromium_cpu_paired_sample=' + JSON.stringify({
@@ -774,7 +784,8 @@ async function runWorker({ rootWorker, command, workers, timeoutMs, label, pageK
         event: terminal.event,
         search_profile: {
           host_execution: profile?.host_execution,
-          verifier_transport: profile?.verifier_transport
+          verifier_transport: profile?.verifier_transport,
+          verifier_core: profile?.verifier_core
         }
       });
       const counters = ['duration_ns', 'invocation_count', 'work_item_count'];
@@ -821,8 +832,8 @@ async function runWorker({ rootWorker, command, workers, timeoutMs, label, pageK
         post_to_terminal_ms: elapsed,
         terminal_root_linear_memory_bytes: terminal.runtime_memory_bytes ?? null,
         terminal_retained_result_pages: terminal.runtime_retained_pages ?? null,
-        // Rust stage rows belong to this root Worker. Per-peer transport
-        // intervals overlap and are not equivalent to peer Rust stage times.
+        // Root and peer Rust profiles have separate scopes. Nested Rust spans
+        // and overlapping peer intervals are not additive wall time.
         search_profile: {
           schema_version: profile?.schema_version === 1 ? 1 : null,
           stages, ...(host === null ? {} : JSON.parse(host))

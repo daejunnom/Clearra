@@ -20,6 +20,7 @@ export async function preserveCandidateWasm({
   sourceDirectory,
   outputDirectory,
   sourceCommit,
+  requireStageProfile = false,
   repositoryRoot = ROOT,
 }) {
   if (!/^[0-9a-f]{40}$/u.test(sourceCommit ?? '')) throw new Error('Candidate source must be an exact commit');
@@ -28,11 +29,22 @@ export async function preserveCandidateWasm({
     if (error?.code !== 'ENOENT') throw error;
     return null;
   });
-  if (!manifest) return Object.freeze({ ready: false, reason: 'wasm-not-built' });
+  if (!manifest) {
+    if (requireStageProfile) throw new Error('Diagnostic WASM was not built');
+    return Object.freeze({ ready: false, reason: 'wasm-not-built' });
+  }
   const inspected = await inspectVerifiedClearraWasmDirectory({ sourceDirectory: source, repositoryRoot });
   const identity = inspected.manifest.build.runtime_identity;
   if (identity.source_commit !== sourceCommit || identity.engine_build_id !== sourceCommit) {
     throw new Error('Candidate WASM runtime identity differs from the exact source');
+  }
+  if (requireStageProfile) {
+    const exports = new Set(WebAssembly.Module.exports(
+      new WebAssembly.Module(inspected.files.get(inspected.manifest.wasm.path))
+    ).filter((item) => item.kind === 'function').map((item) => item.name));
+    if (!['clearra_wasm_profile_start', 'clearra_wasm_profile_finish'].every((name) => exports.has(name))) {
+      throw new Error('Diagnostic WASM lacks the required stage profiling exports');
+    }
   }
   // The parent must already exist. A fresh leaf, no overwrite and no recursive
   // enumeration/deletion, prevents a failed preservation from changing user data.
@@ -66,11 +78,13 @@ export async function appendCandidateWasmOutputs(outputFile, result, outputDirec
 if (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.meta.url) {
   try {
     const args = process.argv.slice(2);
-    if (args.length !== 6 || args[0] !== '--from' || args[2] !== '--output' || args[4] !== '--source-commit') {
-      throw new Error('usage: candidate-preflight-artifacts.mjs --from DIRECTORY --output DIRECTORY --source-commit SHA');
+    const requireStageProfile = args.length === 7 && args[6] === '--require-stage-profile';
+    if ((args.length !== 6 && !requireStageProfile) || args[0] !== '--from' ||
+        args[2] !== '--output' || args[4] !== '--source-commit') {
+      throw new Error('usage: candidate-preflight-artifacts.mjs --from DIRECTORY --output DIRECTORY --source-commit SHA [--require-stage-profile]');
     }
     const result = await preserveCandidateWasm({
-      sourceDirectory: args[1], outputDirectory: args[3], sourceCommit: args[5],
+      sourceDirectory: args[1], outputDirectory: args[3], sourceCommit: args[5], requireStageProfile,
     });
     if (process.env.GITHUB_OUTPUT) await appendCandidateWasmOutputs(process.env.GITHUB_OUTPUT, result, args[3]);
     console.log(`candidate_wasm=${result.ready ? 'verified-unqualified' : 'not-built'} copied_files=${result.copiedFiles ?? 0} release_authority=false`);

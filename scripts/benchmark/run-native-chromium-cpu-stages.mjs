@@ -1,16 +1,21 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { availableParallelism, cpus } from 'node:os';
 import { performance } from 'node:perf_hooks';
 import { fileURLToPath } from 'node:url';
 import { COMPACT_REPLAY_PROBE_ARGS, compactReplayProbeIdentity, verifyCompactReplayProbeStages }
   from '../tools/paired-compact-replay-probe.mjs';
+import { pairedP7P4StageArgs, P7P4_STAGE_IDENTITY, P7P4_STAGE_TIMEOUT_MS, requireLocalP7P4StageProbe }
+  from '../tools/paired-p7p4-stage-probe.mjs';
 
-// This diagnostic intentionally has no large case and no acceptance authority.
-// Use the same product request on both hosts, without the research-only solver.
+// The large case is explicitly local-only; no diagnostic has release authority.
+// Run the same product request on both hosts, without the research-only solver.
 const options = process.argv.slice(2);
 const compactReplay = options.length === 1 && options[0] === '--compact-replay';
-assert.ok(!options.length || compactReplay, 'only --compact-replay is accepted');
+const largeP7P4 = options.length === 1 && options[0] === '--p7p4';
+assert.ok(!options.length || compactReplay || largeP7P4, 'expected --compact-replay or --p7p4');
 const fixture = [
   'pc', '--board-mask', '0x3c0f03c0f', '--height', '4', '--lines', '4',
   '--pieces', '6', '--patterns', 'P7', '--hold', 'empty',
@@ -27,11 +32,22 @@ assert.ok(cli, 'CLEARRA_NATIVE_STAGE_CLI is required');
 assert.match(source ?? '', /^[a-f0-9]{40}$/u);
 assert.equal(process.env.CLEARRA_ENGINE_BUILD_ID, source);
 const logical = availableParallelism();
-const widths = compactReplay ? [1] : [...new Set([1, Math.min(8, Math.max(logical - 1, 1))])];
-const label = compactReplay ? 'compact-1l-typed-replay' : 'existing-field-4l-p7';
+let nativeSha256 = null;
+if (largeP7P4) {
+  requireLocalP7P4StageProbe();
+  assert.ok(logical >= 3, 'P7P4 needs at least two compute workers');
+  const expectedSha = process.env.CLEARRA_NATIVE_STAGE_CLI_SHA256;
+  assert.match(expectedSha ?? '', /^[0-9a-f]{64}$/u, 'bind the profiling CLI artifact digest');
+  nativeSha256 = createHash('sha256').update(readFileSync(cli)).digest('hex');
+  assert.equal(nativeSha256, expectedSha, 'profiling CLI artifact identity');
+}
+const widths = compactReplay ? [1] : largeP7P4 ? [Math.min(11, logical - 1)]
+  : [...new Set([1, Math.min(8, Math.max(logical - 1, 1))])];
+const sampleOrder = largeP7P4 ? ['native', 'chromium'] : ['native', 'chromium', 'chromium', 'native'];
+const label = compactReplay ? 'compact-1l-typed-replay' : largeP7P4 ? 'empty-4l-p7p4' : 'existing-field-4l-p7';
 console.log('native_chromium_cpu_probe=' + JSON.stringify({
   source, fixture: label, logical_processors: logical, cpu_model: cpus()[0]?.model ?? null,
-  workers_requested: widths, sample_order: ['native', 'chromium', 'chromium', 'native'],
+  workers_requested: widths, sample_order: sampleOrder, native_sha256: nativeSha256,
   profiling_builds: true, release_authority: false,
 }));
 
@@ -53,7 +69,11 @@ function productIdentity(report, workers) {
   };
   assert.ok(Number.isSafeInteger(identity.solutions) && identity.solutions > 0);
   assert.match(identity.solution_set, /^cts1:[0-9a-f]+$/u);
-  assert.equal(identity.patterns_total, '5040');
+  assert.equal(identity.patterns_total, largeP7P4 ? P7P4_STAGE_IDENTITY.patterns : '5040');
+  if (largeP7P4) {
+    assert.equal(identity.solutions, P7P4_STAGE_IDENTITY.solutions);
+    assert.equal(identity.solution_set, P7P4_STAGE_IDENTITY.solutionSet);
+  }
   assert.match(identity.patterns_covered, /^[1-9]\d*$/u);
   return identity;
 }
@@ -64,7 +84,8 @@ function runNative(args) {
   const started = performance.now();
   const run = spawnSync(cli, ['--format', 'json', ...args], {
     env: { ...process.env, CLEARRA_NATIVE_CPU_STAGE_PROBE: '1' },
-    encoding: 'utf8', windowsHide: true, timeout: 90_000, maxBuffer: 8 * 1024 * 1024,
+    encoding: 'utf8', windowsHide: true, timeout: largeP7P4 ? P7P4_STAGE_TIMEOUT_MS : 90_000,
+    maxBuffer: 8 * 1024 * 1024,
   });
   const wall = performance.now() - started;
   if (run.error) throw run.error;
@@ -78,9 +99,12 @@ function runNative(args) {
 }
 
 function runChromium(args, workers) {
+  const browserArgs = largeP7P4 ? ['--paired-p7p4', '--workers', String(workers)] :
+    ['--paired-probe', '--workers', String(workers), '--command', ['clearra', ...args].join(' ')];
   const run = spawnSync(process.execPath, [
-    browserProbe, '--paired-probe', '--workers', String(workers), '--command', ['clearra', ...args].join(' '),
-  ], { encoding: 'utf8', windowsHide: true, maxBuffer: 2 * 1024 * 1024 });
+    browserProbe, ...browserArgs,
+  ], { encoding: 'utf8', windowsHide: true, maxBuffer: 2 * 1024 * 1024,
+    ...(largeP7P4 ? { timeout: P7P4_STAGE_TIMEOUT_MS + 90_000 } : {}) });
   if (run.error) throw run.error;
   // Retain exact time-out observations; do not substitute a terminal receipt.
   if (run.status !== 0) {
@@ -124,11 +148,14 @@ function matchedSerialStages(native, chromium) {
 }
 
 for (const workers of widths) {
-  const args = compactReplay ? COMPACT_REPLAY_PROBE_ARGS : [...fixture, '--workers', String(workers)];
+  const args = compactReplay ? COMPACT_REPLAY_PROBE_ARGS :
+    largeP7P4 ? pairedP7P4StageArgs(workers) : [...fixture, '--workers', String(workers)];
   let expected;
   let problems = 0;
   const serialStages = { native: [], chromium: [] };
-  for (const [index, host] of ['native', 'chromium', 'chromium', 'native'].entries()) {
+  let nativeLargeStages;
+  let chromiumLargeStages;
+  for (const [index, host] of sampleOrder.entries()) {
     try {
       const sample = host === 'native' ? runNative(args) : runChromium(args, workers);
       assert.equal(sample.event, 'final_response');
@@ -140,6 +167,15 @@ for (const workers of widths) {
         : productIdentity(sample.search, workers);
       if (expected) assert.deepEqual(identity, expected, 'native/Chromium result differs');
       else expected = identity;
+      if (largeP7P4 && host === 'native') nativeLargeStages = observedStages(sample);
+      if (largeP7P4 && host === 'chromium') {
+        const peer = sample.search_profile?.verifier_core;
+        assert.equal(peer?.scope, 'finished-geometry-verifiers', 'missing browser peer Rust profile');
+        assert.equal(peer.sampled_workers, workers, 'incomplete browser peer Rust profile');
+        assert.equal(peer.expected_workers, workers, 'browser peer profile width mismatch');
+        assert.ok(peer.stages.length > 0, 'empty browser peer Rust profile');
+        chromiumLargeStages = peer.stages;
+      }
       if (workers === 1) {
         const stages = observedStages(sample);
         assert.ok(stages.length > 0, 'no observed one-worker Core stages');
@@ -169,6 +205,17 @@ for (const workers of widths) {
     workers, comparable: problems === 0, rejected_samples: problems, release_authority: false,
     ...(workers === 1 && problems === 0 ? { serial_accumulated_stage_means:
       matchedSerialStages(serialStages.native, serialStages.chromium) } : {}),
+    ...(largeP7P4 && problems === 0 ? {
+      shared_stage_diagnostics: nativeLargeStages.flatMap(native => {
+        const peer = chromiumLargeStages.find(row => row.name === native.name);
+        return peer ? [{
+          name: native.name, native_accumulated_ms: native.duration_ns / 1e6,
+          chromium_peer_accumulated_ms: peer.duration_ns / 1e6,
+          native_work_items: native.work_item_count, chromium_peer_work_items: peer.work_item_count
+        }] : [];
+      }),
+      timing_scope: 'nested stage intervals accumulate across threads/peers; this is not elapsed wall time',
+    } : {}),
   }));
   if (problems) process.exitCode = 1;
 }
