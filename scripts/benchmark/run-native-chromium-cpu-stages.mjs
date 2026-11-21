@@ -3,9 +3,14 @@ import { spawnSync } from 'node:child_process';
 import { availableParallelism, cpus } from 'node:os';
 import { performance } from 'node:perf_hooks';
 import { fileURLToPath } from 'node:url';
+import { COMPACT_REPLAY_PROBE_ARGS, compactReplayProbeIdentity, verifyCompactReplayProbeStages }
+  from '../tools/paired-compact-replay-probe.mjs';
 
 // This diagnostic intentionally has no large case and no acceptance authority.
 // Use the same product request on both hosts, without the research-only solver.
+const options = process.argv.slice(2);
+const compactReplay = options.length === 1 && options[0] === '--compact-replay';
+assert.ok(!options.length || compactReplay, 'only --compact-replay is accepted');
 const fixture = [
   'pc', '--board-mask', '0x3c0f03c0f', '--height', '4', '--lines', '4',
   '--pieces', '6', '--patterns', 'P7', '--hold', 'empty',
@@ -22,9 +27,10 @@ assert.ok(cli, 'CLEARRA_NATIVE_STAGE_CLI is required');
 assert.match(source ?? '', /^[a-f0-9]{40}$/u);
 assert.equal(process.env.CLEARRA_ENGINE_BUILD_ID, source);
 const logical = availableParallelism();
-const widths = [...new Set([1, Math.min(8, Math.max(logical - 1, 1))])];
+const widths = compactReplay ? [1] : [...new Set([1, Math.min(8, Math.max(logical - 1, 1))])];
+const label = compactReplay ? 'compact-1l-typed-replay' : 'existing-field-4l-p7';
 console.log('native_chromium_cpu_probe=' + JSON.stringify({
-  source, fixture: 'existing-field-4l-p7', logical_processors: logical, cpu_model: cpus()[0]?.model ?? null,
+  source, fixture: label, logical_processors: logical, cpu_model: cpus()[0]?.model ?? null,
   workers_requested: widths, sample_order: ['native', 'chromium', 'chromium', 'native'],
   profiling_builds: true, release_authority: false,
 }));
@@ -67,7 +73,8 @@ function runNative(args) {
   const stages = jsonLine(run.stderr, 'clearra_native_cpu_stages=');
   assert.ok(stages.stages.length > 0, 'native stage capture contains no search work');
   return { event: 'final_response', status: 'success', runtime_identity: result.runtime_identity,
-    process_wall_ms: wall, search: result.summary, search_profile: stages };
+    process_wall_ms: wall, search: compactReplay ? null : result.summary, search_profile: stages,
+    replay: compactReplay ? { kind: result.kind, summary: result.summary } : null };
 }
 
 function runChromium(args, workers) {
@@ -117,7 +124,7 @@ function matchedSerialStages(native, chromium) {
 }
 
 for (const workers of widths) {
-  const args = [...fixture, '--workers', String(workers)];
+  const args = compactReplay ? COMPACT_REPLAY_PROBE_ARGS : [...fixture, '--workers', String(workers)];
   let expected;
   let problems = 0;
   const serialStages = { native: [], chromium: [] };
@@ -128,18 +135,22 @@ for (const workers of widths) {
       assert.equal(sample.status, 'success');
       assert.equal(sample.runtime_identity?.source_commit, source);
       assert.equal(sample.runtime_identity?.engine_build_id, source);
-      const identity = productIdentity(sample.search, workers);
+      const identity = compactReplay
+        ? compactReplayProbeIdentity(sample.replay?.kind, sample.replay?.summary)
+        : productIdentity(sample.search, workers);
       if (expected) assert.deepEqual(identity, expected, 'native/Chromium result differs');
       else expected = identity;
       if (workers === 1) {
         const stages = observedStages(sample);
         assert.ok(stages.length > 0, 'no observed one-worker Core stages');
+        if (compactReplay) verifyCompactReplayProbeStages(stages);
         serialStages[host].push(stages);
       }
       console.log('native_chromium_cpu_sample=' + JSON.stringify({
-        host, sample: index + 1, workers_requested: workers, workers_used: Number(sample.search.workers_used),
-        backend_selected: sample.search.backend_selected ?? null,
-        packing_candidate_count: sample.search.packing_candidate_count ?? null,
+        host, sample: index + 1, workers_requested: workers,
+        workers_used: sample.search?.workers_used == null ? null : Number(sample.search.workers_used),
+        backend_selected: sample.search?.backend_selected ?? null,
+        packing_candidate_count: sample.search?.packing_candidate_count ?? null,
         identity, process_wall_ms: sample.process_wall_ms ?? null,
         post_to_terminal_ms: sample.post_to_terminal_ms ?? null,
         phase_observations: sample.phases ?? null, last_progress: sample.last_progress ?? null,

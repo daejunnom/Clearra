@@ -136,6 +136,10 @@ pub(crate) enum ExecutorSearchStage {
     WasmFinalCoverage,
     WasmMinimumCoverProof,
     WasmSpinExecutionGraphPrepare,
+    WasmPcPathExecutionGraphs,
+    WasmPcPathPatternRows,
+    AppPcPathManifestPrepare,
+    AppPcPathManifestCount,
     WasmResultCanonicalize,
     FinesseGeometry,
     FinesseTargetGrouping,
@@ -258,6 +262,10 @@ impl ExecutorSearchStage {
         Self::WasmFinalCoverage,
         Self::WasmMinimumCoverProof,
         Self::WasmSpinExecutionGraphPrepare,
+        Self::WasmPcPathExecutionGraphs,
+        Self::WasmPcPathPatternRows,
+        Self::AppPcPathManifestPrepare,
+        Self::AppPcPathManifestCount,
         Self::WasmResultCanonicalize,
         Self::FinesseGeometry,
         Self::FinesseTargetGrouping,
@@ -373,6 +381,10 @@ impl ExecutorSearchStage {
             Self::WasmFinalCoverage => "wasm.finalize.coverage",
             Self::WasmMinimumCoverProof => "wasm.finalize.minimum_cover_proof",
             Self::WasmSpinExecutionGraphPrepare => "wasm.finalize.spin_execution_graph_prepare",
+            Self::WasmPcPathExecutionGraphs => "wasm.pc.path.execution_graphs",
+            Self::WasmPcPathPatternRows => "wasm.pc.path.pattern_rows",
+            Self::AppPcPathManifestPrepare => "app.pc.path.manifest_prepare",
+            Self::AppPcPathManifestCount => "app.pc.path.manifest_count",
             Self::WasmResultCanonicalize => "wasm.finalize.result_canonicalize",
             Self::FinesseGeometry => "finesse.geometry",
             Self::FinesseTargetGrouping => "finesse.target_grouping",
@@ -570,6 +582,37 @@ pub(crate) const fn profile_sample_scale(ordinal: usize) -> u64 {
     {
         let _ = ordinal;
         0
+    }
+}
+
+/// A coarse App-side stage in the same opt-in profile as the Core PC replay stages.
+///
+/// With profiling disabled this is a no-op. Dropping an active span counts a
+/// single manifest preparation or bounded count slice; it does not count pairs
+/// of queues and candidates.
+pub struct PcReplayProfileSpan(SearchStageSpan);
+
+impl PcReplayProfileSpan {
+    /// Measures one grouped replay manifest preparation.
+    #[inline]
+    pub fn manifest_prepare() -> Self {
+        Self(SearchStageSpan::begin(
+            ExecutorSearchStage::AppPcPathManifestPrepare,
+        ))
+    }
+
+    /// Measures one bounded grouped replay manifest count slice.
+    #[inline]
+    pub fn manifest_count() -> Self {
+        Self(SearchStageSpan::begin(
+            ExecutorSearchStage::AppPcPathManifestCount,
+        ))
+    }
+
+    /// Records the number of completed units instead of counting a single slice.
+    #[inline]
+    pub fn finish(self, work_items: u64) {
+        self.0.finish(work_items);
     }
 }
 
@@ -812,7 +855,7 @@ mod tests {
 
     use super::{
         ExecutorSearchProfileSession, ExecutorSearchProfileStage, ExecutorSearchStage,
-        SearchStageSpan, WorkerSearchProfile, ACTIVE_PROFILE,
+        PcReplayProfileSpan, SearchStageSpan, WorkerSearchProfile, ACTIVE_PROFILE,
     };
 
     const STAGE: ExecutorSearchStage = ExecutorSearchStage::WasmGeometryAdvance;
@@ -822,6 +865,37 @@ mod tests {
             .iter()
             .find(|stage| stage.name == STAGE.name())
             .expect("fixed stage")
+    }
+
+    #[test]
+    fn worker_profile_pc_path_stages_keep_work_counts_separate() {
+        let session = ExecutorSearchProfileSession::start().expect("caller profile");
+        SearchStageSpan::begin(ExecutorSearchStage::WasmPcPathExecutionGraphs).finish(3);
+        SearchStageSpan::begin(ExecutorSearchStage::WasmPcPathPatternRows).finish(7);
+        {
+            let _span = PcReplayProfileSpan::manifest_prepare();
+        }
+        PcReplayProfileSpan::manifest_count().finish(1);
+        {
+            let _span = PcReplayProfileSpan::manifest_count();
+        }
+
+        let stages = session.finish();
+        for (name, calls, items) in [
+            ("wasm.pc.path.execution_graphs", 1, 3),
+            ("wasm.pc.path.pattern_rows", 1, 7),
+            ("app.pc.path.manifest_prepare", 1, 1),
+            ("app.pc.path.manifest_count", 2, 2),
+        ] {
+            let stage = stages
+                .iter()
+                .find(|stage| stage.name == name)
+                .expect("named PC path stage");
+            assert_eq!(
+                (stage.invocation_count, stage.work_item_count),
+                (calls, items)
+            );
+        }
     }
 
     #[test]

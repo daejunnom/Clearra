@@ -170,6 +170,7 @@ pub use pc_failed_queue_evidence::{
     PcFailedQueueProbabilityClass,
 };
 pub use pc_full_height_replay_evidence::PcFullHeightReplayEvidence;
+pub use performance::PcReplayProfileSpan;
 #[cfg(any(feature = "search-stage-profiling", feature = "wasm-stage-profiling"))]
 pub use performance::{
     ExecutorSearchProfileError, ExecutorSearchProfileSession, ExecutorSearchProfileStage,

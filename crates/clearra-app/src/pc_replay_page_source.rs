@@ -22,6 +22,10 @@ use std::sync::Arc;
 mod batches;
 use batches::{PreparedReplayBatches, ReplayBatches, ReplayLanguage};
 
+#[path = "pc_replay_inventory.rs"]
+mod inventory;
+use inventory::P7P4InventoryIndex;
+
 #[path = "pc_replay_page_store.rs"]
 mod store;
 pub use store::{PcReplayPageAdvance, PcReplayPageStore};
@@ -87,6 +91,7 @@ pub struct PcReplaySourceBuildSession {
     current_patterns: Vec<PatternManifest>,
     current_witness_count: usize,
     language: Option<ReplayLanguage>,
+    inventory: Option<Box<P7P4InventoryIndex>>,
     first_rank: usize,
     hasher: Sha256,
     complete: bool,
@@ -155,6 +160,7 @@ impl PcReplaySourceBuildSession {
         maximum_bytes: u128,
         external_reserve_bytes: u128,
     ) -> ReplayResult<Self> {
+        let _profile = clearra_core_executor::PcReplayProfileSpan::manifest_prepare();
         let original_core = result.checked_resource_retained_bytes().ok_or(OVERFLOW)?;
         let pattern_count = result
             .usize_field("materialized_pattern_count")
@@ -249,7 +255,11 @@ impl PcReplaySourceBuildSession {
         }
         drop(flat);
         let hasher = batches.source_hasher(problem)?;
-        let session = Self {
+        let inventory_eligible = !pending.is_empty()
+            && batches
+                .single_compact_batch()
+                .is_some_and(|batch| P7P4InventoryIndex::eligible(problem, batch));
+        let mut session = Self {
             source: PcReplayPageSource {
                 problem_id: problem.problem_id().as_str().to_owned(),
                 projection,
@@ -273,11 +283,21 @@ impl PcReplaySourceBuildSession {
             current_patterns: Vec::new(),
             current_witness_count: 0,
             language: None,
+            inventory: None,
             first_rank: 0,
             hasher,
             complete: false,
         };
         session.guard_additional(0)?;
+        // Charge the optional table and its transient initialization separately
+        // so all other request shapes retain the original allocation envelope.
+        if inventory_eligible
+            && session
+                .guard_additional(2 * core::mem::size_of::<P7P4InventoryIndex>() as u128)
+                .is_ok()
+        {
+            session.inventory = Some(Box::new(P7P4InventoryIndex::new()));
+        }
         Ok(session)
     }
 
@@ -288,6 +308,7 @@ impl PcReplaySourceBuildSession {
         if self.complete {
             return Ok(true);
         }
+        let _profile = clearra_core_executor::PcReplayProfileSpan::manifest_count();
         self.guard_additional(0)?;
         // Even a tiny language may finish in one caller slice. Publish its
         // stage before doing work so a progress-triggered cancellation cannot
@@ -302,6 +323,7 @@ impl PcReplaySourceBuildSession {
                 break;
             }
             if self.next_geometry == self.pending.len() {
+                self.inventory = None;
                 self.hasher
                     .update((self.source.geometries.len() as u128).to_le_bytes());
                 self.hasher.update(self.source.witness_count.to_le_bytes());
@@ -314,6 +336,35 @@ impl PcReplaySourceBuildSession {
                 return Ok(true);
             }
             if self.language.is_none() {
+                if let Some(index) = &mut self.inventory {
+                    if !index.ready() {
+                        let valid = self
+                            .source
+                            .batches
+                            .single_compact_batch()
+                            .is_some_and(|batch| index.advance_layout(batch));
+                        if !valid {
+                            self.inventory = None;
+                        }
+                        continue;
+                    }
+                    if !index.has_geometry() {
+                        self.prepare_inventory_geometry();
+                        if quantum.is_exhausted() {
+                            break;
+                        }
+                        continue;
+                    }
+                    let next = index.next_pattern(self.next_pattern);
+                    if next != self.next_pattern {
+                        self.next_pattern = next;
+                        if next == self.source.materialized_pattern_count {
+                            self.finish_geometry()?;
+                            self.guard_additional(0)?;
+                        }
+                        continue;
+                    }
+                }
                 let additional = self
                     .checked_retained_capacity_bytes()
                     .and_then(|n| n.checked_sub(self.source.checked_retained_capacity_bytes()?))
@@ -434,6 +485,47 @@ impl PcReplaySourceBuildSession {
         Ok(false)
     }
 
+    fn prepare_inventory_geometry(&mut self) {
+        let [location] = self.pending[self.next_geometry].1.as_slice() else {
+            self.inventory
+                .as_mut()
+                .expect("inventory")
+                .use_all_patterns();
+            return;
+        };
+        let Some((batch, graph)) = self
+            .source
+            .batches
+            .single_compact_batch()
+            .filter(|_| location.batch == 0)
+            .and_then(|batch| {
+                batch
+                    .graphs()
+                    .get(location.graph)
+                    .map(|graph| (batch, graph))
+            })
+        else {
+            self.inventory
+                .as_mut()
+                .expect("inventory")
+                .use_all_patterns();
+            return;
+        };
+        if !P7P4InventoryIndex::scratch_projection(graph)
+            .is_some_and(|additional| self.guard_additional(additional).is_ok())
+        {
+            self.inventory
+                .as_mut()
+                .expect("inventory")
+                .use_all_patterns();
+            return;
+        }
+        self.inventory
+            .as_mut()
+            .expect("inventory")
+            .prepare_geometry(batch, graph);
+    }
+
     fn report_progress(&self, control: &ExecutionControl) {
         control.report_progress(
             "complete-replay-pattern",
@@ -502,6 +594,9 @@ impl PcReplaySourceBuildSession {
         self.current_witness_count = 0;
         self.next_pattern = 0;
         self.next_geometry += 1;
+        if let Some(index) = &mut self.inventory {
+            index.clear_geometry();
+        }
         Ok(())
     }
 
@@ -528,6 +623,11 @@ impl PcReplaySourceBuildSession {
                 bytes::<(u64, Vec<ExactReplayGraphLocation>)>(self.pending.capacity()).ok()?,
             )?
             .checked_add(self.pending_location_bytes)?
+            .checked_add(if self.inventory.is_some() {
+                core::mem::size_of::<P7P4InventoryIndex>() as u128
+            } else {
+                0
+            })?
             .checked_add(match &self.language {
                 Some(language) => language.checked_retained_bytes()?,
                 None => 0,

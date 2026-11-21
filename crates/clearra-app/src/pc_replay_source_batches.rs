@@ -40,6 +40,16 @@ pub(super) enum SelectedReplay {
 }
 
 impl ReplayBatches {
+    pub(super) fn single_compact_batch(&self) -> Option<&ExactScoringExecutionBatch> {
+        let [batch] = compact_slice(match self {
+            Self::Compact(batches) => batches,
+            Self::FullHeight(_) => return None,
+        }) else {
+            return None;
+        };
+        Some(batch)
+    }
+
     pub(super) fn prepare_from_result(
         problem: &SearchProblem,
         result: &CoreExecutionResult,

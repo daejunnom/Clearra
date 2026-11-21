@@ -14,6 +14,8 @@ import { createClearraWasmBuildContract, clearraWasmBuildContractsEqual }
   from './clearra-wasm-build-contract.mjs';
 import { readChromiumGateWasmInput } from './chromium-gate-wasm-input.mjs';
 import { acquireManagedTransientDirectory } from './managed-transient-directory.mjs';
+import { COMPACT_REPLAY_PROBE_COMMAND, compactReplayProbeIdentity }
+  from './paired-compact-replay-probe.mjs';
 
 const SELF = fileURLToPath(import.meta.url);
 const repository = resolve(fileURLToPath(new URL('../..', import.meta.url)));
@@ -52,6 +54,10 @@ function pairedProbeOptions(args) {
   assert.match(args[2], /^[1-8]$/u);
   const workers = Number(args[2]);
   const command = args[4];
+  if (command === COMPACT_REPLAY_PROBE_COMMAND) {
+    assert.equal(workers, 1, 'the compact replay probe uses one worker');
+    return { command, workers, compactReplay: true };
+  }
   // The paired scheduler owns the exact input. Reject accidental large/other
   // products rather than turning this bounded diagnostic into a generic runner.
   assert.match(command, /^clearra pc(?: [a-zA-Z0-9-]+)+$/u);
@@ -327,7 +333,7 @@ async function readbackChromiumSmoke(page) {
   }
 }
 
-async function readbackPairedProbe(page, { workers, command }) {
+async function readbackPairedProbe(page, { workers, command, compactReplay = false }) {
   const browser = await page.evaluate(() => ({
     logical_processors: navigator.hardwareConcurrency,
     cross_origin_isolated: self.crossOriginIsolated,
@@ -335,7 +341,7 @@ async function readbackPairedProbe(page, { workers, command }) {
   const runnerProcessors = availableParallelism();
   const availableWorkers = Math.max(1, Math.min(runnerProcessors, browser.logical_processors) - 1);
   assert.ok(workers <= availableWorkers, 'paired worker count exceeds this browser host capacity');
-  const label = 'existing-field-4l-p7';
+  const label = compactReplay ? 'compact-1l-typed-replay' : 'existing-field-4l-p7';
   console.log('chromium_cpu_paired_config=' + JSON.stringify({
     source, wasm_sha256: manifest.wasm.sha256, runner_logical_processors: runnerProcessors,
     browser, workers_requested: workers, command, timeout_ms: PAIRED_TIMEOUT_MS,
@@ -348,6 +354,7 @@ async function readbackPairedProbe(page, { workers, command }) {
   const before = verifierLoads;
   const execution = await page.evaluate(runWorker, {
     rootWorker: ROOT_WORKER, command, workers, timeoutMs: PAIRED_TIMEOUT_MS, label, benchmarkProbe: true,
+    compactReplayProbe: compactReplay,
   });
   console.log('chromium_cpu_paired_sample=' + JSON.stringify({
     label, browser, wasm_sha256: manifest.wasm.sha256, verifier_loads: verifierLoads - before, ...execution,
@@ -355,7 +362,11 @@ async function readbackPairedProbe(page, { workers, command }) {
   assert.equal(execution.event, 'final_response', label);
   assert.equal(execution.status, 'success', label);
   assert.deepEqual(execution.runtime_identity, manifest.build.runtime_identity);
-  assert.equal(execution.search?.backend_selected, 'wasm-cpu', label);
+  if (compactReplay) {
+    compactReplayProbeIdentity(execution.replay?.kind, execution.replay?.summary);
+  } else {
+    assert.equal(execution.search?.backend_selected, 'wasm-cpu', label);
+  }
   if (workers === 1) {
     assert.equal(execution.search_profile?.schema_version, 1, 'missing instrumented WASM search profile');
     assert.ok(execution.search_profile.stages.some(stage => stage.invocation_count > 0),
@@ -636,7 +647,7 @@ function typedProjection(test, execution, forced24GeometryKey) {
 // Executed only in Chromium; do not shim the Worker implementation, the
 // executable-authority protocol, or the terminal result.
 async function runWorker({ rootWorker, command, workers, timeoutMs, label, pageKind,
-  expectedKind, empty, targetLines, benchmarkProbe = false }) {
+  expectedKind, empty, targetLines, benchmarkProbe = false, compactReplayProbe = false }) {
   const { createHostCapabilitySnapshot, resolveWorkerAuthority } = await import('/capabilities.js');
   const snapshot = createHostCapabilitySnapshot({
     snapshotId: 'exact-chromium-cpu-smoke', source: 'browser-main',
@@ -768,6 +779,20 @@ async function runWorker({ rootWorker, command, workers, timeoutMs, label, pageK
         searched_nodes: report.searched_nodes,
         solver_reported_peak_cpu_bytes: report.peak_cpu_bytes,
       };
+      const product = compactReplayProbe ? terminal.response?.product_result_payload : null;
+      const path = product?.content?.payload;
+      const replay = path && { kind: product.result_kind, summary: {
+        complete: path.complete,
+        witness_count: path.witness_count,
+        materialized_pattern_count: path.materialized_pattern_count,
+        geometry_count: path.geometry_count,
+        page_source_identity_sha256: path.page_source_identity_sha256,
+        canonical_witness: path.canonical_witness && {
+          candidate_id: path.canonical_witness.candidate_id,
+          pattern_id: path.canonical_witness.pattern_id,
+          normalized_trace_key: path.canonical_witness.normalized_trace_key,
+        },
+      } };
       return {
         event: terminal.event, status: terminal.response?.status ?? null,
         runtime_identity: terminal.response?.runtime_identity ?? null,
@@ -781,7 +806,7 @@ async function runWorker({ rootWorker, command, workers, timeoutMs, label, pageK
           schema_version: profile?.schema_version === 1 ? 1 : null,
           stages, ...(host === null ? {} : JSON.parse(host))
         },
-        ...probeProgress(), search,
+        ...probeProgress(), search, ...(replay ? { replay } : {}),
       };
     }
     if (!pageKind || terminal.event !== 'final_response' || terminal.response.status !== 'success') {

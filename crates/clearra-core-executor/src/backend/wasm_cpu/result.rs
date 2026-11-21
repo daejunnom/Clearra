@@ -4443,7 +4443,7 @@ impl WasmExactSearchSession {
             || save_execution_requested
             || path_execution_requested;
         let scoring_batch = if execution_evidence_requested {
-            Some(self.prepare_exact_scoring_execution_batch()?)
+            Some(self.prepare_exact_scoring_execution_batch(path_execution_requested)?)
         } else {
             None
         };
@@ -4466,7 +4466,10 @@ impl WasmExactSearchSession {
 
     fn prepare_exact_scoring_execution_batch(
         &mut self,
+        profile_pc_path: bool,
     ) -> Result<ExactScoringExecutionBatch, WasmExactSearchError> {
+        let graph_span = profile_pc_path
+            .then(|| SearchStageSpan::begin(ExecutorSearchStage::WasmPcPathExecutionGraphs));
         let identity_count = self.buildable_identities.len();
         let identity_bytes = (identity_count as u128)
             .checked_mul(core::mem::size_of::<StandardBoard64TilingIdentity>() as u128)
@@ -4547,6 +4550,11 @@ impl WasmExactSearchSession {
                 }
             }
         }
+        if let Some(span) = graph_span {
+            span.finish(identity_count as u64);
+        }
+        let pattern_span = profile_pc_path
+            .then(|| SearchStageSpan::begin(ExecutorSearchStage::WasmPcPathPatternRows));
         let board_size = BoardSize::new(
             u16::from(self.catalog.width()),
             u16::from(self.catalog.height()),
@@ -4644,6 +4652,9 @@ impl WasmExactSearchSession {
                 ));
             }
             patterns.push(pattern);
+        }
+        if let Some(span) = pattern_span {
+            span.finish(patterns.len() as u64);
         }
         let (kick_table_id, rule_profile_id) = replay_profile_ids(&self.problem);
         let batch = ExactScoringExecutionBatch::new(
