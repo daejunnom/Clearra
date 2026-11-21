@@ -11,6 +11,8 @@ use crate::{
 };
 
 use super::{
+    catalog::GeometryCatalog,
+    geometry::GeometryCandidate,
     mix_digest,
     result::{
         compact_pc_failed_queue, DistributedGeometryAdvance, ExactSearchAdvance,
@@ -467,6 +469,33 @@ impl WasmDistributedVerifier {
         candidate: &WasmCandidatePacket,
         control: &ExecutionControl,
     ) -> Result<(), &'static str> {
+        self.prepare_for_consumption(control)?;
+        Self::check_consume_outcome(self.session.process_external_candidate_with_ordinal(
+            candidate.target_index,
+            candidate.row_ids(),
+            candidate.ordinal,
+            control,
+        ))
+    }
+
+    pub(super) fn local_geometry_catalog(&self) -> Arc<GeometryCatalog> {
+        self.session.catalog()
+    }
+
+    pub(super) fn consume_local_geometry_candidate(
+        &mut self,
+        candidate: GeometryCandidate,
+        ordinal: u64,
+        control: &ExecutionControl,
+    ) -> Result<(), &'static str> {
+        self.prepare_for_consumption(control)?;
+        Self::check_consume_outcome(
+            self.session
+                .process_local_geometry_candidate_with_ordinal(candidate, ordinal, control),
+        )
+    }
+
+    fn prepare_for_consumption(&mut self, control: &ExecutionControl) -> Result<(), &'static str> {
         if self.finished {
             return Err("wasm_distributed_verifier_already_finished");
         }
@@ -477,16 +506,13 @@ impl WasmDistributedVerifier {
         while self.preparation_pending() {
             self.advance_preparation(control)?;
         }
-        match self
-            .session
-            .process_external_candidate_with_ordinal(
-                candidate.target_index,
-                candidate.row_ids(),
-                candidate.ordinal,
-                control,
-            )
-            .map_err(map_error)?
-        {
+        Ok(())
+    }
+
+    fn check_consume_outcome(
+        advance: Result<Option<ExactSearchAdvance>, WasmExactSearchError>,
+    ) -> Result<(), &'static str> {
+        match advance.map_err(map_error)? {
             Some(ExactSearchAdvance::Cancelled) => Err("wasm_cpu_search_cancelled"),
             Some(ExactSearchAdvance::Completed(_)) => {
                 Err("wasm_distributed_verifier_completed_early")

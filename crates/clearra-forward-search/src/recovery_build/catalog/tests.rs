@@ -4,6 +4,7 @@ use super::super::{
 use super::*;
 use crate::CrossStageEarlyLimit;
 use clearra_core_domain::board::standard_pc_board::Board256Mask as Mask;
+use clearra_core_domain::piece::piece_kind::PieceKind;
 use clearra_rules::profile::rule_profile::RuleProfileId;
 use clearra_scoring::profile::SpinProfileId;
 fn mask(n: u64) -> Mask {
@@ -115,6 +116,69 @@ fn recovery_build_catalog_mirrored_target_is_actually_verified() {
         .solutions
         .iter()
         .any(|s| s.key.starts_with("recovery-tiling.v1:1|")));
+}
+
+#[test]
+fn recovery_build_result_tile_waits_for_the_actual_middle_clear() {
+    use super::super::search::piece_index;
+    use super::plan::Tile;
+
+    let mut q = query();
+    q.fields.initial = mask(0xfe00);
+    q.fields.middle = mask(0xf0000);
+    q.fields.result = mask(0x300c0);
+    q.first_supply = "I".into();
+    q.second_supply = "O".into();
+    let control = ExecutionControl::default();
+    let mut geometry = Geometry::new(&q, &control).unwrap();
+    let i = piece_index(PieceKind::I) as u8;
+    let o = piece_index(PieceKind::O) as u8;
+    let plan = Plan {
+        orientation: 0,
+        middle: vec![Tile {
+            piece: i,
+            cells: q.fields.middle.words(),
+        }],
+        result: vec![Tile {
+            piece: o,
+            cells: q.fields.result.words(),
+        }],
+    };
+    plan.validate(&geometry).unwrap();
+    let analyzed = AnalyzedPlan::new(plan, &geometry);
+    let root = geometry.roots[0];
+    let start = geometry.position(root);
+    assert!(!analyzed.cannot_complete());
+    assert!(analyzed.permits_piece(&start, i, true));
+    assert!(!analyzed.permits_piece(&start, o, true));
+    let edges = geometry.edges(root, usize::from(i), &control).unwrap();
+    let clear = edges
+        .iter()
+        .copied()
+        .find(|&edge| analyzed.tiling.allows(&geometry, root, edge, i))
+        .unwrap();
+    assert_eq!(clear.cleared_rows, 0b10);
+    assert!(analyzed.permits_piece(&geometry.position(clear.next), o, true));
+
+    let result = compare(q.clone());
+    assert_eq!(
+        (
+            result.normal_count,
+            result.recovery_count,
+            result.no_path_count
+        ),
+        (1, 0, 0)
+    );
+    let witness = result.normal_example.unwrap().path.steps;
+    assert_eq!(
+        (witness[0].piece, witness[0].cleared_rows),
+        (PieceKind::I, 0b10)
+    );
+    assert_eq!(witness[1].piece, PieceKind::O);
+
+    // The same structural dependency does not admit a B2B-breaking single.
+    q.preserve_b2b = true;
+    assert_eq!(compare(q).no_path_count, 1);
 }
 #[test]
 fn recovery_build_catalog_first_and_second_p7_are_compact_and_distinct() {

@@ -3823,12 +3823,16 @@ impl WasmDistributedVerifierRuntime {
                 )
             })?;
             for candidate in &candidates {
-                if !candidate.row_ids().is_empty() {
-                    return Err(distributed_error(
-                        "E_WASM_DISTRIBUTED_TILING_TASK_INVALID",
-                        "wasm_tiling_root_task_rows_must_be_empty",
-                    ));
-                }
+                let seed_row = match candidate.row_ids() {
+                    [] => None,
+                    [row] => Some(*row),
+                    _ => {
+                        return Err(distributed_error(
+                            "E_WASM_DISTRIBUTED_TILING_TASK_INVALID",
+                            "wasm_tiling_root_task_has_multiple_seed_rows",
+                        ));
+                    }
+                };
                 roots.push((
                     candidate.pass_index(),
                     u32::try_from(candidate.ordinal()).map_err(|_| {
@@ -3838,11 +3842,14 @@ impl WasmDistributedVerifierRuntime {
                         )
                     })?,
                     candidate.target_index(),
+                    seed_row,
                 ));
             }
-            verifier.enqueue(&roots).map_err(|reason| {
-                distributed_error("E_WASM_DISTRIBUTED_TILING_TASK_INVALID", reason)
-            })?;
+            verifier
+                .enqueue_seeded(roots.into_iter())
+                .map_err(|reason| {
+                    distributed_error("E_WASM_DISTRIBUTED_TILING_TASK_INVALID", reason)
+                })?;
             let (partial, has_pending_work, verified_candidates) =
                 advance_tiling_worker(verifier, &self.control)?;
             return Ok(WasmDistributedVerifierConsume {

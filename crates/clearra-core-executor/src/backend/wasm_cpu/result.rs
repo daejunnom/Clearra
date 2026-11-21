@@ -1863,7 +1863,6 @@ impl WasmExactSearchSession {
         Ok(session)
     }
 
-    #[cfg(feature = "webgpu-search")]
     pub(super) fn catalog(&self) -> Arc<GeometryCatalog> {
         Arc::clone(&self.catalog)
     }
@@ -3247,16 +3246,36 @@ impl WasmExactSearchSession {
         ordinal: u64,
         control: &ExecutionControl,
     ) -> Result<Option<ExactSearchAdvance>, WasmExactSearchError> {
+        self.bind_distributed_candidate_control(control)?;
+        let candidate = GeometryCandidate::from_rows(&self.catalog, target_index, row_ids).ok_or(
+            WasmExactSearchError::InvalidProblem("wasm_distributed_geometry_candidate_invalid"),
+        )?;
+        self.process_candidate_ranked(candidate, Some(ordinal), control)
+    }
+
+    /// The caller owns both geometry and verification in the same worker and
+    /// constructed the candidate with this session's shared catalog.
+    pub(super) fn process_local_geometry_candidate_with_ordinal(
+        &mut self,
+        candidate: GeometryCandidate,
+        ordinal: u64,
+        control: &ExecutionControl,
+    ) -> Result<Option<ExactSearchAdvance>, WasmExactSearchError> {
+        self.bind_distributed_candidate_control(control)?;
+        self.process_candidate_ranked(candidate, Some(ordinal), control)
+    }
+
+    fn bind_distributed_candidate_control(
+        &mut self,
+        control: &ExecutionControl,
+    ) -> Result<(), WasmExactSearchError> {
         self.execution_control = control.clone();
         if self.finished {
             return Err(WasmExactSearchError::InvalidProblem(
                 "wasm_search_session_already_finished",
             ));
         }
-        let candidate = GeometryCandidate::from_rows(&self.catalog, target_index, row_ids).ok_or(
-            WasmExactSearchError::InvalidProblem("wasm_distributed_geometry_candidate_invalid"),
-        )?;
-        self.process_candidate_ranked(candidate, Some(ordinal), control)
+        Ok(())
     }
 
     // External candidate identities bind distributed WebGPU result packets.

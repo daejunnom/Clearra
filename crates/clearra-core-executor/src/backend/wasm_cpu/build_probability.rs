@@ -67,6 +67,7 @@ use super::{
     exact_collections::{ExactHashMap, ExactHashSet},
     geometry::{GeometryAdvance, GeometryCandidate, GeometrySearch, SharedTargetGroups},
     kick_profiles::replay_profile_ids,
+    realization_feasibility::RealizationFeasibilityWorkspace,
     standard_bag_coverage::StandardBagCoverage,
     WasmExactSearchError, MAX_BOARD64_PIECES,
 };
@@ -2081,6 +2082,23 @@ fn max_usize_field(results: &[&CoreExecutionResult], key: &str) -> usize {
         .unwrap_or(0)
 }
 
+pub(super) fn build_dependency_preanalysis_enabled(
+    problem: &SearchProblem,
+    field: BuildProbabilityField,
+    aggregation: BuildProbabilityAggregation,
+    finesse_requested: bool,
+) -> bool {
+    // Keep other evidence modes and explicitly node-limited executions on
+    // their existing paths. In particular, do not turn an unnormalized
+    // initial field into a successful empty result.
+    aggregation == BuildProbabilityAggregation::Buildability
+        && !finesse_requested
+        && problem.backend_request().max_nodes() == 0
+        && !problem.objective().execution_constraints().requested()
+        && !problem.objective().score().requested()
+        && field.completed_base_row_mask() == 0
+}
+
 pub(super) struct CompactBuildProbabilitySession {
     problem: SearchProblem,
     aggregation: BuildProbabilityAggregation,
@@ -2090,6 +2108,7 @@ pub(super) struct CompactBuildProbabilitySession {
     shared_supply_catalog: CompactBuildProbabilitySharedCatalog,
     catalog: GeometryCatalog,
     geometry: GeometrySearch,
+    analyze_inverse_dependencies: bool,
     buildup: BuildUpWorkspace,
     coverage_evaluator: CoverageProductEvaluator,
     covered_patterns: PatternBitSet,
@@ -2491,6 +2510,12 @@ impl CompactBuildProbabilitySession {
             shared_supply_catalog,
             catalog,
             geometry,
+            analyze_inverse_dependencies: build_dependency_preanalysis_enabled(
+                problem,
+                field,
+                aggregation,
+                finesse_requested,
+            ),
             buildup: BuildUpWorkspace::default(),
             coverage_evaluator: CoverageProductEvaluator::default(),
             covered_patterns,
@@ -2611,6 +2636,19 @@ impl CompactBuildProbabilitySession {
         let target = self.geometry.target(candidate.target_index).ok_or(
             WasmExactSearchError::InvalidProblem("wasm_build_probability_target_index_invalid"),
         )?;
+        if self.analyze_inverse_dependencies {
+            if control.is_cancelled() {
+                return Err(WasmExactSearchError::Cancelled);
+            }
+            if RealizationFeasibilityWorkspace::relaxed_ilc_order_is_impossible(
+                &self.catalog,
+                &candidate,
+            ) {
+                // This candidate still contributes to the geometry count and
+                // digest, but no queue or movement can realize it.
+                return Ok(());
+            }
+        }
         let solution_coverage_required = self.solution_coverage.is_some();
         let witness_mode = CandidateWitnessMode::for_candidate(
             &self.problem,
@@ -6109,6 +6147,97 @@ fn field(key: impl Into<String>, value: impl ToString) -> (String, String) {
 }
 
 #[cfg(test)]
+pub(super) fn inverse_dependency_build_fixture(
+    height: u8,
+    cyclic: bool,
+) -> (SearchProblem, BuildProbabilityField) {
+    use clearra_pc_graph::request::{PcQueueInput, PcScenarioBoard, PcScenarioQuery, PieceWindow};
+    use clearra_problem::ProblemCompiler;
+    use clearra_supply::queue::fixed_sequence::FixedSequence;
+
+    let (base, target, queue) = if cyclic {
+        // With rows numbered bottom-up, the T spans rows 1 and 3 but
+        // requires row 2 gone. The Z spans rows 0 and 2 but requires
+        // row 1 gone. Each of those rows needs the other operation.
+        let t = (0b111 << 12) | (1 << 33);
+        let z = (0b11 << 23) | (0b11 << 4);
+        let target = t | z;
+        let base = ((1_u64 << 40) - 1) & !target;
+        (base, target, vec![PieceKind::T, PieceKind::Z])
+    } else {
+        // An unblocked I completes a single row and supplies a real witness.
+        (0x3f0, 0x0f, vec![PieceKind::I])
+    };
+    let piece_count = queue.len();
+    let query = PcScenarioQuery::new(
+        PcScenarioBoard::standard_10(u16::from(height), base),
+        PcQueueInput::fixed_sequence(FixedSequence::new(queue)),
+        PieceWindow::new(piece_count),
+    )
+    .with_exact_pieces(Some(piece_count))
+    .with_allow_hold(false);
+    let problem = ProblemCompiler::compile_scenario_pc(&query).expect("build fixture source");
+    let field = BuildProbabilityField::from_words_preserving_height(
+        height,
+        [base, 0, 0, 0],
+        [target, 0, 0, 0],
+    )
+    .expect("build fixture field");
+    (problem, field)
+}
+
+#[cfg(test)]
+pub(super) fn assert_build_dependency_result_parity(
+    preanalyzed: &CoreExecutionResult,
+    baseline: &CoreExecutionResult,
+    cyclic: bool,
+) {
+    for key in [
+        "count_complete",
+        "probability_complete",
+        "packing_candidate_count",
+        "packing_candidate_set_digest",
+        "total_possible_pattern_count",
+        "coverage_probability_denominator",
+        "unique_solution_count",
+        "coverage_probability",
+    ] {
+        assert_eq!(preanalyzed.field(key), baseline.field(key), "{key}");
+        assert!(preanalyzed.field(key).is_some(), "{key}");
+    }
+    assert!(preanalyzed.usize_field("packing_candidate_count").unwrap() > 0);
+    assert_eq!(
+        preanalyzed.field("coverage_probability"),
+        Some(if cyclic { "0" } else { "1" })
+    );
+    assert_eq!(preanalyzed.field("probability_complete"), Some("true"));
+    assert_eq!(
+        preanalyzed.coverage_pattern_words(),
+        baseline.coverage_pattern_words()
+    );
+    assert_eq!(
+        preanalyzed.normalized_solution_keys(),
+        baseline.normalized_solution_keys()
+    );
+    assert_eq!(
+        preanalyzed.normalized_solution_identities(),
+        baseline.normalized_solution_identities()
+    );
+    assert_eq!(preanalyzed.path_steps(), baseline.path_steps());
+    assert_eq!(preanalyzed.path_steps().is_empty(), cyclic);
+    let work =
+        |result: &CoreExecutionResult| result.usize_field("total_build_order_nodes").unwrap();
+    if cyclic {
+        assert!(
+            work(preanalyzed) < work(baseline),
+            "cyclic work was not skipped"
+        );
+    } else {
+        assert_eq!(work(preanalyzed), work(baseline));
+    }
+}
+
+#[cfg(test)]
 mod finesse_integration_tests {
     use std::sync::Arc;
 
@@ -6134,6 +6263,33 @@ mod finesse_integration_tests {
 
     use super::*;
     use crate::backend::wasm_cpu::buildup::{PreparedFinesseEdge, PreparedFinesseNode};
+
+    #[test]
+    fn compact_build_ilc_dependencies_skip_only_impossible_witness_work() {
+        for cyclic in [false, true] {
+            let (problem, field) = inverse_dependency_build_fixture(4, cyclic);
+            let run = |analyze| {
+                let mut session = CompactBuildProbabilitySession::new(
+                    &problem,
+                    field,
+                    BuildProbabilityAggregation::Buildability,
+                )
+                .unwrap();
+                assert!(session.analyze_inverse_dependencies);
+                session.analyze_inverse_dependencies = analyze;
+                let control = ExecutionControl::default();
+                for _ in 0..256 {
+                    match session.advance(8, &control).unwrap() {
+                        BuildProbabilityAdvance::Pending => {}
+                        BuildProbabilityAdvance::Completed(result) => return result,
+                        BuildProbabilityAdvance::Cancelled => panic!("unexpected cancellation"),
+                    }
+                }
+                panic!("bounded Build fixture did not finish")
+            };
+            assert_build_dependency_result_parity(&run(true), &run(false), cyclic);
+        }
+    }
 
     #[test]
     fn build_cooperative_progress_reports_monotonic_geometry_across_mirror_passes() {

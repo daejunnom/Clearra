@@ -6,14 +6,69 @@ use std::hash::{Hash, Hasher};
 use clearra_core_domain::{execution_cancellation::ExecutionControl, piece::piece_kind::PieceKind};
 use clearra_problem::{SearchProblem, SetupPathDetail};
 
+use crate::conditioned_local_relation::LocalRelationRowFrame;
+
 use super::{
-    buildup::{merge_deleted_rows, place_and_clear},
-    catalog::GeometryCatalog,
+    buildup::{merge_deleted_rows, place_and_clear, placement_is_grounded},
+    catalog::{GeometryCatalog, InstantiatedRealizationIter},
     exact_collections::ExactHashMap,
     geometry::{add_packed_piece, CompiledGeometryFamily, GeometryCompletionOracle},
     reachability::ReachabilityWorkspace,
     WasmExactSearchError,
 };
+
+/// The inverse row mapping is injective in a fixed clear frame: every
+/// realization that projects to a given catalog row has the same physical
+/// lock footprint. Analyze its occupied/support cells once, leaving movement
+/// and rotation (which may differ between those poses) to the exact verifier.
+pub(super) struct SetupPlacementDependency<'a> {
+    pub(super) lock_mask: u64,
+    pub(super) frame: Option<LocalRelationRowFrame>,
+    pub(super) realizations: std::iter::Peekable<InstantiatedRealizationIter<'a>>,
+}
+
+impl<'a> SetupPlacementDependency<'a> {
+    pub(super) fn analyze(
+        catalog: &'a GeometryCatalog,
+        row_id: u32,
+        board: u64,
+        deleted_rows: u16,
+    ) -> Option<Self> {
+        let mut realizations = catalog.instantiations(row_id, deleted_rows).peekable();
+        let lock_mask = realizations.peek()?.lock_mask;
+        if board & lock_mask != 0 || !placement_is_grounded(catalog.width(), board, lock_mask) {
+            return None;
+        }
+        Some(Self {
+            frame: LocalRelationRowFrame::new(catalog.height(), deleted_rows),
+            lock_mask,
+            realizations,
+        })
+    }
+
+    /// Return only the first witness needed by the set-valued suffix graph.
+    /// Detail traversal must instead preserve all concrete realizations.
+    pub(super) fn any_reachable(
+        &mut self,
+        catalog: &GeometryCatalog,
+        board: u64,
+        piece: PieceKind,
+        reachability: &mut ReachabilityWorkspace,
+    ) -> bool {
+        let lock_mask = self.lock_mask;
+        let frame = self.frame;
+        self.realizations.any(|realization| {
+            debug_assert_eq!(realization.lock_mask, lock_mask);
+            reachability.lock_reachable_instantiated_in_frame(
+                catalog,
+                board,
+                piece,
+                realization,
+                frame,
+            )
+        })
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct PartialStateKey {
@@ -782,6 +837,11 @@ impl PartialBuildGraphBuilder {
         let source = self.nodes[source_state.node as usize];
         let source_residual = self.residuals[source_state.node as usize];
         let row = catalog.skeleton(row_id);
+        let Some(dependency) =
+            SetupPlacementDependency::analyze(catalog, row_id, source.board, source.deleted_rows)
+        else {
+            return Ok(());
+        };
         let packed_counts =
             add_packed_piece(source_residual.packed_counts, super::piece_index(row.piece)).ok_or(
                 WasmExactSearchError::InvalidProblem("setup_partial_build_piece_count_overflow"),
@@ -792,71 +852,44 @@ impl PartialBuildGraphBuilder {
             0
         };
         let remaining = source_residual.remaining ^ row.cells;
-        for realization in catalog.instantiations(row_id, source.deleted_rows) {
-            if source.board & realization.lock_mask != 0
-                || !self.reachability.lock_reachable_instantiated(
-                    catalog,
-                    source.board,
-                    row.piece,
-                    realization,
-                )
-            {
+        let mut child = None;
+        for realization in dependency.realizations {
+            debug_assert_eq!(realization.lock_mask, dependency.lock_mask);
+            if !self.reachability.lock_reachable_instantiated_in_frame(
+                catalog,
+                source.board,
+                row.piece,
+                realization,
+                dependency.frame,
+            ) {
                 continue;
             }
-            let (board, cleared_current, _) = place_and_clear(
-                catalog.width(),
-                catalog.height(),
-                source.board | realization.lock_mask,
-            );
-            let Some(deleted_rows) =
-                merge_deleted_rows(catalog.height(), source.deleted_rows, cleared_current)
-            else {
-                continue;
-            };
-            let key = PartialStateKey::new(
-                board,
-                remaining,
-                placement_set_id,
-                packed_counts,
-                deleted_rows,
-            )?;
-            let target = if let Some(target) = self.next_layer.get(&key).copied() {
-                target
-            } else {
-                let target = u32::try_from(self.nodes.len()).map_err(|_| {
-                    WasmExactSearchError::InvalidProblem("setup_partial_build_node_index_overflow")
-                })?;
-                self.nodes.try_reserve(1).map_err(|_| {
-                    WasmExactSearchError::InvalidProblem(
-                        "setup_partial_build_node_storage_unavailable",
-                    )
-                })?;
-                self.next_states.try_reserve(1).map_err(|_| {
-                    WasmExactSearchError::InvalidProblem(
-                        "setup_partial_build_frontier_storage_unavailable",
-                    )
-                })?;
-                self.next_layer.try_reserve(1).map_err(|_| {
-                    WasmExactSearchError::InvalidProblem(
-                        "setup_partial_build_dedupe_storage_unavailable",
-                    )
-                })?;
-                self.nodes.push(PartialBuildNode {
-                    board,
-                    edge_start: 0,
-                    edge_count: 0,
-                    placement_set_or_shape_index: placement_set_id,
-                    deleted_rows,
-                    depth: source.depth + 1,
-                    flags: 0,
-                });
-                self.residuals.push(PartialBuildResidual {
-                    remaining,
-                    packed_counts,
-                });
-                self.next_layer.insert(key, target);
-                self.next_states.push(ActivePartialState { node: target });
-                target
+            let (target, cleared) = match child {
+                Some(child) => child,
+                None => {
+                    let (board, cleared_current, cleared) = place_and_clear(
+                        catalog.width(),
+                        catalog.height(),
+                        source.board | dependency.lock_mask,
+                    );
+                    let Some(deleted_rows) =
+                        merge_deleted_rows(catalog.height(), source.deleted_rows, cleared_current)
+                    else {
+                        return Ok(());
+                    };
+                    let target = self.intern_edge_target(
+                        board,
+                        PartialBuildResidual {
+                            remaining,
+                            packed_counts,
+                        },
+                        placement_set_id,
+                        deleted_rows,
+                        source.depth + 1,
+                    )?;
+                    child = Some((target, cleared));
+                    (target, cleared)
+                }
             };
             let row_id = u16::try_from(row_id).map_err(|_| {
                 WasmExactSearchError::InvalidProblem(
@@ -870,12 +903,57 @@ impl PartialBuildGraphBuilder {
                     realization.rotation.quarter_turns(),
                     realization.x,
                     realization.lock_y,
-                    cleared_current.count_ones() as u8,
+                    cleared,
                 )?,
                 row_id,
             });
         }
         Ok(())
+    }
+
+    fn intern_edge_target(
+        &mut self,
+        board: u64,
+        residual: PartialBuildResidual,
+        placement_set_id: u32,
+        deleted_rows: u16,
+        depth: u8,
+    ) -> Result<u32, WasmExactSearchError> {
+        let key = PartialStateKey::new(
+            board,
+            residual.remaining,
+            placement_set_id,
+            residual.packed_counts,
+            deleted_rows,
+        )?;
+        if let Some(target) = self.next_layer.get(&key).copied() {
+            return Ok(target);
+        }
+        let target = u32::try_from(self.nodes.len()).map_err(|_| {
+            WasmExactSearchError::InvalidProblem("setup_partial_build_node_index_overflow")
+        })?;
+        self.nodes.try_reserve(1).map_err(|_| {
+            WasmExactSearchError::InvalidProblem("setup_partial_build_node_storage_unavailable")
+        })?;
+        self.next_states.try_reserve(1).map_err(|_| {
+            WasmExactSearchError::InvalidProblem("setup_partial_build_frontier_storage_unavailable")
+        })?;
+        self.next_layer.try_reserve(1).map_err(|_| {
+            WasmExactSearchError::InvalidProblem("setup_partial_build_dedupe_storage_unavailable")
+        })?;
+        self.nodes.push(PartialBuildNode {
+            board,
+            edge_start: 0,
+            edge_count: 0,
+            placement_set_or_shape_index: placement_set_id,
+            deleted_rows,
+            depth,
+            flags: 0,
+        });
+        self.residuals.push(residual);
+        self.next_layer.insert(key, target);
+        self.next_states.push(ActivePartialState { node: target });
+        Ok(target)
     }
 
     fn extend_placement_set(
@@ -1276,6 +1354,120 @@ mod tests {
     use clearra_core_domain::execution_cancellation::ExecutionCancellationToken;
     use clearra_problem::{compile_setup_search_conditions, SetupSearchQuery};
     use clearra_supply::pattern_universe::PieceMultisetKey;
+
+    #[test]
+    fn setup_row_dependencies_match_concrete_witnesses_and_suffix_children() {
+        let query = SetupSearchQuery::default()
+            .with_tablebase_requested(false)
+            .with_conditioned_reachability_enabled(false);
+        let conditions = compile_setup_search_conditions(&query).expect("setup conditions");
+        let problem = conditions[0].problem();
+        let catalog = GeometryCatalog::compile(problem).expect("setup geometry");
+        let workspace = || {
+            let mut reachability = ReachabilityWorkspace::default();
+            reachability.configure(catalog.skeleton_count());
+            reachability.configure_kick_profile(problem.kick_profile().profile_id(), false);
+            reachability
+        };
+        let mut reference = workspace();
+        let mut detailed = workspace();
+        let mut suffix = workspace();
+        let rows = [
+            (PieceKind::O, 0x0c03),
+            (PieceKind::I, 0x7800),
+            (PieceKind::L, 0x0010_0403),
+            (PieceKind::S, 0x0001_8030),
+            (PieceKind::J, 0x000e_0200),
+        ];
+        let mut accepted = 0;
+        let mut rejected = 0;
+        let mut shared_poses = 0;
+        let mut clear_after_clear = 0;
+        for (piece, cells) in rows {
+            let row_id = catalog.skeleton_id(piece, cells).expect("catalog row");
+            for deleted in [0_u16, 0b1, 0b10, 0b100, 0b1000] {
+                let Some(pose) = catalog.instantiations(row_id, deleted).next() else {
+                    assert!(
+                        SetupPlacementDependency::analyze(&catalog, row_id, 0, deleted).is_none()
+                    );
+                    continue;
+                };
+                let height = usize::from(catalog.height()) - deleted.count_ones() as usize;
+                let width = usize::from(catalog.width());
+                let live = u64::MAX >> (64 - height * width);
+                let support = (pose.lock_mask >> width) & !pose.lock_mask;
+                let bottom = (pose.lock_mask.trailing_zeros() as usize / width) * width;
+                let row_mask = ((1_u64 << width) - 1) << bottom;
+                let one_support = support & support.wrapping_neg();
+                for board in [
+                    0,
+                    one_support,
+                    pose.lock_mask,
+                    (row_mask & !pose.lock_mask) | one_support,
+                    live & !pose.lock_mask,
+                ] {
+                    let expected = catalog
+                        .instantiations(row_id, deleted)
+                        .filter(|pose| {
+                            board & pose.lock_mask == 0
+                                && reference
+                                    .lock_reachable_instantiated(&catalog, board, piece, *pose)
+                        })
+                        .collect::<Vec<_>>();
+                    let mut actual = Vec::new();
+                    if let Some(dependency) =
+                        SetupPlacementDependency::analyze(&catalog, row_id, board, deleted)
+                    {
+                        for realization in dependency.realizations {
+                            assert_eq!(realization.lock_mask, dependency.lock_mask);
+                            if detailed.lock_reachable_instantiated_in_frame(
+                                &catalog,
+                                board,
+                                piece,
+                                realization,
+                                dependency.frame,
+                            ) {
+                                actual.push(realization);
+                            }
+                        }
+                    }
+                    assert_eq!(actual, expected);
+
+                    let child = |lock_mask| {
+                        let (compacted, cleared, _) =
+                            place_and_clear(catalog.width(), catalog.height(), board | lock_mask);
+                        merge_deleted_rows(catalog.height(), deleted, cleared)
+                            .map(|next_deleted| (compacted, next_deleted))
+                    };
+                    let mut actual_suffix =
+                        SetupPlacementDependency::analyze(&catalog, row_id, board, deleted);
+                    let found = actual_suffix.as_mut().and_then(|dependency| {
+                        dependency
+                            .any_reachable(&catalog, board, piece, &mut suffix)
+                            .then(|| child(dependency.lock_mask))
+                            .flatten()
+                    });
+                    let expected_suffix = expected
+                        .iter()
+                        .filter_map(|pose| child(pose.lock_mask))
+                        .collect::<std::collections::BTreeSet<_>>();
+                    assert_eq!(
+                        found.into_iter().collect::<std::collections::BTreeSet<_>>(),
+                        expected_suffix
+                    );
+                    accepted += usize::from(!expected.is_empty());
+                    rejected += usize::from(expected.is_empty());
+                    shared_poses += usize::from(expected.len() > 1);
+                    clear_after_clear += usize::from(
+                        deleted != 0
+                            && found.is_some_and(|(_, next_deleted)| next_deleted != deleted),
+                    );
+                }
+            }
+        }
+        assert!(accepted > 0 && rejected > 0 && shared_poses > 0 && clear_after_clear > 0);
+        assert!(suffix.metrics().lock_queries < detailed.metrics().lock_queries);
+    }
 
     #[test]
     fn setup_partial_build_hot_state_stays_compact() {

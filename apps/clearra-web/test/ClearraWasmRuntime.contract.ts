@@ -12,6 +12,10 @@ import {
   withArtifactDeadline
 } from '../src/workers/clearraWasmRuntime.ts';
 import type { ClearraProductBuildIdentity } from '@clearra/ui/wasm';
+import {
+  prepareWasmForNewResult,
+  retainedWasmResultPages
+} from '../src/workers/WasmResultPageLifetime.ts';
 
 // Include the worker entry point in the contract type-check without executing
 // its browser-only self.onmessage binding in Node.
@@ -25,6 +29,40 @@ const productIdentity: ClearraProductBuildIdentity = {
   supply_semantics_id: 'clearra.supply.projected-terminal-lookahead.v1',
   artifact_schema_version: 'clearra.solution-data.v1'
 };
+
+{
+  const host = {
+    logicalProcessorCount: 8,
+    transferByteCap: 32 * 1024 * 1024,
+    webGpuAvailable: false,
+    crossOriginIsolated: true
+  };
+  let product = true;
+  let tiling = true;
+  const calls: string[] = [];
+  const wasm = {
+    product_page_available: () => product,
+    tiling_solution_available: () => tiling,
+    product_page_release() { product = false; calls.push('product'); },
+    tiling_solution_release() { tiling = false; calls.push('tiling'); },
+    configure_host(value: typeof host) {
+      assert.deepEqual(value, host);
+      assert.deepEqual(retainedWasmResultPages(wasm), { product: false, tiling: false });
+      calls.push('configure');
+    }
+  };
+  assert.deepEqual(retainedWasmResultPages(wasm), { product: true, tiling: true });
+  assert.deepEqual(calls, [], 'inspection does not mutate the lazy page sources');
+  prepareWasmForNewResult(wasm, host);
+  assert.deepEqual(calls, ['product', 'tiling', 'configure']);
+
+  tiling = true;
+  assert.throws(() => prepareWasmForNewResult({
+    ...wasm,
+    tiling_solution_release() { throw new Error('tiling source still borrowed'); }
+  }, host), /tiling source still borrowed/u);
+  assert.deepEqual(calls, ['product', 'tiling', 'configure'], 'failed release cannot admit new host configuration');
+}
 
 const terminalEnvelope = (identity: unknown) =>
   JSON.stringify([

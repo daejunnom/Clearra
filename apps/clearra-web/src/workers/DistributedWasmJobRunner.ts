@@ -910,6 +910,10 @@ export class DistributedWasmJobRunner {
   private releaseCompletedRun() {
     if (this.released) return;
     this.released = true;
+    // All verifier receipts have been merged; pagination is owned only by
+    // the root. Reusing these realms would keep their WASM high-water capacity
+    // resident even after the Rust request arenas are dropped.
+    if (this.poolOwned) this.pool.cancel();
     this.resetOwnedCoordinator();
     this.releaseExecutionLease();
   }

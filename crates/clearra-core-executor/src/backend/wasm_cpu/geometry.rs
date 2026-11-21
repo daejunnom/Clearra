@@ -1436,8 +1436,15 @@ impl FamilyCompiler {
             self.residual_memo
                 .insert_after_miss(frame.key, suffix_family);
         }
-        if frame.chosen_row == NO_ROW && frame.chosen_component_family == FAMILY_INVALID {
-            self.root_family = suffix_family;
+        if self.stack.is_empty() {
+            self.root_family = if frame.chosen_row == NO_ROW || suffix_family == FAMILY_INVALID {
+                suffix_family
+            } else {
+                let Some(family) = self.family.append(frame.chosen_row, suffix_family) else {
+                    return CompileAdvance::ResourceIncomplete;
+                };
+                family
+            };
             #[cfg(any(feature = "local-search-ab", test))]
             {
                 self.domain_metrics.completed_families = 1;
@@ -3512,6 +3519,72 @@ fn checked_target_nested_retained_bytes(targets: &[TargetGroup]) -> Option<u128>
 }
 
 impl GeometrySearch {
+    /// Use the ordinary Geometry compiler's exact first decision and order.
+    /// A component product has no corresponding single-row first decision;
+    /// callers needing a stable representative ordinal must leave it intact.
+    pub(super) fn distributed_first_rows(
+        catalog: &GeometryCatalog,
+        target: &TargetGroup,
+    ) -> Option<Vec<u32>> {
+        let mut compiler =
+            FamilyCompiler::new(catalog.required_cells(), Arc::from([target.clone()]));
+        if !matches!(compiler.advance(catalog), CompileAdvance::Pending) {
+            return None;
+        }
+        let frame = compiler.stack.first()?;
+        if !frame.entered || frame.support_end == 0 || frame.component_entry_end != 0 {
+            return None;
+        }
+        Some(
+            catalog
+                .support(frame.support_cell)
+                .iter()
+                .copied()
+                .filter(|&row_id| {
+                    frame.domain.row_allowed(
+                        catalog,
+                        row_id,
+                        frame.remaining,
+                        frame.feasible_piece_mask,
+                    )
+                })
+                .collect(),
+        )
+    }
+
+    /// Begin a distributed exact-cover shard with one row already chosen.
+    /// The producer partitions on a common cell, so sibling shards cannot
+    /// share a completed identity. Keep the full target's piece counts and
+    /// catalog: only the compiler's residual cells and prefix change.
+    pub(super) fn seed_distributed_root(
+        &mut self,
+        catalog: &GeometryCatalog,
+        row_id: u32,
+    ) -> Result<(), WasmExactSearchError> {
+        const INVALID: WasmExactSearchError =
+            WasmExactSearchError::InvalidProblem("wasm_geometry_distributed_root_seed_invalid");
+        let compiler = self.compiler.as_mut().ok_or(INVALID)?;
+        if compiler.stack.len() != 1
+            || compiler.stack[0].entered
+            || compiler.used_counts != [0; 7]
+            || compiler.stack[0].remaining != catalog.required_cells()
+            || row_id as usize >= catalog.skeleton_count()
+        {
+            return Err(INVALID);
+        }
+        let row = catalog.skeleton(row_id);
+        let piece = piece_index(row.piece);
+        if row.cells.count_ones() != 4
+            || row.cells & !catalog.required_cells() != 0
+            || compiler.feasible_piece_mask() & (1 << piece) == 0
+        {
+            return Err(INVALID);
+        }
+        compiler.used_counts[piece] = 1;
+        compiler.stack[0] = CompileFrame::child(catalog.required_cells() ^ row.cells, 1, row_id, 0);
+        Ok(())
+    }
+
     #[cfg(feature = "parallel")]
     pub fn placeholder() -> Self {
         Self {

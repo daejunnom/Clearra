@@ -2,8 +2,9 @@
 //! Middle completion delegates to a separate, unrestricted suffix memo. Repair
 //! explores only input cylinders not already covered by the normal stages.
 use super::super::{
-    search::piece_index, RecoveryBuildError as Error, RecoveryBuildFixedReport, RecoveryBuildQuery,
-    RecoveryBuildStatus,
+    catalog::{AnalyzedPlan, Plan},
+    search::piece_index,
+    RecoveryBuildError as Error, RecoveryBuildFixedReport, RecoveryBuildQuery, RecoveryBuildStatus,
 };
 use super::{
     diagram::{Diagram, Id, ALL, NONE},
@@ -93,7 +94,7 @@ struct Root {
 }
 
 pub(in crate::recovery_build) struct Solver {
-    plan: Option<super::super::catalog::Plan>,
+    plan: Option<AnalyzedPlan>,
     pub diagram: Diagram,
     pub source: Source,
     pub geometry: Geometry,
@@ -163,8 +164,8 @@ impl Solver {
             done: false,
         }
     }
-    pub fn with_plan(mut self, plan: super::super::catalog::Plan) -> Self {
-        self.plan = Some(plan);
+    pub fn with_plan(mut self, plan: Plan) -> Self {
+        self.plan = Some(AnalyzedPlan::new(plan, &self.geometry));
         self
     }
     fn orientation_count(&self) -> usize {
@@ -178,13 +179,19 @@ impl Solver {
         self.geometry.roots[self
             .plan
             .as_ref()
-            .map_or(self.orientation, |p| p.orientation as usize)]
+            .map_or(self.orientation, |p| p.tiling.orientation as usize)]
     }
     /// A finite amount of solver work, not one monolithic fixed queue pair.
     pub fn advance(&mut self, fuel: usize, control: &ExecutionControl) -> Result<bool, Error> {
         for _ in 0..fuel.max(1) {
             cancelled(control)?;
-            if self.done {
+            if self.done
+                || self
+                    .plan
+                    .as_ref()
+                    .is_some_and(AnalyzedPlan::cannot_complete)
+            {
+                self.done = true;
                 return Ok(true);
             }
             if self.machine.is_none() {
@@ -555,16 +562,25 @@ impl Solver {
             return Ok(());
         }
         let before = pos.middle_count() < middle_pieces;
+        let permit_result =
+            !before || (key.mode != Mode::Middle && usize::from(key.early) < self.maximum);
+        if self
+            .plan
+            .as_ref()
+            .is_some_and(|plan| !plan.permits_piece(&pos, token.piece, permit_result))
+        {
+            return Ok(());
+        }
         for &edge in self
             .geometry
             .edges(key.geometry, usize::from(token.piece), control)?
             .iter()
         {
-            if self
-                .plan
-                .as_ref()
-                .is_some_and(|plan| !plan.allows(&self.geometry, key.geometry, edge, token.piece))
-            {
+            if self.plan.as_ref().is_some_and(|plan| {
+                !plan
+                    .tiling
+                    .allows(&self.geometry, key.geometry, edge, token.piece)
+            }) {
                 continue;
             }
             if before && edge.result && key.mode == Mode::Middle {

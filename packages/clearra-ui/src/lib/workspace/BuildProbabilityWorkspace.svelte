@@ -194,7 +194,13 @@
   async function run() {
     if (active || validationCodes.length) return;
     continuationApplied = false;
-    const executionRequest = normalizeBuildProbabilityRequest(request);
+    const foregroundAuthority = automaticWorkerAuthority(
+      hostCapabilitySnapshot,
+      request.useAllLogicalProcessors
+    );
+    const executionRequest = normalizeBuildProbabilityRequest(runtime === 'web'
+      ? { ...request, workers: foregroundAuthority.workersEffective }
+      : request);
     executedSourceIdentity = buildMandatorySource(executionRequest);
     resultHeight = executionRequest.height;
     resultExistingMask = executionRequest.existingMask;
@@ -203,7 +209,7 @@
     resultMode = executionRequest.resultMode;
     if (runtime === 'web') {
       updateWasmCommandText(buildProbabilityCommand(executionRequest));
-      if (workerController.run()) elapsedTimer.start();
+      if (workerController.run(foregroundAuthority)) elapsedTimer.start();
       return;
     }
     elapsedTimer.start();

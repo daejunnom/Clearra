@@ -7,6 +7,11 @@ import { get } from 'svelte/store';
 
 import { WasmTerminalWorkerController } from '../src/lib/wasm/WasmTerminalWorkerController';
 import {
+  automaticWorkerAuthority,
+  createHostCapabilitySnapshot,
+  resolveWorkerAuthority
+} from '../src/lib/wasm/hostCapabilitySnapshot';
+import {
   createWasmWorkerOwnerId,
   listenForWasmOwnerTermination,
   signalWasmOwnerTermination
@@ -144,21 +149,44 @@ async function duplicateRunIsRejectedBeforePosting() {
 async function retainedWorkerDiscardsSettledAndForeignJobEvents() {
   resetState();
   const worker = new FakeWorker();
-  const controller = controllerFor(worker);
+  const replacement = new FakeWorker();
+  const workers = [worker, replacement];
+  let created = 0;
+  const snapshot = createHostCapabilitySnapshot({ reportedLogicalProcessors: 8 });
+  const authority = automaticWorkerAuthority(snapshot);
+  const controller = new WasmTerminalWorkerController(
+    () => workers[created++] as unknown as Worker,
+    snapshot
+  );
+  const commandText = 'clearra pc --lines 4 --patterns P7P4 --workers 7';
+  updateWasmCommandText(commandText);
+  const verifyForeground = (owner: FakeWorker, expectedAuthority = authority, command = commandText) => {
+    const messages = owner.messages as Array<{ type: string }>;
+    const admission = messages.filter(({ type }) => type === 'run_command_text').at(-1);
+    assert.ok(admission);
+    assert.equal('commandText' in admission ? admission.commandText : null, command);
+    assert.equal('prewarmWorkerCount' in admission ? admission.prewarmWorkerCount : null, expectedAuthority.workersEffective);
+    assert.deepEqual('workerAuthority' in admission ? admission.workerAuthority : null, expectedAuthority);
+  };
   const completed = (jobId: number): ClearraWasmWorkerEvent => ({
     schema_version: 1, runtime: 'clearra-wasm', event: 'final_response', job_id: jobId,
     response: { command: 'pc', status: 'success', result: null, diagnostics: [] },
     search_report: null, webgpu_backend: null
   } as unknown as ClearraWasmWorkerEvent);
 
-  assert.equal(controller.run(), true);
+  controller.prewarm(1);
+  assert.equal(controller.run(authority), true);
+  verifyForeground(worker);
   worker.emit(started(101));
   worker.emit(completed(101));
   assert.equal(get(wasmWorkerState).status, 'completed');
   worker.emit(progress(101, 'searching', 99, 'distributed'));
   assert.equal(get(wasmWorkerState).progressLabel, '', 'settled work cannot restore stale progress');
 
-  assert.equal(controller.run(), true);
+  // The retained worker may be warm, or a lower readiness hint may still
+  // be present. Neither is the authority for this foreground search.
+  assert.equal(controller.run(authority), true);
+  verifyForeground(worker);
   worker.emit(started(101));
   worker.emit(completed(101));
   assert.equal(get(wasmWorkerState).status, 'running', 'the old terminal cannot settle the queued replacement');
@@ -183,6 +211,18 @@ async function retainedWorkerDiscardsSettledAndForeignJobEvents() {
   worker.emit(cancelled(102));
   assert.equal(get(wasmWorkerState).status, 'cancelled');
   assert.equal(worker.terminateCount, 1);
+  assert.equal(controller.run(authority), true);
+  verifyForeground(replacement);
+  assert.equal(created, 2);
+  replacement.emit(started(1));
+  replacement.emit(completed(1));
+  assert.equal(get(wasmWorkerState).status, 'completed');
+  const serial = resolveWorkerAuthority(snapshot, 1);
+  const serialCommand = 'clearra pc --lines 4 --patterns P7P4 --workers 1';
+  updateWasmCommandText(serialCommand);
+  assert.equal(controller.run(serial), true);
+  verifyForeground(replacement, serial, serialCommand);
+  controller.dispose();
 }
 
 async function activeSearchStartsOnlyTheNewTablebaseTransportIntent() {
@@ -288,6 +328,57 @@ async function idleMemoryCeilingRotatesOnlyOverLimitWorkers() {
   } as unknown as ClearraWasmWorkerEvent);
   assert.equal(transferController.takeIdleWorker(), null);
   assert.equal(transferred.terminateCount, 1, 'over-ceiling worker is not transferred');
+}
+
+async function oversizedTerminalWorkerReclaimsOnlyUnownedPages() {
+  const completed = (
+    pages?: { tiling: boolean; product: boolean }
+  ): ClearraWasmWorkerEvent => ({
+    schema_version: 1,
+    runtime: 'clearra-wasm',
+    event: 'final_response',
+    job_id: 301,
+    response: { command: 'pc', status: 'success', result: null, diagnostics: [] },
+    search_report: null,
+    webgpu_backend: null,
+    runtime_memory_bytes: 101,
+    runtime_retained_pages: pages
+  } as unknown as ClearraWasmWorkerEvent);
+
+  for (const selection of [
+    { pages: { tiling: false, product: false }, afterCompletion: 1, afterProductRelease: 1 },
+    { pages: { tiling: false, product: true }, afterCompletion: 0, afterProductRelease: 1 },
+    { pages: { tiling: true, product: true }, afterCompletion: 0, afterProductRelease: 0 },
+    { pages: undefined, afterCompletion: 0, afterProductRelease: 0 }
+  ]) {
+    resetState();
+    const worker = new FakeWorker();
+    const controller = new WasmTerminalWorkerController(
+      () => worker as unknown as Worker,
+      undefined,
+      { idleWorkerMemoryCeilingBytes: 100 }
+    );
+    assert.equal(controller.run(), true);
+    worker.emit(started(301));
+    worker.emit(completed(selection.pages));
+    assert.equal(get(wasmWorkerState).status, 'completed');
+    assert.equal(worker.terminateCount, selection.afterCompletion);
+    if (selection.pages?.tiling || selection.pages?.product) {
+      assert.equal(controller.takeIdleWorker(), null, 'a result page owner is not an idle handoff');
+      assert.equal(worker.terminateCount, 0, 'a handoff cannot destroy the visible result');
+    }
+    controller.releaseProductPages();
+    assert.equal(worker.terminateCount, selection.afterProductRelease);
+    if (selection.pages?.tiling) {
+      const page = controller.loadSolutionPage(0, 1);
+      const request = worker.messages.find(
+        (message) => (message as { type?: string }).type === 'load_solution_page'
+      ) as { requestId: number };
+      worker.emit({ type: 'solution_page', request_id: request.requestId, offset: 0, total: 1, keys: ['retained'] });
+      assert.deepEqual(await page, { keys: ['retained'], total: 1 });
+    }
+    controller.dispose();
+  }
 }
 
 async function boundedProgressWatchdogCoversPreparationAndSerialSearchStalls() {
@@ -1139,6 +1230,7 @@ try {
   await activeSearchStartsOnlyTheNewTablebaseTransportIntent();
   await tablebaseToggleDoesNotRotateThePrewarmingWorker();
   await idleMemoryCeilingRotatesOnlyOverLimitWorkers();
+  await oversizedTerminalWorkerReclaimsOnlyUnownedPages();
   await boundedProgressWatchdogCoversPreparationAndSerialSearchStalls();
   await boundedProgressWatchdogRequiresAndAcceptsChangedDistributedWork();
   await workerCreationFailureBecomesTerminalFailure();
@@ -1174,6 +1266,7 @@ console.log(
     active_tablebase_transport_prewarm: 'started-without-runtime-reconfiguration',
     tablebase_toggle_worker_lifetime: 'preserved',
     idle_worker_memory_ceiling: 'over-limit-rotated-within-limit-retained',
+    terminal_worker_memory: 'oversized-root-reclaimed-without-losing-live-pages',
     worker_creation_failure: 'reported',
     non_success_response: 'failed',
     typed_failed_response: 'preserved',

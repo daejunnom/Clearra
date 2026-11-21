@@ -67,6 +67,7 @@ export class WasmTerminalWorkerController {
   private worker: Worker | null = null;
   private workerArtifactGeneration: string | null = null;
   private workerLinearMemoryBytes = 0;
+  private workerResultPages: { tiling: boolean; product: boolean } | null = null;
   private cancellingWorker: Worker | null = null;
   private prewarmingWorker: Worker | null = null;
   private prewarmWorkerCount = 1;
@@ -156,7 +157,7 @@ export class WasmTerminalWorkerController {
     return this.workerAuthority;
   }
 
-  run(): boolean {
+  run(authority: WorkerAuthorityReport = this.workerAuthority): boolean {
     if (
       this.runInFlight ||
       this.cancellingWorker !== null ||
@@ -164,6 +165,14 @@ export class WasmTerminalWorkerController {
     ) {
       return false;
     }
+    // An interactive search declares its own admission request. Readiness
+    // hints (including a one-worker prewarm) and a terminated predecessor
+    // must not set the foreground worker count.
+    const foregroundAuthority = authorityForPrewarm(
+      this.hostCapabilitySnapshot,
+      authority.workersEffective,
+      authority
+    );
     this.replaceStaleWorkerForNewRun();
     let worker: Worker | null;
     try {
@@ -193,6 +202,7 @@ export class WasmTerminalWorkerController {
     this.rejectProductPages(new Error('a new search replaced the previous product pages'));
     this.clearProgressWatchdog();
     this.runningJobId = null;
+    this.workerResultPages = null;
     try {
       postReleaseProductPages(worker);
     } catch {}
@@ -205,10 +215,10 @@ export class WasmTerminalWorkerController {
       this.runInFlight = true;
       runWasmCommand(
         worker,
-        this.prewarmWorkerCount,
+        foregroundAuthority.workersEffective,
         this.tablebaseRequested,
         ensureWasmWorkerOwnerId(worker),
-        this.runtimeAuthority()
+        this.runtimeAuthority(foregroundAuthority)
       );
       return true;
     } catch (error) {
@@ -385,6 +395,10 @@ export class WasmTerminalWorkerController {
     this.rejectProductPages(new Error('product page runtime was released'));
     if (!worker) return;
     postReleaseProductPages(worker);
+    if (!this.runInFlight && this.workerResultPages) {
+      this.workerResultPages = { ...this.workerResultPages, product: false };
+      this.retireOversizedWorkerWithoutPages(worker);
+    }
   }
 
   private requestProductPage(
@@ -466,6 +480,8 @@ export class WasmTerminalWorkerController {
       this.prewarmingWorker !== null ||
       this.runInFlight ||
       this.cancelFallback !== null ||
+      this.workerResultPages?.tiling ||
+      this.workerResultPages?.product ||
       this.solutionPageRequests.size > 0 ||
       this.productPageRequests.size > 0
     ) {
@@ -483,6 +499,7 @@ export class WasmTerminalWorkerController {
     this.worker = null;
     this.workerArtifactGeneration = null;
     this.workerLinearMemoryBytes = 0;
+    this.workerResultPages = null;
     worker.onmessage = null;
     worker.onerror = null;
     worker.onmessageerror = null;
@@ -521,6 +538,7 @@ export class WasmTerminalWorkerController {
       this.newestStartedJobId = null;
       this.workerArtifactGeneration = currentWasmArtifactGeneration();
       this.workerLinearMemoryBytes = 0;
+      this.workerResultPages = null;
       worker.onmessage = (
         message: MessageEvent<
           | ClearraWasmWorkerEvent
@@ -552,6 +570,11 @@ export class WasmTerminalWorkerController {
         }
         if (!this.acceptCurrentJobEvent(message.data)) return;
         this.observeWorkerMemory(message.data.runtime_memory_bytes);
+        if (message.data.event === 'final_response' && message.data.response.status === 'success') {
+          const pages = message.data.runtime_retained_pages;
+          this.workerResultPages = pages && typeof pages.tiling === 'boolean' &&
+            typeof pages.product === 'boolean' ? pages : null;
+        }
         if (this.cancellingWorker === worker) {
           if (message.data.event === 'started') {
             this.cancellingJobId = message.data.job_id;
@@ -575,6 +598,7 @@ export class WasmTerminalWorkerController {
               this.releaseWorker(worker, 'worker-failure');
             } else {
               this.clearCancelFallback();
+              this.retireOversizedWorkerWithoutPages(worker);
             }
             this.flushDeferredPrewarm();
             return;
@@ -596,6 +620,8 @@ export class WasmTerminalWorkerController {
               ? 'worker-failure'
               : 'owner-disposed'
           );
+        } else if (terminal) {
+          this.retireOversizedWorkerWithoutPages(worker);
         }
         if (terminal) this.flushDeferredPrewarm();
       };
@@ -804,6 +830,7 @@ export class WasmTerminalWorkerController {
     this.worker = null;
     this.workerArtifactGeneration = null;
     this.workerLinearMemoryBytes = 0;
+    this.workerResultPages = null;
   }
 
   private disposeOwnedWorker(worker: Worker) {
@@ -820,6 +847,7 @@ export class WasmTerminalWorkerController {
     this.worker = null;
     this.workerArtifactGeneration = null;
     this.workerLinearMemoryBytes = 0;
+    this.workerResultPages = null;
     try {
       worker.postMessage({ type: 'dispose_runtime' });
     } catch {}
@@ -847,10 +875,22 @@ export class WasmTerminalWorkerController {
     }
   }
 
-  private runtimeAuthority() {
+  private retireOversizedWorkerWithoutPages(worker: Worker) {
+    if (this.worker !== worker || this.runInFlight || this.cancellingWorker ||
+        this.solutionPageRequests.size > 0 || this.productPageRequests.size > 0 ||
+        this.workerLinearMemoryBytes <= this.idleWorkerMemoryCeilingBytes ||
+        !this.workerResultPages || this.workerResultPages.tiling || this.workerResultPages.product) {
+      return;
+    }
+    // Dropping Rust allocations doesn't shrink WebAssembly.Memory. Only
+    // release the realm once there is no lazy result authority to lose.
+    this.disposeOwnedWorker(worker);
+  }
+
+  private runtimeAuthority(workerAuthority = this.workerAuthority) {
     return {
       hostCapabilitySnapshot: this.hostCapabilitySnapshot,
-      workerAuthority: this.workerAuthority,
+      workerAuthority,
       warmupPolicy: this.warmupPolicy
     };
   }

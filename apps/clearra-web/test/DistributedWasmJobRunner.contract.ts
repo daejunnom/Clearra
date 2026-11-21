@@ -47,6 +47,7 @@ const emptyProgress: ClearraVerifierPoolProgress = {
   oldestBatchMs: 0
 };
 let poolFinished = false;
+let retiredVerifierRealms = 0;
 const pool = {
   beginTransportProfile() {},
   finishTransportProfile() { return { schema: 'clearra.verifier-transport-profile.v1', timings: {} }; },
@@ -66,7 +67,7 @@ const pool = {
   progressSnapshot() {
     return poolFinished ? emptyProgress : completedProgress;
   },
-  cancel() {}
+  cancel() { retiredVerifierRealms += 1; }
 };
 
 let workersUsed = 0;
@@ -138,6 +139,7 @@ await new DistributedWasmJobRunner(
   plan,
   (event) => events.push(event)
 );
+assert.equal(retiredVerifierRealms, 1, 'committed verifier realms are released with the job');
 
 const distributedSearching = events.find(
   (event) => event.event === 'progress' && event.progress.telemetry?.phase === 'searching'

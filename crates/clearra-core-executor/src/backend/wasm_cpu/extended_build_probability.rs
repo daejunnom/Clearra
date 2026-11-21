@@ -46,11 +46,12 @@ pub(super) mod pc_distributed;
 
 use super::{
     build_probability::{
-        build_pattern_coverage_aggregation, costed_finesse_language, exact_bool_field,
-        exact_solution_probabilities_requested, exact_usize_field,
-        solution_coverage_union_matches_global, validate_distributed_coverage_aggregation_surface,
-        validate_distributed_coverage_authority, validate_worker_partial_probability_surface,
-        BuildProbabilityAdvance, FinesseSearchMaterial,
+        build_dependency_preanalysis_enabled, build_pattern_coverage_aggregation,
+        costed_finesse_language, exact_bool_field, exact_solution_probabilities_requested,
+        exact_usize_field, solution_coverage_union_matches_global,
+        validate_distributed_coverage_aggregation_surface, validate_distributed_coverage_authority,
+        validate_worker_partial_probability_surface, BuildProbabilityAdvance,
+        FinesseSearchMaterial,
     },
     buildup::{representative_pattern_path, PreparedFinesseLanguage},
     coverage_product::CoverageProductEvaluator,
@@ -67,7 +68,9 @@ use super::{
     extended_geometry::{ExtendedGeometryAdvance, ExtendedGeometrySearch},
     extended_inverse_catalog::ExtendedInverseCatalog,
     kick_profiles::replay_profile_ids,
-    mix_digest, WasmExactSearchError,
+    mix_digest,
+    realization_feasibility::dependency_relaxation_stalls,
+    WasmExactSearchError,
 };
 
 pub(super) struct ExtendedBuildProbabilitySession {
@@ -81,6 +84,7 @@ pub(super) struct ExtendedBuildProbabilitySession {
     // private workspace/reducer state, never Arc::strong_count snapshots.
     shared_immutable_owners: bool,
     geometry: ExtendedGeometrySearch,
+    analyze_inverse_dependencies: bool,
     build_order_workspace: ExtendedBuildOrderWorkspace,
     coverage_evaluator: CoverageProductEvaluator,
     covered_patterns: PatternBitSet,
@@ -133,6 +137,29 @@ pub(super) struct ExtendedBuildProbabilitySession {
 enum ExtendedFamilyPurpose {
     Build,
     Pc,
+}
+
+fn extended_build_dependencies_stall(catalog: &ExtendedInverseCatalog, rows: &[u32]) -> bool {
+    if !(1..=60).contains(&rows.len())
+        || !(1..=24).contains(&catalog.height())
+        || rows
+            .iter()
+            .all(|&row| catalog.realization_requirement_is_satisfied(row, 0))
+    {
+        return false;
+    }
+    let mut contributors = [0_u64; 24];
+    for (operation, &row) in rows.iter().enumerate() {
+        let bit = 1_u64 << operation;
+        for cell in catalog.skeleton(row).cells.cells() {
+            contributors[usize::from(cell) / usize::from(catalog.width())] |= bit;
+        }
+    }
+    dependency_relaxation_stalls(
+        rows.len(),
+        &contributors[..usize::from(catalog.height())],
+        |operation, deleted| catalog.realization_requirement_is_satisfied(rows[operation], deleted),
+    )
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -320,6 +347,7 @@ impl ExtendedBuildProbabilitySession {
             catalog: Arc::clone(&self.catalog),
             shared_immutable_owners: true,
             geometry: ExtendedGeometrySearch::private_verifier_placeholder(),
+            analyze_inverse_dependencies: false,
             build_order_workspace: ExtendedBuildOrderWorkspace::new(
                 self.field.width(),
                 self.field.height(),
@@ -518,6 +546,13 @@ impl ExtendedBuildProbabilitySession {
             catalog: Arc::new(catalog),
             shared_immutable_owners: false,
             geometry,
+            analyze_inverse_dependencies: purpose == ExtendedFamilyPurpose::Build
+                && build_dependency_preanalysis_enabled(
+                    problem,
+                    field,
+                    aggregation,
+                    finesse_requested,
+                ),
             build_order_workspace,
             coverage_evaluator: CoverageProductEvaluator::default(),
             covered_patterns,
@@ -767,6 +802,16 @@ impl ExtendedBuildProbabilitySession {
                 return Ok(());
             }
             self.buildable_tilings.insert(tiling.clone());
+        }
+        if self.analyze_inverse_dependencies {
+            if control.is_cancelled() {
+                return Err(WasmExactSearchError::Cancelled);
+            }
+            if extended_build_dependencies_stall(&self.catalog, candidate.row_ids()) {
+                // The geometry count/digest above must still account for this
+                // candidate. Only impossible physical witness work is skipped.
+                return Ok(());
+            }
         }
         let execution_evidence_requested = self.aggregation.requests_spin_coverage()
             || self.problem.objective().score().requested()
@@ -4275,6 +4320,38 @@ mod tests {
     use clearra_supply::queue::fixed_sequence::FixedSequence;
 
     use super::*;
+
+    #[test]
+    fn full_height_build_ilc_dependencies_preserve_the_complete_result() {
+        use super::super::build_probability::{
+            assert_build_dependency_result_parity, inverse_dependency_build_fixture,
+        };
+
+        for cyclic in [false, true] {
+            let (problem, field) = inverse_dependency_build_fixture(8, cyclic);
+            assert!(!field.is_compact());
+            let run = |analyze| {
+                let mut session = ExtendedBuildProbabilitySession::new(
+                    &problem,
+                    field,
+                    BuildProbabilityAggregation::Buildability,
+                )
+                .unwrap();
+                assert!(session.analyze_inverse_dependencies);
+                session.analyze_inverse_dependencies = analyze;
+                let control = ExecutionControl::default();
+                for _ in 0..256 {
+                    match session.advance(8, &control).unwrap() {
+                        BuildProbabilityAdvance::Pending => {}
+                        BuildProbabilityAdvance::Completed(result) => return result,
+                        BuildProbabilityAdvance::Cancelled => panic!("unexpected cancellation"),
+                    }
+                }
+                panic!("bounded full-height Build fixture did not finish")
+            };
+            assert_build_dependency_result_parity(&run(true), &run(false), cyclic);
+        }
+    }
 
     #[test]
     fn shared_extended_identity_resolves_only_matching_full_height_catalog_rows() {

@@ -49,6 +49,10 @@ const bundle = await build({
         ClearraWasmTransferLimitError,
         assertWasmTransferWithinHostCap
       } from '../../apps/clearra-web/src/workers/clearraWasmRuntime.ts';
+      export {
+        prepareWasmForNewResult,
+        retainedWasmResultPages
+      } from '../../apps/clearra-web/src/workers/WasmResultPageLifetime.ts';
     `,
     loader: 'ts',
     resolveDir: fileURLToPath(new URL('..', import.meta.url))
@@ -609,6 +613,15 @@ test('serial product warmup preserves requested worker authority and legacy poli
   }
 });
 
+function emptyResultWasmFixture() {
+  return {
+    compiled_module: () => ({}),
+    configure_host() {},
+    tiling_solution_available: () => false,
+    product_page_available: () => false
+  };
+}
+
 test('root-only warmup loads WASM without prewarming verifiers and can later expand', async () => {
   const source = readFileSync(
     new URL('../../../apps/clearra-web/src/workers/clearraWorker.ts', import.meta.url), 'utf8'
@@ -625,6 +638,7 @@ test('root-only warmup loads WASM without prewarming verifiers and can later exp
   let disposedPools = 0;
   const state = {
     normalizeRuntimeWarmupPolicy: production.normalizeRuntimeWarmupPolicy,
+    retainedWasmResultPages: production.retainedWasmResultPages,
     resolveWorkerAuthority: (_snapshot, workers) => ({ workersEffective: workers }),
     hostCapabilitySnapshot: {}, MAX_EAGER_PREWARM_TOTAL_WORKERS: 9,
     requestedPrewarmWorkerCount: 1, deferredTablebaseRequested: false,
@@ -637,7 +651,7 @@ test('root-only warmup loads WASM without prewarming verifiers and can later exp
     loadClearraWasmModule: async () => {
       rootLoads++;
       if (failRoot) throw new Error('injected root load failure');
-      return { compiled_module: () => ({}) };
+      return emptyResultWasmFixture();
     },
     wasmHostCapabilities: () => ({}), startTablebaseWarmupAfterWasm: async () => {},
     startGpuWarmupAfterWasm: async () => {},
@@ -729,6 +743,7 @@ test('in-flight warmup applies only the latest policy and respects worker lifeti
     const peers = [];
     const state = {
       normalizeRuntimeWarmupPolicy: production.normalizeRuntimeWarmupPolicy,
+      retainedWasmResultPages: production.retainedWasmResultPages,
       resolveWorkerAuthority: (_snapshot, workers) => ({ workersEffective: workers }),
       hostCapabilitySnapshot: {}, MAX_EAGER_PREWARM_TOTAL_WORKERS: 9,
       requestedPrewarmWorkerCount: 1, deferredTablebaseRequested: false,
@@ -756,7 +771,7 @@ test('in-flight warmup applies only the latest policy and respects worker lifeti
     api.startRuntimePrewarm(7, false, ['full-to-root', 'already-started'].includes(scenario) ? full : rootOnly);
     const first = state.runtimePrewarm;
     if (scenario === 'already-started') {
-      resolveLoad({ compiled_module: () => ({}) });
+      resolveLoad(emptyResultWasmFixture());
       await Promise.resolve();
       assert.deepEqual(peers, [7]);
     }
@@ -768,7 +783,7 @@ test('in-flight warmup applies only the latest policy and respects worker lifeti
     }
     if (scenario === 'dispose') api.disposeRuntime();
     if (scenario === 'already-started') resolvePeers();
-    resolveLoad({ compiled_module: () => ({}) });
+    resolveLoad(emptyResultWasmFixture());
     await first;
     if (state.runtimePrewarm) await state.runtimePrewarm;
     assert.deepEqual(peers, ['root-to-full', 'already-started'].includes(scenario) ? [7] : [], scenario);
@@ -805,10 +820,12 @@ test('active search retains the latest warmup policy, while cancellation remains
     const jobStarted = new Promise((resolve) => { reportStarted = resolve; });
     const terminal = new Promise((resolve) => { finishJob = resolve; });
     const peers = [];
-    const wasm = { configure_host() {}, compiled_module: () => ({}) };
+    const wasm = emptyResultWasmFixture();
     const state = {
       isLocalSearchProfileMode: () => false,
       normalizeRuntimeWarmupPolicy: production.normalizeRuntimeWarmupPolicy,
+      prepareWasmForNewResult: production.prepareWasmForNewResult,
+      retainedWasmResultPages: production.retainedWasmResultPages,
       isHostCapabilitySnapshot: () => false,
       resolveWorkerAuthority: (_snapshot, workers) => ({ workersRequested: workers, workersEffective: workers }),
       hostCapabilitySnapshot: { wasmTransferByteCap: 1 }, workerAuthority: { workersRequested: 7, workersEffective: 7 },

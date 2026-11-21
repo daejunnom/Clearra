@@ -232,7 +232,13 @@
 
   async function run() {
     if (active || validationCodes.length || tablebaseBlocked) return;
-    const cpuRequest = normalizeWorkspaceRequest(request);
+    const foregroundAuthority = automaticWorkerAuthority(
+      hostCapabilitySnapshot,
+      request.useAllLogicalProcessors
+    );
+    const cpuRequest = normalizeWorkspaceRequest(runtime === 'web'
+      ? { ...request, workers: foregroundAuthority.workersEffective }
+      : request);
     const normalized = normalizeWorkspaceInitialField(cpuRequest);
     const executionRequest = normalized.request;
     if (normalized.clearedRows > 0) {
@@ -247,7 +253,7 @@
     resultScoreMode = executionRequest.scoreMode;
     if (runtime === 'web') {
       updateWasmCommandText(buildWorkspaceCommand(executionRequest));
-      if (workerController.run()) elapsedTimer.start();
+      if (workerController.run(foregroundAuthority)) elapsedTimer.start();
       return;
     }
     elapsedTimer.start();

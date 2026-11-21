@@ -270,8 +270,13 @@
       MAX_PC_SOLVER_LINES
     );
     if (targetLines === null) return;
+    const foregroundAuthority = automaticWorkerAuthority(
+      hostCapabilitySnapshot,
+      request.useAllLogicalProcessors
+    );
     const executionRequest = {
       ...request,
+      workers: foregroundAuthority.workersEffective,
       lines: targetLines,
       boardMask: normalized.boardMask,
       pinnedSolutionKeys: normalized.boardMask === request.boardMask
@@ -288,7 +293,7 @@
     if (executionRequest !== request) updateRequest(executionRequest);
     resultTargetLines = executionRequest.lines;
     updateWasmCommandText(buildWorkspaceCommand(executionRequest));
-    if (!workerController.run()) return;
+    if (!workerController.run(foregroundAuthority)) return;
     executedSourceIdentity = pcMandatorySource(executionRequest);
     executedScoreMode = executionRequest.scoreMode;
     hasRun = true;

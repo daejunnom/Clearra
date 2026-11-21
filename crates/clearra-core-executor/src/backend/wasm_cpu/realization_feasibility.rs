@@ -79,17 +79,32 @@ impl RealizationFeasibilityWorkspace {
         catalog: &GeometryCatalog,
         candidate: &GeometryCandidate,
     ) -> bool {
-        if !crate::search_prune_policy::dependency_relaxation_enabled() {
-            return false;
-        }
+        crate::search_prune_policy::dependency_relaxation_enabled()
+            && Self::relaxed_ilc_order_is_impossible(catalog, candidate)
+    }
+
+    pub(super) fn relaxed_ilc_order_is_impossible(
+        catalog: &GeometryCatalog,
+        candidate: &GeometryCandidate,
+    ) -> bool {
         let operation_count = candidate.row_ids().len();
         if operation_count == 0 || operation_count > MAX_BOARD64_PIECES {
             return false;
         }
 
-        let mut row_contributors = [0_u16; 16];
+        if candidate
+            .row_ids()
+            .iter()
+            .all(|&row| catalog.realization_requirement_is_satisfied(row, 0))
+        {
+            // Ordinary shapes need no cleared frame. Do not even assemble a
+            // row contributor map in this common case.
+            return false;
+        }
+
+        let mut row_contributors = [0_u64; 16];
         for (operation_index, row_id) in candidate.row_ids().iter().copied().enumerate() {
-            let operation_bit = 1_u16 << operation_index;
+            let operation_bit = 1_u64 << operation_index;
             let mut occupied_rows = catalog.skeleton_occupied_rows(row_id);
             while occupied_rows != 0 {
                 let row = occupied_rows.trailing_zeros() as usize;
@@ -100,12 +115,11 @@ impl RealizationFeasibilityWorkspace {
 
         dependency_relaxation_stalls(
             operation_count,
-            catalog.height(),
-            &row_contributors,
+            &row_contributors[..usize::from(catalog.height())],
             |operation_index, deleted_rows| {
                 catalog.realization_requirement_is_satisfied(
                     candidate.row_ids()[operation_index],
-                    deleted_rows,
+                    deleted_rows as u16,
                 )
             },
         )
@@ -503,37 +517,33 @@ impl RealizationFeasibilityWorkspace {
 /// any operation is a finite impossibility certificate rather than a search
 /// heuristic. In particular, `A requires row(B)` and `B requires row(A)` is
 /// the `2 > 3 > 2` cycle: neither operation can be the first one placed.
-fn dependency_relaxation_stalls(
+pub(super) fn dependency_relaxation_stalls(
     operation_count: usize,
-    height: u8,
-    row_contributors: &[u16; 16],
-    mut requirement_is_satisfied: impl FnMut(usize, u16) -> bool,
+    row_contributors: &[u64],
+    mut requirement_is_satisfied: impl FnMut(usize, u32) -> bool,
 ) -> bool {
-    let all_placed = if operation_count == u16::BITS as usize {
-        u16::MAX
-    } else {
-        (1_u16 << operation_count) - 1
-    };
-    let mut placed = 0_u16;
+    if !(1..=u64::BITS as usize).contains(&operation_count)
+        || row_contributors.len() > u32::BITS as usize
+    {
+        return false;
+    }
+    let all_placed = u64::MAX >> (u64::BITS as usize - operation_count);
+    let mut placed = 0_u64;
     while placed != all_placed {
-        let mut deleted_rows = 0_u16;
-        for (row, contributors) in row_contributors
-            .iter()
-            .copied()
-            .take(usize::from(height))
-            .enumerate()
-        {
+        let mut deleted_rows = 0_u32;
+        for (row, contributors) in row_contributors.iter().copied().enumerate() {
             if contributors != 0 && contributors & !placed == 0 {
-                deleted_rows |= 1_u16 << row;
+                deleted_rows |= 1_u32 << row;
             }
         }
 
-        let mut ready = 0_u16;
-        for operation_index in 0..operation_count {
-            let operation_bit = 1_u16 << operation_index;
-            if placed & operation_bit == 0
-                && requirement_is_satisfied(operation_index, deleted_rows)
-            {
+        let mut ready = 0_u64;
+        let mut remaining = all_placed & !placed;
+        while remaining != 0 {
+            let operation_index = remaining.trailing_zeros() as usize;
+            let operation_bit = 1_u64 << operation_index;
+            remaining ^= operation_bit;
+            if requirement_is_satisfied(operation_index, deleted_rows) {
                 ready |= operation_bit;
             }
         }
@@ -573,14 +583,13 @@ mod tests {
         // 3 deleted. Operation 1 (Z) completes target row 3 but requires row 2
         // deleted. Extra requirements on rows 1/4 cannot break this core
         // 2 -> 3 -> 2 cycle, so the monotone closure has no first operation.
-        let mut contributors = [0_u16; 16];
+        let mut contributors = [0_u64; 4];
         contributors[1] = 0b01;
         contributors[2] = 0b10;
-        let required_rows = [1_u16 << 2, 1_u16 << 1];
+        let required_rows = [1_u32 << 2, 1_u32 << 1];
 
         assert!(dependency_relaxation_stalls(
             2,
-            4,
             &contributors,
             |operation, deleted| required_rows[operation] & !deleted == 0,
         ));
@@ -588,14 +597,13 @@ mod tests {
 
     #[test]
     fn relaxed_ilc_accepts_an_acyclic_dependency_chain() {
-        let mut contributors = [0_u16; 16];
+        let mut contributors = [0_u64; 4];
         contributors[1] = 0b01;
         contributors[2] = 0b10;
-        let required_rows = [0_u16, 1_u16 << 1];
+        let required_rows = [0_u32, 1_u32 << 1];
 
         assert!(!dependency_relaxation_stalls(
             2,
-            4,
             &contributors,
             |operation, deleted| required_rows[operation] & !deleted == 0,
         ));

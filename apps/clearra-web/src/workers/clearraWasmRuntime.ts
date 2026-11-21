@@ -97,6 +97,7 @@ export type ClearraWasmModule = {
   distributed_finish_parallel_worker_start?: (task: ArrayBuffer) => void;
   distributed_finish_parallel_worker_advance?: (maximumWork: number) => ArrayBuffer | null;
   distributed_finish_parallel_worker_cancel?: () => ArrayBuffer;
+  tiling_solution_available: () => boolean;
   tiling_solution_count: () => number;
   tiling_solution_page: (offset: number, limit: number) => string[];
   tiling_solution_release: () => void;
@@ -1491,6 +1492,9 @@ function wrapRawModule(
         return status === 1;
       }
     } : {}),
+    tiling_solution_available() {
+      return raw.clearra_wasm_tiling_solution_count_available() !== 0;
+    },
     tiling_solution_count() {
       requireExactCount(
         raw.clearra_wasm_tiling_solution_count_available(),

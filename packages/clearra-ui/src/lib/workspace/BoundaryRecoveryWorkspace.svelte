@@ -24,7 +24,6 @@
   let language: WorkspaceLanguage = 'en';
   let disposed = false;
   let invalidHeightDraft = false;
-  let workerCount = 1;
   let elapsedMs = 0;
   let executedInputKey = '';
   $: currentInputKey = recoveryBuildInputKey(request);
@@ -39,11 +38,10 @@
   $: if (!active && timer !== null && ['completed','failed','cancelled','terminated'].includes(runtimeView.status)) stopTimer();
   onMount(() => {
     language = readWorkspaceLanguage();
-    workerCount = automaticWorkerAuthority(hostCapabilitySnapshot, request.useAllLogicalProcessors).workersEffective;
+    const authority = automaticWorkerAuthority(hostCapabilitySnapshot, request.useAllLogicalProcessors);
     if (runtime === 'web') {
       clearWasmTerminalResult();
-      workerController.prewarm(workerCount, false, CPU_ONLY_RUNTIME_WARMUP_POLICY,
-        automaticWorkerAuthority(hostCapabilitySnapshot, request.useAllLogicalProcessors));
+      workerController.prewarm(authority.workersEffective, false, CPU_ONLY_RUNTIME_WARMUP_POLICY, authority);
     } else {
       clearDesktopTerminalResult();
       resumeDesktopJobPolling();
@@ -81,11 +79,10 @@
   async function run(selection?: RecoveryMinimumSelection) {
     if(active || validation.length || (selection && executedInputKey !== currentInputKey)) return;
     executedInputKey = currentInputKey;
-    workerCount = automaticWorkerAuthority(hostCapabilitySnapshot, request.useAllLogicalProcessors).workersEffective;
-    if (runtime === 'web') workerController.prewarm(workerCount, false, CPU_ONLY_RUNTIME_WARMUP_POLICY,
-      automaticWorkerAuthority(hostCapabilitySnapshot, request.useAllLogicalProcessors));
+    const authority = automaticWorkerAuthority(hostCapabilitySnapshot, request.useAllLogicalProcessors);
+    const workerCount = authority.workersEffective;
     stopTimer();elapsedMs=0;startedAt=performance.now();timer=setInterval(()=>elapsedMs=performance.now()-startedAt,100);
-    if(runtime==='web') { updateWasmCommandText(recoveryBuildCommand(request, workerCount, selection));workerController.run(); }
+    if(runtime==='web') { updateWasmCommandText(recoveryBuildCommand(request, workerCount, selection));workerController.run(authority); }
     else { updateDesktopRequest(recoveryBuildDesktopRequest(request,language,workerCount,selection));await startDesktopJob(); }
   }
   async function cancel() { if(runtime==='web') workerController.cancel();else await cancelDesktopJob(); }

@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 0.8.0 - 2026-11-21
+
+- Prepare a recovery release from the Rust production baseline with focused
+  browser worker ownership and large-search scheduling corrections.
+- Keep browser-only timing comparisons separate from the older native
+  experimental measurements.
+
 ## 0.9.0 - 2026-11-21
 
 - Use the Rust CPU solver in product builds and keep the C solver isolated as
@@ -70,7 +77,7 @@
   unqualified profile targets remain unavailable and cannot mint release
   authority before whole-domain completeness and offline exact parity exist.
 
-## 0.8.0 - 2026-09-05
+## Earlier 0.8.0 notes - 2026-09-05
 
 - Retained complete, identity-checked source coverage for native parallel score
   portfolios instead of incorrectly marking their producer evidence incomplete.

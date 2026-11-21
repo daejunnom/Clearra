@@ -406,6 +406,21 @@ impl ExtendedInverseCatalog {
         self.skeleton(row_id).realization_count as usize
     }
 
+    /// A necessary ILC prerequisite, not an instantiated lock. Deliberately
+    /// ignore invalidated poses and collisions to keep the predicate monotone.
+    pub(super) fn realization_requirement_is_satisfied(
+        &self,
+        row_id: u32,
+        deleted_rows: u32,
+    ) -> bool {
+        let row = self.skeleton(row_id);
+        let start = row.realization_start as usize;
+        let end = start + row.realization_count as usize;
+        self.realizations[start..end]
+            .iter()
+            .any(|realization| realization.required_deleted_rows & !deleted_rows == 0)
+    }
+
     pub const fn identity_digest(&self) -> u64 {
         self.identity_digest
     }

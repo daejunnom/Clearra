@@ -38,6 +38,7 @@ import {
   releasePc4TablebaseAssets
 } from './pc4TablebaseAssets';
 import { currentQualifiedAcceleratorIdentity, readQualifiedAccelerator } from './acceleratorLocalStore';
+import { prepareWasmForNewResult, retainedWasmResultPages } from './WasmResultPageLifetime';
 
 const MAX_EAGER_PREWARM_TOTAL_WORKERS = 9;
 const RUNTIME_PREWARM_TIMEOUT_MS = 15_000;
@@ -233,7 +234,7 @@ self.addEventListener('unhandledrejection', (event) => {
 
 async function runCommandText(
   commandText: string,
-  prewarmWorkerCount: number,
+  foregroundWorkerCount: number,
   requestedTablebase: boolean
 ) {
   const profileStarted = isLocalSearchProfileMode(import.meta.env.MODE) ? performance.now() : null;
@@ -241,7 +242,11 @@ async function runCommandText(
     postRuntimeFailure(active.id, 'E_WASM_JOB_ALREADY_RUNNING', 'a WASM job is already active');
     return;
   }
-  requestedPrewarmWorkerCount = Math.max(1, Math.floor(prewarmWorkerCount));
+  // Snapshot job custody before yielding. A readiness or tablebase transport
+  // hint can arrive while loading WASM, but only configures future jobs.
+  const foregroundCapabilities = wasmHostCapabilities(hostCapabilitySnapshot);
+  const foregroundOwnerId = lifecycleOwnerId;
+  requestedPrewarmWorkerCount = Math.max(1, Math.floor(foregroundWorkerCount));
   deferredTablebaseRequested = requestedTablebase;
   setTablebaseRequested(requestedTablebase);
   const jobId = nextJobId++;
@@ -261,19 +266,18 @@ async function runCommandText(
     interruptIncompleteRuntimePrewarm();
     wasm = loadedWasm ?? (await loadClearraWasmModule(
       undefined,
-      wasmHostCapabilities(hostCapabilitySnapshot)
+      foregroundCapabilities
     ));
-    wasm.configure_host(wasmHostCapabilities(hostCapabilitySnapshot));
+    prepareWasmForNewResult(wasm, foregroundCapabilities);
     loadedWasm = wasm;
-    releaseProductPages();
     // The root retains the complete legal-board, and peers may receive only
     // its bounded negative-only derivative. The signed relation is staged
     // for one serial or distributed owner, never every verifier.
     const accelerators = await activateLocalAccelerators(
-      wasm, commandText, hostCapabilitySnapshot.wasmTransferByteCap,
-      workerAuthority.workersEffective
+      wasm, commandText, foregroundCapabilities.transferByteCap,
+      foregroundWorkerCount
     );
-    await startTablebaseWarmupAfterWasm(wasm);
+    if (requestedTablebase) await startTablebaseWarmupAfterWasm(wasm);
     if (job.cancelled) {
       releaseJobResources(job);
       emitCancelled(job);
@@ -284,8 +288,8 @@ async function runCommandText(
     job.runner = new ClearraProductJobRunner(
       wasm,
       jobId,
-      lifecycleOwnerId,
-      wasmHostCapabilities(hostCapabilitySnapshot),
+      foregroundOwnerId,
+      foregroundCapabilities,
       undefined,
       undefined,
       accelerators.legalBoardSynopsis,
@@ -301,7 +305,7 @@ async function runCommandText(
       if (isTerminal(emitted)) job.terminalPosted = true;
       postWorkerEvent(emitted);
     }, { transportProfile: isLocalSearchProfileMode(import.meta.env.MODE),
-      onlinePc4: tablebaseRequested ? getPc4OnlineGeneration() : null, tablebaseRequested });
+      onlinePc4: requestedTablebase ? getPc4OnlineGeneration() : null, tablebaseRequested: requestedTablebase });
     if (requiresFailClosedRelease(terminal)) {
       releaseJobResources(job);
       closeFailClosedWorker();
@@ -317,6 +321,7 @@ async function runCommandText(
     }
     closeFailClosedWorker();
   } finally {
+    job.runner = null;
     if (active === job) active = null;
     if (!failClosed) {
       startRuntimePrewarm(
@@ -517,6 +522,15 @@ function startRuntimePrewarm(
     return;
   }
   setTablebaseRequested(requestedTablebase);
+  if (loadedWasm) {
+    const pages = retainedWasmResultPages(loadedWasm);
+    if (pages.product || pages.tiling) {
+      // The finished search still owns a live result surface, not a mutable
+      // idle runtime. TB transport, if requested, is handled above.
+      postRuntimePrewarmPhase('finished', 1);
+      return;
+    }
+  }
   if (
     !normalizedWarmupPolicy.cpuWarmup &&
     !normalizedWarmupPolicy.gpuWarmup &&
@@ -704,7 +718,6 @@ function updateRuntimeAuthority(
   warmupPolicy = normalizeRuntimeWarmupPolicy(
     message.warmupPolicy ?? warmupPolicy
   );
-  loadedWasm?.configure_host(wasmHostCapabilities(hostCapabilitySnapshot));
 }
 
 function wasmHostCapabilities(
@@ -1005,12 +1018,19 @@ function formatByteCount(bytes: number): string {
 }
 
 function postWorkerEvent(event: ClearraWasmWorkerEvent) {
+  if (!isTerminal(event)) {
+    self.postMessage(event);
+    return;
+  }
   const runtimeMemoryBytes = currentRuntimeMemoryBytes();
-  self.postMessage(
-    isTerminal(event) && runtimeMemoryBytes !== undefined
-      ? { ...event, runtime_memory_bytes: runtimeMemoryBytes }
-      : event
-  );
+  const retainedPages = event.event === 'final_response' && event.response.status === 'success' && loadedWasm
+    ? retainedWasmResultPages(loadedWasm)
+    : undefined;
+  self.postMessage({
+    ...event,
+    ...(runtimeMemoryBytes === undefined ? {} : { runtime_memory_bytes: runtimeMemoryBytes }),
+    ...(retainedPages === undefined ? {} : { runtime_retained_pages: retainedPages })
+  });
 }
 
 function postRuntimePrewarmPhase(phase: 'started' | 'finished', workerCount: number) {

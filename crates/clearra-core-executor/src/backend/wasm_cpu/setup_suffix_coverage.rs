@@ -19,7 +19,7 @@ use super::{
     setup_coverage_graph::{
         SetupCoverageEdge, SetupCoverageGraph, SetupCoverageInterner, EMPTY_COVERAGE_REFERENCE,
     },
-    setup_partial_build::SetupPartialBuildPrefix,
+    setup_partial_build::{SetupPartialBuildPrefix, SetupPlacementDependency},
     WasmExactSearchError,
 };
 
@@ -364,56 +364,58 @@ impl SetupSuffixCoverageSession {
         let row_id = self.source_row_id(self.available_row_cursor)?;
         self.available_row_cursor += 1;
         let row = self.catalog.skeleton(row_id);
+        let Some(mut dependency) = SetupPlacementDependency::analyze(
+            &self.catalog,
+            row_id,
+            state.board,
+            state.deleted_rows,
+        ) else {
+            return Ok(());
+        };
+        // Suffix coverage is a union of queue languages, not a count of
+        // placement witnesses. Every pose of this row reaches the identical
+        // residual/board when it locks, so one exact positive is sufficient.
+        if !dependency.any_reachable(
+            &self.catalog,
+            state.board,
+            row.piece,
+            &mut self.reachability,
+        ) {
+            return Ok(());
+        }
         let packed_counts = add_packed_piece(state.packed_counts, super::piece_index(row.piece))
             .ok_or(WasmExactSearchError::InvalidProblem(
                 "setup_suffix_piece_count_overflow",
             ))?;
         let remaining = state.remaining ^ row.cells;
-        let realization_count = self
-            .catalog
-            .instantiated_realizations(row_id, state.deleted_rows)
-            .map_or(usize::from(row.realization_count), <[_]>::len);
+        let (board, cleared_current, _) = place_and_clear(
+            self.catalog.width(),
+            self.catalog.height(),
+            state.board | dependency.lock_mask,
+        );
+        let Some(deleted_rows) =
+            merge_deleted_rows(self.catalog.height(), state.deleted_rows, cleared_current)
+        else {
+            return Ok(());
+        };
         ensure_vec_additional_capacity(
             &mut self.source_edges,
-            realization_count,
+            1,
             "setup_suffix_source_edge_storage_unavailable",
         )?;
-        for realization in self.catalog.instantiations(row_id, state.deleted_rows) {
-            if state.board & realization.lock_mask != 0 {
-                continue;
-            }
-            if !self.reachability.lock_reachable_instantiated(
-                &self.catalog,
-                state.board,
-                row.piece,
-                realization,
-            ) {
-                continue;
-            }
-            let (board, cleared_current, _) = place_and_clear(
-                self.catalog.width(),
-                self.catalog.height(),
-                state.board | realization.lock_mask,
-            );
-            let Some(deleted_rows) =
-                merge_deleted_rows(self.catalog.height(), state.deleted_rows, cleared_current)
-            else {
-                continue;
-            };
-            let child = SuffixState {
-                board,
-                remaining,
-                packed_counts,
-                deleted_rows,
-            };
-            let (child_index, _) =
-                intern_next_state(&mut self.next_layer, &mut self.next_states, child)?;
-            push_source_edge(
-                &mut self.source_edges,
-                &mut self.source_edges_need_sort,
-                SetupCoverageEdge::new(child_index, row.piece)?,
-            );
-        }
+        let child = SuffixState {
+            board,
+            remaining,
+            packed_counts,
+            deleted_rows,
+        };
+        let (child_index, _) =
+            intern_next_state(&mut self.next_layer, &mut self.next_states, child)?;
+        push_source_edge(
+            &mut self.source_edges,
+            &mut self.source_edges_need_sort,
+            SetupCoverageEdge::new(child_index, row.piece)?,
+        );
         Ok(())
     }
 

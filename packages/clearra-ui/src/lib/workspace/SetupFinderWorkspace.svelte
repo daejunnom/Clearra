@@ -198,8 +198,12 @@
     pathDetails = {};
     resultRequest = { ...request };
     if (runtime === 'web') {
-      updateWasmCommandText(buildSetupFinderCommand(request, prewarmWorkerCount));
-      if (workerController.run()) elapsedTimer.start();
+      const foregroundAuthority = automaticWorkerAuthority(
+        hostCapabilitySnapshot,
+        request.useAllLogicalProcessors
+      );
+      updateWasmCommandText(buildSetupFinderCommand(request, foregroundAuthority.workersEffective));
+      if (workerController.run(foregroundAuthority)) elapsedTimer.start();
       return;
     }
     elapsedTimer.start();

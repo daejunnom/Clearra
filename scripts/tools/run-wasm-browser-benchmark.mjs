@@ -7,6 +7,15 @@ import { acquireManagedTransientDirectory } from './managed-transient-directory.
 export const BENCHMARK_PORT = 4195;
 
 const options = parseArgs(process.argv.slice(2));
+const repeat = boundedInteger(options.repeat ?? '1', 'repeat', 1, 10);
+const idleSampleMs = boundedInteger(options['idle-sample-ms'] ?? '0', 'idle-sample-ms', 0, 60_000);
+const isolation = options.isolation ?? 'on';
+if (isolation !== 'on' && isolation !== 'off') {
+  throw new Error('isolation must be on or off');
+}
+if (options['prewarm-workers'] && (repeat !== 1 || idleSampleMs !== 0)) {
+  throw new Error('repeat and idle-sample-ms require a command run, not a prewarm-only probe');
+}
 if (process.env.CLEARRA_RUNTIME_SUPERVISED !== '1' ||
     process.env.CLEARRA_RUNTIME_PROFILE !== 'benchmark-search') {
   throw new Error(
@@ -78,6 +87,8 @@ try {
       }
       const url = new URL(`http://127.0.0.1:${address.port}/`);
       if (options.command) url.searchParams.set('command', options.command);
+      if (repeat > 1) url.searchParams.set('repeat', String(repeat));
+      if (idleSampleMs > 0) url.searchParams.set('idleSampleMs', String(idleSampleMs));
       if (options['prewarm-workers']) {
         url.searchParams.set('prewarmWorkers', options['prewarm-workers']);
       }
@@ -127,6 +138,12 @@ try {
   outcome.result.browser_process_tree_peak_working_set_bytes = processMemory.peakBytes;
   outcome.result.browser_process_tree_memory_probe = processMemory.status;
   outcome.result.browser_process_tree_memory_sample_interval_ms = processMemory.intervalMs;
+  outcome.result.benchmark_requested_isolation = isolation;
+  outcome.result.benchmark_requested_repetitions = repeat;
+  const actualIsolation = outcome.result.capabilities?.cross_origin_isolated;
+  outcome.result.benchmark_isolation_matches = typeof actualIsolation === 'boolean'
+    ? actualIsolation === (isolation === 'on')
+    : null;
   await stopBrowser(browser, profile);
   browser = null;
   await closeServer(server);
@@ -319,6 +336,7 @@ function serveStatic(root, request, response) {
 }
 
 function benchmarkHeaders() {
+  if (isolation === 'off') return {};
   return {
     'cross-origin-opener-policy': 'same-origin',
     'cross-origin-embedder-policy': 'require-corp'
@@ -380,5 +398,13 @@ function parseArgs(args) {
 function positiveInteger(value, label) {
   const parsed = Number.parseInt(value, 10);
   if (!Number.isSafeInteger(parsed) || parsed <= 0) throw new Error(`${label} must be a positive integer`);
+  return parsed;
+}
+
+function boundedInteger(value, label, min, max) {
+  const parsed = Number(value);
+  if (!/^\d+$/u.test(value) || !Number.isSafeInteger(parsed) || parsed < min || parsed > max) {
+    throw new Error(`${label} must be an integer from ${min} to ${max}`);
+  }
   return parsed;
 }

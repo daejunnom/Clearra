@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - codex/v090-relation-rust-integration
+      - codex/v080-pages-runtime-recovery
       - codex/v090-relation-rust-p7p4
       - codex/v090-relation-rust-proof-operation-masks-*
       - codex/v090-relation-rust-proof-strict-prefix-union-memo-*
@@ -38,7 +39,8 @@ env:
 jobs:
   relation-and-mapping:
     if: >-
-      github.ref == 'refs/heads/codex/v090-relation-rust-integration' &&
+      (github.ref == 'refs/heads/codex/v090-relation-rust-integration' ||
+       github.ref == 'refs/heads/codex/v080-pages-runtime-recovery') &&
       (github.event_name != 'workflow_dispatch' || !inputs.run_adoption)
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -66,6 +68,8 @@ jobs:
             candidate_projection_clear_fact_reuse_ distributed_pc2_replay_ compact_pc2_
             family_root_count_ family_handoff_ prepared_parallel_family_
             parallel_branch_queue_
+            pc_root_distribution root_partition::tests
+            setup_row_dependencies_ relaxed_ilc_ build_ilc_dependencies_
             build_cooperative_progress_reports_monotonic_geometry_across_mirror_passes
             extended_parallel_cooperative_preparation_
             extended_pc_native_cooperative_worker_waves_preserve_exact_family_and_drain
@@ -181,7 +185,8 @@ jobs:
           retention-days: 14
   receipts-and-adoption:
     if: >-
-      github.ref == 'refs/heads/codex/v090-relation-rust-integration' &&
+      (github.ref == 'refs/heads/codex/v090-relation-rust-integration' ||
+       github.ref == 'refs/heads/codex/v080-pages-runtime-recovery') &&
       (github.event_name != 'workflow_dispatch' || !inputs.run_adoption)
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -228,7 +233,8 @@ jobs:
           apps/clearra-discord-bot/test/job-service.test.mjs
   operation-invariants:
     if: >-
-      github.ref == 'refs/heads/codex/v090-relation-rust-integration' &&
+      (github.ref == 'refs/heads/codex/v090-relation-rust-integration' ||
+       github.ref == 'refs/heads/codex/v080-pages-runtime-recovery') &&
       (github.event_name != 'workflow_dispatch' || !inputs.run_adoption)
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -251,9 +257,13 @@ jobs:
       - name: Validate the exact Legacy assignment join independently of the C adapter
         if: ${{ !cancelled() && steps.exact-source.outcome == 'success' }}
         run: cargo test --locked -p clearra-build-coverage --lib verified_assignment_rows_
+      - name: Verify exact Boundary Recovery clear dependency
+        if: ${{ !cancelled() && steps.exact-source.outcome == 'success' && github.ref == 'refs/heads/codex/v080-pages-runtime-recovery' }}
+        run: cargo test --locked -p clearra-forward-search --lib recovery_build_result_tile_waits_for_the_actual_middle_clear
   operation-reuse:
     if: >-
-      github.ref == 'refs/heads/codex/v090-relation-rust-integration' &&
+      (github.ref == 'refs/heads/codex/v090-relation-rust-integration' ||
+       github.ref == 'refs/heads/codex/v080-pages-runtime-recovery') &&
       (github.event_name != 'workflow_dispatch' || !inputs.run_adoption)
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -329,7 +339,8 @@ jobs:
           SH
   rust-product-boundaries:
     if: >-
-      github.ref == 'refs/heads/codex/v090-relation-rust-integration' &&
+      (github.ref == 'refs/heads/codex/v090-relation-rust-integration' ||
+       github.ref == 'refs/heads/codex/v080-pages-runtime-recovery') &&
       (github.event_name != 'workflow_dispatch' || !inputs.run_adoption)
     runs-on: ubuntu-latest
     timeout-minutes: 15

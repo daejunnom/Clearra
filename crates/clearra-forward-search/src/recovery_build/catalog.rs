@@ -19,7 +19,7 @@ use super::{
     RecoveryBuildPopulation, RecoveryBuildQuery, RecoveryBuildStatus as Status,
 };
 use clearra_core_domain::execution_cancellation::ExecutionControl;
-pub(in crate::recovery_build) use plan::Plan;
+pub(in crate::recovery_build) use plan::{AnalyzedPlan, Plan};
 use std::{
     collections::{BTreeMap, HashMap},
     sync::Arc,
