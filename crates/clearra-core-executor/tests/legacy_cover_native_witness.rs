@@ -1,5 +1,7 @@
 #![cfg(feature = "native-c-core")]
 
+use std::sync::Mutex;
+
 use clearra_build_coverage::{
     coverage::{
         BuildCoverageExecution, BuildCoverageExecutionError, ConcreteAssignmentCoverageRow,
@@ -53,6 +55,10 @@ use clearra_supply::{
 
 const LEGACY_PATTERN_ID: u32 = 0;
 
+// Native Packing and the exact Rust backend share a process-wide admission
+// lease. Keep these witnesses independent of the test runner's scheduling.
+static LEGACY_COVER_FIXTURE: Mutex<()> = Mutex::new(());
+
 fn o_cover_query(board: BoardSize, pattern_count: usize, concrete: bool) -> BuildCoverageQuery {
     let (slots, domains) = (0_u16..5)
         .map(|index| {
@@ -81,6 +87,9 @@ fn o_cover_query(board: BoardSize, pattern_count: usize, concrete: bool) -> Buil
 
 #[test]
 fn native_and_rust_agree_on_complete_bounded_legacy_fixed_and_finite_sources() {
+    let _lease = LEGACY_COVER_FIXTURE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let control = ExecutionControl::default();
     let board = BoardSize::new(10, 2).expect("two-line standard field");
     let all_o = [PieceKind::O; 5];
@@ -418,6 +427,9 @@ fn coarse_colored_filter(masks: [u64; 10]) -> StandardBoard64ColoredTilingIdenti
 
 #[test]
 fn native_and_rust_join_two_legacy_four_line_candidates_on_original_ordinal() {
+    let _lease = LEGACY_COVER_FIXTURE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let cancellation = ExecutionCancellationToken::new();
     let board = BoardSize::new(10, 4).expect("standard 10×4 target");
     let bridge = BuildTemplateBridge::new("legacy-two-candidate-probe", board, PIECES.len());
@@ -653,6 +665,9 @@ fn prefix_matrix_query(board: BoardSize) -> BuildCoverageQuery {
 #[test]
 #[ignore = "measure this bounded native/Rust prefix matrix separately before routine qualification"]
 fn native_and_rust_agree_on_complete_bounded_legacy_prefix_assignment_matrix() {
+    let _lease = LEGACY_COVER_FIXTURE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let cancellation = ExecutionCancellationToken::new();
     let control = ExecutionControl::new(cancellation.clone());
     let board = BoardSize::new(10, 4).expect("standard four-line board");

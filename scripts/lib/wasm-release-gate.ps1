@@ -265,9 +265,11 @@ function Invoke-WasmBuildTestGate {
         $browserTools = Join-Path $CargoTargetDir 'surface-browser-tools'
         $npmName = if ($env:OS -eq 'Windows_NT') { 'npm.cmd' } else { 'npm' }
         $npmCommand = Get-Command $npmName -ErrorAction Stop
+        # Invoke Playwright's JS entrypoint directly. npm's POSIX .bin links
+        # would otherwise make the managed Cargo slot unsealable.
         Invoke-WasmReleaseCommand $npmCommand.Source @(
             'install', '--prefix', $browserTools, '--ignore-scripts',
-            '--no-audit', '--no-fund', 'playwright@1.56.1'
+            '--no-audit', '--no-fund', '--no-bin-links', 'playwright@1.56.1'
         ) 'clearra-browser pinned tooling'
         $browserInstallArgs = @((Join-Path $browserTools 'node_modules/playwright/cli.js'), 'install')
         if (Test-StartTestsWindows) {
