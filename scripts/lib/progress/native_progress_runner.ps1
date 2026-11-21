@@ -69,7 +69,10 @@ function ConvertTo-ClearraProcessArgument {
 
         [string[]]$Arguments = @(),
 
-        [int]$HeartbeatMs = 500
+        [int]$HeartbeatMs = 500,
+
+        [ValidateRange(0, 2147483647)]
+        [int]$TimeoutMs = 0
     )
 
     $commandLeaf = [System.IO.Path]::GetFileNameWithoutExtension($FileName)
@@ -141,14 +144,40 @@ function ConvertTo-ClearraProcessArgument {
 
         $stdoutTask = $process.StandardOutput.ReadToEndAsync()
         $stderrTask = $process.StandardError.ReadToEndAsync()
+        $timer = [System.Diagnostics.Stopwatch]::StartNew()
 
         while (-not $process.HasExited) {
             Write-ClearraProgressLine $Scope $Label
-            Start-Sleep -Milliseconds ([Math]::Max(50, $HeartbeatMs))
+            $waitMs = [Math]::Max(50, $HeartbeatMs)
+            if ($TimeoutMs -gt 0) {
+                $remainingMs = $TimeoutMs - $timer.ElapsedMilliseconds
+                if ($remainingMs -le 0) {
+                    throw [System.TimeoutException]::new(
+                        "'$Label' exceeded its ${TimeoutMs}ms process-test deadline."
+                    )
+                }
+                $waitMs = [int][Math]::Min($waitMs, $remainingMs)
+            }
+            # Return immediately when a short probe exits; the heartbeat is
+            # a maximum observation interval, not a minimum probe duration.
+            [void]$process.WaitForExit($waitMs)
         }
-        $process.WaitForExit()
-        $stdoutTask.Wait()
-        $stderrTask.Wait()
+        if ($TimeoutMs -gt 0) {
+            # Process exit and pipe EOF are different events. A leaked handle
+            # must not turn the output-read half of a bounded probe unbounded.
+            $remainingMs = $TimeoutMs - $timer.ElapsedMilliseconds
+            $captures = [System.Threading.Tasks.Task[]]@($stdoutTask, $stderrTask)
+            if ($remainingMs -le 0 -or
+                -not [System.Threading.Tasks.Task]::WaitAll($captures, [int]$remainingMs)) {
+                throw [System.TimeoutException]::new(
+                    "'$Label' exceeded its ${TimeoutMs}ms process-test deadline while draining output."
+                )
+            }
+        } else {
+            $process.WaitForExit()
+            $stdoutTask.Wait()
+            $stderrTask.Wait()
+        }
 
         $exitCode = $process.ExitCode
         $stdout = $stdoutTask.Result
@@ -158,7 +187,15 @@ function ConvertTo-ClearraProcessArgument {
         if ($null -ne $process) {
             try {
                 if (-not $process.HasExited) {
-                    $process.Kill()
+                    if ($TimeoutMs -gt 0 -and
+                        $null -ne $process.GetType().GetMethod('Kill', [type[]]@([bool]))) {
+                        $process.Kill($true)
+                    } else {
+                        $process.Kill()
+                    }
+                    if ($TimeoutMs -gt 0) {
+                        [void]$process.WaitForExit(2000)
+                    }
                 }
             } catch {
             }

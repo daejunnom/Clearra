@@ -88,7 +88,11 @@ export class ClearraCommandRunner {
     const preparedArguments = prepareClearraArguments(job.arguments, {
       workers: this.config.searchWorkersPerSession,
       useAllLogicalProcessors: this.config.useAllLogicalProcessors,
-      logicalProcessors: this.config.processLogicalProcessors,
+      // Match config's revision CPU authority. A Node startup observation is
+      // neither the configured Cloud Run capacity nor the Rust child's live
+      // affinity. The CLI receives an automatic ceiling and clamps it itself.
+      logicalProcessors: this.config.expectedVcpus ??
+        this.config.processLogicalProcessors,
       outputFormat: "json",
       includeSolutionData: true,
     });

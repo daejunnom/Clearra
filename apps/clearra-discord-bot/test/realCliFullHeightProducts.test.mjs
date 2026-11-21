@@ -5,6 +5,7 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { readFile, realpath } from 'node:fs/promises';
+import { availableParallelism } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import { decodeCtk3 } from 'ctk3';
@@ -12,6 +13,7 @@ import { readCurrentProductRelease } from '../../../scripts/release/current-prod
 import { assertDiscordCanonicalOnlyResult, prepareClearraArguments } from '../src/clearra/command.mjs';
 import { buildCtk3Result } from '../src/clearra/ctk3-result.mjs';
 import { ClearraDirectExecutor } from '../src/clearra/direct-executor.mjs';
+import { ClearraCommandRunner } from '../src/job-service/runner.mjs';
 import { renderDocumentGif } from '../src/viewer/gif.mjs';
 import { buildCanonicalPcPathReplayDocument, PC_PATH_REPLAY_FRAME_DELAY_MS }
   from '../src/viewer/pc-path-replay.mjs';
@@ -23,9 +25,10 @@ import { checkedCliPath } from './support/realCliFullHeightArtifact.mjs';
 const executable = process.env.CLEARRA_REAL_PC24_CLI;
 const sourceCommit = process.env.CLEARRA_REAL_PC24_SOURCE_COMMIT;
 const packagedVersion = process.env.CLEARRA_REAL_PC24_RELEASE_VERSION;
+const PROCESS_TIMEOUT_MS = 15_000;
 
 function invoke(cliPath, arguments_) {
-  return execFileSync(cliPath, arguments_, { encoding: 'utf8', timeout: 120_000,
+  return execFileSync(cliPath, arguments_, { encoding: 'utf8', timeout: PROCESS_TIMEOUT_MS,
     maxBuffer: 1024 * 1024, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 }
 
@@ -145,8 +148,60 @@ function verifyProduct(raw, projected, input) {
   }
 }
 
+async function verifyCompactChanceRunnerParity(cliPath) {
+  // Exercise the Cloud runner with the same small search, host budget and
+  // already-built CLI as direct execution. Do not run the larger P7P4 probe
+  // here: this verifies product lowering and admission, not performance.
+  const workers = Math.min(2, availableParallelism());
+  const request = ['pc', 'chance', '--board-mask', '0x3c0f03c0f', '--height', '4',
+    '--lines', '4', '--pieces', '6', '--patterns', 'P7', '--hold', 'empty',
+    '--queue-knowledge', 'oracle', '--backend', 'cpu', '--rule', 'srs-plus',
+    '--no-legal-board', '--no-conditioned-reachability'];
+  const maxOutputBytes = 1024 * 1024;
+  const timeout = PROCESS_TIMEOUT_MS;
+  const native = JSON.parse(execFileSync(cliPath, [
+    '--format', 'json', ...request, '--auto-workers', String(workers), '--use-all-cpu-threads',
+  ], {
+    encoding: 'utf8', timeout, maxBuffer: maxOutputBytes, windowsHide: true,
+    env: { ...process.env, CLEARRA_EXPECTED_VCPUS: String(workers) },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  }));
+  const runner = new ClearraCommandRunner({
+    executable: cliPath, processLogicalProcessors: workers, expectedVcpus: workers,
+    searchWorkersPerSession: workers, useAllLogicalProcessors: true,
+    searchTimeoutMs: timeout, maxOutputBytes, terminationGraceMs: 1_000,
+  });
+  const actual = await runner.execute({ arguments: request, timeoutClass: 'pc_reverse',
+    deadlineUnixMs: Date.now() + timeout, maxOutputBytes });
+  assert.equal(actual.exitCode, 0, actual.stderr || actual.stdout);
+  assert.equal(actual.terminationReason, 'exit');
+  const discord = JSON.parse(actual.stdout);
+  for (const run of [native, discord]) {
+    assert.equal(run.kind, 'pc-probability.v2');
+    assert.equal(run.runtime_identity?.source_commit, sourceCommit);
+    assert.equal(run.runtime_identity?.engine_build_id, sourceCommit);
+    assert.equal(run.summary.actual_backend, 'wasm-cpu');
+    assert.equal(Number(run.summary.workers_used), workers);
+    assert.equal(run.summary.probability_complete, true);
+    assert.equal(Number(run.summary.coverage_probability), 1);
+    assert.equal(Number(run.summary.total_possible_pattern_count), 5040);
+    assert.equal(Number(run.summary.covered_pattern_count), 5040);
+    // Chance is a union-probability summary, not a materialized solution
+    // family. A missing normalized hash is not identity-parity evidence.
+    assert.equal(run.summary.unique_solution_count, 'not-calculated');
+    assert.equal(run.summary.normalized_solution_set_hash, 'not-calculated');
+    assert.ok(Number(run.summary.packing_candidate_count) > 0);
+    assert.match(run.summary.geometry_catalog_digest, /^[0-9a-f]{16}$/u);
+    assert.equal(String(run.summary.cpu_parallel_execution), String(workers > 1));
+  }
+  for (const field of ['packing_candidate_count', 'geometry_catalog_digest']) {
+    assert.deepEqual(discord.summary[field], native.summary[field], `pc chance result differs: ${field}`);
+  }
+  return workers;
+}
+
 test('real full-height CLI families survive Discord runner and render all physical rows', {
-  skip: !executable && !sourceCommit && packagedVersion === undefined, timeout: 1_200_000,
+  skip: !executable && !sourceCommit && packagedVersion === undefined, timeout: 120_000,
 }, async t => {
   assert.match(sourceCommit ?? '', /^[0-9a-f]{40}$/u);
   const repository = await realpath(fileURLToPath(new URL('../../..', import.meta.url)));
@@ -156,8 +211,8 @@ test('real full-height CLI families survive Discord runner and render all physic
   assert.equal(await realpath(executable), cliPath);
   const digest = createHash('sha256').update(await readFile(cliPath)).digest('hex');
   const executor = new ClearraDirectExecutor({ executable: cliPath, processLogicalProcessors: 1,
-    searchWorkersPerSession: 1, useAllLogicalProcessors: false, searchTimeoutMs: 120_000,
-    interactionDeadlineMs: 150_000, maxOutputBytes: 1024 * 1024,
+    searchWorkersPerSession: 1, useAllLogicalProcessors: false, searchTimeoutMs: PROCESS_TIMEOUT_MS,
+    interactionDeadlineMs: PROCESS_TIMEOUT_MS, maxOutputBytes: 1024 * 1024,
     maxArtifactBytes: 1024 * 1024, terminationGraceMs: 1_000 });
   const planned = new Map(realCliProjectionProfiles.map(profile =>
     [profile, realCliFullHeightProductRequests(profile)]));
@@ -183,6 +238,7 @@ test('real full-height CLI families survive Discord runner and render all physic
   }
   assertFixtureCoverage(completed, [...planned].flatMap(([profile, inputs]) => inputs.map(input =>
     [profile, input.name, input.product, input.kind, input.preserveB2b])), 'real full-height CLI/Discord products');
+  t.diagnostic(`compact 4L P7 CLI/Discord chance matched with ${await verifyCompactChanceRunnerParity(cliPath)} worker(s)`);
   assert.equal(await realpath(cliPath), cliPath);
   assert.equal(createHash('sha256').update(await readFile(cliPath)).digest('hex'), digest,
     'the built binary must not change during exact-source readback');

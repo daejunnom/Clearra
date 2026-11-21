@@ -61,7 +61,8 @@ try {
             -Name "scenario 4L simple product pipeline" `
             -FixturePath "tests/fixtures/pc/scenario_simple_4l.json" `
             -CheckOutput { param($json) Assert-ProductE2EScenarioResult $json "fixture" } `
-            -CommandArgs @("--format", "json", "pc-scenario", "--fixture", "tests/fixtures/pc/scenario_simple_4l.json", "--verify-expected")
+            -CommandArgs @(Get-ProductE2EScenario4LSearchArgs "cpu") `
+            -ReuseExactReadOnlyProbe
 
         Invoke-ProductE2ET4GoldenCases
 
@@ -75,7 +76,8 @@ try {
             -Name "post-PC continuation token contract" `
             -FixturePath "tests/fixtures/continuation/pc_then_next_pc_available.json" `
             -GoldenPath "tests/golden/continuation/next_pc_available.json" `
-            -CommandArgs (Get-FixtureCommandArgs "tests/fixtures/continuation/pc_then_next_pc_available.json")
+            -CommandArgs @(Get-ProductE2EOpeningSearchArgs "cpu") `
+            -ReuseExactReadOnlyProbe
 
         Invoke-ProductE2EOpening2LBackendEquivalenceCase
 

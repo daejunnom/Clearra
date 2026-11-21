@@ -12,7 +12,7 @@ use crate::{
 
 use super::{
     catalog::GeometryCatalog,
-    geometry::GeometryCandidate,
+    geometry::{GeometryCandidate, TargetGroup},
     mix_digest,
     result::{
         compact_pc_failed_queue, DistributedGeometryAdvance, ExactSearchAdvance,
@@ -480,6 +480,10 @@ impl WasmDistributedVerifier {
 
     pub(super) fn local_geometry_catalog(&self) -> Arc<GeometryCatalog> {
         self.session.catalog()
+    }
+
+    pub(super) fn local_geometry_targets(&self) -> Option<&[TargetGroup]> {
+        self.session.geometry_targets()
     }
 
     pub(super) fn consume_local_geometry_candidate(

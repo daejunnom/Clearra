@@ -3519,6 +3519,18 @@ fn checked_target_nested_retained_bytes(targets: &[TargetGroup]) -> Option<u128>
 }
 
 impl GeometrySearch {
+    pub(super) fn new_for_verifier_target(required_cells: u64, target: &TargetGroup) -> Self {
+        // The verifier already owns the possible-pattern backing. Geometry
+        // needs the same key and keeps only a reference to that backing.
+        Self::new_shared(
+            required_cells,
+            &SharedTargetGroups {
+                targets: Arc::from([target.clone()]),
+                group_pattern_index_bytes: 0,
+            },
+        )
+    }
+
     /// Use the ordinary Geometry compiler's exact first decision and order.
     /// A component product has no corresponding single-row first decision;
     /// callers needing a stable representative ordinal must leave it intact.

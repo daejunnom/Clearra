@@ -585,6 +585,49 @@ test("job runner sends curated sfinder argv without shell interpretation", async
   ]);
 });
 
+test("Cloud PC chance uses the configured adaptive ceiling, not Node startup visibility", async () => {
+  const config = loadClearraJobServiceConfig(
+    {
+      K_SERVICE: "clearra-current-job",
+      CLEARRA_JOB_TOKEN: "job-token",
+      CLEARRA_EXPECTED_VCPUS: "8",
+      CLEARRA_SEARCH_WORKERS_PER_SESSION: "8",
+      CLEARRA_USE_ALL_LOGICAL_PROCESSORS: "1",
+      CLEARRA_MAX_CONCURRENT_JOBS: "1",
+    },
+    { availableParallelism: () => 6 },
+  );
+  let invocation;
+  const runner = new ClearraCommandRunner(config, {
+    readOomKillCount: async () => null,
+    spawn: (_executable, arguments_, options) => {
+      invocation = { arguments_, options };
+      const child = new EventEmitter();
+      child.stdout = new PassThrough();
+      child.stderr = new PassThrough();
+      child.exitCode = null;
+      child.signalCode = null;
+      queueMicrotask(() => {
+        child.exitCode = 0;
+        child.emit("close", 0, null);
+      });
+      return child;
+    },
+  });
+  const request = ["pc", "chance", "--lines", "4", "--board-mask", "0x3c0f03c0f",
+    "--height", "4", "--pieces", "6", "--patterns", "P7", "--hold", "empty", "--backend", "cpu"];
+  const result = await runner.execute({
+    arguments: [...request, "--workers", "99"],
+    deadlineUnixMs: Date.now() + 5_000,
+    maxOutputBytes: 4096,
+  });
+  assert.equal(result.exitCode, 0);
+  assert.deepEqual(invocation.arguments_, [
+    ...request, "--auto-workers", "8", "--use-all-cpu-threads", "--format", "json", "--include-solution-data",
+  ]);
+  assert.equal(invocation.options.env.CLEARRA_EXPECTED_VCPUS, "8");
+});
+
 test("SIGKILL is classified as OOM only when the container counter advances", async () => {
   for (const fixture of [
     { counts: [7, 8], expected: "oom" },

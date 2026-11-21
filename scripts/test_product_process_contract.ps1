@@ -68,7 +68,8 @@ try {
         -Arguments @(
             '-NoLogo', '-NoProfile', '-NonInteractive', '-Command',
             "[Console]::Out.WriteLine('native-stdout-success'); [Console]::Error.WriteLine('native-stderr-success'); exit 0"
-        )
+        ) `
+        -TimeoutMs 15000
     Assert-ProductProcessCondition `
         ($nativeSuccess.ExitCode -eq 0) `
         'native_capture_keeps_stderr_with_zero_exit_successful'
@@ -111,6 +112,19 @@ try {
         ($nativeFailure.Output.Contains('native-stdout-failure') -and
             $nativeFailure.Output.Contains('native-stderr-failure')) `
         'native_capture_preserves_stdout_and_stderr_on_failure'
+
+    $didTimeOut = $false
+    try {
+        Invoke-NativeWithProgress `
+            -Scope $nativeCaptureScope `
+            -Label 'bounded process probe' `
+            -FileName $nativePowerShellCommand.Name `
+            -Arguments @('-NoLogo', '-NoProfile', '-NonInteractive', '-Command', 'Start-Sleep -Seconds 30') `
+            -TimeoutMs 200 | Out-Null
+    } catch [System.TimeoutException] {
+        $didTimeOut = $true
+    }
+    Assert-ProductProcessCondition $didTimeOut 'native_capture_rejects_case_exceeding_wall_budget'
 
     function Get-ClearraBuiltBinaryPath([string]$Root) {
         return $script:TestExePath

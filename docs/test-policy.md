@@ -64,6 +64,16 @@ Focused passes are development feedback, not release authority. They may be
 repeated while a patch is changing. The full matrix remains intact but runs at
 the frozen predeployment boundary described below.
 
+Required product tests use searches that reach their asserted behavior with
+small actual work, rather than allowing or forbidding requests by pattern name,
+target height, or piece count. Keep exhaustive/high-variance search and
+performance measurements in explicitly requested, supervised diagnostics.
+ProductE2E runs the shipping CLI on bounded fixtures, reuses identical
+successful read-only requests within that run, and fails a built-binary probe
+that exceeds 15 seconds of process wall time. This stops a runaway test; it
+does not add a solver-side cap, change backend/worker selection, or include
+compilation time.
+
 `Trusted` selects the execution surface; it does not override Windows application
 control. Before any requested full/generated-execution task starts, the entry
 point normalizes `auto` to the requested host runtime and checks its policy.

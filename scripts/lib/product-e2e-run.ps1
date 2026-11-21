@@ -55,11 +55,14 @@ function Invoke-ProductE2EClearra {
             if ([System.IO.Path]::GetFileName($resolvedExe) -in @("clearra-cli.exe", "clearra-cli")) {
                 throw "Product E2E accepts only the release-facing clearra executable."
             }
+            # Bound only the direct built product probe. The selected
+            # commands run in-process, without external child solvers.
             $nativeResult = Invoke-NativeWithProgress `
                 -Scope $script:ProductE2EProgressScope `
                 -Label $script:ProductE2ECurrentCaseName `
                 -FileName $resolvedExe `
-                -Arguments $CommandArgs
+                -Arguments $CommandArgs `
+                -TimeoutMs 15000
             $exitCode = $nativeResult.ExitCode
             $text = $nativeResult.Output
         } else {
@@ -116,7 +119,8 @@ function Invoke-ProductE2ECommandCase(
     [string]$GoldenPath,
     [string[]]$CommandArgs,
     [int]$ExpectedExitCode = 0,
-    [scriptblock]$CheckOutput
+    [scriptblock]$CheckOutput,
+    [switch]$ReuseExactReadOnlyProbe
 ) {
     Invoke-ClearraProgressCase -Scope $script:ProductE2EProgressScope -Name $Name -Body {
         $script:ProductE2ECurrentCaseName = $Name
@@ -124,13 +128,19 @@ function Invoke-ProductE2ECommandCase(
         if ($VerboseLog.IsPresent) {
             Write-ClearraProgressVerboseLine $script:ProductE2EProgressScope "[product-e2e] running | $Name"
         }
-        $commandResult = Invoke-ProductE2EClearra $CommandArgs
-        $duration = (Get-Date) - $started
         $status = "passed"
         $errorMessage = $null
         $markerCount = 0
+        $commandResult = [pscustomobject]@{
+            Command = "clearra $($CommandArgs -join ' ')"
+            ExitCode = $null
+            Output = ""
+        }
 
         try {
+            $commandResult = Invoke-ProductE2EClearra `
+                -CommandArgs $CommandArgs `
+                -ReuseExactReadOnlyProbe:$ReuseExactReadOnlyProbe.IsPresent
             if ($commandResult.ExitCode -ne $ExpectedExitCode) {
                 throw "expected exit $ExpectedExitCode but got $($commandResult.ExitCode)`n$(Get-ProductE2EExcerpt $commandResult.Output)"
             }
@@ -153,10 +163,11 @@ function Invoke-ProductE2ECommandCase(
                 -GoldenPath $GoldenPath `
                 -Output $commandResult.Output
             if ($VerboseLog.IsPresent) {
-                Write-ClearraProgressVerboseLine $script:ProductE2EProgressScope "[product-e2e] failed  | $Name | $([math]::Round($duration.TotalSeconds, 2))s"
+                Write-ClearraProgressVerboseLine $script:ProductE2EProgressScope "[product-e2e] failed  | $Name | $([math]::Round(((Get-Date) - $started).TotalSeconds, 2))s"
             }
             throw $errorMessage
         } finally {
+            $duration = (Get-Date) - $started
             $ProductResults.Add([pscustomobject]@{
                 name = $Name
                 kind = "cli-product"
@@ -234,7 +245,13 @@ function Invoke-ProductE2EFixtureCase(
 }
 
 function Get-ProductE2EOpeningSearchArgs([string]$Backend) {
-    $commandArgs = @("--format", "json", "pc", "--lines", "2", "--queue", "IIOOOIIOOO", "--fixed", "--no-hold", "--backend", $Backend)
+    $commandArgs = @(Get-FixtureCommandArgs "tests/fixtures/continuation/pc_then_next_pc_available.json") + @("--backend", $Backend)
+    if ($Backend -ne "cpu") { $commandArgs += "--allow-backend-fallback" }
+    return $commandArgs
+}
+
+function Get-ProductE2EScenario4LSearchArgs([string]$Backend) {
+    $commandArgs = @("--format", "json", "pc-scenario", "--fixture", "tests/fixtures/pc/scenario_simple_4l.json", "--verify-expected", "--backend", $Backend)
     if ($Backend -ne "cpu") { $commandArgs += "--allow-backend-fallback" }
     return $commandArgs
 }
@@ -411,10 +428,11 @@ function Invoke-ProductE2EScenario4LBackendEquivalenceCase {
     Invoke-ProductE2EBackendEquivalenceCase `
         -Name "product_backend_cpu_gpu_hybrid_same_scenario_4l" `
         -FixturePath "tests/fixtures/pc/scenario_simple_4l.json" `
-        -CpuArgs @("--format", "json", "pc-scenario", "--fixture", "tests/fixtures/pc/scenario_simple_4l.json", "--verify-expected", "--backend", "cpu") `
-        -GpuArgs @("--format", "json", "pc-scenario", "--fixture", "tests/fixtures/pc/scenario_simple_4l.json", "--verify-expected", "--backend", "gpu", "--allow-backend-fallback") `
-        -HybridArgs @("--format", "json", "pc-scenario", "--fixture", "tests/fixtures/pc/scenario_simple_4l.json", "--verify-expected", "--backend", "hybrid", "--allow-backend-fallback") `
-        -ExtraEquivalenceFields @("scenario_replay_token_version", "scenario_replay_token")
+        -CpuArgs @(Get-ProductE2EScenario4LSearchArgs "cpu") `
+        -GpuArgs @(Get-ProductE2EScenario4LSearchArgs "gpu") `
+        -HybridArgs @(Get-ProductE2EScenario4LSearchArgs "hybrid") `
+        -ExtraEquivalenceFields @("scenario_replay_token_version", "scenario_replay_token") `
+        -ReuseExactReadOnlyProbes
 }
 
 function Invoke-ProductE2EGpuNoFallbackUnavailableCase {
