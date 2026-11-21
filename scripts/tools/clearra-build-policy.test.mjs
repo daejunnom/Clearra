@@ -37,7 +37,7 @@ async function fixture(t) {
   return { temporary, sourceRoot, environment };
 }
 
-async function completedRetentionFixture(options, { purpose, index, snapshot }) {
+async function retentionFixture(options, { purpose, index, snapshot, status = 'complete' }) {
   const root = canonicalBuildRoot(options.environment);
   const sourceRoot = canonicalNativeBuildPath(options.sourceRoot);
   const sourceId = buildSourceId(sourceRoot);
@@ -52,7 +52,7 @@ async function completedRetentionFixture(options, { purpose, index, snapshot }) 
   const marker = {
     schema_version: snapshot ? 4 : 3, purpose, source_root: sourceRoot, source_id: sourceId,
     session_id: sessionId, transaction_root: transactionRoot, cargo_target_dir: target,
-    owner_pid: process.pid, status: 'complete', created_utc: time, completed_utc: time,
+    owner_pid: process.pid, status, created_utc: time, completed_utc: status === 'complete' ? time : null,
   };
   if (snapshot) Object.assign(marker, {
     compiler_snapshot_sha256: snapshot.sourceSha256, compiler_input_file_count: snapshot.inputFileCount,
@@ -206,6 +206,9 @@ test('independent owners cannot steal a purpose; nested owner reuses it', async 
 test('source, lease and output mismatches cannot compile', async t => {
   const options = await fixture(t);
   const owner = await acquireBuildOwner(options);
+  assert.throws(() => assertManagedBuildTransaction({
+    environment: { ...owner.environment, CARGO_BUILD_TARGET_DIR: owner.environment.CARGO_TARGET_DIR },
+  }), /override/u);
   assert.throws(() => assertManagedBuildTransaction({ environment: { ...owner.environment, CLEARRA_BUILD_SOURCE_ID: '0'.repeat(24) } }), /binding/u);
   assert.throws(() => assertCargoOutputArguments(['--out-dir', options.temporary], owner.transaction.transaction_root), /outside/u);
   assert.throws(() => assertCargoOutputArguments(['--emit=metadata=' + join(options.temporary, 'escape.rmeta')], owner.transaction.transaction_root), /outside/u);
@@ -258,7 +261,7 @@ test('product retirement preflights and refuses to delete generations without pr
   const options = await fixture(t);
   const generations = [];
   for (let index = 0; index < 7; index += 1) {
-    generations.push(await completedRetentionFixture(options, { purpose: 'product', index }));
+    generations.push(await retentionFixture(options, { purpose: 'product', index }));
   }
   const [oldest, sibling] = generations;
   const foreign = join(options.temporary, 'foreign');
@@ -294,7 +297,7 @@ test('product retirement preflights and refuses to delete generations without pr
 test('experiment cache retirement preserves every scratch sibling on foreign nested ownership', async t => {
   const options = await fixture(t);
   const snapshot = await buildCompilerSnapshot(options.sourceRoot, options.environment);
-  const previous = await completedRetentionFixture(options, { purpose: 'experiment', index: 0, snapshot });
+  const previous = await retentionFixture(options, { purpose: 'experiment', index: 0, snapshot });
   const early = join(previous.transactionRoot, 'a-scratch');
   const nested = join(previous.transactionRoot, 'z-scratch', 'nested');
   await mkdir(early);
@@ -315,25 +318,31 @@ test('experiment cache retirement preserves every scratch sibling on foreign nes
 
 test('unknown current directory and junctions are never replaced', async t => {
   const options = await fixture(t);
-  const owner = await acquireBuildOwner(options);
-  await owner.finish(true);
-  await rm(join(owner.transaction.transaction_root, '.clearra-build-transaction.json'));
-  await writeFile(join(owner.transaction.transaction_root, 'user-file'), 'preserve');
-  await assert.rejects(acquireBuildOwner(options), /without ownership/u);
-  assert.equal(await readFile(join(owner.transaction.transaction_root, 'user-file'), 'utf8'), 'preserve');
+  const root = canonicalBuildRoot(options.environment);
+  const sourceId = buildSourceId(canonicalNativeBuildPath(options.sourceRoot));
+  const current = join(root, 'experiments', sourceId, 'current');
+  const userFile = join(current, 'user-file');
+  await mkdir(current, { recursive: true });
+  await writeFile(userFile, 'preserve');
+  await assert.rejects(acquireBuildOwner(options), { code: 'E_CLEARRA_BUILD_STORAGE_INCOMPLETE' });
+  assert.equal(await readFile(userFile, 'utf8'), 'preserve');
+  await assert.rejects(stat(join(current, BUILD_TRANSACTION_MARKER)), { code: 'ENOENT' });
+  assert.deepEqual(await readdir(join(root, '.leases')), []);
   const link = join(options.temporary, 'link');
   await symlink(options.sourceRoot, link, process.platform === 'win32' ? 'junction' : 'dir');
   assert.throws(() => assertCargoOutputArguments(['-o', join(link, 'escape')], options.temporary), /symlink|junction/u);
 });
 
-test('active generation without a lease and nested aliases fail closed', async t => {
+test('an active generation is preserved even after all leases are lost', async t => {
   const options = await fixture(t);
-  const owner = await acquireBuildOwner(options);
-  assert.throws(() => assertManagedBuildTransaction({ environment: { ...owner.environment, CARGO_BUILD_TARGET_DIR: owner.environment.CARGO_TARGET_DIR } }), /override/u);
-  const lease = join(owner.environment.CLEARRA_BUILD_ROOT, '.leases', `experiment-${owner.transaction.source_id}.lock`);
-  await rm(lease);
-  await assert.rejects(acquireBuildOwner(options), /active experimental/u);
-  assert.equal(JSON.parse(await readFile(join(owner.transaction.transaction_root, '.clearra-build-transaction.json'), 'utf8')).status, 'active');
+  const orphan = await retentionFixture(options, { purpose: 'experiment', index: 0, status: 'active' });
+  const marker = join(orphan.transactionRoot, BUILD_TRANSACTION_MARKER);
+  const original = await readFile(marker);
+  assert.deepEqual(await readdir(join(orphan.root, '.leases')), []);
+  await assert.rejects(acquireBuildOwner(options), { code: 'E_CLEARRA_BUILD_STORAGE_UNOWNED' });
+  assert.deepEqual(await readFile(marker), original);
+  assert.equal(await readFile(join(orphan.target, 'Cargo.lock'), 'utf8'), 'fixture compiler input');
+  assert.deepEqual(await readdir(join(orphan.root, '.leases')), []);
 });
 
 test('Node and PowerShell reuse the same lease without nested completion', { skip: process.platform !== 'win32' }, async t => {
