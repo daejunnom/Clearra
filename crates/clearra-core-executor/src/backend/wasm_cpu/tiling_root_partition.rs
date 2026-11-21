@@ -125,8 +125,7 @@ mod tests {
 
     use clearra_objectives::policy::objective_policy::ObjectivePolicy;
     use clearra_pc_graph::request::{
-        PcExecutionPolicy, PcHoldPolicy, PcQueueInput, PcScenarioBoard, PcScenarioQuery,
-        PieceWindow,
+        PcExecutionPolicy, PcQueueInput, PcScenarioBoard, PcScenarioQuery, PieceWindow,
     };
     use clearra_problem::ProblemCompiler;
     use clearra_supply::queue::queue_pattern_expression::QueuePatternExpression;
@@ -146,7 +145,7 @@ mod tests {
             PieceWindow::new(14),
         )
         .with_exact_pieces(Some(14))
-        .with_hold_policy(PcHoldPolicy::Disabled)
+        .with_allow_hold(false)
         .with_objective(ObjectivePolicy::tiling())
         .with_execution_policy(
             PcExecutionPolicy::mvp_default()

@@ -12,6 +12,7 @@ on:
       # request the entire proof and timing suite on one hosted runner.
       - codex/v090-relation-rust-adoption-*
       - codex/v090-relation-rust-host-*
+      - codex/v080-pages-p7p4-browser-*
   workflow_dispatch:
     inputs:
       run_adoption:
@@ -380,7 +381,8 @@ jobs:
       !github.event.deleted && !github.event.forced &&
       github.event.before == '0000000000000000000000000000000000000000' &&
       github.event.after == github.sha &&
-      github.ref == format('refs/heads/codex/v090-relation-rust-host-{0}', github.sha)
+      (github.ref == format('refs/heads/codex/v090-relation-rust-host-{0}', github.sha) ||
+       github.ref == format('refs/heads/codex/v080-pages-p7p4-browser-{0}', github.sha))
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -442,7 +444,8 @@ jobs:
       !github.event.deleted && !github.event.forced &&
       github.event.before == '0000000000000000000000000000000000000000' &&
       github.event.after == github.sha &&
-      github.ref == format('refs/heads/codex/v090-relation-rust-host-{0}', github.sha)
+      (github.ref == format('refs/heads/codex/v090-relation-rust-host-{0}', github.sha) ||
+       github.ref == format('refs/heads/codex/v080-pages-p7p4-browser-{0}', github.sha))
     # Keep the browser host compatible with the pinned Playwright release.
     # In particular ubuntu-latest can move ahead of its Chromium registry.
     runs-on: ubuntu-24.04
@@ -501,6 +504,35 @@ jobs:
           "$CLEARRA_MANAGE_BIN" --root "$GITHUB_WORKSPACE" runtime run \
             --producer web-cpu-chromium --profile local-service --timeout 360 -- \
             node scripts/tools/run-real-chromium-cpu-worker-smoke.mjs
+      - name: Observe the exact-source P7P4 product Worker at 4195
+        if: >-
+          !cancelled() &&
+          github.ref == format('refs/heads/codex/v080-pages-p7p4-browser-{0}', github.sha) &&
+          steps.product-wasm.outcome == 'success' && steps.browser-tools.outcome == 'success'
+        shell: bash
+        run: |
+          set -o pipefail
+          receipt_root="${XDG_STATE_HOME:-${HOME}/.local/state}/Clearra/receipts/rust-v2"
+          "$CLEARRA_MANAGE_BIN" --root "$GITHUB_WORKSPACE" runtime run \
+            --producer web-cpu-p7p4 --profile benchmark-search --timeout 960 -- \
+            node scripts/tools/run-real-chromium-cpu-worker-smoke.mjs --p7p4-probe 2>&1 |
+          while IFS= read -r line; do
+            printf '%s\n' "$line"
+            case "$line" in
+              clearra_runtime_receipt=*)
+                receipt="${line#clearra_runtime_receipt=}"
+                name="${receipt#"$receipt_root/"}"
+                [[ "$name" =~ ^[0-9]+-[0-9]+-runtime\.json$ ]]
+                [[ -f "$receipt" && "$(realpath -e -- "$receipt")" == "$receipt_root/$name" ]]
+                jq -cer 'select(.schema_id == "clearra.runtime-receipt.v2") | .outcome |
+                  select(.producer == "web-cpu-p7p4") |
+                  "chromium_cpu_p7p4_supervisor=" + ({
+                    reason, duration_ms, peak_memory_bytes, sampled_memory_peak,
+                    memory_pressure_observed, process_tree_stopped
+                  } | tojson)' "$receipt"
+                ;;
+            esac
+          done
   p7p4-exact-handoff:
     if: >-
       github.event_name == 'push' &&

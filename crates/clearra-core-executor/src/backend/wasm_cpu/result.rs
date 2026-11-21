@@ -1867,7 +1867,6 @@ impl WasmExactSearchSession {
         Arc::clone(&self.catalog)
     }
 
-    #[cfg(feature = "webgpu-search")]
     pub(super) fn geometry_targets(&self) -> Option<&[super::geometry::TargetGroup]> {
         self.geometry.targets()
     }

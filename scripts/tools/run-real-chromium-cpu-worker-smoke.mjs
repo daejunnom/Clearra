@@ -1,10 +1,11 @@
-// Functional Chromium execution of the product Worker, not a full Pages/UI
-// build, a signed asset qualification, or a performance measurement.
+// Functional Chromium execution of the product Worker. The explicit 4195
+// probe uses the same artifact, but is not a Pages/UI or release readback.
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { readFile, realpath } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { createRequire } from 'node:module';
+import { availableParallelism } from 'node:os';
 import { basename, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { build } from 'esbuild';
@@ -16,19 +17,24 @@ import { acquireManagedTransientDirectory } from './managed-transient-directory.
 const SELF = fileURLToPath(import.meta.url);
 const repository = resolve(fileURLToPath(new URL('../..', import.meta.url)));
 const HOST = '127.0.0.1';
-const PORT = 4194;
-const ORIGIN = 'http://127.0.0.1:4194';
+const options = process.argv.slice(2);
+const p7p4Probe = options.length === 1 && options[0] === '--p7p4-probe';
+const PORT = p7p4Probe ? 4195 : 4194;
+const ORIGIN = 'http://' + HOST + ':' + PORT;
 const ROOT_WORKER = '/workers/clearraWorker.ts';
 const VERIFIER_WORKER = '/workers/clearraVerifierWorker.ts';
 const PLAYWRIGHT_VERSION = '1.56.1';
 const CASE_TIMEOUT_MS = 40_000;
+const P7P4_TIMEOUT_MS = 420_000;
 const ACCELERATORS_OFF = '--no-legal-board --no-conditioned-reachability';
 const PC_CPU = '--objective unique --count unique --queue-knowledge oracle --backend cpu ' +
   '--rule srs-plus --no-hold --no-tablebase ' + ACCELERATORS_OFF;
 
-assert.equal(process.argv.length, 2, 'the Chromium smoke does not accept options');
-assert.ok(process.env.CLEARRA_RUNTIME_SUPERVISED === '1' && process.env.CLEARRA_RUNTIME_PROFILE === 'local-service',
-  'run the reserved 4194 listener under clearra-manage runtime run --profile local-service --timeout 360');
+assert.ok(!options.length || p7p4Probe, 'only --p7p4-probe is supported');
+const runtimeProfile = p7p4Probe ? 'benchmark-search' : 'local-service';
+assert.ok(process.env.CLEARRA_RUNTIME_SUPERVISED === '1' &&
+  process.env.CLEARRA_RUNTIME_PROFILE === runtimeProfile,
+  'run the reserved ' + PORT + ' listener under clearra-manage runtime run --profile ' + runtimeProfile);
 for (const name of ['CLEARRA_BROWSER_TOOLS_ROOT', 'CLEARRA_REAL_ACCELERATOR_WASM_DIR',
   'CLEARRA_SOURCE_COMMIT', 'CLEARRA_ENGINE_BUILD_ID']) {
   assert.ok(process.env[name], name + ' is required');
@@ -124,7 +130,7 @@ const toolsRoot = await realpath(process.env.CLEARRA_BROWSER_TOOLS_ROOT);
 const require = createRequire(join(toolsRoot, 'package.json'));
 assert.equal(require('playwright/package.json').version, PLAYWRIGHT_VERSION);
 const { chromium } = require('playwright');
-const owner = enterManagedBuildOrRelaunch(repository, [SELF], 'experiment');
+const owner = enterManagedBuildOrRelaunch(repository, [SELF, ...options], 'experiment');
 assert.equal(owner.purpose, 'experiment', 'the browser smoke must not write into a product transaction');
 const scripts = await build({
   absWorkingDir: repository, bundle: true, write: false, format: 'esm', platform: 'browser',
@@ -177,7 +183,7 @@ const scratch = await acquireManagedTransientDirectory(join(owner.transaction, '
 let context;
 let launchStarted = false;
 try {
-  // Let the OS reject an occupied 4194; do not adopt/stop its existing owner.
+  // Let the OS reject an occupied port; do not adopt/stop its existing owner.
   await new Promise((ready, reject) => {
     server.once('error', reject);
     server.listen({ host: HOST, port: PORT, exclusive: true }, ready);
@@ -194,6 +200,36 @@ try {
   page.on('pageerror', error => errors.push(error.message));
   const response = await page.goto(ORIGIN, { timeout: 15_000 });
   assert.equal(response?.status(), 200);
+  if (p7p4Probe) await readbackP7P4Probe(page);
+  else await readbackChromiumSmoke(page);
+  assert.deepEqual(errors, []);
+  assert.deepEqual([...unexpected], [], 'the browser requested files outside the exact asset-free allowlist');
+  if (!p7p4Probe) {
+    console.log('chromium_cpu_worker_smoke=passed source=' + source + ' wasm_sha256=' + manifest.wasm.sha256 +
+      ' verifier_loads=' + verifierLoads + ' release_authority=false');
+  }
+} finally {
+  let browserDrained = !launchStarted;
+  try {
+    if (context) {
+      await context.close();
+      browserDrained = true;
+    }
+  } finally {
+    try {
+      if (server.listening) {
+        server.closeAllConnections();
+        await new Promise((done, reject) => server.close(error => error ? reject(error) : done()));
+      }
+    } finally {
+      // Incomplete launch/close leaves an unresolved lease for reviewed
+      // recovery. The outer supervisor still owns the entire process tree.
+      if (browserDrained) await scratch.release();
+    }
+  }
+}
+
+async function readbackChromiumSmoke(page) {
   const available = await page.evaluate(() => navigator.hardwareConcurrency);
   assert.ok(Number.isSafeInteger(available) && available >= 3, 'the Chromium smoke needs three real logical processors');
   await readbackLocalSr3(page);
@@ -245,28 +281,47 @@ try {
           ' page_unavailable_after_release=true'
         : ' solutions=' + runs[0].keys.length + ' covered=' + runs[0].covered));
   }
-  assert.deepEqual(errors, []);
-  assert.deepEqual([...unexpected], [], 'the browser requested files outside the exact asset-free allowlist');
-  console.log('chromium_cpu_worker_smoke=passed source=' + source + ' wasm_sha256=' + manifest.wasm.sha256 +
-    ' verifier_loads=' + verifierLoads + ' release_authority=false');
-} finally {
-  let browserDrained = !launchStarted;
-  try {
-    if (context) {
-      await context.close();
-      browserDrained = true;
-    }
-  } finally {
-    try {
-      if (server.listening) {
-        server.closeAllConnections();
-        await new Promise((done, reject) => server.close(error => error ? reject(error) : done()));
-      }
-    } finally {
-      // Incomplete launch/close leaves an unresolved lease for reviewed
-      // recovery. The outer supervisor still owns the entire process tree.
-      if (browserDrained) await scratch.release();
-    }
+}
+
+async function readbackP7P4Probe(page) {
+  const browser = await page.evaluate(() => ({
+    logical_processors: navigator.hardwareConcurrency,
+    cross_origin_isolated: self.crossOriginIsolated,
+  }));
+  const runnerProcessors = availableParallelism();
+  const workers = Math.max(1, Math.min(8, runnerProcessors - 1, browser.logical_processors - 1));
+  const label = 'empty-4l-p7p4-jstris-180';
+  const command = 'clearra pc --board-mask 0 --height 4 --pieces 10 --lines 4 --patterns P7P4 ' +
+    '--count unique --hold empty --queue-knowledge oracle --rule jstris-180 --backend cpu ' +
+    '--no-build-dependency-dag --no-tablebase ' + ACCELERATORS_OFF + ' --workers ' + workers;
+  console.log('chromium_cpu_p7p4_probe_config=' + JSON.stringify({
+    source, wasm_sha256: manifest.wasm.sha256, runner_logical_processors: runnerProcessors,
+    browser, workers_requested: workers, command, samples: 2, timeout_ms: P7P4_TIMEOUT_MS,
+    memory_scope: 'solver-reported peak per sample; managed process-tree peak across the invocation',
+    idle_rss_measured: false, autonomous_peer_drain_measured: false,
+    pages_readback: false, release_authority: false,
+  }));
+  for (const sample of [1, 2]) {
+    const before = verifierLoads;
+    // Sequential new Workers; don't overlap samples or claim warm rerun behavior.
+    const execution = await page.evaluate(runWorker, {
+      rootWorker: ROOT_WORKER, command, workers, timeoutMs: P7P4_TIMEOUT_MS,
+      label: label + '-' + sample, benchmarkProbe: true,
+    });
+    console.log('chromium_cpu_p7p4_probe_sample=' + JSON.stringify({
+      label, sample, verifier_loads: verifierLoads - before, ...execution,
+    }));
+    assert.equal(execution.event, 'final_response', label);
+    assert.equal(execution.status, 'success', label);
+    assert.deepEqual(execution.runtime_identity, manifest.build.runtime_identity);
+    const report = execution.search;
+    assert.equal(report.backend_selected, 'wasm-cpu', label);
+    assert.equal(report.count_complete, true, label);
+    assert.equal(report.unique_solution_count, 456_459, label);
+    assert.equal(report.normalized_solution_set_hash, 'cts1:2fcbc950acdffa31', label);
+    assert.equal(report.total_possible_pattern_count, '4233600', label);
+    assert.ok(Number.isSafeInteger(report.workers_used) && report.workers_used > 0 &&
+      report.workers_used <= workers, label + ' reported workers outside the host request');
   }
 }
 
@@ -543,7 +598,7 @@ function typedProjection(test, execution, forced24GeometryKey) {
 // Executed only in Chromium; do not shim the Worker implementation, the
 // executable-authority protocol, or the terminal result.
 async function runWorker({ rootWorker, command, workers, timeoutMs, label, pageKind,
-  expectedKind, empty, targetLines }) {
+  expectedKind, empty, targetLines, benchmarkProbe = false }) {
   const { createHostCapabilitySnapshot, resolveWorkerAuthority } = await import('/capabilities.js');
   const snapshot = createHostCapabilitySnapshot({
     snapshotId: 'exact-chromium-cpu-smoke', source: 'browser-main',
@@ -554,6 +609,8 @@ async function runWorker({ rootWorker, command, workers, timeoutMs, label, pageK
   let verified = 0;
   let lastPhase = 'preparing';
   let requestId = 0;
+  let postedAt = null;
+  const phaseObserved = new Map();
   const lifetime = new AbortController();
   const signal = lifetime.signal;
   const timeout = setTimeout(() => lifetime.abort(new Error(label + ' timed out in ' + lastPhase)), timeoutMs);
@@ -565,6 +622,9 @@ async function runWorker({ rootWorker, command, workers, timeoutMs, label, pageK
       lastPhase = telemetry.phase;
       if (telemetry.execution_mode === 'distributed' && telemetry.availability?.candidates_verified) {
         verified = Math.max(verified, telemetry.candidates_verified);
+      }
+      if (benchmarkProbe && postedAt !== null && !phaseObserved.has(lastPhase)) {
+        phaseObserved.set(lastPhase, Math.round(performance.now() - postedAt));
       }
     }
   });
@@ -591,10 +651,44 @@ async function runWorker({ rootWorker, command, workers, timeoutMs, label, pageK
   try {
     const terminal = await waitForMessage(
       data => ['final_response', 'failed', 'cancelled', 'terminated'].includes(data.event),
-      () => worker.postMessage({ type: 'run_command_text', commandText: command, prewarmWorkerCount: workers,
-        tablebaseRequested: false, hostCapabilitySnapshot: snapshot,
-        workerAuthority: resolveWorkerAuthority(snapshot, workers),
-        warmupPolicy: { backend: 'cpu', cpuWarmup: false, gpuWarmup: false, verifierWarmup: false } }));
+      () => {
+        if (benchmarkProbe) postedAt = performance.now();
+        worker.postMessage({ type: 'run_command_text', commandText: command, prewarmWorkerCount: workers,
+          tablebaseRequested: false, hostCapabilitySnapshot: snapshot,
+          workerAuthority: resolveWorkerAuthority(snapshot, workers),
+          warmupPolicy: { backend: 'cpu', cpuWarmup: false, gpuWarmup: false, verifierWarmup: false } });
+      });
+    if (benchmarkProbe) {
+      // Time ends when the browser receives the Worker terminal, so it
+      // includes Worker startup and result transport, but not Playwright's
+      // serialization of this compact observation back to Node.
+      const elapsed = Math.round(performance.now() - postedAt);
+      const report = terminal.search_report;
+      const search = report && {
+        backend_selected: report.backend_selected,
+        workers_used: report.workers_used,
+        cpu_parallel_execution: report.cpu_parallel_execution,
+        cpu_parallel_decision_reason: report.cpu_parallel_decision_reason,
+        packing_candidate_count: report.packing_candidate_count,
+        packing_candidate_set_digest: report.packing_candidate_set_digest,
+        unique_solution_count: report.unique_solution_count,
+        normalized_solution_set_hash: report.normalized_solution_set_hash,
+        covered_pattern_count: report.covered_pattern_count,
+        total_possible_pattern_count: report.total_possible_pattern_count,
+        count_complete: report.count_complete,
+        searched_nodes: report.searched_nodes,
+        solver_reported_peak_cpu_bytes: report.peak_cpu_bytes,
+      };
+      return {
+        event: terminal.event, status: terminal.response?.status ?? null,
+        runtime_identity: terminal.response?.runtime_identity ?? null,
+        diagnostics: terminal.response?.diagnostics ?? null,
+        post_to_terminal_ms: elapsed, first_observed_phase_ms: Object.fromEntries(phaseObserved),
+        terminal_root_linear_memory_bytes: terminal.runtime_memory_bytes ?? null,
+        terminal_retained_result_pages: terminal.runtime_retained_pages ?? null,
+        peer_verified: verified, search,
+      };
+    }
     if (!pageKind || terminal.event !== 'final_response' || terminal.response.status !== 'success') {
       return { terminal, verified };
     }
