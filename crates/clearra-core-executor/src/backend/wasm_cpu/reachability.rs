@@ -48,6 +48,13 @@ pub(super) mod static_influence;
 #[path = "reachability_peer_tests.rs"]
 mod peer_tests;
 
+#[cfg(test)]
+#[path = "reachability_board_family.rs"]
+mod board_family;
+#[cfg(test)]
+#[path = "reachability_boolean_family.rs"]
+mod boolean_family;
+
 #[cfg(any(
     test,
     feature = "placement-dependency-pc",

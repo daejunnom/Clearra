@@ -200,7 +200,87 @@ pub(in super::super) fn static_lock_dependency_mask(
     x: i8,
     y: i8,
 ) -> Option<u64> {
+    static_lock_dependency_mask_filtered(template, rotation, x, y, None, |_, _, _| true)
+}
+
+/// Exact edge-existence test over the cube `fixed | subset(variable)`.
+///
+/// The caller validates the cube and the board width. Source and destination
+/// must stay empty. Every earlier valid kick must have at least one possible
+/// blocker outside those required-empty cells; selecting one such blocker for
+/// each earlier kick constructs a witness board inside the cube. Different
+/// earlier kicks may share a blocker. This decides whether an edge can exist,
+/// not whether its source is reachable.
+#[cfg(test)]
+pub(super) fn edge_possible_in_cube(
+    source_mask: u64,
+    target_mask: u64,
+    prior_masks: impl IntoIterator<Item = u64>,
+    fixed: u64,
+    variable: u64,
+) -> bool {
+    if source_mask == INVALID_STATE_MASK || target_mask == INVALID_STATE_MASK {
+        return false;
+    }
+    let required_empty = source_mask | target_mask;
+    fixed & required_empty == 0
+        && prior_masks.into_iter().all(|mask| {
+            mask == INVALID_STATE_MASK
+                || mask & fixed != 0
+                || mask & variable & !required_empty != 0
+        })
+}
+
+/// The static target quotient restricted to one declared occupancy cube.
+///
+/// Edges that cannot exist on any board in the cube are removed before the
+/// existing predecessor closure. Earlier kick competitors still contribute
+/// reads even when their own incoming edge is impossible. The returned mask
+/// contains only variable cells and is reusable only with this same cube,
+/// template and target. A zero mask is constancy, not a reachable/negative answer.
+#[cfg(test)]
+pub(super) fn static_lock_dependency_mask_in_cube(
+    template: &ReachabilityTemplate,
+    rotation: RotationState,
+    x: i8,
+    y: i8,
+    fixed: u64,
+    variable: u64,
+) -> Option<u64> {
+    static_lock_dependency_mask_filtered(
+        template,
+        rotation,
+        x,
+        y,
+        Some((fixed, variable)),
+        |source, target, prior| {
+            edge_possible_in_cube(
+                template.state_masks[source],
+                template.state_masks[target],
+                prior
+                    .iter()
+                    .map(|&index| template.state_masks[usize::from(index)]),
+                fixed,
+                variable,
+            )
+        },
+    )
+}
+
+fn static_lock_dependency_mask_filtered(
+    template: &ReachabilityTemplate,
+    rotation: RotationState,
+    x: i8,
+    y: i8,
+    cube: Option<(u64, u64)>,
+    mut edge_allowed: impl FnMut(usize, usize, &[u16]) -> bool,
+) -> Option<u64> {
     let (state_count, board_mask) = validate_forward_template(template)?;
+    if cube.is_some_and(|(fixed, variable)| {
+        fixed & variable != 0 || (fixed | variable) & !board_mask != 0
+    }) {
+        return None;
+    }
     if y < 0 || y >= template.height as i8 {
         return None;
     }
@@ -212,7 +292,7 @@ pub(in super::super) fn static_lock_dependency_mask(
     // CSR predecessor lists keep storage linear in the bounded potential graph.
     let mut offsets = zeroed_vec::<usize>(state_count.checked_add(1)?)?;
     let mut edge_count = 0_usize;
-    visit_forward_edges(template, |_, target| {
+    visit_forward_edges(template, &mut edge_allowed, |_, target| {
         edge_count = edge_count.checked_add(1)?;
         if edge_count > MAX_DEPENDENCY_EDGES {
             return None;
@@ -226,7 +306,7 @@ pub(in super::super) fn static_lock_dependency_mask(
     let mut parents = zeroed_vec::<u16>(edge_count)?;
     let mut cursors = zeroed_vec::<usize>(state_count)?;
     cursors.copy_from_slice(&offsets[..state_count]);
-    visit_forward_edges(template, |source, target| {
+    visit_forward_edges(template, &mut edge_allowed, |source, target| {
         let cursor = *cursors.get(target)?;
         *parents.get_mut(cursor)? = u16::try_from(source).ok()?;
         cursors[target] = cursor.checked_add(1)?;
@@ -288,7 +368,8 @@ pub(in super::super) fn static_lock_dependency_mask(
     if y != 0 && below != INVALID_STATE_INDEX {
         dependency_mask |= template.state_masks[usize::from(below)];
     }
-    (dependency_mask & !board_mask == 0).then_some(dependency_mask)
+    (dependency_mask & !board_mask == 0)
+        .then_some(dependency_mask & cube.map_or(board_mask, |(_, variable)| variable))
 }
 
 fn zeroed_vec<T: Default + Clone>(len: usize) -> Option<Vec<T>> {
@@ -367,6 +448,7 @@ fn validate_forward_template(template: &ReachabilityTemplate) -> Option<(usize, 
 
 fn visit_forward_edges(
     template: &ReachabilityTemplate,
+    mut edge_allowed: impl FnMut(usize, usize, &[u16]) -> bool,
     mut visit: impl FnMut(usize, usize) -> Option<()>,
 ) -> Option<()> {
     for source in 0..template.state_masks.len() {
@@ -374,7 +456,7 @@ fn visit_forward_edges(
             continue;
         }
         for &target in &template.translation_targets[source] {
-            if target != INVALID_STATE_INDEX {
+            if target != INVALID_STATE_INDEX && edge_allowed(source, usize::from(target), &[]) {
                 visit(source, usize::from(target))?;
             }
         }
@@ -382,8 +464,14 @@ fn visit_forward_edges(
             let transition = source * 3 + slot;
             let begin = template.rotation_target_offsets[transition] as usize;
             let end = template.rotation_target_offsets[transition + 1] as usize;
-            for &target in &template.rotation_targets[begin..end] {
-                visit(source, usize::from(target))?;
+            for (offset, &target) in template.rotation_targets[begin..end].iter().enumerate() {
+                if edge_allowed(
+                    source,
+                    usize::from(target),
+                    &template.rotation_targets[begin..begin + offset],
+                ) {
+                    visit(source, usize::from(target))?;
+                }
             }
         }
     }
@@ -402,6 +490,176 @@ mod tests {
         KickTableProfileId::Jstris180,
         KickTableProfileId::NoKick,
     ];
+
+    #[test]
+    fn combinatorial_cube_edge_existence_matches_all_three_cell_boards() {
+        let mut cubes = 0;
+        let mut queries = 0;
+        for fixed in 0_u64..8 {
+            for variable in 0_u64..8 {
+                if fixed & variable != 0 {
+                    continue;
+                }
+                cubes += 1;
+                for source in 0_u64..8 {
+                    for target in 0_u64..8 {
+                        for first in 0_u64..8 {
+                            for second in 0_u64..8 {
+                                let oracle = (0_u64..8).any(|board| {
+                                    board & !variable == fixed
+                                        && source & board == 0
+                                        && [first, second, target]
+                                            .iter()
+                                            .position(|mask| mask & board == 0)
+                                            == Some(2)
+                                });
+                                assert_eq!(
+                                    edge_possible_in_cube(
+                                        source,
+                                        target,
+                                        [first, second],
+                                        fixed,
+                                        variable,
+                                    ),
+                                    oracle,
+                                    "source={source:x} target={target:x} prior=({first:x},{second:x}) fixed={fixed:x} variable={variable:x}"
+                                );
+                                queries += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!((cubes, queries), (27, 110_592));
+        assert!(!edge_possible_in_cube(INVALID_STATE_MASK, 0, [], 0, 0));
+        assert!(edge_possible_in_cube(0, 0, [INVALID_STATE_MASK], 0, 0));
+    }
+
+    #[test]
+    fn combinatorial_cube_cone_removes_an_inaccessible_roof_exterior() {
+        const WIDTH: u8 = 4;
+        const HEIGHT: u8 = 6;
+        let template =
+            ReachabilityTemplate::compile(WIDTH, HEIGHT, PieceKind::O, KickTableProfileId::Srs90);
+        // A one-cell opening in original row three cannot admit an O.
+        // Only the two rows above that fixed roof are variable.
+        let fixed = 0x7_u64 << 12;
+        let variable = 0xff_u64 << 16;
+        let global = static_lock_dependency_mask(&template, RotationState::Zero, 0, 0)
+            .expect("valid global target certificate");
+        let scoped = static_lock_dependency_mask_in_cube(
+            &template,
+            RotationState::Zero,
+            0,
+            0,
+            fixed,
+            variable,
+        )
+        .expect("valid cube target certificate");
+        assert_eq!((global & variable).count_ones(), 8);
+        assert_eq!(scoped, 0);
+        for upper in 0_u64..256 {
+            let anchors = reference_spawn_lock_anchors(
+                WIDTH,
+                HEIGHT,
+                fixed | (upper << 16),
+                PieceKind::O,
+                KickTableProfileId::Srs90,
+            )
+            .unwrap();
+            assert_eq!(anchors[0] & 1, 0);
+        }
+        assert!(static_lock_dependency_mask_in_cube(
+            &template,
+            RotationState::Zero,
+            0,
+            0,
+            fixed,
+            fixed,
+        )
+        .is_none());
+        assert!(static_lock_dependency_mask_in_cube(
+            &template,
+            RotationState::Zero,
+            0,
+            0,
+            0,
+            1 << 24,
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn combinatorial_cube_masks_preserve_all_profile_piece_answers_above_four_lines() {
+        let mut checked = 0_usize;
+        let mut positives = 0_usize;
+        let mut negatives = 0_usize;
+        for height in [5_u8, 6] {
+            let cells = [
+                0,
+                1,
+                (height - 2) * 4 + 1,
+                (height - 2) * 4 + 2,
+                (height - 1) * 4,
+                (height - 1) * 4 + 3,
+            ];
+            let fixed = 1_u64 << ((height - 3) * 4 + 2);
+            let variable = cells.iter().fold(0_u64, |mask, &cell| mask | (1 << cell));
+            for profile in PROFILES {
+                for piece in PieceKind::STANDARD_TETROMINOES {
+                    let template = ReachabilityTemplate::compile(4, height, piece, profile);
+                    let oracle = (0_u64..64)
+                        .map(|assignment| {
+                            let board =
+                                cells.iter().enumerate().fold(fixed, |board, (bit, &cell)| {
+                                    board | (((assignment >> bit) & 1) << cell)
+                                });
+                            let anchors =
+                                reference_spawn_lock_anchors(4, height, board, piece, profile)
+                                    .expect("independent bounded cell interpreter");
+                            (board, anchors)
+                        })
+                        .collect::<Vec<_>>();
+                    for rotation in [RotationState::Zero, RotationState::Right] {
+                        for x in [0_i8, 1] {
+                            for y in [0_i8, height as i8 - 2] {
+                                let Some(mask) = static_lock_dependency_mask_in_cube(
+                                    &template, rotation, x, y, fixed, variable,
+                                ) else {
+                                    continue;
+                                };
+                                let global =
+                                    static_lock_dependency_mask(&template, rotation, x, y).unwrap();
+                                assert_eq!(mask & !global, 0);
+                                let mut answers = std::collections::BTreeMap::new();
+                                let anchor = (y as usize * 4) + x as usize;
+                                for &(board, anchors) in &oracle {
+                                    let answer = anchors[rotation.quarter_turns() as usize]
+                                        & (1 << anchor)
+                                        != 0;
+                                    if let Some(previous) = answers.insert(board & mask, answer) {
+                                        assert_eq!(
+                                            previous, answer,
+                                            "height={height} piece={piece:?} profile={profile:?} rotation={rotation:?} x={x} y={y} mask={mask:x} board={board:x}"
+                                        );
+                                    }
+                                    checked += 1;
+                                    positives += usize::from(answer);
+                                    negatives += usize::from(!answer);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(checked > 20_000);
+        assert!(positives > 0 && negatives > 0);
+        eprintln!(
+            "combinatorial cube mask parity checked={checked} positive={positives} negative={negatives} profiles=5 pieces=7 heights=5,6"
+        );
+    }
 
     #[allow(clippy::too_many_arguments)]
     fn oracle_lock(
