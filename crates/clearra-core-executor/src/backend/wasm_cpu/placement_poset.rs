@@ -9,29 +9,39 @@
 //! are enumerated. Failure to obtain a certificate is always `None` (fallback),
 //! never an infeasibility claim.
 //!
-//! The owning module gates this prototype to tests / `local-search-ab`. The
-//! optional catalog guard table replaces repeated same-frame geometric tests,
-//! not movement proofs or the conditions on which they depend. Callers
+//! The symbolic prefix compiler reuses the candidate frame projection below.
+//! The distinct poset and conditional-order prototypes remain local-only.
+//! Their optional catalog guard table replaces repeated same-frame geometric
+//! tests, not movement proofs or the conditions on which they depend. Callers
 //! must additionally keep CountAll, finesse and non-clear-to-empty completion
 //! on their existing paths. A certificate belongs to the supplied candidate;
 //! its operation indices are concrete row IDs, not interchangeable kind IDs.
 
 use clearra_core_domain::piece::piece_kind::PieceKind;
+#[cfg(any(test, feature = "local-search-ab"))]
 use std::cell::OnceCell;
 
 use super::{
-    buildup::{compact_target_board, placement_is_grounded},
-    catalog::{GeometryCatalog, InstantiatedRealization},
+    buildup::compact_target_board,
+    catalog::GeometryCatalog,
     geometry::GeometryCandidate,
-    placement_conditions::{
-        grounding_sources, vertical_entry_mask, AtomicRowProjection, GroundingSources,
-        GroupedClearConditions, PlacementConditionCatalog, PrecomputedOrderGuard,
-    },
+    placement_conditions::{AtomicRowProjection, GroupedClearConditions},
     MAX_BOARD64_PIECES,
+};
+#[cfg(any(test, feature = "local-search-ab"))]
+use super::{
+    buildup::placement_is_grounded,
+    catalog::InstantiatedRealization,
+    placement_conditions::{
+        grounding_sources, vertical_entry_mask, GroundingSources, PlacementConditionCatalog,
+        PrecomputedOrderGuard,
+    },
 };
 
 const MAX_HEIGHT: usize = 6;
+#[cfg(any(test, feature = "local-search-ab"))]
 const MAX_CLEAR_FRAMES: usize = 1 << MAX_HEIGHT;
+#[cfg(any(test, feature = "local-search-ab"))]
 const MAX_CONDITIONAL_OPERATIONS: usize = 8;
 
 #[cfg(test)]
@@ -96,6 +106,7 @@ pub(super) fn with_joint_clear_admission<T>(enabled: bool, action: impl FnOnce()
     action()
 }
 
+#[cfg(any(test, feature = "local-search-ab"))]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct CertifiedPlacementPoset {
     operation_count: usize,
@@ -104,6 +115,7 @@ pub(super) struct CertifiedPlacementPoset {
     interval_guard_count: usize,
 }
 
+#[cfg(any(test, feature = "local-search-ab"))]
 impl CertifiedPlacementPoset {
     pub(super) fn pieces(&self) -> &[PieceKind] {
         &self.pieces[..self.operation_count]
@@ -127,12 +139,14 @@ pub(super) struct CandidateGeometry {
     height: u8,
     initial_board: u64,
     operation_count: usize,
+    #[cfg(any(test, feature = "local-search-ab"))]
     all_operations: u16,
     pieces: [PieceKind; MAX_BOARD64_PIECES],
     cells: [u64; MAX_BOARD64_PIECES],
     clear_conditions: GroupedClearConditions,
 }
 
+#[cfg(any(test, feature = "local-search-ab"))]
 struct CandidateOrderGuards<'a> {
     conditions: &'a PlacementConditionCatalog,
     // The candidate has disjoint validated original cells and at most 15
@@ -140,6 +154,7 @@ struct CandidateOrderGuards<'a> {
     owner_bits: [u16; u64::BITS as usize],
 }
 
+#[cfg(any(test, feature = "local-search-ab"))]
 impl<'a> CandidateOrderGuards<'a> {
     fn new(catalog: &'a GeometryCatalog, geometry: &CandidateGeometry) -> Option<Self> {
         let conditions = catalog.placement_conditions()?.as_ref();
@@ -189,6 +204,7 @@ impl<'a> CandidateOrderGuards<'a> {
 
 /// One exact executed-board snapshot and its immutable original-row frame.
 /// Kept only while the conditional proof walks this state's outgoing edges.
+#[cfg(any(test, feature = "local-search-ab"))]
 pub(super) struct ConditionalState {
     pub(super) board: u64,
     pub(super) deleted: u16,
@@ -228,6 +244,7 @@ pub(super) fn compile_with_guard(
     })
 }
 
+#[cfg(any(test, feature = "local-search-ab"))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum MovementProof {
     /// Existence of an exact edge on every board in [minimum, maximum].
@@ -237,6 +254,7 @@ pub(super) enum MovementProof {
     Closed,
 }
 
+#[cfg(any(test, feature = "local-search-ab"))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct MovementProofQuery {
     pub(super) piece: PieceKind,
@@ -250,6 +268,7 @@ pub(super) struct MovementProofQuery {
 /// A guard miss is Unknown. Only closed proofs for *all* realizations remove a
 /// frame from the necessary-order calculation. Positive endpoint samples alone
 /// cannot certify an interval under ordered kicks.
+#[cfg(any(test, feature = "local-search-ab"))]
 pub(super) fn compile_with_movement_guard(
     catalog: &GeometryCatalog,
     candidate: &GeometryCandidate,
@@ -558,6 +577,7 @@ pub(super) fn compile_with_movement_guard(
 impl CandidateGeometry {
     #[cfg(any(
         test,
+        feature = "placement-dependency-pc",
         all(
             feature = "local-search-ab",
             feature = "parallel",
@@ -573,6 +593,7 @@ impl CandidateGeometry {
 
     #[cfg(any(
         test,
+        feature = "placement-dependency-pc",
         all(
             feature = "local-search-ab",
             feature = "parallel",
@@ -585,6 +606,7 @@ impl CandidateGeometry {
 
     #[cfg(any(
         test,
+        feature = "placement-dependency-pc",
         all(
             feature = "local-search-ab",
             feature = "parallel",
@@ -598,6 +620,7 @@ impl CandidateGeometry {
     /// Start only with small Boolean candidates with a geometric support
     /// disjunction, either initially or after a clear induced by just one
     /// concrete operation. This admission does not prove a physical move.
+    #[cfg(any(test, feature = "local-search-ab"))]
     pub(super) fn for_conditional_order(
         catalog: &GeometryCatalog,
         candidate: &GeometryCandidate,
@@ -627,6 +650,7 @@ impl CandidateGeometry {
     /// The state is only the executed set: completed rows are derived from
     /// their concrete contributor conjunctions, and all such rows are
     /// removed together in the original-row frame.
+    #[cfg(any(test, feature = "local-search-ab"))]
     pub(super) fn conditional_state(&self, executed: u16) -> ConditionalState {
         debug_assert_eq!(executed & !self.all_operations, 0);
         let pending = self.all_operations & !executed;
@@ -664,6 +688,7 @@ impl CandidateGeometry {
         }
     }
 
+    #[cfg(any(test, feature = "local-search-ab"))]
     pub(super) fn conditional_lock_mask(&self, operation: usize, state: &ConditionalState) -> u64 {
         #[cfg(test)]
         record_projection_work(|work| work.lock_projections += 1);
@@ -673,6 +698,7 @@ impl CandidateGeometry {
     /// Return this concrete operation's projected footprint and a deferred
     /// child check bound to the same candidate, executed set and row frame.
     /// Rejecting an ungrounded or uninstantiable operation need not build its child.
+    #[cfg(any(test, feature = "local-search-ab"))]
     pub(super) fn conditional_operation<'a>(
         &'a self,
         state: &'a ConditionalState,
@@ -684,6 +710,7 @@ impl CandidateGeometry {
         })
     }
 
+    #[cfg(any(test, feature = "local-search-ab"))]
     fn conditional_after_operation(
         &self,
         state: &ConditionalState,
@@ -764,7 +791,6 @@ impl CandidateGeometry {
         {
             return None;
         }
-        let all_operations = (1_u16 << operation_count) - 1;
         let mut pieces = [PieceKind::I; MAX_BOARD64_PIECES];
         let mut cells = [0_u64; MAX_BOARD64_PIECES];
         let mut row_contributors = [0_u16; MAX_HEIGHT];
@@ -811,7 +837,8 @@ impl CandidateGeometry {
             height,
             initial_board,
             operation_count,
-            all_operations,
+            #[cfg(any(test, feature = "local-search-ab"))]
+            all_operations: (1_u16 << operation_count) - 1,
             pieces,
             cells,
             clear_conditions: GroupedClearConditions::from_completed_rows(
@@ -821,6 +848,7 @@ impl CandidateGeometry {
         })
     }
 
+    #[cfg(any(test, feature = "local-search-ab"))]
     fn has_unprovable_initial_support_disjunction(
         &self,
         catalog: &GeometryCatalog,
@@ -868,6 +896,7 @@ impl CandidateGeometry {
         false
     }
 
+    #[cfg(any(test, feature = "local-search-ab"))]
     fn has_support_disjunction_after_group_clear<const JOINT: bool>(
         &self,
         catalog: &GeometryCatalog,
@@ -970,6 +999,7 @@ impl CandidateGeometry {
     }
 }
 
+#[cfg(any(test, feature = "local-search-ab"))]
 fn close_predecessors(predecessors: &mut [u16; MAX_BOARD64_PIECES], count: usize) -> bool {
     for intermediate in 0..count {
         let intermediate_bit = 1_u16 << intermediate;
@@ -986,6 +1016,7 @@ fn close_predecessors(predecessors: &mut [u16; MAX_BOARD64_PIECES], count: usize
         .all(|(operation, &requirements)| requirements & (1_u16 << operation) == 0)
 }
 
+#[cfg(any(test, feature = "local-search-ab"))]
 fn predecessor_closure(mut operations: u16, predecessors: &[u16; MAX_BOARD64_PIECES]) -> u16 {
     // Each predecessor mask already contains its transitive ancestors.
     let mut pending = operations;
@@ -997,6 +1028,7 @@ fn predecessor_closure(mut operations: u16, predecessors: &[u16; MAX_BOARD64_PIE
     operations
 }
 
+#[cfg(any(test, feature = "local-search-ab"))]
 fn board_for_operations(
     mut board: u64,
     physical_cells: &[u64; MAX_BOARD64_PIECES],

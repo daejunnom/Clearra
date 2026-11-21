@@ -365,6 +365,8 @@ export const japaneseWorkspaceMessages = Object.freeze({
   tablebaseReady: '準備完了 · {size}',
   progressStageTablebase: 'オンラインテーブルベースの部分取得',
   tablebaseUnavailable: '使用不可',
+  pcPrecomputeBuildDependencies: 'ミノの依存関係を事前計算',
+  pcPrecomputeBuildDependenciesHelp: '対応する配置はミノの依存関係で確認し、それ以外は従来の厳密な探索を使います。',
   precomputeBuildDependencies: 'ミノの依存関係を事前計算（ベータ）',
   precomputeBuildDependenciesHelp: 'ベータ機能です。無効にした場合より遅くなることがあります。',
   exactLegalBoard: 'Exact legal-boardフィルター',

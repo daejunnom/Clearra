@@ -1259,8 +1259,45 @@ mod tests {
     use super::{
         validate_opening_pc_result_projection, validate_pc_path_common_request_contract,
         validate_pc_score_common_request_contract, validate_scenario_pc_result_projection,
-        PcResultProjection,
+        PcChanceIngressOrigin, PcPathIngressOrigin, PcResultProjection,
     };
+
+    #[test]
+    fn placement_dependency_opt_in_keeps_pc_chance_and_replay_contracts_distinct() {
+        let execution = clearra_pc_graph::request::PcExecutionPolicy::mvp_default()
+            .with_precompute_build_dependencies(true);
+        let opening = OpeningPcSearchQuery::new(PcTarget::two_lines())
+            .with_objective(ObjectivePolicy::unique())
+            .with_execution_policy(execution.clone());
+        let scenario = PcScenarioQuery::new(
+            PcScenarioBoard::standard_10(1, 0x3f0),
+            PcQueueInput::standard_7_bag(),
+            PieceWindow::new(1),
+        )
+        .with_exact_pieces(Some(1))
+        .with_objective(ObjectivePolicy::unique())
+        .with_count_policy(PcCountPolicy::CountUnique)
+        .with_execution_policy(execution);
+        let chance =
+            PcResultProjection::ChanceProbabilityV2(PcChanceIngressOrigin::CanonicalPcChance);
+        let path = PcResultProjection::PathFamilyV2(PcPathIngressOrigin::CanonicalPcPath);
+        for projection in [PcResultProjection::Standard, chance] {
+            assert!(validate_opening_pc_result_projection(&opening, projection).is_ok());
+            assert!(validate_scenario_pc_result_projection(&scenario, projection).is_ok());
+        }
+        assert!(validate_opening_pc_result_projection(
+            &opening.with_objective(ObjectivePolicy::all()),
+            path,
+        )
+        .is_err());
+        assert!(validate_scenario_pc_result_projection(
+            &scenario
+                .with_objective(ObjectivePolicy::all())
+                .with_count_policy(PcCountPolicy::CountAll),
+            path,
+        )
+        .is_err());
+    }
 
     #[test]
     fn pc_path_app_contract_preserves_b2b_without_admitting_score_tie_trace_or_count() {

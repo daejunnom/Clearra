@@ -119,9 +119,11 @@ export function normalizeWorkspaceRequest(
   request: SolverWorkspaceRequest
 ): SolverWorkspaceRequest {
   assertGuiScoreMode(request.scoreMode);
+  const precomputeBuildDependencies =
+    request.precomputeBuildDependencies && workspaceDependencyPreanalysisAvailable(request);
   // PC products use the exact CPU path. Retain GPU engines and transport
   // options for explicit non-GUI callers, but never select them implicitly.
-  request = { ...request, backend: 'cpu', gpuDevice: 'auto' };
+  request = { ...request, backend: 'cpu', gpuDevice: 'auto', precomputeBuildDependencies };
   if (request.scoreMode === 'tiling') {
     return {
       ...request,
@@ -133,7 +135,6 @@ export function normalizeWorkspaceRequest(
       initialB2B: 0,
       solutionProbabilities: false,
       tablebaseEnabled: false,
-      precomputeBuildDependencies: false,
       legalBoardEnabled: false,
       conditionedReachabilityEnabled: false
     };
@@ -146,8 +147,7 @@ export function normalizeWorkspaceRequest(
       spinProfile: 't-spins',
       preserveB2B: false,
       initialB2B: 0,
-      solutionProbabilities: false,
-      precomputeBuildDependencies: false
+      solutionProbabilities: false
     };
   }
   if (
@@ -166,7 +166,6 @@ export function normalizeWorkspaceRequest(
       backend: 'cpu',
       gpuDevice: 'auto',
       tablebaseEnabled: request.scoreMode === 'score-finder' ? false : request.tablebaseEnabled,
-      precomputeBuildDependencies: false,
       maxPatterns: undefined
     };
   }
@@ -176,8 +175,7 @@ export function normalizeWorkspaceRequest(
       queueKnowledge: 'oracle',
       scoreProfile: 'tetrio',
       spinProfile: request.preserveB2B ? request.spinProfile : 't-spins',
-      initialB2B: 0,
-      precomputeBuildDependencies: false
+      initialB2B: 0
     };
   }
   if (request.scoreMode === 'failed-queue') {
@@ -447,6 +445,22 @@ export function scenarioPieceWindow(request: SolverWorkspaceRequest): number | n
   return emptyCells / 4;
 }
 
+/** Expose the qualified subset, not every pattern a product parser accepts.
+ * The GUI uses CPU, and the solver still owns per-candidate eligibility. */
+export function workspaceDependencyPreanalysisAvailable(request: SolverWorkspaceRequest): boolean {
+  if (request.scoreMode !== 'off' ||
+      !Number.isInteger(request.lines) || request.lines < 1 || request.lines > 4 ||
+      (request.rule !== 'srs-plus' && request.rule !== 'jstris-180') ||
+      request.queueKnowledge !== 'oracle' || request.preserveB2B || request.tablebaseEnabled ||
+      request.boardMask !== trimBoardMask(request.boardMask, request.lines)) {
+    return false;
+  }
+  const queue = parseBrowserQueueInput(request.queue);
+  if (queue?.kind !== 'pattern' || !/^P7(?:P[1-7])?$/u.test(queue.source)) return false;
+  const pieces = scenarioPieceWindow(request);
+  return pieces !== null && pieces <= queue.sequenceLength;
+}
+
 export function automaticPcTargetLines(
   boardMask: bigint,
   queue: string,
@@ -495,7 +509,6 @@ export function workspaceValidationCodes(
     // workers on both surfaces. Only ordinary all/unique enumeration has an
     // observation-policy owner; typed reducers still require the supplied queue.
     if (!['cpu', 'auto'].includes(execution.backend) || execution.tablebaseEnabled ||
-        execution.precomputeBuildDependencies ||
         (execution.queueKnowledge !== 'oracle' && execution.scoreMode !== 'off')) {
       errors.push('pc_extended_options_unavailable');
     }
@@ -634,11 +647,7 @@ export function buildWorkspaceCommandArguments(request: SolverWorkspaceRequest):
     tokens.push('--count', request.scoreMode === 'off' ? 'unique' : 'all');
     tokens.push('--rule', request.rule);
     tokens.push(request.tablebaseEnabled ? '--tablebase' : '--no-tablebase');
-    tokens.push(
-      request.precomputeBuildDependencies
-        ? '--build-dependency-dag'
-        : '--no-build-dependency-dag'
-    );
+    if (request.precomputeBuildDependencies) tokens.push('--build-dependency-dag');
     if (request.solutionProbabilities) tokens.push('--solution-probabilities');
     tokens.push('--queue-knowledge', request.queueKnowledge);
     if (request.preserveB2B) {

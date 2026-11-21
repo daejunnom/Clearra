@@ -2,12 +2,14 @@
 
 ## Unreleased
 
-## 0.8.0 - 2026-11-21
+## 0.9.1 - 2026-11-22
 
-- Prepare a recovery release from the Rust production baseline with focused
-  browser worker ownership and large-search scheduling corrections.
-- Keep browser-only timing comparisons separate from the older native
-  experimental measurements.
+- Reduce repeated work in browser CPU search and keep exact candidate
+  verification and worker lifetimes bounded.
+- Avoid duplicate graph construction in replay-only worker results and
+  reduce redundant queue counting while keeping canonical replay order.
+- Restore bounded native tiling workers. Keep Rust BuildUp as the default;
+  supported PC requests can explicitly opt into placement-dependency analysis.
 
 ## 0.9.0 - 2026-11-21
 
@@ -77,7 +79,7 @@
   unqualified profile targets remain unavailable and cannot mint release
   authority before whole-domain completeness and offline exact parity exist.
 
-## Earlier 0.8.0 notes - 2026-09-05
+## 0.8.0 - 2026-09-05
 
 - Retained complete, identity-checked source coverage for native parallel score
   portfolios instead of incorrectly marking their producer evidence incomplete.

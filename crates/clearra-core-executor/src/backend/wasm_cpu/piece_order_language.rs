@@ -1,6 +1,6 @@
 use std::{collections::HashMap, sync::Arc};
 
-#[cfg(any(test, feature = "local-search-ab"))]
+#[cfg(any(test, feature = "local-search-ab", feature = "placement-dependency-pc"))]
 use clearra_core_domain::piece::piece_kind::PieceKind;
 
 use super::{buildup::BuildOrderGraph, mix_digest, WasmExactSearchError};
@@ -587,6 +587,25 @@ impl PieceOrderLanguageCache {
         )
     }
 
+    #[cfg(feature = "placement-dependency-pc")]
+    pub(super) fn compile_product_closed_prefix_language(
+        &mut self,
+        pieces: &[PieceKind],
+        permitted_parents: &[[u64; super::symbolic_prefix_domain::MAX_PREFIX_WORDS]],
+        active: &[u64; super::symbolic_prefix_domain::MAX_PREFIX_WORDS],
+        inspected_edges: &mut usize,
+    ) -> Result<Option<u32>, WasmExactSearchError> {
+        // Product uses the existing exact bottom-up subset language, irrespective
+        // of whether a local experiment mode is also compiled into this binary.
+        self.compile_closed_prefix_language_with_mode(
+            pieces,
+            permitted_parents,
+            active,
+            inspected_edges,
+            Some(0),
+        )
+    }
+
     #[cfg(any(
         test,
         all(
@@ -601,6 +620,7 @@ impl PieceOrderLanguageCache {
 
     #[cfg(any(
         test,
+        feature = "placement-dependency-pc",
         all(
             feature = "local-search-ab",
             feature = "parallel",
@@ -615,7 +635,7 @@ impl PieceOrderLanguageCache {
         inspected_edges: &mut usize,
         // None selects the process experiment mode; Some(0) forces the
         // reference, while a small positive bound tests exact fallback.
-        explicit_frontier_budget: Option<usize>,
+        _explicit_frontier_budget: Option<usize>,
     ) -> Result<Option<u32>, WasmExactSearchError> {
         use super::symbolic_prefix_domain::{PrefixDomain, MAX_PREFIX_WORDS};
 
@@ -640,29 +660,39 @@ impl PieceOrderLanguageCache {
         {
             return Err(invalid());
         }
-        let frontier_budget = if let Some(budget) = explicit_frontier_budget {
-            budget
-        } else if closed_prefix_frontier::experiment_enabled()? {
-            closed_prefix_frontier::MAX_FRONTIER_STATES
-        } else {
-            0
-        };
-        if frontier_budget != 0 {
-            let mut frontier = std::mem::take(&mut self.prefix_frontier);
-            let root = frontier.compile(
-                self,
-                pieces,
-                permitted_parents,
-                active,
-                full,
-                frontier_budget,
-                inspected_edges,
-            );
-            self.prefix_frontier = frontier;
-            if let Some(root) = root? {
-                self.prefix_frontier_compilations =
-                    self.prefix_frontier_compilations.saturating_add(1);
-                return Ok(Some(root));
+        #[cfg(any(
+            test,
+            all(
+                feature = "local-search-ab",
+                feature = "parallel",
+                not(target_family = "wasm")
+            )
+        ))]
+        {
+            let frontier_budget = if let Some(budget) = _explicit_frontier_budget {
+                budget
+            } else if closed_prefix_frontier::experiment_enabled()? {
+                closed_prefix_frontier::MAX_FRONTIER_STATES
+            } else {
+                0
+            };
+            if frontier_budget != 0 {
+                let mut frontier = std::mem::take(&mut self.prefix_frontier);
+                let root = frontier.compile(
+                    self,
+                    pieces,
+                    permitted_parents,
+                    active,
+                    full,
+                    frontier_budget,
+                    inspected_edges,
+                );
+                self.prefix_frontier = frontier;
+                if let Some(root) = root? {
+                    self.prefix_frontier_compilations =
+                        self.prefix_frontier_compilations.saturating_add(1);
+                    return Ok(Some(root));
+                }
             }
         }
         self.ensure_buckets();
@@ -1679,6 +1709,24 @@ mod tests {
             );
             assert_eq!(cache.frontier_compilations(), expected_frontiers);
         }
+    }
+
+    #[cfg(feature = "placement-dependency-pc")]
+    #[test]
+    fn product_prefix_language_preserves_overlapping_same_kind_suffixes() {
+        use PieceKind::{I, O};
+
+        let (parents, active) = prefix_path_masks(&[[0, 2, 1], [1, 0, 2], [1, 2, 0]]);
+        let mut cache = PieceOrderLanguageCache::default();
+        let root = cache
+            .compile_product_closed_prefix_language(&[I, I, O], &parents, &active, &mut 0)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            words(&cache, root),
+            BTreeSet::from([vec![1, 1, 2], vec![1, 2, 1]])
+        );
+        assert_eq!(cache.frontier_compilations(), 0);
     }
 
     #[test]

@@ -107,8 +107,8 @@ PC専用の幾何学的配置検索を実行し、供給されるミノと正確
 objective all、count allで完全なリプレイ経路を専用検索します。各手順は配置、元のミノ列、ホールドと読み取り位置の遷移、消費ミノ数、ライン消去を保持します。--tablebaseは正確に適格化された完全候補群だけを使用し、オフライン探索を自動開始しません。最適集合の同率候補ではなく、同率集合のメタデータやページ継続カーソルは含みません。"#
         }
         ProductHelpTopic::PcChance => {
-            r#"使い方: clearra pc chance --lines 2 [--patterns PATTERN | --queue IOTSZJL] [--hold|--no-hold] [--rule srs-plus|srs|srs-x|jstris-180|no-kick] [--backend auto|cpu|gpu|hybrid] [--workers N|--auto-workers N] [--max-patterns N]
-PC確率の専用検索を実行し、入力ミノ順全体に対する完全な確率を返します。トップレベルのchanceとpercentは従来互換の汎用結果を返します。"#
+            r#"使い方: clearra pc chance --lines 2 [--patterns PATTERN | --queue IOTSZJL] [--hold|--no-hold] [--rule srs-plus|srs|srs-x|jstris-180|no-kick] [--backend auto|cpu|gpu|hybrid] [--workers N|--auto-workers N] [--max-patterns N] [--build-dependency-dag|--no-build-dependency-dag]
+元のミノ順全体に対する正確なPC成功率を返します。--build-dependency-dagを指定すると、同じ結果を証明できる場合は依存関係に基づいて検証し、それ以外は標準の検索を使用します。既定では無効です。トップレベルのchanceとpercentは従来互換の汎用結果を返します。"#
         }
         ProductHelpTopic::PcScore => {
             r#"使い方: clearra pc score --lines 2 [--patterns PATTERN | --queue IOTSZJL] [--hold|--no-hold] [--score-profile tetrio|guideline|jstris-ultra] [--spin-profile disabled|t-spin-simple|t-spins|t-spins-plus|all-spin|all-spin-plus|all-mini|all-mini-plus] [--initial-b2b N] [--rule srs-plus|srs|srs-x|jstris-180|no-kick] [--workers N|--auto-workers N] [--use-all-cpu-threads] [--cpu-warmup] [--tablebase|--no-tablebase]

@@ -3,6 +3,16 @@ use std::sync::Arc;
 
 mod compact_snapshot;
 pub mod generic_board64_search;
+#[cfg(any(
+    feature = "placement-dependency-pc",
+    test,
+    all(
+        feature = "local-search-ab",
+        feature = "parallel",
+        not(target_family = "wasm")
+    )
+))]
+mod placement_dependency;
 pub use compact_snapshot::{
     CompactBuildUpEdge, CompactBuildUpNode, CompactBuildUpSnapshot, CompactBuildUpSnapshotError,
     CompactBuildUpTransitionMode, RustCompactBuildUpWorkspace,
@@ -2105,7 +2115,7 @@ fn verify_candidate_for_completion_mode(
                 "wasm_symbolic_prefix_unsupported_evidence",
             ));
         }
-        return verify_strict_prefix_order(
+        return placement_dependency::verify_strict(
             problem,
             catalog,
             candidate,
@@ -2113,6 +2123,26 @@ fn verify_candidate_for_completion_mode(
             control,
             profile_scale,
         );
+    }
+    #[cfg(feature = "placement-dependency-pc")]
+    if use_builtin_rule
+        && matches!(completion, BuildCompletion::ClearToEmpty)
+        && !retain_trace
+        && !finesse_requested
+        && !finesse_spin_coverage_requested
+        && !witness_mode.enabled()
+        && placement_dependency::supports_product(problem, catalog, candidate, target)
+    {
+        if let Some(result) = placement_dependency::verify_product(
+            problem,
+            catalog,
+            candidate,
+            workspace,
+            control,
+            profile_scale,
+        )? {
+            return Ok(result);
+        }
     }
     if RealizationFeasibilityWorkspace::dependency_relaxation_is_infeasible(catalog, candidate) {
         return Ok(infeasible_candidate_result(0));
@@ -2208,99 +2238,6 @@ fn verify_candidate_for_completion_mode(
     );
     workspace.recycle_projection(projection);
     result
-}
-
-#[cfg(any(
-    test,
-    all(
-        feature = "local-search-ab",
-        feature = "parallel",
-        not(target_family = "wasm")
-    )
-))]
-fn verify_strict_prefix_order(
-    problem: &SearchProblem,
-    catalog: &GeometryCatalog,
-    candidate: &GeometryCandidate,
-    workspace: &mut BuildUpWorkspace,
-    control: &ExecutionControl,
-    profile_scale: u64,
-) -> Result<CandidateBuildResult, WasmExactSearchError> {
-    use super::symbolic_prefix_orders::{
-        record_strict_prefix_work, SymbolicPrefixOrders, SymbolicPrefixRefusal,
-    };
-
-    let unsupported_supply =
-        || WasmExactSearchError::InvalidProblem("wasm_symbolic_prefix_unsupported_supply");
-    let universe = problem
-        .piece_source()
-        .materialized_universe()
-        .ok_or_else(unsupported_supply)?;
-    if !StandardBagCoverage::supports(universe, problem.initial_hold()) {
-        return Err(unsupported_supply());
-    }
-    record_strict_prefix_work(|work| {
-        work.candidates_attempted += 1;
-        let orders = SymbolicPrefixOrders::compile_with_workspace(
-            catalog,
-            candidate,
-            problem.kick_profile().profile_id(),
-            control,
-            &mut workspace.reachability,
-            work,
-            profile_scale,
-        )
-        .map_err(|reason| match reason {
-            SymbolicPrefixRefusal::Cancelled => WasmExactSearchError::Cancelled,
-            SymbolicPrefixRefusal::Unsupported => {
-                WasmExactSearchError::InvalidProblem("wasm_symbolic_prefix_unsupported_candidate")
-            }
-            SymbolicPrefixRefusal::RelationLimit => {
-                WasmExactSearchError::InvalidProblem("wasm_symbolic_prefix_relation_limit")
-            }
-            SymbolicPrefixRefusal::InconsistentProjection => {
-                WasmExactSearchError::InvalidProblem("wasm_symbolic_prefix_inconsistent_projection")
-            }
-        })?;
-        let language_span =
-            SearchStageSpan::begin_scaled(ExecutorSearchStage::StrictPrefixLanguage, profile_scale);
-        let language = orders.compile_language(&mut workspace.piece_order_languages, work)?;
-        language_span.finish(1);
-        let coverage = match language {
-            Some(root) => {
-                let product_span = SearchStageSpan::begin_scaled(
-                    ExecutorSearchStage::WasmCoverageLanguageProduct,
-                    profile_scale,
-                );
-                #[cfg(all(
-                    feature = "local-search-ab",
-                    feature = "parallel",
-                    not(target_family = "wasm")
-                ))]
-                let bag_product_span = SearchStageSpan::begin_scaled(
-                    ExecutorSearchStage::StrictStandardBagProduct,
-                    profile_scale,
-                );
-                let coverage = workspace
-                    .cover_standard_bag_language(problem, root, control)?
-                    .ok_or_else(unsupported_supply)?;
-                #[cfg(all(
-                    feature = "local-search-ab",
-                    feature = "parallel",
-                    not(target_family = "wasm")
-                ))]
-                bag_product_span.finish(coverage.edge_checks as u64);
-                product_span.finish(coverage.edge_checks as u64);
-                Some(coverage)
-            }
-            None => None,
-        };
-        if control.is_cancelled() {
-            return Err(WasmExactSearchError::Cancelled);
-        }
-        work.candidates_certified += 1;
-        Ok(certified_language_result(coverage))
-    })
 }
 
 // Evidence lives only until this candidate's fallback graph is constructed.
@@ -3140,7 +3077,7 @@ fn verify_certified_poset(
     Ok(Some(certified_language_result(Some(coverage))))
 }
 
-#[cfg(any(test, feature = "local-search-ab"))]
+#[cfg(any(test, feature = "local-search-ab", feature = "placement-dependency-pc"))]
 fn certified_language_result(coverage: Option<StandardBagCoverageResult>) -> CandidateBuildResult {
     let buildable = coverage
         .as_ref()

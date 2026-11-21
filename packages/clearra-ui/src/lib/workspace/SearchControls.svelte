@@ -7,6 +7,7 @@
 
   import {
     updateWorkspaceDraft,
+    workspaceDependencyPreanalysisAvailable,
     type SolverWorkspaceRequest,
     type WorkspaceValidationCode
   } from './solverWorkspaceModel';
@@ -166,21 +167,21 @@
       </label>
       <WorkerAuthorityStatus authority={workerAuthority} {language} />
     </div>
-    {#if dependencyDagControlAvailable}
+    {#if dependencyDagControlAvailable && workspaceDependencyPreanalysisAvailable(request)}
       <div class="dependency-dag-control">
         <label class="workspace-switch-label">
           <input
             type="checkbox"
+            data-pc-control="dependency-preanalysis"
             checked={request.precomputeBuildDependencies}
-            disabled={tilingOnly || pathOnly || fixedScoreProduct}
             on:change={(event) => patch({
               precomputeBuildDependencies: (event.currentTarget as HTMLInputElement).checked
             })}
           />
           <span class="workspace-switch" aria-hidden="true"></span>
-          <span>{label('precomputeBuildDependencies')}</span>
+          <span>{label('pcPrecomputeBuildDependencies')}</span>
         </label>
-        <small class="workspace-field-help">{label('precomputeBuildDependenciesHelp')}</small>
+        <small class="workspace-field-help">{label('pcPrecomputeBuildDependenciesHelp')}</small>
       </div>
     {/if}
   </section>

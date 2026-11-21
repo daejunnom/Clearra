@@ -1,16 +1,20 @@
 // SRP rationale: compile target-frame placement and row-clear conditions once,
 // before tiling, and specialize those conditions without a placement-subset graph.
+#[cfg(any(test, feature = "local-search-ab"))]
 use super::catalog::GeometryCatalog;
 use crate::row_frame::CompactedRowFrame;
 
 pub(super) const MAX_CONDITION_HEIGHT: u8 = 6;
 // This is a bounded prototype. The board64, six-row tetromino catalogs are much
 // smaller, but a future catalog extension must explicitly revisit this bound.
+#[cfg(any(test, feature = "local-search-ab"))]
 const MAX_CONDITION_ROWS: usize = 128 * 1024;
 const MAX_SURVIVING_RUNS: usize = (MAX_CONDITION_HEIGHT as usize).div_ceil(2);
+#[cfg(any(test, feature = "local-search-ab"))]
 const MAX_ORDER_GUARD_RECORDS: usize = 64 * 1024;
 // Order guards are restricted to at most ten columns and six rows. Neither
 // original footprint can own this bit; use it for the known initial term.
+#[cfg(any(test, feature = "local-search-ab"))]
 const INITIAL_TERM: u64 = 1 << 63;
 
 #[cfg(test)]
@@ -30,6 +34,7 @@ pub(super) fn with_precomputed_order_guards<T>(enabled: bool, run: impl FnOnce()
     run()
 }
 
+#[cfg(any(test, feature = "local-search-ab"))]
 pub(super) fn precomputed_order_guards_enabled() -> bool {
     #[cfg(test)]
     {
@@ -109,6 +114,7 @@ impl AtomicRowProjection {
 
     /// Restore original indices for the surviving footprint. Bits in the
     /// physical headroom above the last surviving row have no contributor.
+    #[cfg(any(test, feature = "local-search-ab"))]
     fn surviving_original_cells(&self, physical_cells: u64) -> u64 {
         self.runs[..self.run_count].iter().fold(0, |board, run| {
             board | ((physical_cells << run.shift) & run.original_cells)
@@ -118,6 +124,7 @@ impl AtomicRowProjection {
 
 /// Grounding of one pending lock footprint in a fixed, compacted frame.
 /// A satisfied premise does not prove ILC instantiation or move reachability.
+#[cfg(any(test, feature = "local-search-ab"))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum GroundingSources {
     /// The lock touches the floor or a surviving initial-board cell.
@@ -133,6 +140,7 @@ pub(super) enum GroundingSources {
 /// still count, independently of whether that operation could instantiate
 /// again. Eligibility restricts the possible supporters, not actual execution.
 /// A malformed query is unknown (`None`), not an ungrounded lock.
+#[cfg(any(test, feature = "local-search-ab"))]
 pub(super) fn grounding_sources(
     width: u8,
     initial: u64,
@@ -174,6 +182,7 @@ pub(super) fn grounding_sources(
     })
 }
 
+#[cfg(any(test, feature = "local-search-ab"))]
 #[derive(Clone, Copy, Debug)]
 struct CanonicalPlacement {
     cells: u64,
@@ -186,12 +195,14 @@ struct CanonicalPlacement {
 /// The masks are lifted into the original frame so current executed
 /// operations need not be projected individually just to test intersection.
 /// Neither term certifies a kick, translation, or move on its own.
+#[cfg(any(test, feature = "local-search-ab"))]
 #[derive(Clone, Copy, Debug)]
 pub(super) struct PrecomputedOrderGuard {
     support: u64,
     corridor: u64,
 }
 
+#[cfg(any(test, feature = "local-search-ab"))]
 impl PrecomputedOrderGuard {
     pub(super) const fn ground_at_initial(self) -> bool {
         self.support & INITIAL_TERM != 0
@@ -210,12 +221,14 @@ impl PrecomputedOrderGuard {
     }
 }
 
+#[cfg(any(test, feature = "local-search-ab"))]
 #[derive(Debug)]
 struct PrecomputedOrderGuards {
     offsets: Vec<u32>,
     guards: Vec<PrecomputedOrderGuard>,
 }
 
+#[cfg(any(test, feature = "local-search-ab"))]
 impl PrecomputedOrderGuards {
     fn compile(
         catalog: &GeometryCatalog,
@@ -278,6 +291,7 @@ impl PrecomputedOrderGuards {
     }
 }
 
+#[cfg(any(test, feature = "local-search-ab"))]
 pub(super) fn vertical_entry_mask(lock: u64, width: u8, height: u8) -> u64 {
     // Same collision corridor as the existing hard-drop fast path.
     // Above-target bits cannot intersect a valid board.
@@ -298,6 +312,7 @@ pub(super) fn vertical_entry_mask(lock: u64, width: u8, height: u8) -> u64 {
 ///
 /// The owner must scope use to this particular catalog. No digest is used as an
 /// equality proof, and these conditions do not assert movement reachability.
+#[cfg(any(test, feature = "local-search-ab"))]
 #[derive(Debug)]
 pub(super) struct PlacementConditionCatalog {
     width: u8,
@@ -309,6 +324,7 @@ pub(super) struct PlacementConditionCatalog {
     order_guards: Option<PrecomputedOrderGuards>,
 }
 
+#[cfg(any(test, feature = "local-search-ab"))]
 impl PlacementConditionCatalog {
     /// Conservative additional compile peak for a row-count upper bound,
     /// including temporary exact-domain sorting.
@@ -605,6 +621,7 @@ struct RowConditionGroup {
 pub(super) struct GroupedClearConditions {
     groups: [RowConditionGroup; MAX_CONDITION_HEIGHT as usize],
     group_count: u8,
+    #[cfg(any(test, feature = "local-search-ab"))]
     completed_rows: u16,
 }
 
@@ -625,6 +642,7 @@ impl GroupedClearConditions {
         let mut result = Self {
             groups: [RowConditionGroup::default(); MAX_CONDITION_HEIGHT as usize],
             group_count: 0,
+            #[cfg(any(test, feature = "local-search-ab"))]
             completed_rows,
         };
         let mut pending = completed_rows;
@@ -657,10 +675,12 @@ impl GroupedClearConditions {
         &self.groups[..self.group_count as usize]
     }
 
+    #[cfg(any(test, feature = "local-search-ab"))]
     pub(super) fn group_count(&self) -> usize {
         self.active_groups().len()
     }
 
+    #[cfg(any(test, feature = "local-search-ab"))]
     pub(super) fn atomic_group_count(&self) -> usize {
         self.active_groups()
             .iter()
@@ -669,6 +689,7 @@ impl GroupedClearConditions {
     }
 
     /// Inline groups have no additional retained heap payload.
+    #[cfg(any(test, feature = "local-search-ab"))]
     pub(super) const fn retained_bytes(&self) -> usize {
         0
     }
@@ -689,12 +710,14 @@ impl GroupedClearConditions {
             .map(|group| group.contributors)
     }
 
+    #[cfg(any(test, feature = "local-search-ab"))]
     pub(super) const fn completed_rows(&self) -> u16 {
         self.completed_rows
     }
 
     /// Which original rows complete for these execution bits. This says
     /// nothing about whether a legal order can reach the execution set.
+    #[cfg(any(test, feature = "local-search-ab"))]
     pub(super) fn deleted_rows(&self, executed: u16) -> u16 {
         self.active_groups().iter().fold(0, |deleted, group| {
             if group.contributors & !executed == 0 {
@@ -709,6 +732,7 @@ impl GroupedClearConditions {
     /// Each slot describes only that concrete operation, not a kind or a
     /// reachable child. Indices outside the caller's bounded slots are not
     /// represented; the ordinary subset predicate remains available.
+    #[cfg(any(test, feature = "local-search-ab"))]
     pub(super) fn deleted_rows_with_child_deltas<const N: usize>(
         &self,
         executed: u16,
@@ -730,6 +754,7 @@ impl GroupedClearConditions {
 
     /// Minimal executed set in this geometric frame, or no consistent set.
     /// The minimum may include contributors to several atomic row groups.
+    #[cfg(any(test, feature = "local-search-ab"))]
     pub(super) fn required_for_frame(&self, deleted: u16) -> Option<u16> {
         if deleted & !self.completed_rows() != 0 {
             return None;
@@ -746,6 +771,7 @@ impl GroupedClearConditions {
     /// must be the minimum returned by `required_for_frame(deleted)` for this
     /// same object. The union is not itself a possible executed set: two
     /// optional operations might jointly clear an undeleted row.
+    #[cfg(any(test, feature = "local-search-ab"))]
     pub(super) fn possible_operations_in_frame(
         &self,
         deleted: u16,

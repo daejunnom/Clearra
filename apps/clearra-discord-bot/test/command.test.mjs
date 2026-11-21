@@ -687,6 +687,40 @@ test("Discord commands always use the Clearra exact product path", () => {
   );
 });
 
+test("canonical PC chance dependency survives both transport preparations only in scope", () => {
+  const tokens = [
+    "pc", "chance", "--lines", "4", "--height", "4", "--patterns", "P7P4",
+    "--rule", "jstris-180", "--build-dependency-dag",
+  ];
+  const gateway = prepareClearraArguments(tokens, { outputFormat: "json" });
+  const job = prepareClearraArguments(gateway, { outputFormat: "json", includeSolutionData: true });
+  assert.equal(job.filter((argument) => argument === "--build-dependency-dag").length, 1);
+  assert.deepEqual(job.slice(0, 2), ["pc", "chance"]);
+  assert.throws(
+    () => prepareClearraArguments(tokens.map((argument) => argument === "4" ? "6" : argument)),
+    /requires PC chance, 1–4 lines/u,
+  );
+  assert.throws(
+    () => prepareClearraArguments([...tokens, "--rule", "srs"]),
+    /requires PC chance/u,
+  );
+  for (const incompatible of [
+    ["--count", "all"], ["--score"], ["--queue", "I"], ["--hold", "empty", "--no-hold"],
+  ]) {
+    assert.throws(
+      () => prepareClearraArguments([...tokens, ...incompatible]),
+      /requires PC chance/u,
+    );
+  }
+  assert.throws(
+    () => prepareClearraArguments([...tokens, "--no-build-dependency-dag"]),
+    /only one dependency choice/u,
+  );
+  assert.equal(prepareClearraArguments(tokens.map(
+    (argument) => argument === "chance" ? "path" : argument,
+  )).includes("--build-dependency-dag"), false);
+});
+
 test("Discord owns an adaptive worker ceiling instead of accepting a user override", () => {
   const runtimeSelected = prepareClearraArguments(
     ["pc", "--lines", "2", "--auto-workers", "99"],

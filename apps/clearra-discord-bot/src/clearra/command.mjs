@@ -9,6 +9,11 @@ import {
   projectDiscordPcScoreMinimalsCanonicalResult,
 } from "../discord/pc-score-minimals-result.mjs";
 import { projectDiscordTypedProductResult } from "../discord/typed-product-result.mjs";
+import {
+  NO_PC_DEPENDENCY_FLAG,
+  PC_DEPENDENCY_FLAG,
+  supportsPreparedPcDependencyArguments,
+} from "../discord/pc-dependency-option.mjs";
 
 const JOB_PROTOCOL = "clearra.job.v1";
 const DEFAULT_JOB_ENDPOINT = "http://127.0.0.1:8787/jobs";
@@ -364,8 +369,6 @@ const CONTROLLED_OPTIONS = new Map([
   ["--no-tablebase", 0],
   ["--tb", 0],
   ["--no-tb", 0],
-  ["--build-dependency-dag", 0],
-  ["--no-build-dependency-dag", 0],
   ["--workers", 1],
   ["--auto-workers", 1],
   ["--cpu-threads", 1],
@@ -492,6 +495,7 @@ export function prepareClearraArguments(tokens, execution = {}) {
   }
 
   const output = [command];
+  let pcDependency = null;
   for (let index = 1; index < tokens.length; index += 1) {
     const token = tokens[index];
     const normalizedToken = token.toLowerCase();
@@ -517,12 +521,27 @@ export function prepareClearraArguments(tokens, execution = {}) {
     if (FILE_OPTIONS.has(optionName) && !inlineOperationDocument) {
       throw new Error("File and custom-code inputs are not available through Discord.");
     }
+    if (optionName === PC_DEPENDENCY_FLAG || optionName === NO_PC_DEPENDENCY_FLAG) {
+      // Legacy/non-chance transports never gain this execution option.
+      if (command !== "pc" || tokens[1] !== "chance") continue;
+      if (equalsIndex >= 0 || pcDependency !== null) {
+        throw new Error("PC chance accepts only one dependency choice.");
+      }
+      pcDependency = optionName === PC_DEPENDENCY_FLAG;
+      continue;
+    }
     const controlledWidth = CONTROLLED_OPTIONS.get(optionName);
     if (controlledWidth !== undefined) {
       if (equalsIndex < 0) index += controlledWidth;
       continue;
     }
     output.push(token);
+  }
+  if (pcDependency === true) {
+    if (!supportsPreparedPcDependencyArguments(output)) {
+      throw new Error("Dependency pre-analysis requires PC chance, 1–4 lines, SRS+ or Jstris 180, and P7 or P7P4.");
+    }
+    output.push(PC_DEPENDENCY_FLAG);
   }
 
   const canonicalPcSubcommand = command === "pc" &&

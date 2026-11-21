@@ -24,7 +24,9 @@ online-pc4-tablebase = ["dep:clearra-pc4-tablebase", "dep:serde_json"]
 [dependencies]
 clearra-build-coverage = { path = "../clearra-build-coverage" }
 clearra-core-domain = { path = "../clearra-core-domain" }
-clearra-core-executor = { path = "../clearra-core-executor" }
+# The shared App composition compiles the same PC dependency capability for
+# CLI, Desktop, and Web; requests opt in independently at runtime.
+clearra-core-executor = { path = "../clearra-core-executor", features = ["placement-dependency-pc"] }
 clearra-coverage = { path = "../clearra-coverage" }
 clearra-ctk3 = { path = "../clearra-ctk3" }
 clearra-forward-search = { path = "../clearra-forward-search" }

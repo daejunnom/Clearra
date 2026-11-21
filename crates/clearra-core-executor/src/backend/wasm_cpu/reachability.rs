@@ -1,5 +1,6 @@
 #[cfg(any(
     test,
+    feature = "placement-dependency-pc",
     all(
         feature = "local-search-ab",
         feature = "parallel",
@@ -49,6 +50,7 @@ mod peer_tests;
 
 #[cfg(any(
     test,
+    feature = "placement-dependency-pc",
     all(
         feature = "local-search-ab",
         feature = "parallel",
@@ -59,6 +61,7 @@ mod peer_tests;
 mod symbolic_prefix;
 #[cfg(any(
     test,
+    feature = "placement-dependency-pc",
     all(
         feature = "local-search-ab",
         feature = "parallel",
@@ -68,6 +71,7 @@ mod symbolic_prefix;
 pub(super) use symbolic_prefix::{PrefixLockRelation, PrefixPoseWork};
 #[cfg(any(
     test,
+    feature = "placement-dependency-pc",
     all(
         feature = "local-search-ab",
         feature = "parallel",
@@ -78,6 +82,7 @@ pub(super) use symbolic_prefix::{PrefixLockRelation, PrefixPoseWork};
 mod symbolic_target;
 #[cfg(any(
     test,
+    feature = "placement-dependency-pc",
     all(
         feature = "local-search-ab",
         feature = "parallel",
@@ -650,6 +655,7 @@ pub(super) struct ReachabilityWorkspace {
     scratch: ReachabilityScratch,
     #[cfg(any(
         test,
+        feature = "placement-dependency-pc",
         all(
             feature = "local-search-ab",
             feature = "parallel",
@@ -735,6 +741,7 @@ impl Default for ReachabilityWorkspace {
             scratch: ReachabilityScratch::default(),
             #[cfg(any(
                 test,
+                feature = "placement-dependency-pc",
                 all(
                     feature = "local-search-ab",
                     feature = "parallel",
@@ -1842,6 +1849,7 @@ impl ReachabilityWorkspace {
         let import_bytes = 0;
         #[cfg(any(
             test,
+            feature = "placement-dependency-pc",
             all(
                 feature = "local-search-ab",
                 feature = "parallel",
@@ -1851,6 +1859,7 @@ impl ReachabilityWorkspace {
         let symbolic_reverse_bytes = self.symbolic_reverse_scratch.retained_bytes();
         #[cfg(not(any(
             test,
+            feature = "placement-dependency-pc",
             all(
                 feature = "local-search-ab",
                 feature = "parallel",
@@ -1888,6 +1897,7 @@ impl ReachabilityWorkspace {
 
     #[cfg(any(
         test,
+        feature = "placement-dependency-pc",
         all(
             feature = "local-search-ab",
             feature = "parallel",
@@ -1917,6 +1927,7 @@ impl ReachabilityWorkspace {
 
     #[cfg(any(
         test,
+        feature = "placement-dependency-pc",
         all(
             feature = "local-search-ab",
             feature = "parallel",

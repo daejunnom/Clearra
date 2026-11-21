@@ -192,6 +192,42 @@ test("bare chance shares the typed PC chance contract and percent is retired", (
   }
 });
 
+test("text dependency flag belongs to typed chance, including the bare alias", () => {
+  const base = "--field XXXXXX____ --patterns P7 --lines 1";
+  for (const prefix of ["$", ">"]) {
+    const canonical = parseClearraTextRequest(
+      `${prefix}pc chance ${base} --build-dependency-dag`,
+      prefix,
+    );
+    const alias = parseClearraTextRequest(
+      `${prefix}chance ${base} --build-dependency-dag`,
+      prefix,
+    );
+    assert.equal(canonical.command.capabilityId, "pc.chance");
+    assert.equal(canonical.arguments_.includes("--build-dependency-dag"), true);
+    assert.deepEqual(alias.arguments_, canonical.arguments_);
+    const unique = parseClearraTextRequest(
+      `${prefix}path ${base} --objective unique --build-dependency-dag`,
+      prefix,
+    );
+    assert.equal(unique.command.capabilityId, "pc.chance");
+    assert.deepEqual(unique.arguments_, canonical.arguments_);
+    const off = parseClearraTextRequest(
+      `${prefix}pc chance ${base} --no-build-dependency-dag`,
+      prefix,
+    );
+    assert.deepEqual(off.arguments_, parseClearraTextRequest(`${prefix}pc chance ${base}`, prefix).arguments_);
+    assert.throws(
+      () => parseClearraTextRequest(`${prefix}pc path ${base} --build-dependency-dag`, prefix),
+      /does not expose option/u,
+    );
+    assert.throws(
+      () => parseClearraTextRequest(`${prefix}chance ${base} --build-dependency-dag=off`, prefix),
+      /does not accept a value/u,
+    );
+  }
+});
+
 test("bare score shares the typed PC score contract", () => {
   const base = "--field XXXXXX____ --patterns I --lines 1 --kicktable srs";
   for (const prefix of ["$", ">"] ) {

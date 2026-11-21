@@ -10,6 +10,11 @@ import { decodeViewerDocument } from "../viewer/document.mjs";
 import { DiscordInputError } from "./i18n.mjs";
 import { boundaryRecoveryArguments } from "./boundary-recovery-input.mjs";
 import {
+  PC_DEPENDENCY_FLAG,
+  PC_DEPENDENCY_OPTION,
+  supportsPcDependencyOption,
+} from "./pc-dependency-option.mjs";
+import {
   isStandardBagQueue,
   parseQueuePatternSource,
 } from "./queue-pattern-source.mjs";
@@ -862,6 +867,15 @@ function nativePcArguments(command, values, mode = {}, plannedInput = null) {
   const failedCount = mode.failedQueue
     ? optionalInteger(values, "failed-count", 1, 4_294_967_295)
     : null;
+  const rules = mode.tiling ? [] : nativeRuleArguments(values);
+  const dependency = mode.chance && onOffValue(values, PC_DEPENDENCY_OPTION, false);
+  if (dependency && !supportsPcDependencyOption({ lines, rule: rules[1], patterns: next })) {
+    throw new DiscordInputError(
+      "options.pc_dependency_scope",
+      {},
+      "Dependency pre-analysis requires 1–4 PC lines, SRS+ or Jstris 180, and P7 or P7P4.",
+    );
+  }
   return [
     ...command.argvPrefix,
     "--lines", String(lines),
@@ -888,7 +902,8 @@ function nativePcArguments(command, values, mode = {}, plannedInput = null) {
     ...(initialB2b !== null ? ["--initial-b2b", String(initialB2b)] : []),
     ...(solutionProbabilities ? ["--solution-probabilities"] : []),
     ...(failedCount !== null ? ["--failed-count", String(failedCount)] : []),
-    ...(mode.tiling ? [] : nativeRuleArguments(values)),
+    ...rules,
+    ...(dependency ? [PC_DEPENDENCY_FLAG] : []),
   ];
 }
 
@@ -2807,7 +2822,7 @@ function allowedOptionNames(command) {
         "preserve-b2b",
       ]);
     case "pc-chance-v2":
-      return new Set(["field", "next", "lines", "hold", "kicktable"]);
+      return new Set(["field", "next", "lines", "hold", "kicktable", PC_DEPENDENCY_OPTION]);
     case "pc-save-v2":
       return new Set(["field", "next", "lines", "hold", "kicktable"]);
     case "pc-score-v2":

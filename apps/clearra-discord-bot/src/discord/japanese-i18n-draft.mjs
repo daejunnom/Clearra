@@ -205,6 +205,7 @@ export const JAPANESE_DISCORD_MESSAGES = Object.freeze({
   "input.options.spin_fill_bounds": "fill-bottomはfill-topより小さい値にしてください。",
   "input.options.finesse_score_unsupported": "最小操作数計算ではaggregation、spin-profile、preserve-b2bを指定できません。",
   "input.options.finesse_spin_dependency": "spin-profileにはaggregation=spinまたはpreserve-b2b=onが必要です。",
+  "input.options.pc_dependency_scope": "配置の事前確認には1〜4行PC、SRS+またはJstris 180、P7またはP7P4が必要です。",
   "input.options.invalid": "{option}の値が無効です。",
   "input.source.invalid": "キューまたはパターンの指定が無効です。",
   "security.rate_limited": "このアカウントからのリクエストが多すぎます。しばらく待ってからもう一度お試しください。",

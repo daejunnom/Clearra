@@ -503,6 +503,59 @@ struct OracleCaseOutcome {
     first_clear_masks: BTreeSet<u16>,
 }
 
+#[cfg(feature = "placement-dependency-pc")]
+#[test]
+fn product_pc_placement_dependencies_match_concrete_p7_coverage() {
+    let origin = P7Origin::new(CTK_ORIGIN);
+    let run = |precompute_dependencies| {
+        let problem = ProblemCompiler::compile_scenario_pc(
+            &PcScenarioQuery::new(
+                PcScenarioBoard::standard_10(u16::from(PROOF_HEIGHT), origin.initial),
+                PcQueueInput::standard_7_bag(),
+                PieceWindow::new(origin.locks),
+            )
+            .with_rule(srs_plus())
+            .with_allow_hold(true)
+            .with_exact_pieces(Some(origin.locks))
+            .with_supply_window_size(SupplyWindowSize::new(DRAWS))
+            .with_count_policy(PcCountPolicy::CountUnique)
+            .with_solution_probability_policy(PcSolutionProbabilityPolicy::Include)
+            .with_retained_trace_limit(0)
+            .with_execution_policy(
+                PcExecutionPolicy::mvp_default()
+                    .with_requested_backend(RequestedSearchBackend::Cpu)
+                    .with_allow_backend_fallback(false)
+                    .with_workers(1)
+                    .with_exact_legal_board_enabled(false)
+                    .with_conditioned_reachability_enabled(false)
+                    .with_tablebase_requested(false)
+                    .with_precompute_build_dependencies(precompute_dependencies),
+            ),
+        )
+        .unwrap()
+        .with_output_policy(SearchOutputPolicy::CoverageSummary);
+        WasmCpuSearchBackend::execute_with_control(&problem, &ExecutionControl::default())
+            .expect("complete product P7 run")
+    };
+
+    let concrete = run(false);
+    let dependency = run(true);
+    assert_eq!(concrete.solution_coverages().len(), 246);
+    assert_eq!(
+        dependency.solution_coverages(),
+        concrete.solution_coverages()
+    );
+    assert_eq!(
+        dependency.field("coverage_probability"),
+        concrete.field("coverage_probability")
+    );
+    assert!(concrete
+        .usize_field("total_build_order_nodes")
+        .is_some_and(|nodes| nodes > 0));
+    assert_eq!(dependency.usize_field("total_build_order_nodes"), Some(0));
+    assert_eq!(dependency.usize_field("total_reachability_states"), Some(0));
+}
+
 fn verify_oracle_case(
     origin: P7Origin,
     profile: KickTableProfileId,

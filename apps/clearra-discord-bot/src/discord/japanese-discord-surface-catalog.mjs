@@ -1,5 +1,6 @@
 // Translation-only review catalogs. Missing source text must fail review rather than fall back.
 export const JAPANESE_DESCRIPTIONS = Object.freeze({
+  "Optional placement pre-check for 1–4 PC lines": "1〜4行PCの配置を事前に確認します",
   "Show the exact syntax and limits for a Clearra command": "Clearraコマンドの正確な入力方法と制限を表示します",
   "Command to explain; omit it to list every command group": "説明するコマンド。省略すると全コマンドグループを表示します",
   "Download an original GIF from a recent Clearra field preview": "最近のClearra盤面プレビューから元のGIFを取得します",
@@ -306,6 +307,7 @@ export const JAPANESE_NAMES = Object.freeze({
   "guaranteed": "確定",
   "final-piece": "最後のミノ",
   "dependency-report": "依存関係レポート",
+  dependency: "配置事前確認",
   "utility": "ツール",
   "sequence": "配置手順",
   "attachment": "添付ファイル",
@@ -479,6 +481,7 @@ export const JAPANESE_HELP_DESCRIPTIONS = Object.freeze({
 });
 
 export const JAPANESE_HELP_TEXT = Object.freeze({
+  "`dependency:on` adds a placement pre-check without changing results. All evaluated targets must be 1–4 lines, with SRS+ or Jstris 180 and P7 or P7P4. Supply `field` and `next` directly when setting this option. The default is off.": "`dependency:on`は結果を変えずに配置を事前確認します。すべての対象が1〜4行で、SRS+またはJstris 180とP7またはP7P4を指定する必要があります。このオプションを使う場合は`field`と`next`を直接指定してください。既定値はoffです。",
   "**Clearra slash commands**": "**Clearraのスラッシュコマンド**",
   "Render files: `/render-file` or `Apps → Get original GIF` on a preview message (command fields render inside their own command)": "画像の取得: `/render-file`またはプレビューメッセージの`Apps → Get original GIF`を使います（各コマンドの盤面はそのコマンド内で描画されます）。",
   "Perfect clears: `/pc path|chance|minimals|score|saves|best-save|score-minimals|tiling|failed-queue|score-finder|allspin-sol|allspin-pres-chance`": "パーフェクトクリア: `/pc path|chance|minimals|score|saves|best-save|score-minimals|tiling|failed-queue|score-finder|allspin-sol|allspin-pres-chance`",

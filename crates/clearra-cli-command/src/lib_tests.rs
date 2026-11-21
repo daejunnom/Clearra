@@ -969,43 +969,35 @@ fn typed_pc_candidate_products_preserve_explicit_tablebase_policy() {
 
 #[test]
 fn shared_cli_build_dependency_dag_is_opt_in_for_pc() {
-    let default_pc = CliCommandParser::parse("clearra pc --lines 4 --backend cpu")
-        .expect("default PC command")
-        .to_app_request()
-        .expect("default PC request");
-    let AppCommand::Pc(command) = default_pc.command() else {
-        panic!("expected AppCommand::Pc");
-    };
-    assert!(!command
-        .query()
-        .execution_policy()
-        .precompute_build_dependencies());
-
-    let enabled_pc =
-        CliCommandParser::parse("clearra pc --lines 4 --backend cpu --build-dependency-dag")
-            .expect("dependency DAG PC command")
-            .to_app_request()
-            .expect("dependency DAG PC request");
-    let AppCommand::Pc(command) = enabled_pc.command() else {
-        panic!("expected AppCommand::Pc");
-    };
-    assert!(command
-        .query()
-        .execution_policy()
-        .precompute_build_dependencies());
-
-    let disabled_pc =
-        CliCommandParser::parse("clearra pc --lines 4 --backend cpu --no-build-dependency-dag")
-            .expect("disabled dependency DAG PC command")
-            .to_app_request()
-            .expect("disabled dependency DAG PC request");
-    let AppCommand::Pc(command) = disabled_pc.command() else {
-        panic!("expected AppCommand::Pc");
-    };
-    assert!(!command
-        .query()
-        .execution_policy()
-        .precompute_build_dependencies());
+    for (subcommand, contract) in [
+        ("", None),
+        (" chance", Some(ProductCapabilityContract::PcChance)),
+    ] {
+        for (selection, expected) in [
+            ("", false),
+            (" --build-dependency-dag", true),
+            (" --no-build-dependency-dag", false),
+        ] {
+            let source =
+                format!("clearra pc{subcommand} --lines 2 --patterns P7 --backend cpu{selection}");
+            let request = CliCommandParser::parse(&source)
+                .expect(&source)
+                .to_app_request()
+                .expect(&source);
+            assert_eq!(request.product_capability_contract(), contract, "{source}");
+            let AppCommand::Pc(command) = request.command() else {
+                panic!("expected AppCommand::Pc for {source}");
+            };
+            assert_eq!(
+                command
+                    .query()
+                    .execution_policy()
+                    .precompute_build_dependencies(),
+                expected,
+                "{source}"
+            );
+        }
+    }
 }
 
 #[test]

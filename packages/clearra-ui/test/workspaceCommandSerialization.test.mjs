@@ -10,6 +10,8 @@ import {
   scenarioPieceWindow,
   clearCompletedRows,
   trimBoardMask,
+  updateWorkspaceDraft,
+  workspaceDependencyPreanalysisAvailable,
   workspaceValidationCodes,
   workspaceRequestForDesktop
 } from '../src/lib/workspace/solverWorkspaceModel.ts';
@@ -160,11 +162,13 @@ test('extended workspace guards result and option capabilities separately from t
     assert.ok(!workspaceValidationCodes(corrected, 'desktop')
       .includes('visible-seven-minimum-cover-unsupported'));
   }
-  for (const change of [
-    { tablebaseEnabled: true }, { precomputeBuildDependencies: true }]) {
-    assert.ok(workspaceValidationCodes({ ...base, ...change }, 'web')
-      .includes('pc_extended_options_unavailable'));
-  }
+  assert.ok(workspaceValidationCodes({ ...base, tablebaseEnabled: true }, 'web')
+    .includes('pc_extended_options_unavailable'));
+  const inactiveDependencyOption = { ...base, queue: 'P7P7P7P7P7P7P7P7P4',
+    precomputeBuildDependencies: true };
+  assert.ok(!workspaceValidationCodes(inactiveDependencyOption, 'web')
+    .includes('pc_extended_options_unavailable'));
+  assert.equal(buildWorkspaceCommandArguments(inactiveDependencyOption).includes('--build-dependency-dag'), false);
   for (const backend of ['auto', 'gpu', 'hybrid']) {
     const request = { ...base, backend };
     for (const surface of ['web', 'desktop']) {
@@ -183,6 +187,49 @@ test('extended workspace guards result and option capabilities separately from t
   for (const lines of [1, 3, 5, 6]) {
     assert.ok(!workspaceValidationCodes({ ...base, lines, workers: 11, scoreMode: 'minimum-cover' }, 'web')
       .some(code => code.startsWith('pc_extended_')), 'compact product semantics stay unchanged');
+  }
+});
+
+test('qualified PC dependency preanalysis is a single explicit option shared by Web and Desktop', () => {
+  assert.equal(createDefaultWorkspaceRequest().precomputeBuildDependencies, false);
+  for (const input of [
+    { queue: 'p7, p4' },
+    { queue: 'P7', boardMask: 0x3c0f03c0fn, rule: 'jstris-180' },
+    { queue: 'P7', lines: 1, boardMask: 0x3fn, holdEnabled: false }
+  ]) {
+    const ready = { ...createDefaultWorkspaceRequest(), ...input };
+    assert.equal(workspaceDependencyPreanalysisAvailable(ready), true, input.queue);
+    const off = buildWorkspaceCommandArguments(ready);
+    const on = buildWorkspaceCommandArguments({ ...ready, precomputeBuildDependencies: true });
+    assert.equal(off.includes('--build-dependency-dag'), false);
+    assert.equal(off.includes('--no-build-dependency-dag'), false);
+    assert.equal(on.filter(arg => arg === '--build-dependency-dag').length, 1);
+    assert.deepEqual(on.filter(arg => arg !== '--build-dependency-dag'), off);
+    assert.equal(on[on.indexOf('--count') + 1], 'unique');
+    assert.deepEqual(workspaceRequestForDesktop({ ...ready, precomputeBuildDependencies: true }, 'ko').arguments, on);
+  }
+});
+
+test('unqualified PC modes and inputs retain their normal execution without a dependency flag', () => {
+  const selected = { ...createDefaultWorkspaceRequest(), queue: 'P7P4',
+    precomputeBuildDependencies: true };
+  for (const change of [
+    ...['tiling', 'path', 'minimum-cover', 'summary', 'score-finder', 'score-minimals', 'failed-queue']
+      .map(scoreMode => ({ scoreMode })),
+    ...['srs', 'srs-x', 'no-kick'].map(rule => ({ rule })),
+    { lines: 0 }, { lines: 5 }, { lines: 24 }, { queueKnowledge: 'visible-7' },
+    { tablebaseEnabled: true }, { preserveB2B: true },
+    { queue: '' }, { queue: 'IOTSZLJIOTS' }, { queue: 'P7' }, { queue: 'P4P7' },
+    { queue: 'P7P4;P7P4' }, { boardMask: 1n << 40n }
+  ]) {
+    const draft = updateWorkspaceDraft(selected, change);
+    assert.equal(draft.precomputeBuildDependencies, true);
+    assert.equal(workspaceDependencyPreanalysisAvailable(draft), false, JSON.stringify({
+      ...change, ...(change.boardMask === undefined ? {} : { boardMask: String(change.boardMask) })
+    }));
+    const ordinary = buildWorkspaceCommandArguments({ ...draft, precomputeBuildDependencies: false });
+    assert.deepEqual(buildWorkspaceCommandArguments(draft), ordinary);
+    assert.deepEqual(workspaceRequestForDesktop(draft, 'en').arguments, ordinary);
   }
 });
 

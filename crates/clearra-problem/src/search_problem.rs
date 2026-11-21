@@ -691,6 +691,95 @@ mod model {
             Option<Vec<StandardBoard64ColoredTilingIdentity>>,
     }
 }
+mod pc_placement_dependency {
+    use clearra_core_domain::objective::objective_kind::ObjectiveKind;
+    use clearra_pc_graph::request::RequestedSearchBackend;
+    use clearra_rules::kicks::KickTableProfileId;
+    use clearra_supply::bag::BagState;
+
+    use crate::goal::SearchGoal;
+
+    use super::{
+        CountPolicy, PcChanceEvidencePolicy, SearchOutputPolicy, SearchProblem, SearchProblemPreset,
+    };
+
+    impl SearchProblem {
+        /// Whether the compiled PC request opts into the bounded placement
+        /// dependency proof. This grants neither a candidate proof nor an
+        /// alternative result contract. The CPU verifier still checks its
+        /// candidate, retained witness and resource boundaries.
+        pub fn pc_placement_dependency_requested(&self) -> bool {
+            let backend = self.backend_policy();
+            if !backend.precompute_build_dependencies() {
+                return false;
+            }
+            let ordinary = self.pc_chance_evidence_policy() == PcChanceEvidencePolicy::Disabled
+                && matches!(
+                    self.output_policy(),
+                    SearchOutputPolicy::Trace
+                        | SearchOutputPolicy::Summary
+                        | SearchOutputPolicy::CoverageSummary
+                );
+            let chance = self.pc_chance_evidence_policy()
+                == PcChanceEvidencePolicy::PcProbabilityV2
+                && self.output_policy() == SearchOutputPolicy::CoverageSummary
+                && self.objective().kind() == ObjectiveKind::Unique
+                && !self.solution_probability_policy().requested();
+            if !(ordinary || chance)
+                || !matches!(
+                    self.preset(),
+                    SearchProblemPreset::OpeningPc | SearchProblemPreset::ScenarioPc
+                )
+                || !matches!(self.search_goal(), SearchGoal::ClearToEmpty)
+                || self.initial_board().width() != 10
+                || self.initial_board().has_extended_occupancy()
+                || !(1..=4).contains(&self.visible_height())
+                || !(1..=4).contains(&self.compact_pc_geometry_height())
+                || self.scenario.setup_query().is_some()
+                || self.scenario.build_query().is_some()
+                || self.scenario.core_query().verified_kick_profile().is_some()
+                || self.rule_profile.verified_kick_profile().is_some()
+                || !matches!(
+                    self.kick_profile().profile_id(),
+                    KickTableProfileId::SrsPlus | KickTableProfileId::Jstris180
+                )
+                || !matches!(
+                    self.objective().kind(),
+                    ObjectiveKind::All | ObjectiveKind::Unique
+                )
+                || self.count_policy() != CountPolicy::CountUnique
+                || self.objective().score().requested()
+                || self.objective().execution_constraints().requested()
+                || self.build_replay_evidence_requested()
+                || self.allowed_colored_solution_identities().is_some()
+                || self
+                    .queue_observation_policy()
+                    .requires_observation_policy()
+                || !matches!(
+                    backend.requested_backend(),
+                    RequestedSearchBackend::Cpu | RequestedSearchBackend::Auto
+                )
+                || backend.tablebase_requested()
+                || self.budget().max_nodes() != 0
+                || backend.max_candidates() != 0
+                || backend.max_frontier_states() != 0
+                || backend.max_memory_mib().is_some()
+            {
+                return false;
+            }
+            let initial_hold = self.initial_hold();
+            initial_hold.cursor() == 0
+                && initial_hold.bag_epoch() == 0
+                && initial_hold.bag_remainder_key()
+                    == BagState::fresh_standard_7_bag().packed_remainder_key()
+                && self
+                    .piece_source()
+                    .materialized_universe()
+                    .and_then(|universe| universe.complete_standard_bag_ordinals())
+                    .is_some()
+        }
+    }
+}
 mod retained_capacity {
     use clearra_objectives::policy::objective_policy::ObjectivePolicy;
 
@@ -878,7 +967,8 @@ mod retained_capacity {
                     .requires_observation_policy()
                     && !ordinary_source)
                 || self.backend_policy().tablebase_requested()
-                || self.backend_policy().precompute_build_dependencies()
+                || (self.backend_policy().precompute_build_dependencies()
+                    && !self.pc_placement_dependency_requested())
             {
                 return None;
             }
@@ -1202,6 +1292,128 @@ mod retained_capacity {
                 constrained.checked_pc_family_pointee_retained_bytes(),
                 manual_expected(&constrained)
             );
+        }
+
+        #[test]
+        fn compact_pc_dependency_opt_in_preserves_supported_family_memory_authority() {
+            use clearra_pc_graph::request::{PcExecutionPolicy, PcSolutionProbabilityPolicy};
+            use clearra_rules::profile::builtin_rules::jstris_180;
+
+            let policy = PcExecutionPolicy::mvp_default().with_precompute_build_dependencies(true);
+            let ordinary_query = OpeningPcSearchQuery::new(PcTarget::two_lines())
+                .with_queue(PcQueueInput::standard_7_bag())
+                .with_objective(ObjectivePolicy::unique());
+            let baseline = ProblemCompiler::compile_opening_pc(&ordinary_query).unwrap();
+            assert!(!baseline.pc_placement_dependency_requested());
+            assert!(baseline
+                .checked_pc_family_pointee_retained_bytes()
+                .is_some());
+
+            let ordinary_query = ordinary_query.with_execution_policy(policy.clone());
+            let ordinary = ProblemCompiler::compile_opening_pc(
+                &ordinary_query
+                    .clone()
+                    .with_solution_probability_policy(PcSolutionProbabilityPolicy::Include),
+            )
+            .unwrap();
+            assert!(ordinary.pc_placement_dependency_requested());
+            assert_eq!(
+                ordinary.checked_pc_family_pointee_retained_bytes(),
+                manual_expected(&ordinary)
+            );
+            let chance = ProblemCompiler::compile_opening_percent(&ordinary_query)
+                .unwrap()
+                .with_pc_chance_probability_v2_evidence();
+            assert!(chance.pc_placement_dependency_requested());
+            assert_eq!(
+                chance.checked_pc_family_pointee_retained_bytes(),
+                manual_expected(&chance)
+            );
+
+            let one_line = ProblemCompiler::compile_scenario_pc(
+                &PcScenarioQuery::new(
+                    PcScenarioBoard::standard_10(1, 0x3f0),
+                    PcQueueInput::standard_7_bag(),
+                    PieceWindow::new(1),
+                )
+                .with_exact_pieces(Some(1))
+                .with_allow_hold(true)
+                .with_hold_piece(Some(PieceKind::I))
+                .with_objective(ObjectivePolicy::unique())
+                .with_count_policy(PcCountPolicy::CountUnique)
+                .with_rule(jstris_180())
+                .with_execution_policy(policy),
+            )
+            .unwrap();
+            assert!(one_line.pc_placement_dependency_requested());
+            assert!(one_line
+                .checked_pc_family_pointee_retained_bytes()
+                .is_some());
+        }
+
+        #[test]
+        fn compact_pc_dependency_opt_in_does_not_authorize_other_families() {
+            use clearra_pc_graph::request::{PcExecutionPolicy, RequestedSearchBackend};
+            use clearra_rules::profile::builtin_rules::srs;
+            use clearra_supply::QueueObservationPolicy;
+
+            let policy = PcExecutionPolicy::mvp_default().with_precompute_build_dependencies(true);
+            let base = OpeningPcSearchQuery::new(PcTarget::two_lines())
+                .with_queue(PcQueueInput::standard_7_bag())
+                .with_objective(ObjectivePolicy::unique())
+                .with_execution_policy(policy.clone());
+            for query in [
+                base.clone()
+                    .with_execution_policy(policy.clone().with_max_candidates(1)),
+                base.clone()
+                    .with_execution_policy(policy.clone().with_max_frontier_states(1)),
+                base.clone()
+                    .with_execution_policy(policy.clone().with_max_nodes(1)),
+                base.clone()
+                    .with_execution_policy(policy.clone().with_max_memory_mib(Some(16))),
+                base.clone()
+                    .with_execution_policy(policy.clone().with_max_patterns(1)),
+                base.clone()
+                    .with_execution_policy(policy.clone().with_tablebase_requested(true)),
+                base.clone().with_execution_policy(
+                    policy
+                        .clone()
+                        .with_requested_backend(RequestedSearchBackend::Gpu),
+                ),
+                base.clone().with_rule(srs()),
+                base.clone().with_objective(ObjectivePolicy::all()),
+                base.clone()
+                    .with_queue_observation_policy(QueueObservationPolicy::VisibleSeven),
+                base.clone()
+                    .with_queue(PcQueueInput::fixed_sequence(FixedSequence::new(vec![
+                        PieceKind::I,
+                        PieceKind::O,
+                        PieceKind::T,
+                        PieceKind::S,
+                        PieceKind::Z,
+                    ]))),
+                OpeningPcSearchQuery::new(PcTarget::six_lines())
+                    .with_queue(PcQueueInput::standard_7_bag())
+                    .with_objective(ObjectivePolicy::unique())
+                    .with_execution_policy(policy),
+            ] {
+                let problem = ProblemCompiler::compile_opening_pc(&query).unwrap();
+                assert!(!problem.pc_placement_dependency_requested(), "{query:?}");
+                assert!(problem.checked_pc_family_pointee_retained_bytes().is_none());
+            }
+
+            let ready = ProblemCompiler::compile_opening_pc(&base).unwrap();
+            assert!(!ready
+                .clone()
+                .with_pc_path_v2_evidence()
+                .pc_placement_dependency_requested());
+            assert!(!ready
+                .clone()
+                .with_pc_failed_queue_v2_evidence(2)
+                .pc_placement_dependency_requested());
+            assert!(!ready
+                .with_build_replay_evidence()
+                .pc_placement_dependency_requested());
         }
 
         #[test]

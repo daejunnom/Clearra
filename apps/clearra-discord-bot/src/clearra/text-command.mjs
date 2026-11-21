@@ -5,6 +5,11 @@ import {
 import { findTextCommand } from "../discord/slash-command-catalog.mjs";
 import { hiddenTextSearchCapabilities } from "../discord/capability-registry.mjs";
 import {
+  NO_PC_DEPENDENCY_FLAG,
+  PC_DEPENDENCY_FLAG,
+  PC_DEPENDENCY_OPTION,
+} from "../discord/pc-dependency-option.mjs";
+import {
   buildSlashCommandArgumentPlan,
   DISCORD_PACKED_OPTION_KEYS,
 } from "../discord/slash-command-input.mjs";
@@ -14,8 +19,6 @@ const HOST_CONTROLLED_OPTIONS = new Map([
   ["--no-tablebase", 0],
   ["--tb", 0],
   ["--no-tb", 0],
-  ["--build-dependency-dag", 0],
-  ["--no-build-dependency-dag", 0],
   ["--workers", 1],
   ["--auto-workers", 1],
   ["--cpu-threads", 1],
@@ -462,6 +465,20 @@ function readCatalogTextOptions(command, tokens) {
     const parsed = optionToken(token);
     if (!parsed) {
       positional.push(token);
+      continue;
+    }
+
+    if (parsed.name === PC_DEPENDENCY_FLAG || parsed.name === NO_PC_DEPENDENCY_FLAG) {
+      if (command.capabilityId !== "pc.chance") {
+        throw new Error(`Text command /${command.name} does not expose option '${parsed.name}'.`);
+      }
+      if (parsed.value !== null) {
+        throw new Error(`${parsed.name} is a flag and does not accept a value.`);
+      }
+      options.push({
+        name: PC_DEPENDENCY_OPTION,
+        value: parsed.name === PC_DEPENDENCY_FLAG ? "on" : "off",
+      });
       continue;
     }
 

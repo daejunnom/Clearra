@@ -3,7 +3,6 @@
 //! It never calls BuildUp or concrete-board pose search. It prices construction
 //! separately from order-language consumption; bounded refusal isn't a miss.
 
-use core::cell::{Cell, RefCell};
 use std::sync::Arc;
 
 use clearra_core_domain::{execution_cancellation::ExecutionControl, piece::piece_kind::PieceKind};
@@ -16,7 +15,6 @@ use super::{
     geometry::GeometryCandidate,
     kick_profiles::builtin_kick_profile,
     piece_order_language::PieceOrderLanguageCache,
-    placement_conditions::AtomicRowProjection,
     placement_poset::CandidateGeometry,
     reachability::{harddrop_path_mask, PrefixPoseWork, ReachabilityWorkspace},
     symbolic_prefix_domain::{PrefixDomain, MAX_OPERATIONS, MAX_PREFIX_WORDS},
@@ -24,8 +22,26 @@ use super::{
     WasmExactSearchError,
 };
 
+#[cfg(any(
+    test,
+    all(
+        feature = "local-search-ab",
+        feature = "parallel",
+        not(target_family = "wasm")
+    )
+))]
+use super::placement_conditions::AtomicRowProjection;
+
 const MAX_FRAMES: usize = 64;
 const CELL_PLANES: usize = 64;
+#[cfg(any(
+    test,
+    all(
+        feature = "local-search-ab",
+        feature = "parallel",
+        not(target_family = "wasm")
+    )
+))]
 const MAX_CATALOG_STATIC_GUARD_BYTES: usize = 4 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -56,34 +72,158 @@ pub(super) struct SymbolicPrefixWork {
     pub catalog_static_guard_bytes: usize,
     pub packed_frame_projections: usize,
     pub packed_segments: usize,
+    #[cfg(any(
+        test,
+        all(
+            feature = "local-search-ab",
+            feature = "parallel",
+            not(target_family = "wasm")
+        )
+    ))]
     pub language_states: u64,
     pub language_transitions: usize,
+    #[cfg(any(
+        test,
+        all(
+            feature = "local-search-ab",
+            feature = "parallel",
+            not(target_family = "wasm")
+        )
+    ))]
     pub frontier_compilations: u64,
     pub pose: PrefixPoseWork,
 }
 
-thread_local! {
-    static STRICT_WORK: RefCell<Option<SymbolicPrefixWork>> = const { RefCell::new(None) };
-    static USE_TARGET_REVERSE: Cell<bool> = const { Cell::new(false) };
-    static USE_UPPER_BOUND: Cell<bool> = const { Cell::new(false) };
-    static PACK_UPPER_LANES: Cell<bool> = const { Cell::new(false) };
-    static LEGACY_UPPER: Cell<bool> = const { Cell::new(false) };
-    static CATALOG_STATIC_GUARDS: RefCell<Option<Arc<CatalogStaticGuards>>> =
-        const { RefCell::new(None) };
-}
+#[cfg(any(
+    test,
+    all(
+        feature = "local-search-ab",
+        feature = "parallel",
+        not(target_family = "wasm")
+    )
+))]
+mod experiment_modes {
+    use core::cell::{Cell, RefCell};
+    use std::sync::Arc;
 
-pub(super) fn with_catalog_static_guards<T>(
-    table: Arc<CatalogStaticGuards>,
-    run: impl FnOnce() -> T,
-) -> T {
-    struct Restore(Option<Arc<CatalogStaticGuards>>);
-    impl Drop for Restore {
-        fn drop(&mut self) {
-            CATALOG_STATIC_GUARDS.with(|slot| slot.replace(self.0.take()));
-        }
+    use super::{CatalogStaticGuards, PrefixCompileOptions, SymbolicPrefixWork};
+
+    thread_local! {
+        static STRICT_WORK: RefCell<Option<SymbolicPrefixWork>> = const { RefCell::new(None) };
+        static USE_TARGET_REVERSE: Cell<bool> = const { Cell::new(false) };
+        static USE_UPPER_BOUND: Cell<bool> = const { Cell::new(false) };
+        static PACK_UPPER_LANES: Cell<bool> = const { Cell::new(false) };
+        static LEGACY_UPPER: Cell<bool> = const { Cell::new(false) };
+        static CATALOG_STATIC_GUARDS: RefCell<Option<Arc<CatalogStaticGuards>>> =
+            const { RefCell::new(None) };
     }
-    let _restore = Restore(CATALOG_STATIC_GUARDS.with(|slot| slot.replace(Some(table))));
-    run()
+
+    pub(in crate::backend::wasm_cpu) fn with_catalog_static_guards<T>(
+        table: Arc<CatalogStaticGuards>,
+        run: impl FnOnce() -> T,
+    ) -> T {
+        struct Restore(Option<Arc<CatalogStaticGuards>>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                CATALOG_STATIC_GUARDS.with(|slot| slot.replace(self.0.take()));
+            }
+        }
+        let _restore = Restore(CATALOG_STATIC_GUARDS.with(|slot| slot.replace(Some(table))));
+        run()
+    }
+
+    #[cfg(all(
+        feature = "local-search-ab",
+        feature = "parallel",
+        not(target_family = "wasm")
+    ))]
+    pub(in crate::backend::wasm_cpu) fn with_legacy_upper<T>(
+        enabled: bool,
+        run: impl FnOnce() -> T,
+    ) -> T {
+        struct Restore(bool);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                LEGACY_UPPER.with(|slot| slot.set(self.0));
+            }
+        }
+        let _restore = Restore(LEGACY_UPPER.with(|slot| slot.replace(enabled)));
+        run()
+    }
+
+    pub(in crate::backend::wasm_cpu) fn with_packed_upper_target<T>(run: impl FnOnce() -> T) -> T {
+        struct Restore(bool);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                PACK_UPPER_LANES.with(|mode| mode.set(self.0));
+            }
+        }
+        let _restore = Restore(PACK_UPPER_LANES.with(|mode| mode.replace(true)));
+        with_upper_bound(|| with_target_reverse(run))
+    }
+    pub(in crate::backend::wasm_cpu) fn with_upper_bound<T>(run: impl FnOnce() -> T) -> T {
+        struct Restore(bool);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                USE_UPPER_BOUND.with(|mode| mode.set(self.0));
+            }
+        }
+        let _restore = Restore(USE_UPPER_BOUND.with(|mode| mode.replace(true)));
+        run()
+    }
+
+    pub(in crate::backend::wasm_cpu) fn with_target_reverse<T>(run: impl FnOnce() -> T) -> T {
+        struct Restore(bool);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                USE_TARGET_REVERSE.with(|mode| mode.set(self.0));
+            }
+        }
+        let _restore = Restore(USE_TARGET_REVERSE.with(|mode| mode.replace(true)));
+        run()
+    }
+
+    pub(in crate::backend::wasm_cpu) fn with_strict_prefix_order<T>(
+        run: impl FnOnce() -> T,
+    ) -> (T, SymbolicPrefixWork) {
+        struct Restore(Option<SymbolicPrefixWork>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                STRICT_WORK.with(|slot| slot.replace(self.0));
+            }
+        }
+        let _restore = Restore(STRICT_WORK.with(|slot| slot.replace(Some(Default::default()))));
+        (run(), STRICT_WORK.with(|slot| slot.borrow().unwrap()))
+    }
+
+    pub(in crate::backend::wasm_cpu) fn in_strict_prefix_order() -> bool {
+        STRICT_WORK.with(|slot| slot.borrow().is_some())
+    }
+
+    pub(in crate::backend::wasm_cpu) fn record_strict_prefix_work<T>(
+        run: impl FnOnce(&mut SymbolicPrefixWork) -> T,
+    ) -> T {
+        STRICT_WORK.with(|slot| {
+            run(slot
+                .borrow_mut()
+                .as_mut()
+                .expect("strict prefix experiment"))
+        })
+    }
+
+    pub(super) fn with_experiment_options<T>(run: impl FnOnce(PrefixCompileOptions<'_>) -> T) -> T {
+        CATALOG_STATIC_GUARDS.with(|slot| {
+            let table = slot.borrow();
+            run(PrefixCompileOptions {
+                target_reverse: USE_TARGET_REVERSE.with(Cell::get),
+                upper_bound: USE_UPPER_BOUND.with(Cell::get),
+                packed_upper: PACK_UPPER_LANES.with(Cell::get),
+                frame_owner: !LEGACY_UPPER.with(Cell::get),
+                catalog_static_guards: table.as_deref(),
+                experiment_subsumption: true,
+            })
+        })
+    }
 }
 
 #[cfg(all(
@@ -91,71 +231,33 @@ pub(super) fn with_catalog_static_guards<T>(
     feature = "parallel",
     not(target_family = "wasm")
 ))]
-pub(super) fn with_legacy_upper<T>(enabled: bool, run: impl FnOnce() -> T) -> T {
-    struct Restore(bool);
-    impl Drop for Restore {
-        fn drop(&mut self) {
-            LEGACY_UPPER.with(|slot| slot.set(self.0));
-        }
-    }
-    let _restore = Restore(LEGACY_UPPER.with(|slot| slot.replace(enabled)));
-    run()
+pub(super) use experiment_modes::with_legacy_upper;
+#[cfg(any(
+    test,
+    all(
+        feature = "local-search-ab",
+        feature = "parallel",
+        not(target_family = "wasm")
+    )
+))]
+pub(super) use experiment_modes::{
+    in_strict_prefix_order, record_strict_prefix_work, with_catalog_static_guards,
+    with_packed_upper_target, with_strict_prefix_order,
+};
+#[cfg(test)]
+pub(super) use experiment_modes::{with_target_reverse, with_upper_bound};
+struct PrefixCompileOptions<'a> {
+    target_reverse: bool,
+    upper_bound: bool,
+    packed_upper: bool,
+    frame_owner: bool,
+    catalog_static_guards: Option<&'a CatalogStaticGuards>,
+    experiment_subsumption: bool,
 }
 
-pub(super) fn with_packed_upper_target<T>(run: impl FnOnce() -> T) -> T {
-    struct Restore(bool);
-    impl Drop for Restore {
-        fn drop(&mut self) {
-            PACK_UPPER_LANES.with(|mode| mode.set(self.0));
-        }
-    }
-    let _restore = Restore(PACK_UPPER_LANES.with(|mode| mode.replace(true)));
-    with_upper_bound(|| with_target_reverse(run))
-}
-pub(super) fn with_upper_bound<T>(run: impl FnOnce() -> T) -> T {
-    struct Restore(bool);
-    impl Drop for Restore {
-        fn drop(&mut self) {
-            USE_UPPER_BOUND.with(|mode| mode.set(self.0));
-        }
-    }
-    let _restore = Restore(USE_UPPER_BOUND.with(|mode| mode.replace(true)));
-    run()
-}
-
-pub(super) fn with_target_reverse<T>(run: impl FnOnce() -> T) -> T {
-    struct Restore(bool);
-    impl Drop for Restore {
-        fn drop(&mut self) {
-            USE_TARGET_REVERSE.with(|mode| mode.set(self.0));
-        }
-    }
-    let _restore = Restore(USE_TARGET_REVERSE.with(|mode| mode.replace(true)));
-    run()
-}
-
-pub(super) fn with_strict_prefix_order<T>(run: impl FnOnce() -> T) -> (T, SymbolicPrefixWork) {
-    struct Restore(Option<SymbolicPrefixWork>);
-    impl Drop for Restore {
-        fn drop(&mut self) {
-            STRICT_WORK.with(|slot| slot.replace(self.0));
-        }
-    }
-    let _restore = Restore(STRICT_WORK.with(|slot| slot.replace(Some(Default::default()))));
-    (run(), STRICT_WORK.with(|slot| slot.borrow().unwrap()))
-}
-
-pub(super) fn in_strict_prefix_order() -> bool {
-    STRICT_WORK.with(|slot| slot.borrow().is_some())
-}
-
-pub(super) fn record_strict_prefix_work<T>(run: impl FnOnce(&mut SymbolicPrefixWork) -> T) -> T {
-    STRICT_WORK.with(|slot| {
-        run(slot
-            .borrow_mut()
-            .as_mut()
-            .expect("strict prefix experiment"))
-    })
+#[cfg(feature = "placement-dependency-pc")]
+pub(super) fn with_product_prefix_order<T>(run: impl FnOnce(&mut SymbolicPrefixWork) -> T) -> T {
+    run(&mut SymbolicPrefixWork::default())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -199,6 +301,14 @@ impl SymbolicPrefixOrders {
         )
     }
 
+    #[cfg(any(
+        test,
+        all(
+            feature = "local-search-ab",
+            feature = "parallel",
+            not(target_family = "wasm")
+        )
+    ))]
     pub(super) fn compile_with_workspace(
         catalog: &GeometryCatalog,
         candidate: &GeometryCandidate,
@@ -207,6 +317,62 @@ impl SymbolicPrefixOrders {
         workspace: &mut ReachabilityWorkspace,
         work: &mut SymbolicPrefixWork,
         profile_scale: u64,
+    ) -> Result<Self, SymbolicPrefixRefusal> {
+        experiment_modes::with_experiment_options(|options| {
+            Self::compile_with_options(
+                catalog,
+                candidate,
+                profile,
+                control,
+                workspace,
+                work,
+                profile_scale,
+                options,
+            )
+        })
+    }
+
+    #[cfg(feature = "placement-dependency-pc")]
+    pub(super) fn compile_product_with_workspace(
+        catalog: &GeometryCatalog,
+        candidate: &GeometryCandidate,
+        profile: KickTableProfileId,
+        control: &ExecutionControl,
+        workspace: &mut ReachabilityWorkspace,
+        work: &mut SymbolicPrefixWork,
+        profile_scale: u64,
+    ) -> Result<Self, SymbolicPrefixRefusal> {
+        // Product does not consult the process environment, thread-local
+        // experiment selection or optional shared-catalog prototype.
+        Self::compile_with_options(
+            catalog,
+            candidate,
+            profile,
+            control,
+            workspace,
+            work,
+            profile_scale,
+            PrefixCompileOptions {
+                target_reverse: true,
+                upper_bound: true,
+                packed_upper: true,
+                frame_owner: true,
+                catalog_static_guards: None,
+                experiment_subsumption: false,
+            },
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn compile_with_options(
+        catalog: &GeometryCatalog,
+        candidate: &GeometryCandidate,
+        profile: KickTableProfileId,
+        control: &ExecutionControl,
+        workspace: &mut ReachabilityWorkspace,
+        work: &mut SymbolicPrefixWork,
+        profile_scale: u64,
+        options: PrefixCompileOptions<'_>,
     ) -> Result<Self, SymbolicPrefixRefusal> {
         use SymbolicPrefixRefusal::{Cancelled, InconsistentProjection, Unsupported};
 
@@ -226,37 +392,34 @@ impl SymbolicPrefixOrders {
         pieces[..operation_count].copy_from_slice(geometry.pieces());
         workspace.configure_kick_profile(profile, false);
         let floor = (1_u64 << catalog.width()) - 1;
-        let target_reverse = USE_TARGET_REVERSE.with(Cell::get);
-        let bound = USE_UPPER_BOUND.with(Cell::get);
+        let target_reverse = options.target_reverse;
+        let bound = options.upper_bound;
         let mut permitted_parents = [[0_u64; MAX_PREFIX_WORDS]; MAX_OPERATIONS];
         let mut possible_parents = [[0_u64; MAX_PREFIX_WORDS]; MAX_OPERATIONS];
         let mut frames_by_word = [[0_u64; MAX_FRAMES]; MAX_PREFIX_WORDS];
-        if bound && !LEGACY_UPPER.with(Cell::get) {
-            CATALOG_STATIC_GUARDS.with(|slot| {
-                let table = slot.borrow();
-                let table = table.as_deref();
-                if let Some(table) = table {
-                    if !core::ptr::eq(table.catalog.as_ref(), catalog) {
-                        return Err(InconsistentProjection);
-                    }
-                    // This byte count belongs to one shared table, not one worker.
-                    work.catalog_static_guard_bytes = table.logical_bytes();
+        if bound && options.frame_owner {
+            let table = options.catalog_static_guards;
+            if let Some(table) = table {
+                if !core::ptr::eq(table.catalog.as_ref(), catalog) {
+                    return Err(InconsistentProjection);
                 }
-                UpperFrameGuards {
-                    catalog,
-                    candidate,
-                    geometry: &geometry,
-                    domain: &domain,
-                    table,
-                }
-                .compile(
-                    &mut permitted_parents,
-                    &mut possible_parents,
-                    &mut frames_by_word,
-                    control,
-                    work,
-                )
-            })?;
+                // This byte count belongs to one shared table, not one worker.
+                work.catalog_static_guard_bytes = table.logical_bytes();
+            }
+            UpperFrameGuards {
+                catalog,
+                candidate,
+                geometry: &geometry,
+                domain: &domain,
+                table,
+            }
+            .compile(
+                &mut permitted_parents,
+                &mut possible_parents,
+                &mut frames_by_word,
+                control,
+                work,
+            )?;
         } else {
             for word in 0..domain.word_count() {
                 let owners = domain.word_owners(word);
@@ -373,7 +536,7 @@ impl SymbolicPrefixOrders {
                     permitted_parents[operation][word] &= possible_live[operation][word];
                 }
             }
-            if subsumption_enabled()? {
+            if options.experiment_subsumption && subsumption_enabled()? {
                 let removed = super::symbolic_prefix_subsumption::elide_covered_suffix_edges(
                     geometry.pieces(),
                     &possible_live,
@@ -391,7 +554,7 @@ impl SymbolicPrefixOrders {
                 ExecutorSearchStage::StrictPrefixReverse,
                 profile_scale,
             );
-            if PACK_UPPER_LANES.with(Cell::get) {
+            if options.packed_upper {
                 PackedFrameQueries {
                     catalog,
                     candidate,
@@ -500,6 +663,14 @@ impl SymbolicPrefixOrders {
         Some(self.permitted_parents[operation][prefix / 64] & (1_u64 << (prefix % 64)) != 0)
     }
 
+    #[cfg(any(
+        test,
+        all(
+            feature = "local-search-ab",
+            feature = "parallel",
+            not(target_family = "wasm")
+        )
+    ))]
     pub(super) fn compile_language(
         &self,
         cache: &mut PieceOrderLanguageCache,
@@ -519,6 +690,20 @@ impl SymbolicPrefixOrders {
         )?;
         work.frontier_compilations += cache.frontier_compilations().saturating_sub(previous) as u64;
         Ok(language)
+    }
+
+    #[cfg(feature = "placement-dependency-pc")]
+    pub(super) fn compile_product_language(
+        &self,
+        cache: &mut PieceOrderLanguageCache,
+        work: &mut SymbolicPrefixWork,
+    ) -> Result<Option<u32>, WasmExactSearchError> {
+        cache.compile_product_closed_prefix_language(
+            &self.pieces[..self.operation_count],
+            &self.permitted_parents[..self.operation_count],
+            &self.active_prefixes,
+            &mut work.language_transitions,
+        )
     }
 }
 
@@ -605,6 +790,14 @@ pub(super) struct CatalogStaticGuards {
 }
 
 impl CatalogStaticGuards {
+    #[cfg(any(
+        test,
+        all(
+            feature = "local-search-ab",
+            feature = "parallel",
+            not(target_family = "wasm")
+        )
+    ))]
     pub(super) fn compile(
         catalog: Arc<GeometryCatalog>,
         control: &ExecutionControl,
@@ -1227,6 +1420,60 @@ mod tests {
             wrong,
             Err(SymbolicPrefixRefusal::InconsistentProjection)
         ));
+    }
+
+    #[cfg(feature = "placement-dependency-pc")]
+    #[test]
+    fn product_prefix_orders_use_request_local_proof_and_exact_language() {
+        let low_o = 3 | 3 << 10;
+        let high_o = low_o << 20;
+        let required = low_o | high_o;
+        let initial = ((1_u64 << 40) - 1) & !required;
+        let catalog =
+            GeometryCatalog::compile_for_required_cells_on_dimensions(10, 4, initial, required)
+                .unwrap();
+        let rows = [low_o, high_o].map(|cells| catalog.skeleton_id(PieceKind::O, cells).unwrap());
+        let candidate = GeometryCandidate::from_rows(&catalog, 0, &rows).unwrap();
+        let control = ExecutionControl::default();
+        // Its board is identical, but a table from another catalog is not
+        // authoritative. This experimental table must be invisible here.
+        let other = Arc::new(catalog.clone());
+        let table = Arc::new(CatalogStaticGuards::compile(other, &control).unwrap());
+        let ((), experiment) = with_catalog_static_guards(table, || {
+            with_strict_prefix_order(|| {
+                with_product_prefix_order(|work| {
+                    let mut reachability = ReachabilityWorkspace::default();
+                    let orders = SymbolicPrefixOrders::compile_product_with_workspace(
+                        &catalog,
+                        &candidate,
+                        KickTableProfileId::Srs90,
+                        &control,
+                        &mut reachability,
+                        work,
+                        0,
+                    )
+                    .unwrap();
+                    assert!(orders.complete_language_only);
+                    assert!(work.harddrop_certificates > 0);
+                    assert_eq!(work.catalog_static_guard_hits, 0);
+                    assert_eq!(work.catalog_static_guard_bytes, 0);
+                    let mut cache = PieceOrderLanguageCache::default();
+                    let root = orders
+                        .compile_product_language(&mut cache, work)
+                        .unwrap()
+                        .unwrap();
+                    assert_eq!(cache.node(root).unwrap().remaining_depth, 2);
+                    let first = cache.edges_for_piece(root, 2).unwrap();
+                    assert_eq!(first.len(), 1);
+                    let second = cache.edges_for_piece(first[0].child(), 2).unwrap();
+                    assert_eq!(second.len(), 1);
+                    assert!(cache.node(second[0].child()).unwrap().accepting);
+                    assert_eq!(cache.frontier_compilations(), 0);
+                })
+            })
+        });
+        assert_eq!(experiment.harddrop_certificates, 0);
+        assert_eq!(experiment.language_transitions, 0);
     }
 
     #[test]

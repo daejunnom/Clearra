@@ -6,10 +6,13 @@ import { encodeCtk3 } from "ctk3";
 
 import {
   findSlashCommand,
+  formatSlashCommandHelp,
 } from "../src/discord/slash-command-catalog.mjs";
 import {
+  buildSlashCommandArgumentSets,
   buildSlashCommandArguments,
 } from "../src/discord/slash-command-input.mjs";
+import { buildCommandModalResponse } from "../src/discord/field-modal.mjs";
 
 const CONTRACT_URL = new URL(
   "../../../tests/fixtures/contracts/search_option_contract.tsv",
@@ -106,7 +109,7 @@ test("native PC routes preserve objective ownership while chance owns typed uniq
   assertValue(chance, "--rule", "srs-plus");
   assert.deepEqual(
     chanceCommand.registration.options.map(({ name }) => name),
-    ["next", "field", "lines", "hold", "kicktable"],
+    ["next", "field", "lines", "hold", "kicktable", "dependency"],
   );
   for (const name of [
     "queue-knowledge",
@@ -156,6 +159,67 @@ test("native PC routes preserve objective ownership while chance owns typed uniq
     ])),
     /requires preserve-b2b=on/i,
   );
+});
+
+test("PC chance pre-check is opt-in and preserves the default exact request", () => {
+  const options = (pattern, kicktable) => [
+    { name: "field", value: EMPTY_FIELD },
+    { name: "next", value: pattern },
+    { name: "lines", value: 4 },
+    { name: "kicktable", value: kicktable },
+  ];
+  for (const [pattern, profile] of [["P7", "srs-plus"], ["p7,p4", "jstris-180"]]) {
+    const base = options(pattern, profile);
+    const original = slashArguments("/pc chance", base);
+    const off = slashArguments("/pc chance", [...base, { name: "dependency", value: "off" }]);
+    const on = slashArguments("/pc chance", [...base, { name: "dependency", value: "on" }]);
+    assert.deepEqual(off, original);
+    assert.deepEqual(on, [...original, "--build-dependency-dag"]);
+    for (const route of ["/pc path", "/pc minimals", "/pc score", "/pc tiling", "/pc failed-queue"]) {
+      assert.throws(
+        () => slashArguments(route, pcBase([{ name: "dependency", value: "on" }])),
+        /unsupported option 'dependency'/i,
+      );
+    }
+  }
+
+  for (const [pattern, profile] of [["IOTSZJL", "srs-plus"], ["P7", "srs"], ["P7P3", "jstris-180"]]) {
+    const base = options(pattern, profile);
+    assert.doesNotThrow(() => slashArguments("/pc chance", base));
+    assert.throws(
+      () => slashArguments("/pc chance", [...base, { name: "dependency", value: "on" }]),
+      { code: "options.pc_dependency_scope" },
+    );
+  }
+});
+
+test("PC chance pre-check keeps every automatic target and requires direct input", () => {
+  const command = commandAt("/pc chance");
+  const toggle = { name: "dependency", value: "on" };
+  const supported = [
+    { name: "field", value: EMPTY_FIELD },
+    { name: "next", value: "P7P4" },
+  ];
+  const baseline = buildSlashCommandArgumentSets(command, supported);
+  const optIn = buildSlashCommandArgumentSets(command, [...supported, toggle]);
+  assert.deepEqual(optIn, baseline.map((argv) => [...argv, "--build-dependency-dag"]));
+  const mixed = [{ name: "field", value: "XXXXXX____" }, supported[1]];
+  const defaultTargets = buildSlashCommandArgumentSets(command, mixed);
+  assert.ok(defaultTargets.some((argv) => argv[argv.indexOf("--lines") + 1] === "5"));
+  assert.throws(
+    () => buildSlashCommandArgumentSets(command, [...mixed, toggle]),
+    { code: "options.pc_dependency_scope" },
+  );
+
+  assert.throws(() => buildCommandModalResponse({
+    type: 2,
+    data: { type: 1, name: "pc", options: [{ type: 1, name: "chance", options: [supported[1], toggle] }] },
+  }), { code: "options.modal_unrepresented" });
+  for (const locale of ["en", "ko", "ja"]) {
+    const help = formatSlashCommandHelp("pc chance", locale);
+    assert.match(help, /dependency:on/u);
+    assert.match(help, /P7P4/u);
+  }
 });
 
 test("canonical score and Build surfaces retain every fieldwise semantic distinction", () => {

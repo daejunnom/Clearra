@@ -64,13 +64,13 @@ mod pc4_graph_materializer;
 mod piece_order_language;
 #[cfg(feature = "local-search-ab")]
 pub use piece_order_language::{count_distinct_no_hold_one_bag_poset, DistinctNoHoldOneBagCount};
-#[cfg(any(test, feature = "local-search-ab"))]
+#[cfg(any(test, feature = "local-search-ab", feature = "placement-dependency-pc"))]
 mod placement_conditions;
 #[cfg(any(test, feature = "local-search-ab"))]
 mod placement_dependency;
 #[cfg(test)]
 mod placement_dependency_integration_tests;
-#[cfg(any(test, feature = "local-search-ab"))]
+#[cfg(any(test, feature = "local-search-ab", feature = "placement-dependency-pc"))]
 mod placement_poset;
 mod queue_observation_policy;
 mod reachability;
@@ -97,6 +97,7 @@ mod structural_graph_probability_tests;
 mod structural_order;
 #[cfg(any(
     test,
+    feature = "placement-dependency-pc",
     all(
         feature = "local-search-ab",
         feature = "parallel",
@@ -106,6 +107,7 @@ mod structural_order;
 mod symbolic_prefix_domain;
 #[cfg(any(
     test,
+    feature = "placement-dependency-pc",
     all(
         feature = "local-search-ab",
         feature = "parallel",
@@ -115,6 +117,7 @@ mod symbolic_prefix_domain;
 mod symbolic_prefix_lanes;
 #[cfg(any(
     test,
+    feature = "placement-dependency-pc",
     all(
         feature = "local-search-ab",
         feature = "parallel",
@@ -130,6 +133,7 @@ mod symbolic_prefix_orders;
 mod symbolic_prefix_parallel;
 #[cfg(any(
     test,
+    feature = "placement-dependency-pc",
     all(
         feature = "local-search-ab",
         feature = "parallel",

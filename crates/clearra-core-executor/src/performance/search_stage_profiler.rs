@@ -151,6 +151,7 @@ pub(crate) enum ExecutorSearchStage {
     FinesseAggregation,
     FinesseWitness,
     #[cfg(any(
+        feature = "placement-dependency-pc",
         test,
         all(
             feature = "local-search-ab",
@@ -160,6 +161,7 @@ pub(crate) enum ExecutorSearchStage {
     ))]
     StrictPrefixUpper,
     #[cfg(any(
+        feature = "placement-dependency-pc",
         test,
         all(
             feature = "local-search-ab",
@@ -169,6 +171,7 @@ pub(crate) enum ExecutorSearchStage {
     ))]
     StrictPrefixReverse,
     #[cfg(any(
+        feature = "placement-dependency-pc",
         test,
         all(
             feature = "local-search-ab",
@@ -189,6 +192,10 @@ pub(crate) enum ExecutorSearchStage {
         not(target_family = "wasm")
     ))]
     StrictStandardBagProduct,
+    #[cfg(feature = "placement-dependency-pc")]
+    PlacementDependencyPc,
+    #[cfg(feature = "placement-dependency-pc")]
+    PlacementDependencyPcLanguage,
     #[cfg_attr(
         not(all(feature = "parallel", not(target_family = "wasm"))),
         allow(dead_code)
@@ -279,6 +286,7 @@ impl ExecutorSearchStage {
         Self::FinesseAggregation,
         Self::FinesseWitness,
         #[cfg(any(
+            feature = "placement-dependency-pc",
             test,
             all(
                 feature = "local-search-ab",
@@ -288,6 +296,7 @@ impl ExecutorSearchStage {
         ))]
         Self::StrictPrefixUpper,
         #[cfg(any(
+            feature = "placement-dependency-pc",
             test,
             all(
                 feature = "local-search-ab",
@@ -297,6 +306,7 @@ impl ExecutorSearchStage {
         ))]
         Self::StrictPrefixReverse,
         #[cfg(any(
+            feature = "placement-dependency-pc",
             test,
             all(
                 feature = "local-search-ab",
@@ -317,6 +327,10 @@ impl ExecutorSearchStage {
             not(target_family = "wasm")
         ))]
         Self::StrictStandardBagProduct,
+        #[cfg(feature = "placement-dependency-pc")]
+        Self::PlacementDependencyPc,
+        #[cfg(feature = "placement-dependency-pc")]
+        Self::PlacementDependencyPcLanguage,
         Self::ExtendedPcCandidateVerifyAndReduce,
     ];
 
@@ -399,10 +413,15 @@ impl ExecutorSearchStage {
             Self::FinesseProductDp => "finesse.product_dp",
             Self::FinesseAggregation => "finesse.aggregation",
             Self::FinesseWitness => "finesse.witness",
+            #[cfg(feature = "placement-dependency-pc")]
+            Self::PlacementDependencyPc => "pc.placement_dependency.proof_and_coverage",
+            #[cfg(feature = "placement-dependency-pc")]
+            Self::PlacementDependencyPcLanguage => "pc.placement_dependency.language",
             Self::ExtendedPcCandidateVerifyAndReduce => {
                 "rust.extended_pc.candidate_verify_and_reduce"
             }
             #[cfg(any(
+                feature = "placement-dependency-pc",
                 test,
                 all(
                     feature = "local-search-ab",
@@ -412,6 +431,7 @@ impl ExecutorSearchStage {
             ))]
             Self::StrictPrefixUpper => "wasm.candidate.strict_prefix.upper",
             #[cfg(any(
+                feature = "placement-dependency-pc",
                 test,
                 all(
                     feature = "local-search-ab",
@@ -421,6 +441,7 @@ impl ExecutorSearchStage {
             ))]
             Self::StrictPrefixReverse => "wasm.candidate.strict_prefix.reverse",
             #[cfg(any(
+                feature = "placement-dependency-pc",
                 test,
                 all(
                     feature = "local-search-ab",
