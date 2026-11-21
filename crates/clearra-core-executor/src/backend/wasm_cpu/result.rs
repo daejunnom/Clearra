@@ -5084,6 +5084,11 @@ impl WasmExactSearchSession {
         } else {
             source_solution_count
         };
+        let reported_solution_count = if solution_set_materialized {
+            solution_count.to_string()
+        } else {
+            "not-calculated".to_owned()
+        };
         let solution_found = if solution_set_materialized {
             solution_count != 0
         } else {
@@ -5388,21 +5393,11 @@ impl WasmExactSearchSession {
                 self.truncated_reason.unwrap_or("none"),
             ),
             field("solution_found", solution_found),
+            field("unique_solution_count", &reported_solution_count),
+            field("normalized_unique_solution_count", &reported_solution_count),
             field(
-                "unique_solution_count",
-                if solution_set_materialized {
-                    solution_count.to_string()
-                } else {
-                    "not-calculated".to_owned()
-                },
-            ),
-            field(
-                "normalized_unique_solution_count",
-                if solution_set_materialized {
-                    solution_count.to_string()
-                } else {
-                    "not-calculated".to_owned()
-                },
+                "actual_normalized_unique_solution_count",
+                &reported_solution_count,
             ),
             field("solution_count_calculated", solution_set_materialized),
             field("solution_set_materialized", solution_set_materialized),

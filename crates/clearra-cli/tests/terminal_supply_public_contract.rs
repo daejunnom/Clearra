@@ -95,6 +95,10 @@ fn terminal_supply_p0_cli_json_preserves_the_exact_solution_set() {
         value["summary"]["normalized_unique_solution_count"],
         TERMINAL_SUPPLY_P0_EXPECTED_UNIQUE_COUNT
     );
+    assert_eq!(
+        value["summary"]["actual_normalized_unique_solution_count"],
+        TERMINAL_SUPPLY_P0_EXPECTED_UNIQUE_COUNT
+    );
     assert_eq!(value["summary"]["solution_count_calculated"], true);
     assert_eq!(value["summary"]["solution_set_materialized"], true);
     assert_eq!(
@@ -102,6 +106,7 @@ fn terminal_supply_p0_cli_json_preserves_the_exact_solution_set() {
         TERMINAL_SUPPLY_P0_EXPECTED_UNIQUE_COUNT
     );
     assert_eq!(value["summary"]["solution_keys_complete"], true);
+    assert_eq!(value["summary"]["count_complete"], true);
     assert_eq!(
         value["summary"]["supply_window_resolution"],
         "projected-terminal-lookahead"

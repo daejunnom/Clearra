@@ -136,6 +136,10 @@ fn assert_terminal_supply_app_and_json() {
         result.usize_field("normalized_unique_solution_count"),
         Some(TERMINAL_SUPPLY_P0_EXPECTED_UNIQUE_COUNT)
     );
+    assert_eq!(
+        result.usize_field("actual_normalized_unique_solution_count"),
+        Some(TERMINAL_SUPPLY_P0_EXPECTED_UNIQUE_COUNT)
+    );
     assert_eq!(result.bool_field("projects_unplaced_lookahead"), Some(true));
     assert_eq!(
         result.bool_field("projects_standard_bag_lookahead"),

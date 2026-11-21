@@ -755,7 +755,7 @@ assert.equal(
     workers[0].onerror?.({ message: 'ready verifier lost its state' } as ErrorEvent);
     await assert.rejects(
       bounded('previously ready worker cannot be discarded as an initializer',
-        pool.finish(() => assert.fail('cannot publish a partial family'), { readySubset: true })),
+        pool.finish(() => { throw new Error('cannot publish a partial family'); }, { readySubset: true })),
       /ready verifier lost its state/
     );
     assert.ok(workers.every((worker) => worker.terminated));

@@ -2079,6 +2079,10 @@ mod coverage_summary_tests {
             Some("not-calculated")
         );
         assert_eq!(
+            result.field("actual_normalized_unique_solution_count"),
+            Some("not-calculated")
+        );
+        assert_eq!(
             result.field("normalized_solution_set_hash"),
             Some("not-calculated")
         );
