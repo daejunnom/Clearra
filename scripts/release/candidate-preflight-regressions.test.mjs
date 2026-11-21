@@ -14,8 +14,7 @@ const ENV = { GITHUB_ACTIONS: 'true', GITHUB_REF: REF, GITHUB_SHA: SHA,
   CLEARRA_SOURCE_COMMIT: SHA, CLEARRA_ENGINE_BUILD_ID: SHA, RUST_MIN_STACK: '16777216' };
 const PASSED = { status: 0, stdout: 'test result: ok. 1 passed; 0 failed; 0 ignored; 5 filtered out;\n', stderr: '' };
 
-test('candidate filters are closed, cover nine observed failures and include enabled parallel Core regressions', () => {
-  assert.equal(CANDIDATE_RUST_REGRESSIONS.filter((entry) => entry.exact).length, 9);
+test('candidate filters are closed and include supported product and parallel Core regressions', () => {
   assert.equal(new Set(CANDIDATE_RUST_REGRESSIONS.map((entry) => `${entry.package}:${entry.filter}`)).size, CANDIDATE_RUST_REGRESSIONS.length);
   for (const entry of CANDIDATE_RUST_REGRESSIONS) {
     assert.match(entry.filter, /^[a-z_][a-z_0-9:]*/u);
@@ -33,6 +32,11 @@ test('candidate filters are closed, cover nine observed failures and include ena
   });
   assert.equal(new Set(coreFeatures).size, 1, 'Core focused cases share one test build');
   assert.deepEqual(coreFeatures[0].split(','), ['parallel', 'placement-dependency-pc']);
+  const failedQueue = CANDIDATE_RUST_REGRESSIONS.find((entry) =>
+    entry.filter === 'product_capability_contract_tests::compact_pc_failed_queue_');
+  assert.ok(failedQueue);
+  assert.equal(failedQueue.package, 'clearra-app');
+  assert.ok(!candidateRegressionArguments(failedQueue).includes('--exact'));
   assert.throws(() => candidateRegressionArguments({ package: 'clearra-app', filter: '' }), /Unknown/u);
 });
 

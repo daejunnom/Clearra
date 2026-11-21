@@ -13,13 +13,16 @@ const APP_FAILURES = [
   'portfolio_alternative_store::tests::checkpoint_resume_is_exact_and_identity_bound',
   'portfolio_alternative_store::tests::runtime_page_store_retains_prefetched_pages_for_backward_member_navigation',
   'product_capability_contract_tests::direct_wasm_pc_minimals_enumerates_every_iiooo_single_member_tie',
-  'product_capability_contract_tests::pc_failed_queue_wasm_and_distributed_paths_fail_closed_without_fallback',
   'product_capability_contract_tests::pc_minimals_deferred_boundary_rejects_status_and_full_source_tampering',
   'product_capability_contract_tests::pc_minimals_derives_selected_metadata_and_probabilities_from_the_app_canonical_page',
   'product_capability_contract_tests::pc_minimals_unique_execution_preserves_the_v074_count_all_public_field_identity',
 ];
 export const CANDIDATE_RUST_REGRESSIONS = Object.freeze([
   ...APP_FAILURES.map((filter) => ({ package: 'clearra-app', filter, exact: true, parallel: true })),
+  // The current product supports compact failed queues. Check the live
+  // typed-owner, cooperative parity and fail-closed cases together.
+  { package: 'clearra-app', filter: 'product_capability_contract_tests::compact_pc_failed_queue_',
+    exact: false, parallel: true },
   ...[
     'native_build_probability_execution::durable::tests::',
     'native_build_probability_execution::system_provider::tests::',

@@ -309,6 +309,8 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 90
     env:
+      # Match the canonical test harness; debug symbols are not release evidence.
+      CARGO_PROFILE_TEST_DEBUG: '0'
       CLEARRA_SOURCE_COMMIT: ${{ github.sha }}
       CLEARRA_ENGINE_BUILD_ID: ${{ github.sha }}
       RUST_MIN_STACK: "16777216"
