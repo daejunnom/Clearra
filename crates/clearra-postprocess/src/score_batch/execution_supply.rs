@@ -89,10 +89,26 @@ pub(super) fn for_each_supply_successor(
     let Some(current) = available_piece(batch, sequence, cursor) else {
         return Ok(());
     };
+    let hold_enabled = batch.hold_enabled();
+    let use_current = current == required_piece;
+    let swap_held = hold_enabled && state.hold == Some(required_piece);
+    let store_and_draw = if hold_enabled && state.hold.is_none() {
+        cursor
+            .checked_add(1)
+            .and_then(|next_cursor| available_piece(batch, sequence, next_cursor))
+            .filter(|&next| next == required_piece)
+    } else {
+        None
+    };
+    if !use_current && !swap_held && store_and_draw.is_none() {
+        // A physical edge need not match this queue state. Avoid hashing the
+        // whole sequence and deriving its provenance for an absent supply edge.
+        return Ok(());
+    }
     let execution_state = execution_state(batch, sequence, state);
     let automaton = SupplyExecutionAutomaton::sequence();
 
-    if current == required_piece {
+    if use_current {
         emit_transition(
             &automaton,
             execution_state,
@@ -103,10 +119,7 @@ pub(super) fn for_each_supply_successor(
             &mut visit,
         )?;
     }
-    if !batch.hold_enabled() {
-        return Ok(());
-    }
-    if state.hold == Some(required_piece) {
+    if swap_held {
         emit_transition(
             &automaton,
             execution_state,
@@ -117,23 +130,16 @@ pub(super) fn for_each_supply_successor(
             &mut visit,
         )?;
     }
-    if state.hold.is_none() {
-        if let Some(next) = cursor
-            .checked_add(1)
-            .and_then(|next_cursor| available_piece(batch, sequence, next_cursor))
-        {
-            if next == required_piece {
-                emit_transition(
-                    &automaton,
-                    execution_state,
-                    state.node,
-                    SupplyBranchKind::StoreCurrent,
-                    current,
-                    Some(next),
-                    &mut visit,
-                )?;
-            }
-        }
+    if let Some(next) = store_and_draw {
+        emit_transition(
+            &automaton,
+            execution_state,
+            state.node,
+            SupplyBranchKind::StoreCurrent,
+            current,
+            Some(next),
+            &mut visit,
+        )?;
     }
     Ok(())
 }

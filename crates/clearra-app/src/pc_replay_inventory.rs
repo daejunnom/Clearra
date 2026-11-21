@@ -27,6 +27,146 @@ const MAX_EDGES: usize = 16_384;
 const INDEX_VALIDATION_CHUNK: usize = 64;
 const DEPTH_SHIFT: u32 = 28;
 
+const P7_PATTERN_COUNT: usize = HEAD_COUNT;
+const P7_PREFIX_BLOCK: usize = 120; // (7 - 2)!
+const P7_PREFIX_COUNT: usize = HEAD * (HEAD - 1);
+const P7_ALL_PREFIXES: u64 = (1 << P7_PREFIX_COUNT) - 1;
+const MAX_P7_ROOT_EDGES: usize = 256;
+
+/// Necessary first-lock availability for an authenticated, complete P7 axis.
+/// A zero prefix bit only rules out a cell; the exact cursor still owns all
+/// counts, projected witnesses, and ranking among the surviving cells.
+pub(super) struct P7FirstLockIndex {
+    hold_enabled: bool,
+    prefixes: Option<u64>,
+}
+
+impl P7FirstLockIndex {
+    pub(super) fn new(problem: &SearchProblem, batch: &ExactScoringExecutionBatch) -> Option<Self> {
+        let ordinals = batch.standard_bag_ordinals()?;
+        let source = problem.piece_source().materialized_universe()?;
+        let supply = problem.supply();
+        if ordinals.sequence_len() != HEAD
+            || ordinals.len() != P7_PATTERN_COUNT
+            || source.complete_standard_bag_ordinals() != Some(ordinals)
+            || supply.source_sequence_length() != HEAD
+            || !matches!(problem.search_goal(), SearchGoal::ClearToEmpty)
+            || problem
+                .queue_observation_policy()
+                .requires_observation_policy()
+            || problem
+                .objective()
+                .execution_constraints()
+                .preserves_back_to_back()
+            || problem.initial_hold().cursor() != 0
+            || problem.initial_hold().hold_piece().is_some()
+            || supply.projects_unplaced_lookahead()
+            || !batch.complete()
+            || batch.pattern_count() != P7_PATTERN_COUNT
+            || batch.initial_cursor() != 0
+            || batch.initial_hold().is_some()
+            || batch.hold_enabled() != supply.hold_enabled()
+            || batch.projects_unplaced_lookahead()
+            || batch.projects_standard_bag_lookahead()
+        {
+            return None;
+        }
+        Some(Self {
+            hold_enabled: batch.hold_enabled(),
+            prefixes: None,
+        })
+    }
+
+    pub(super) fn has_geometry(&self) -> bool {
+        self.prefixes.is_some()
+    }
+
+    pub(super) fn clear_geometry(&mut self) {
+        self.prefixes = None;
+    }
+
+    pub(super) fn prepare_geometry(
+        &mut self,
+        geometry: Option<(&ExactScoringExecutionBatch, &ExactScoringExecutionGraph)>,
+    ) {
+        self.prefixes = Some(
+            geometry
+                .and_then(|(batch, graph)| root_piece_mask(batch, graph))
+                .map_or(P7_ALL_PREFIXES, |pieces| {
+                    p7_prefix_mask(pieces, self.hold_enabled)
+                }),
+        );
+    }
+
+    pub(super) fn next_pattern(&self, ordinal: usize) -> usize {
+        let Some(prefixes) = self.prefixes else {
+            return ordinal;
+        };
+        if ordinal >= P7_PATTERN_COUNT {
+            return P7_PATTERN_COUNT;
+        }
+        let prefix = ordinal / P7_PREFIX_BLOCK;
+        let remaining = prefixes >> prefix;
+        if remaining & 1 != 0 {
+            ordinal
+        } else if remaining != 0 {
+            (prefix + remaining.trailing_zeros() as usize) * P7_PREFIX_BLOCK
+        } else {
+            P7_PATTERN_COUNT
+        }
+    }
+}
+
+fn root_piece_mask(
+    batch: &ExactScoringExecutionBatch,
+    graph: &ExactScoringExecutionGraph,
+) -> Option<u8> {
+    let root = graph.root();
+    let node = graph.node(root)?;
+    if node.accepting() || batch.initial_occupied() & !batch.layout().all_cells_mask() != 0 {
+        return None;
+    }
+    let edges = graph.checked_edges(node)?;
+    if edges.len() > MAX_P7_ROOT_EDGES {
+        return None;
+    }
+    let mut pieces = 0;
+    for &edge in edges {
+        if edge.to() <= root || graph.node(edge.to()).is_none() {
+            return None;
+        }
+        // Do not turn a malformed root frame or edge into a successful zero
+        // count. Any unknown root keeps the original exact cursor path.
+        SolutionTraceBuilder::project_scoring_step(batch.layout(), batch.initial_occupied(), edge)?;
+        pieces |= 1 << piece_slot(edge.piece());
+    }
+    Some(pieces)
+}
+
+fn p7_prefix_mask(root_pieces: u8, hold_enabled: bool) -> u64 {
+    let mut prefix = 0;
+    let mut mask = 0;
+    // StandardBagOrdinals orders each bag by STANDARD_TETROMINOES. Each
+    // distinct two-piece prefix is followed by the same 5! suffixes.
+    // With cursor 0 and an empty hold, the first lock is Current(q0)
+    // or StoreCurrent(q1). Swap/release cannot place any other piece.
+    for first in PieceKind::STANDARD_TETROMINOES {
+        for second in PieceKind::STANDARD_TETROMINOES {
+            if first == second {
+                continue;
+            }
+            let first_mask = 1 << piece_slot(first);
+            let second_mask = u8::from(hold_enabled) << piece_slot(second);
+            if root_pieces & (first_mask | second_mask) != 0 {
+                mask |= 1 << prefix;
+            }
+            prefix += 1;
+        }
+    }
+    debug_assert_eq!(prefix, P7_PREFIX_COUNT);
+    mask
+}
+
 pub(super) struct P7P4InventoryIndex {
     tail: [u8; TAIL_COUNT],
     tail_classes: [[u64; TAIL_WORDS]; TAIL_CLASS_COUNT],
@@ -389,6 +529,36 @@ mod tests {
         PieceKind::J,
         PieceKind::L,
     ];
+
+    #[test]
+    fn p7_first_lock_prefixes_keep_exactly_the_supply_eligible_ordinals() {
+        use clearra_core_domain::piece::standard_bag_ordinals::StandardBagOrdinals;
+        let ordinals = StandardBagOrdinals::new(HEAD).unwrap();
+        assert_eq!(ordinals.len(), P7_PATTERN_COUNT);
+        for hold_enabled in [false, true] {
+            let root_pieces = 1 << piece_slot(PieceKind::I);
+            let mut index = P7FirstLockIndex {
+                hold_enabled,
+                prefixes: Some(p7_prefix_mask(root_pieces, hold_enabled)),
+            };
+            let expected = (0..ordinals.len()).filter(|&ordinal| {
+                let (sequence, len) = ordinals.sequence_at(ordinal).unwrap();
+                assert_eq!(len, HEAD);
+                sequence[0] == PieceKind::I || (hold_enabled && sequence[1] == PieceKind::I)
+            });
+            let found: Vec<_> = std::iter::successors(Some(index.next_pattern(0)), |&ordinal| {
+                (ordinal < P7_PATTERN_COUNT).then(|| index.next_pattern(ordinal + 1))
+            })
+            .take_while(|&ordinal| ordinal < P7_PATTERN_COUNT)
+            .collect();
+            assert!(found.iter().copied().eq(expected));
+            assert_eq!(found.len(), if hold_enabled { 1440 } else { 720 });
+            index.prepare_geometry(None);
+            assert_eq!(index.next_pattern(321), 321, "unknown evidence never skips");
+            index.clear_geometry();
+            assert!(!index.has_geometry());
+        }
+    }
 
     fn visit_second_bag(
         queue: &mut Vec<PieceKind>,

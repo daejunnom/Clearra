@@ -24,7 +24,7 @@ use batches::{PreparedReplayBatches, ReplayBatches, ReplayLanguage};
 
 #[path = "pc_replay_inventory.rs"]
 mod inventory;
-use inventory::P7P4InventoryIndex;
+use inventory::{P7FirstLockIndex, P7P4InventoryIndex};
 
 #[path = "pc_replay_page_store.rs"]
 mod store;
@@ -91,6 +91,7 @@ pub struct PcReplaySourceBuildSession {
     current_patterns: Vec<PatternManifest>,
     current_witness_count: usize,
     language: Option<ReplayLanguage>,
+    p7_first_lock: Option<P7FirstLockIndex>,
     inventory: Option<Box<P7P4InventoryIndex>>,
     first_rank: usize,
     hasher: Sha256,
@@ -321,6 +322,11 @@ impl PcReplaySourceBuildSession {
             && batches
                 .single_compact_batch()
                 .is_some_and(|batch| P7P4InventoryIndex::eligible(problem, batch));
+        // Inline, bounded state: its bytes are already part of the session
+        // admission. No additional geometry or queue storage is retained.
+        let p7_first_lock = batches
+            .single_compact_batch()
+            .and_then(|batch| P7FirstLockIndex::new(problem, batch));
         let mut session = Self {
             source: PcReplayPageSource {
                 problem_id: problem.problem_id().as_str().to_owned(),
@@ -345,6 +351,7 @@ impl PcReplaySourceBuildSession {
             current_patterns: Vec::new(),
             current_witness_count: 0,
             language: None,
+            p7_first_lock,
             inventory: None,
             first_rank: 0,
             hasher,
@@ -385,6 +392,7 @@ impl PcReplaySourceBuildSession {
                 break;
             }
             if self.next_geometry == self.pending.len() {
+                self.p7_first_lock = None;
                 self.inventory = None;
                 self.hasher
                     .update((self.source.geometries.len() as u128).to_le_bytes());
@@ -398,6 +406,37 @@ impl PcReplaySourceBuildSession {
                 return Ok(true);
             }
             if self.language.is_none() {
+                if let Some(index) = &mut self.p7_first_lock {
+                    if !index.has_geometry() {
+                        let geometry = match self.pending[self.next_geometry].1.as_slice() {
+                            [location] if location.batch == 0 => self
+                                .source
+                                .batches
+                                .single_compact_batch()
+                                .and_then(|batch| {
+                                    batch
+                                        .graphs()
+                                        .get(location.graph)
+                                        .map(|graph| (batch, graph))
+                                }),
+                            _ => None,
+                        };
+                        index.prepare_geometry(geometry);
+                        if quantum.is_exhausted() {
+                            break;
+                        }
+                        continue;
+                    }
+                    let next = index.next_pattern(self.next_pattern);
+                    if next != self.next_pattern {
+                        self.next_pattern = next;
+                        if next == self.source.materialized_pattern_count {
+                            self.finish_geometry()?;
+                            self.guard_additional(0)?;
+                        }
+                        continue;
+                    }
+                }
                 if let Some(index) = &mut self.inventory {
                     if !index.ready() {
                         let valid = self
@@ -669,6 +708,9 @@ impl PcReplaySourceBuildSession {
         self.current_witness_count = 0;
         self.next_pattern = 0;
         self.next_geometry += 1;
+        if let Some(index) = &mut self.p7_first_lock {
+            index.clear_geometry();
+        }
         if let Some(index) = &mut self.inventory {
             index.clear_geometry();
         }
