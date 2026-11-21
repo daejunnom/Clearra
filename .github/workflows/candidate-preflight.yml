@@ -12,6 +12,10 @@ on:
         description: Build only the exact-source diagnostic Windows CLI and Web WASM (no performance run)
         default: false
         type: boolean
+      profiling_wasm_only:
+        description: In profiling artifact mode, skip the Windows CLI for a browser-only comparison
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -434,7 +438,7 @@ jobs:
           retention-days: 7
 
   candidate-cli:
-    if: needs.candidate-source.outputs.full_gate == 'false' || needs.candidate-source.outputs.profiling_artifacts == 'true'
+    if: needs.candidate-source.outputs.full_gate == 'false' || (needs.candidate-source.outputs.profiling_artifacts == 'true' && !inputs.profiling_wasm_only)
     needs: candidate-source
     runs-on: ${{ needs.candidate-source.outputs.profiling_artifacts == 'true' && 'windows-latest' || 'ubuntu-latest' }}
     timeout-minutes: 40

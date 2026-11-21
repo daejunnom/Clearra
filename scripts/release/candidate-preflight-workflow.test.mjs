@@ -30,6 +30,7 @@ test('profiling artifacts are opt-in, build-only, and separate from normal candi
   assert.deepEqual([...jobs].filter(([, block]) => diagnostic.test(block)).map(([name]) => name),
     ['candidate-rust-wasm', 'candidate-cli']);
   const cli = jobs.get('candidate-cli');
+  assert.match(cli, /\(needs\.candidate-source\.outputs\.profiling_artifacts == 'true' && !inputs\.profiling_wasm_only\)/u);
   assert.match(cli, /'windows-latest' \|\| 'ubuntu-latest'/u);
   const cliBuild = cli.split('      - name: Build exact-source Windows CLI for stage profiling\n')[1]
     .split(/^      - /mu)[0];
