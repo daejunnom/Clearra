@@ -1,11 +1,12 @@
-// Closed, non-publishing feedback for the current minimum-continuation change.
+// Closed, non-publishing feedback for bounded product regressions.
 // This is deliberately not canonical acceptance and accepts no caller filters.
 import { spawnSync } from 'node:child_process';
 import { resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const ROOT = resolve(fileURLToPath(new URL('../..', import.meta.url)));
-export const CANDIDATE_REF = 'refs/heads/codex/v0.8.0-preflight-20260906-rng';
+const CANDIDATE_WORKFLOW_PATH = '.github/workflows/candidate-preflight.yml';
+const CORE_FEATURES = 'parallel,placement-dependency-pc';
 const APP_FAILURES = [
   'cooperative_execution::pc_allspin_projection_tests::cooperative_build_product_memory_authority_is_bounded_and_fail_closed',
   'portfolio_alternative_store::tests::candidate_ids_and_portfolios_are_numeric_lexicographic_and_one_based',
@@ -35,8 +36,10 @@ export const CANDIDATE_RUST_REGRESSIONS = Object.freeze([
     'member_pages_are_fixed_at_one_hundred_without_losing_candidate_identity',
     'ordered_solution_probability_',
   ].map((filter) => ({ package: 'clearra-app', filter, exact: false, parallel: true })),
-  { package: 'clearra-core-executor', filter: 'native_parallel_minimum_cover_', exact: false, parallel: true },
-  { package: 'clearra-core-executor', filter: 'ordered_solution_probability_', exact: false, parallel: true },
+  ...['native_parallel_minimum_cover_', 'ordered_solution_probability_',
+    'product_pc_placement_dependencies_match_concrete_p7_coverage'].map((filter) => ({
+    package: 'clearra-core-executor', filter, exact: false, parallel: true, features: CORE_FEATURES,
+  })),
   { package: 'clearra-pc-graph', filter: 'compiled_query_equality_', exact: false, parallel: false },
   ...['build_cover_', 'build_score_minimum_', 'build_minimum_source_preparation_'].map((filter) => ({
     package: 'clearra-wasm', filter, exact: false, parallel: false,
@@ -64,7 +67,14 @@ export const CANDIDATE_RUST_REGRESSIONS = Object.freeze([
 ].map(Object.freeze));
 
 export function assertCandidateHost(environment, platform) {
-  if (platform !== 'win32' || environment.GITHUB_ACTIONS !== 'true' || environment.GITHUB_REF !== CANDIDATE_REF) {
+  const { GITHUB_REF: ref, GITHUB_REPOSITORY: repository } = environment;
+  if (platform !== 'win32' || environment.GITHUB_ACTIONS !== 'true'
+      || environment.GITHUB_EVENT_NAME !== 'workflow_dispatch'
+      || environment.GITHUB_JOB !== 'candidate-rust'
+      || environment.GITHUB_REF_TYPE !== 'branch'
+      || !/^refs\/heads\/.+/u.test(ref ?? '') || ref === 'refs/heads/main'
+      || !repository
+      || environment.GITHUB_WORKFLOW_REF !== `${repository}/${CANDIDATE_WORKFLOW_PATH}@${ref}`) {
     throw new Error('Focused native feedback requires the isolated Windows Actions candidate job');
   }
   const sha = environment.GITHUB_SHA;
@@ -78,9 +88,14 @@ export function assertCandidateHost(environment, platform) {
 
 export function candidateRegressionArguments(spec) {
   if (!CANDIDATE_RUST_REGRESSIONS.includes(spec)) throw new Error('Unknown candidate regression');
+  const features = regressionFeatures(spec);
   return ['test', '--locked', '--package', spec.package, '--lib',
-    ...(spec.parallel ? ['--features', 'parallel'] : spec.features ? ['--features', spec.features] : []), spec.filter,
+    ...(features ? ['--features', features] : []), spec.filter,
     '--', '--test-threads=1', ...(spec.exact ? ['--exact'] : [])];
+}
+
+function regressionFeatures(spec) {
+  return spec.features ?? (spec.parallel ? 'parallel' : '');
 }
 
 export function assertNonemptyRustSuccess(result) {
@@ -99,7 +114,7 @@ export function runCandidateRegressions({ environment = process.env, platform = 
   const blockedCompilations = new Set();
   const blocked = [];
   for (const spec of CANDIDATE_RUST_REGRESSIONS) {
-    const compilation = `${spec.package}:${spec.parallel ? 'parallel' : spec.features ?? 'default'}`;
+    const compilation = `${spec.package}:${regressionFeatures(spec)}`;
     if (blockedCompilations.has(compilation)) {
       blocked.push(`${spec.package}:${spec.filter}`);
       write(`candidate_regression=blocked package=${spec.package} filter=${spec.filter} reason=prior-same-target-compile-failure\n`);
