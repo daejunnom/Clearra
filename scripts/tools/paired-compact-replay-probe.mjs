@@ -9,6 +9,8 @@ export const COMPACT_REPLAY_PROBE_ARGS = Object.freeze([
   '--workers', '1',
 ]);
 export const COMPACT_REPLAY_PROBE_COMMAND = ['clearra', ...COMPACT_REPLAY_PROBE_ARGS].join(' ');
+export const STANDARD_BAG_REPLAY_PROBE_COMMAND =
+  COMPACT_REPLAY_PROBE_COMMAND.replace(' --queue I ', ' --patterns P1 ');
 
 const REPLAY_STAGES = [
   'wasm.pc.path.execution_graphs',
@@ -25,10 +27,10 @@ export function verifyCompactReplayProbeStages(stages) {
   }
 }
 
-export function compactReplayProbeIdentity(kind, payload) {
+export function compactReplayProbeIdentity(kind, payload, expectedPatternCount = '1') {
   assert.equal(kind, 'pc-path-family.v2');
   assert.equal(payload?.complete, true);
-  assert.equal(payload.materialized_pattern_count, '1');
+  assert.equal(payload.materialized_pattern_count, expectedPatternCount);
   assert.match(payload.witness_count ?? '', /^[1-9]\d*$/u);
   assert.equal(payload.geometry_count, '1');
   assert.match(payload.page_source_identity_sha256 ?? '', /^[0-9a-f]{64}$/u);

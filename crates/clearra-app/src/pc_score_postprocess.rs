@@ -308,6 +308,11 @@ pub(crate) fn apply_pc_postprocess_with_derivation_and_memory_guard(
             component: "pc_score_exact_batch_missing_or_ambiguous",
         });
     }
+    if compact_batch.is_some_and(|batch| batch.dense_patterns().is_none()) {
+        return Err(CoreExecutionError::RuntimeUnavailable {
+            component: "pc_score_exact_wasm_dense_patterns_required",
+        });
+    }
     let (materialized, materialization_retained_bytes, execution_source_complete) =
         if distributed_score_available {
             if result.postprocess_score_profile_id() != Some(profile.id()) {

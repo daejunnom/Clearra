@@ -1755,7 +1755,10 @@ fn scoring_batch_with_profile_ids(
     ExactScoringExecutionBatch::new(
         batch.layout(),
         batch.initial_occupied(),
-        batch.patterns().to_vec(),
+        batch
+            .dense_patterns()
+            .expect("score batch is dense")
+            .to_vec(),
         batch.initial_cursor(),
         batch.initial_hold(),
         batch.hold_enabled(),

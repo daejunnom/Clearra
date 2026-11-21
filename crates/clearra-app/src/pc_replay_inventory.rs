@@ -83,7 +83,7 @@ impl P7P4InventoryIndex {
             && batch.layout().height() == 4
             && batch.hold_enabled() == supply.hold_enabled()
             && !batch.projects_unplaced_lookahead()
-            && batch.patterns().len() == PATTERN_COUNT
+            && batch.pattern_count() == PATTERN_COUNT
             && problem
                 .piece_source()
                 .materialized_universe()
@@ -97,6 +97,9 @@ impl P7P4InventoryIndex {
                                 sequence_len: 11
                             }
                         )
+                        && batch.standard_bag_ordinals().is_none_or(|ordinals| {
+                            source.complete_standard_bag_ordinals() == Some(ordinals)
+                        })
                 })
     }
 
@@ -113,19 +116,30 @@ impl P7P4InventoryIndex {
         self.validated == PATTERN_COUNT
     }
 
-    /// Use the actual batch ordinals. Matching a nominal P7P4 request or
-    /// its length is insufficient: verify every stored queue under a
-    /// bounded cooperative cursor before enabling any skipping.
+    /// Use the actual batch ordinals. Dense storage must validate every
+    /// stored queue; an authenticated ordinal source only needs to decode
+    /// one tail block. Both use bounded cooperative work.
     pub(super) fn advance_layout(&mut self, batch: &ExactScoringExecutionBatch) -> bool {
-        let end = (self.validated + INDEX_VALIDATION_CHUNK).min(PATTERN_COUNT);
-        let Some(group) = batch.patterns().get(self.validated..end) else {
-            return false;
+        // Eligibility already bound the opaque ordinal descriptor to the
+        // authentic query. Its mixed-radix layout repeats the first tail block
+        // for every first-bag permutation, unlike arbitrary dense sources.
+        let validation_rows = if batch.standard_bag_ordinals().is_some() {
+            TAIL_COUNT
+        } else {
+            PATTERN_COUNT
         };
-        for queue in group {
-            if !self.accept_layout_at(self.validated, queue) {
+        let end = (self.validated + INDEX_VALIDATION_CHUNK).min(validation_rows);
+        for id in self.validated..end {
+            let Some(queue) = batch.pattern_at(id) else {
+                return false;
+            };
+            if !self.accept_layout_at(id, queue.as_ref()) {
                 return false;
             }
             self.validated += 1;
+        }
+        if end == validation_rows {
+            self.validated = PATTERN_COUNT;
         }
         true
     }

@@ -2,7 +2,9 @@
 //! its exponentially large trace stream. Counting/proof and ownership remain
 //! with the replay session; a matching digest does not admit unvalidated input.
 
-use clearra_core_domain::piece::piece_kind::PieceKind;
+use clearra_core_domain::piece::{
+    piece_kind::PieceKind, standard_bag_ordinals::StandardBagOrdinals,
+};
 use clearra_problem::SearchProblem;
 use clearra_replay::{
     ExactScoringExecutionBatch, ExactScoringExecutionGraph, FullHeightExecutionBatch,
@@ -11,6 +13,9 @@ use clearra_replay::{
 use sha2::{Digest, Sha256};
 
 const INVALID_SOURCE: &str = "complete_replay_source_digest_invalid";
+const BAG_LENGTH: usize = PieceKind::STANDARD_TETROMINOES.len();
+const MAX_TAIL_LENGTH: usize = 4;
+const MAX_TAIL_COUNT: usize = 7 * 6 * 5 * 4;
 
 /// The caller has already established the typed result/problem authority.
 /// This additional check binds the projection and ordered immutable storage.
@@ -37,7 +42,11 @@ pub(crate) fn pc_replay_source_hasher(
     bytes(&mut hash, b"ordered-batches")?;
     count(&mut hash, batches.len())?;
     let supply = problem.supply();
-    for batch in batches {
+    let expected_ordinals = problem
+        .piece_source()
+        .materialized_universe()
+        .and_then(|universe| universe.complete_standard_bag_ordinals());
+    for (index, batch) in batches.iter().enumerate() {
         if !batch.complete()
             || batch.initial_occupied() != problem.initial_board().occupied_mask()
             || batch.initial_cursor() != problem.initial_hold().cursor()
@@ -47,9 +56,10 @@ pub(crate) fn pc_replay_source_hasher(
             || batch.projects_standard_bag_lookahead() != supply.projects_standard_bag_lookahead()
             || batch.layout().width() != problem.initial_board().width()
             || batch.layout().height() != problem.visible_height()
-            || batches
-                .first()
-                .is_some_and(|first| batch.patterns() != first.patterns())
+            || batch
+                .standard_bag_ordinals()
+                .is_some_and(|ordinals| expected_ordinals != Some(ordinals))
+            || (index != 0 && !same_compact_patterns(&batches[0], batch))
         {
             return Err(INVALID_SOURCE);
         }
@@ -57,6 +67,28 @@ pub(crate) fn pc_replay_source_hasher(
     }
     bytes(&mut hash, b"ordered-exact-manifest")?;
     Ok(hash)
+}
+
+fn same_compact_patterns(
+    left: &ExactScoringExecutionBatch,
+    right: &ExactScoringExecutionBatch,
+) -> bool {
+    if left.pattern_count() != right.pattern_count() {
+        return false;
+    }
+    if let (Some(left), Some(right)) = (left.standard_bag_ordinals(), right.standard_bag_ordinals())
+    {
+        return left == right;
+    }
+    if let (Some(left), Some(right)) = (left.dense_patterns(), right.dense_patterns()) {
+        return left == right;
+    }
+    // A union may include one source of each representation. Equal counts
+    // are insufficient; the exact queue at every original ordinal must agree.
+    (0..left.pattern_count()).all(|id| match (left.pattern_at(id), right.pattern_at(id)) {
+        (Some(left), Some(right)) => left.as_ref() == right.as_ref(),
+        _ => false,
+    })
 }
 
 fn hash_problem_context(
@@ -232,18 +264,71 @@ fn hash_batch(hash: &mut Sha256, batch: &ExactScoringExecutionBatch) -> Result<(
     ]);
     hash.update(batch.kick_table_id().to_le_bytes());
     hash.update(batch.rule_profile_id().to_le_bytes());
-    count(hash, batch.patterns().len())?;
-    for pattern in batch.patterns() {
-        count(hash, pattern.len())?;
-        for piece in pattern {
-            hash.update([piece.as_ascii() as u8]);
+    count(hash, batch.pattern_count())?;
+    if let Some(patterns) = batch.dense_patterns() {
+        for pattern in patterns {
+            count(hash, pattern.len())?;
+            for piece in pattern {
+                hash.update([piece.as_ascii() as u8]);
+            }
         }
+    } else {
+        hash_standard_bag_rows(hash, batch.standard_bag_ordinals().ok_or(INVALID_SOURCE)?)?;
     }
     count(hash, batch.graphs().len())?;
     for graph in batch.graphs() {
         hash_graph(hash, graph)?;
     }
     Ok(())
+}
+
+fn hash_standard_bag_rows(
+    hash: &mut Sha256,
+    ordinals: StandardBagOrdinals,
+) -> Result<(), &'static str> {
+    let length = ordinals.sequence_len();
+    let mut row = [0_u8; 8 + BAG_LENGTH + MAX_TAIL_LENGTH];
+    let row = row.get_mut(..8 + length).ok_or(INVALID_SOURCE)?;
+    row[..8].copy_from_slice(&(length as u64).to_le_bytes());
+    if length <= BAG_LENGTH {
+        for rank in 0..ordinals.len() {
+            let (pieces, _) = ordinals.sequence_at(rank).ok_or(INVALID_SOURCE)?;
+            write_ascii_pieces(&mut row[8..], &pieces);
+            hash.update(&*row);
+        }
+        return Ok(());
+    }
+
+    // The complete fresh bag descriptor guarantees head-major mixed-radix
+    // order. Decode each of the at most 5,040 heads and 840 tails once. Only
+    // the tiny tail ASCII table is live, not millions of decoded queues.
+    let head = StandardBagOrdinals::new(BAG_LENGTH).ok_or(INVALID_SOURCE)?;
+    let tail_length = length - BAG_LENGTH;
+    let tail = StandardBagOrdinals::new(tail_length).ok_or(INVALID_SOURCE)?;
+    if head.len().checked_mul(tail.len()) != Some(ordinals.len()) {
+        return Err(INVALID_SOURCE);
+    }
+    let mut tails = [[0_u8; MAX_TAIL_LENGTH]; MAX_TAIL_COUNT];
+    let tails = tails.get_mut(..tail.len()).ok_or(INVALID_SOURCE)?;
+    for (rank, suffix) in tails.iter_mut().enumerate() {
+        let (pieces, _) = tail.sequence_at(rank).ok_or(INVALID_SOURCE)?;
+        write_ascii_pieces(&mut suffix[..tail_length], &pieces);
+    }
+    for rank in 0..head.len() {
+        let (pieces, _) = head.sequence_at(rank).ok_or(INVALID_SOURCE)?;
+        write_ascii_pieces(&mut row[8..8 + BAG_LENGTH], &pieces);
+        for suffix in &*tails {
+            row[8 + BAG_LENGTH..].copy_from_slice(&suffix[..tail_length]);
+            hash.update(&*row);
+        }
+    }
+    Ok(())
+}
+
+fn write_ascii_pieces(destination: &mut [u8], pieces: &[PieceKind]) {
+    for (byte, piece) in destination.iter_mut().zip(pieces) {
+        *byte = piece.as_ascii() as u8;
+    }
 }
 
 fn hash_graph(hash: &mut Sha256, graph: &ExactScoringExecutionGraph) -> Result<(), &'static str> {
@@ -403,6 +488,34 @@ mod tests {
             digest(&compact),
             digest(&graph(vec![edge(0, 1), edge(0, 0)]))
         );
+    }
+
+    #[test]
+    fn ordinal_row_hash_preserves_historical_bytes_across_the_bag_boundary() {
+        fn write_legacy(hash: &mut Sha256, remaining: u8, next: usize, head: &mut [u8; 7]) {
+            if next == head.len() {
+                for tail in PieceKind::STANDARD_TETROMINOES {
+                    count(hash, 8).unwrap();
+                    for &piece in &*head {
+                        hash.update([piece]);
+                    }
+                    hash.update([tail.as_ascii() as u8]);
+                }
+                return;
+            }
+            for (slot, piece) in PieceKind::STANDARD_TETROMINOES.into_iter().enumerate() {
+                let bit = 1 << slot;
+                if remaining & bit != 0 {
+                    head[next] = piece.as_ascii() as u8;
+                    write_legacy(hash, remaining & !bit, next + 1, head);
+                }
+            }
+        }
+        let mut historical = Sha256::new();
+        write_legacy(&mut historical, 0x7f, 0, &mut [0; 7]);
+        let mut ordinal = Sha256::new();
+        hash_standard_bag_rows(&mut ordinal, StandardBagOrdinals::new(8).unwrap()).unwrap();
+        assert_eq!(ordinal.finalize(), historical.finalize());
     }
 
     #[test]

@@ -1062,9 +1062,11 @@ impl PcScoreCompiledAuthority {
             .piece_source()
             .materialized_universe()
             .ok_or_else(|| rejected("pc_score_pattern_universe_missing"))?;
-        if batch.patterns().len() != self.materialized_pattern_count
-            || batch
-                .patterns()
+        let patterns = batch
+            .dense_patterns()
+            .ok_or_else(|| rejected("pc_score_exact_wasm_dense_patterns_required"))?;
+        if patterns.len() != self.materialized_pattern_count
+            || patterns
                 .iter()
                 .enumerate()
                 .any(|(index, pattern)| pattern.as_slice() != universe.sequence_at(index).as_ref())

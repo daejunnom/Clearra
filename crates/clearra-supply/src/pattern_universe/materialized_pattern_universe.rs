@@ -1,7 +1,8 @@
 use std::borrow::Cow;
 
 use clearra_core_domain::{
-    piece::piece_kind::PieceKind, probability::probability_value::ProbabilityValue,
+    piece::{piece_kind::PieceKind, standard_bag_ordinals::StandardBagOrdinals},
+    probability::probability_value::ProbabilityValue,
 };
 use clearra_coverage::{
     pattern::{
@@ -57,6 +58,26 @@ pub enum UniformCompactPatternSource<'a> {
 }
 
 impl MaterializedPatternUniverse {
+    /// Prove that this universe's actual rows already follow the complete
+    /// canonical compact axis. A descriptor, matching count or sampled
+    /// equality alone does not grant replay-producer authority.
+    pub fn complete_standard_bag_ordinals(&self) -> Option<StandardBagOrdinals> {
+        if !self.complete || self.truncation_reason.is_some() {
+            return None;
+        }
+        let UniformCompactPatternSource::Standard7Bag {
+            sequence_len,
+            pattern_count,
+        } = self.uniform_compact_source()?
+        else {
+            return None;
+        };
+        let ordinals = StandardBagOrdinals::new(sequence_len)?;
+        (ordinals.len() == pattern_count
+            && ordinals.len() as u128 == self.total_possible_pattern_count)
+            .then_some(ordinals)
+    }
+
     pub fn uniform_compact_source(&self) -> Option<UniformCompactPatternSource<'_>> {
         // Equality of two Uniform variants is O(1). Explicit and terminal-
         // remainder variants do not compare equal, even if their samples do.
@@ -586,8 +607,14 @@ mod tests {
         pattern_universe_id::PatternUniverseId, pattern_weight_model_id::PatternWeightModelId,
     };
 
-    use super::{checked_add_bytes, MaterializedPatternUniverse, PatternSequenceStorage};
-    use crate::queue::queue_pattern_expression::QueuePatternExpression;
+    use super::{
+        checked_add_bytes, MaterializedPatternUniverse, MaterializedPatternUniverseStructure,
+        PatternSequenceStorage,
+    };
+    use crate::{
+        pattern_universe::PatternUniverseMaterializer,
+        queue::queue_pattern_expression::QueuePatternExpression,
+    };
 
     #[test]
     fn explicit_retained_capacity_is_flat_sequences_plus_weight_payload() {
@@ -691,6 +718,82 @@ mod tests {
             universe.uniform_compact_source().is_none(),
             "sub-unity mass is not silently normalized"
         );
+    }
+
+    #[test]
+    fn complete_standard_bag_ordinals_require_actual_complete_uniform_storage() {
+        let mut universe = PatternUniverseMaterializer::standard_7_bag(11, 0, 1).unwrap();
+        let ordinals = universe.complete_standard_bag_ordinals().unwrap();
+        assert_eq!(ordinals.len(), 4_233_600);
+        assert_eq!(ordinals.sequence_len(), 11);
+        for index in [0, 1, 839, 840, 4_233_599] {
+            let (row, len) = ordinals.sequence_at(index).unwrap();
+            assert_eq!(
+                &row[..len],
+                universe.try_sequence_at(index).unwrap().as_ref()
+            );
+        }
+        universe.structure = MaterializedPatternUniverseStructure::Explicit;
+        assert_eq!(universe.complete_standard_bag_ordinals(), Some(ordinals));
+        universe.total_possible_pattern_count += 1;
+        assert_eq!(universe.complete_standard_bag_ordinals(), None);
+
+        let mut truncated = PatternUniverseMaterializer::standard_7_bag(11, 2, 1).unwrap();
+        assert_eq!(truncated.complete_standard_bag_ordinals(), None);
+        // Even a false "complete" marker and self-consistent narrowed total
+        // cannot turn a prefix of the axis into the complete axis.
+        truncated.complete = true;
+        truncated.truncation_reason = None;
+        truncated.total_possible_pattern_count = 2;
+        truncated.weights =
+            clearra_coverage::pattern::weighted_pattern_set::WeightedPatternSet::uniform(2)
+                .unwrap();
+        assert_eq!(truncated.complete_standard_bag_ordinals(), None);
+        let mut weighted = PatternUniverseMaterializer::standard_7_bag(1, 0, 1).unwrap();
+        weighted.weights =
+            clearra_coverage::pattern::weighted_pattern_set::WeightedPatternSet::new(vec![
+                ProbabilityValue::new(1.0 / 7.0).unwrap();
+                7
+            ])
+            .unwrap();
+        assert_eq!(weighted.complete_standard_bag_ordinals(), None);
+    }
+
+    #[test]
+    fn complete_standard_bag_ordinals_do_not_infer_backing_from_sequences_or_factorization() {
+        let explicit = MaterializedPatternUniverse::from_sequences(
+            PatternUniverseId::new(1),
+            PatternWeightModelId::new(2),
+            PieceKind::STANDARD_TETROMINOES
+                .into_iter()
+                .map(|piece| vec![piece])
+                .collect(),
+            vec![ProbabilityValue::new(1.0 / 7.0).unwrap(); 7],
+            7,
+            true,
+            None,
+        )
+        .unwrap();
+        assert_eq!(explicit.complete_standard_bag_ordinals(), None);
+
+        let factorized = MaterializedPatternUniverse::from_factorized_queue_expression(
+            PatternUniverseId::new(1),
+            PatternWeightModelId::new(2),
+            QueuePatternExpression::parse("P7", 5_040).unwrap(),
+            ProbabilityValue::new(1.0 / 5_040.0).unwrap(),
+            5_040,
+        )
+        .unwrap();
+        assert_eq!(factorized.complete_standard_bag_ordinals(), None);
+
+        let larger = PatternUniverseMaterializer::standard_7_bag(12, 0, 1).unwrap();
+        assert_eq!(larger.complete_standard_bag_ordinals(), None);
+        assert!(larger
+            .try_sequence_at(2_520)
+            .unwrap()
+            .iter()
+            .map(|piece| piece.as_ascii())
+            .eq("IOTSZLJIOTSZ".chars()));
     }
 
     #[test]

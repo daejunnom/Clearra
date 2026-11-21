@@ -91,7 +91,7 @@ impl ReplayBatches {
                     || Some(batch.initial_occupied()) != projection.initial_board.compact()
                     || usize::from(batch.initial_cursor()) != projection.initial_cursor
                     || batch.initial_hold() != projection.initial_hold
-                    || batch.patterns().len() != patterns
+                    || batch.pattern_count() != patterns
                 {
                     return Err("pc replay graph source does not match the query".into());
                 }

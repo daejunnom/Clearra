@@ -6,7 +6,7 @@ use std::{fmt::Debug, hash::Hash};
 use clearra_core_domain::{execution_cancellation::ExecutionControl, piece::piece_kind::PieceKind};
 use clearra_replay::{
     ExactScoringExecutionBatch, ExactScoringExecutionGraph, HoldDecision, PieceDecision,
-    ScoringExecutionEdge, ScoringExecutionNode, SpinCoverageExecutionGraph,
+    ReplayPattern, ScoringExecutionEdge, ScoringExecutionNode, SpinCoverageExecutionGraph,
 };
 
 use super::{
@@ -53,8 +53,19 @@ impl ReplayLanguageGraph for SpinCoverageExecutionGraph {
 
 pub(super) trait ReplayLanguageBatch: Debug + ExecutionSupplyBatch {
     type Graph: ReplayLanguageGraph;
+    type PatternCache: Debug + Default;
     fn graph(&self, index: usize) -> Option<&Self::Graph>;
-    fn patterns(&self) -> &[Vec<PieceKind>];
+    fn pattern_count(&self) -> usize;
+    fn load_pattern_cache(&self, index: usize) -> Option<Self::PatternCache>;
+    fn selected_pattern<'a>(
+        &'a self,
+        index: usize,
+        cache: &'a Self::PatternCache,
+    ) -> Option<&'a [PieceKind]>;
+    fn has_same_ordinal_axis(&self, _other: &Self) -> bool {
+        false
+    }
+    fn pattern_matches(&self, index: usize, expected: &[PieceKind]) -> bool;
     fn initial_cursor(&self) -> u16;
     fn initial_hold(&self) -> Option<PieceKind>;
     fn complete(&self) -> bool;
@@ -62,13 +73,52 @@ pub(super) trait ReplayLanguageBatch: Debug + ExecutionSupplyBatch {
     fn rule_profile_id(&self) -> u64;
 }
 
+#[derive(Debug, Default)]
+pub(super) enum CompactReplayPatternCache {
+    #[default]
+    Dense,
+    StandardBag {
+        pieces: [PieceKind; 11],
+        len: usize,
+    },
+}
+
 impl ReplayLanguageBatch for ExactScoringExecutionBatch {
     type Graph = ExactScoringExecutionGraph;
+    type PatternCache = CompactReplayPatternCache;
     fn graph(&self, index: usize) -> Option<&Self::Graph> {
         self.graphs().get(index)
     }
-    fn patterns(&self) -> &[Vec<PieceKind>] {
-        self.patterns()
+    fn pattern_count(&self) -> usize {
+        self.pattern_count()
+    }
+    fn load_pattern_cache(&self, index: usize) -> Option<Self::PatternCache> {
+        Some(match self.pattern_at(index)? {
+            ReplayPattern::Dense(_) => CompactReplayPatternCache::Dense,
+            ReplayPattern::StandardBag { pieces, len } => {
+                CompactReplayPatternCache::StandardBag { pieces, len }
+            }
+        })
+    }
+    fn selected_pattern<'a>(
+        &'a self,
+        index: usize,
+        cache: &'a Self::PatternCache,
+    ) -> Option<&'a [PieceKind]> {
+        match cache {
+            CompactReplayPatternCache::Dense => {
+                self.dense_patterns()?.get(index).map(Vec::as_slice)
+            }
+            CompactReplayPatternCache::StandardBag { pieces, len } => pieces.get(..*len),
+        }
+    }
+    fn pattern_matches(&self, index: usize, expected: &[PieceKind]) -> bool {
+        self.pattern_at(index)
+            .is_some_and(|pattern| pattern.as_ref() == expected)
+    }
+    fn has_same_ordinal_axis(&self, other: &Self) -> bool {
+        self.standard_bag_ordinals()
+            .is_some_and(|ordinals| other.standard_bag_ordinals() == Some(ordinals))
     }
     fn initial_cursor(&self) -> u16 {
         self.initial_cursor()

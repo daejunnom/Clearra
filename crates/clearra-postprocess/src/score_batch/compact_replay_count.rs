@@ -146,10 +146,23 @@ impl CompactReplayOrdinalBinding {
             let Some(batch) = self.batches.get(self.batch) else {
                 return Ok(true);
             };
-            if !batch.complete() || batch.patterns().len() != self.shape.pattern_count {
+            if !batch.complete() || batch.pattern_count() != self.shape.pattern_count {
                 return Err(Error::InvalidEvidence.into());
             }
-            let actual = &batch.patterns()[self.ordinal];
+            if let Some(ordinals) = batch.standard_bag_ordinals() {
+                // The storage type fixes every row on this axis. Continue to
+                // inspect each row for separately supplied dense batches.
+                if self.ordinal != 0 || ordinals.sequence_len() != usize::from(self.shape.queue_len)
+                {
+                    return Err(Error::InvalidEvidence.into());
+                }
+                self.batch += 1;
+                continue;
+            }
+            let actual = batch
+                .dense_patterns()
+                .and_then(|rows| rows.get(self.ordinal))
+                .ok_or(Error::InvalidEvidence)?;
             let expected = &mut self.slots[..usize::from(self.shape.queue_len)];
             if actual.len() != expected.len()
                 || actual.iter().zip(expected.iter()).any(|(&piece, &slot)| {

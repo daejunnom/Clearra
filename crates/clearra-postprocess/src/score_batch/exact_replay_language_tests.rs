@@ -3,11 +3,15 @@ use crate::ExactScoringExecutionMaterializer;
 use clearra_core_domain::{
     board::board_size::BoardSize,
     execution_cancellation::ExecutionCancellationToken,
-    piece::{piece_kind::PieceKind, rotation::RotationState},
+    piece::{
+        piece_kind::PieceKind, rotation::RotationState, standard_bag_ordinals::StandardBagOrdinals,
+    },
     solution::normalized_tiling_solution::{PiecePlacementMask, StandardBoard64TilingIdentity},
 };
 use clearra_geometry::layout::board64_layout::Board64Layout;
-use clearra_replay::{ExactScoringExecutionGraph, ScoringExecutionNode, ScoringLockEvidence};
+use clearra_replay::{
+    ExactScoringExecutionGraph, ReplayPatternRows, ScoringExecutionNode, ScoringLockEvidence,
+};
 
 fn graph(paths: &[&[i8]], pieces: usize) -> ExactScoringExecutionGraph {
     let width = pieces * 2;
@@ -128,6 +132,119 @@ fn session(batches: Arc<[ExactScoringExecutionBatch]>, cap: usize) -> ExactRepla
         })
         .collect();
     ExactReplayLanguageSession::new(batches, locations, 0, limits(cap), &mut |_| Ok(())).unwrap()
+}
+
+#[test]
+fn compact_ordinal_replay_matches_dense_witness_and_rejects_unsupported_consumers() {
+    let layout = Board64Layout::new(BoardSize::new(2, 2).unwrap()).unwrap();
+    let identity = StandardBoard64TilingIdentity::from_placements(
+        0,
+        [PiecePlacementMask::new(PieceKind::O, 15)],
+    )
+    .unwrap();
+    let make_batch = |patterns| {
+        ExactScoringExecutionBatch::new_with_pattern_rows(
+            layout,
+            0,
+            patterns,
+            0,
+            None,
+            false,
+            false,
+            false,
+            1,
+            1,
+            vec![ExactScoringExecutionGraph::new(
+                1,
+                identity,
+                0,
+                vec![
+                    ScoringExecutionNode::new(0, 1, false),
+                    ScoringExecutionNode::new(1, 0, true),
+                ],
+                vec![edge(1, 0, 2)],
+            )],
+            true,
+        )
+    };
+    let dense = make_batch(ReplayPatternRows::Dense(
+        PieceKind::STANDARD_TETROMINOES
+            .into_iter()
+            .map(|piece| vec![piece])
+            .collect(),
+    ));
+    let compact = make_batch(ReplayPatternRows::StandardBag(
+        StandardBagOrdinals::new(1).expect("one-draw ordinals"),
+    ));
+    let make_session = |batches, ordinal, cap| {
+        let batches: Vec<ExactScoringExecutionBatch> = batches;
+        let locations = (0..batches.len())
+            .map(|batch| ExactReplayGraphLocation { batch, graph: 0 })
+            .collect();
+        ExactReplayLanguageSession::new(
+            batches.into(),
+            locations,
+            ordinal,
+            Limits::new(100, 256, cap),
+            &mut |_| Ok(()),
+        )
+    };
+    let budget = 64 * 1024 * 1024;
+    let mut control = make_session(vec![dense.clone()], 1, budget).unwrap();
+    complete(&mut control).unwrap();
+    let expected = all(&control);
+    assert_eq!(expected.len(), 1);
+    for batches in [
+        vec![compact.clone()],
+        vec![dense, compact.clone()],
+        vec![compact.clone(), compact.clone()],
+    ] {
+        let mut candidate = make_session(batches, 1, budget).unwrap();
+        complete(&mut candidate).unwrap();
+        assert_eq!(all(&candidate), expected);
+    }
+    let (direct, _) =
+        ExactScoringExecutionMaterializer::materialize_complete_replay_cell_with_limits(
+            &compact,
+            0,
+            1,
+            &ExecutionControl::default(),
+            limits(100),
+        )
+        .unwrap();
+    assert_eq!(
+        direct.aggregates()[0].executions()[0].trace_identity(),
+        &expected[0]
+    );
+    assert!(matches!(
+        make_session(vec![compact.clone()], 1, 1),
+        Err(Error::MemoryLimitExceeded { .. })
+    ));
+    let mut invalid = make_session(vec![compact.clone()], 7, budget).unwrap();
+    assert_eq!(complete(&mut invalid), Err(Error::InvalidEvidence));
+    let different_row = make_batch(ReplayPatternRows::Dense(vec![vec![PieceKind::O]; 7]));
+    let mut mismatched = make_session(vec![compact.clone(), different_row], 0, budget).unwrap();
+    assert_eq!(complete(&mut mismatched), Err(Error::InvalidEvidence));
+    assert!(
+        ExactScoringExecutionMaterializer::checked_score_cell_memory_projection(&compact).is_none()
+    );
+    assert!(
+        ExactScoringExecutionMaterializer::materialize_terminal_replays(
+            &compact,
+            &ExecutionControl::default(),
+        )
+        .is_err()
+    );
+    assert!(
+        crate::TSpinCoverageOnlyMaterializer::checked_target_memory_projection(&compact).is_none()
+    );
+    assert!(
+        crate::BackToBackExecutionFilter::checked_scoring_batch_memory_projection(
+            &compact,
+            clearra_scoring::profile::SpinProfileId::TSpins,
+        )
+        .is_none()
+    );
 }
 
 #[test]

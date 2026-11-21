@@ -69,13 +69,13 @@ impl BackToBackExecutionFilter {
         batch: &ExactScoringExecutionBatch,
         spin_profile: SpinProfileId,
     ) -> Option<BackToBackFilterMemoryProjection> {
+        let patterns = batch.dense_patterns()?;
         let policy = BackToBackPreservationPolicy::new(SpinProfile::builtin(spin_profile));
         let mut output_retained_bytes = core::mem::size_of::<ExactScoringExecutionBatch>() as u128;
         output_retained_bytes = output_retained_bytes.checked_add(
-            (batch.patterns().len() as u128)
-                .checked_mul(core::mem::size_of::<Vec<PieceKind>>() as u128)?,
+            (patterns.len() as u128).checked_mul(core::mem::size_of::<Vec<PieceKind>>() as u128)?,
         )?;
-        for pattern in batch.patterns() {
+        for pattern in patterns {
             output_retained_bytes = output_retained_bytes.checked_add(
                 (pattern.len() as u128).checked_mul(core::mem::size_of::<PieceKind>() as u128)?,
             )?;
@@ -162,7 +162,12 @@ impl BackToBackExecutionFilter {
             max_memory_bytes,
         )?;
         let policy = BackToBackPreservationPolicy::new(SpinProfile::builtin(spin_profile));
-        let patterns = try_clone_patterns(batch.patterns(), projection.output_retained_bytes)?;
+        let patterns = try_clone_patterns(
+            batch
+                .dense_patterns()
+                .ok_or(BackToBackFilterError::ProjectionOverflow)?,
+            projection.output_retained_bytes,
+        )?;
         let mut graphs = Vec::new();
         graphs
             .try_reserve_exact(batch.graphs().len())
@@ -273,7 +278,8 @@ impl BackToBackExecutionFilter {
         ))
     }
 
-    pub fn scoring_batch(
+    #[cfg(test)]
+    fn scoring_batch(
         batch: &ExactScoringExecutionBatch,
         spin_profile: SpinProfileId,
     ) -> ExactScoringExecutionBatch {
@@ -286,7 +292,10 @@ impl BackToBackExecutionFilter {
         ExactScoringExecutionBatch::new(
             batch.layout(),
             batch.initial_occupied(),
-            batch.patterns().to_vec(),
+            batch
+                .dense_patterns()
+                .expect("dense scoring fixture")
+                .to_vec(),
             batch.initial_cursor(),
             batch.initial_hold(),
             batch.hold_enabled(),
@@ -324,6 +333,7 @@ impl BackToBackExecutionFilter {
     }
 }
 
+#[cfg(test)]
 fn filter_scoring_graph(
     graph: &ExactScoringExecutionGraph,
     policy: BackToBackPreservationPolicy,

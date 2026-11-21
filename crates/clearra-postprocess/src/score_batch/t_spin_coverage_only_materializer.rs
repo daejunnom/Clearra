@@ -202,49 +202,53 @@ impl TSpinCoverageOnlyMaterialization {
 
 #[derive(Clone, Copy)]
 enum SpinBatchRef<'a> {
-    Scoring(&'a ExactScoringExecutionBatch),
+    Scoring(&'a ExactScoringExecutionBatch, &'a [Vec<PieceKind>]),
     Coverage(&'a SpinCoverageExecutionBatch),
 }
 
 impl<'a> SpinBatchRef<'a> {
+    fn from_scoring(batch: &'a ExactScoringExecutionBatch) -> Option<Self> {
+        Some(Self::Scoring(batch, batch.dense_patterns()?))
+    }
+
     fn patterns(self) -> &'a [Vec<PieceKind>] {
         match self {
-            Self::Scoring(batch) => batch.patterns(),
+            Self::Scoring(_, patterns) => patterns,
             Self::Coverage(batch) => batch.patterns(),
         }
     }
 
     const fn initial_cursor(self) -> u16 {
         match self {
-            Self::Scoring(batch) => batch.initial_cursor(),
+            Self::Scoring(batch, _) => batch.initial_cursor(),
             Self::Coverage(batch) => batch.initial_cursor(),
         }
     }
 
     const fn initial_hold(self) -> Option<PieceKind> {
         match self {
-            Self::Scoring(batch) => batch.initial_hold(),
+            Self::Scoring(batch, _) => batch.initial_hold(),
             Self::Coverage(batch) => batch.initial_hold(),
         }
     }
 
     const fn complete(self) -> bool {
         match self {
-            Self::Scoring(batch) => batch.complete(),
+            Self::Scoring(batch, _) => batch.complete(),
             Self::Coverage(batch) => batch.complete(),
         }
     }
 
     fn graph_count(self) -> usize {
         match self {
-            Self::Scoring(batch) => batch.graphs().len(),
+            Self::Scoring(batch, _) => batch.graphs().len(),
             Self::Coverage(batch) => batch.graphs().len(),
         }
     }
 
     fn graph(self, index: usize) -> Option<SpinGraphRef<'a>> {
         match self {
-            Self::Scoring(batch) => batch.graphs().get(index).map(SpinGraphRef::Scoring),
+            Self::Scoring(batch, _) => batch.graphs().get(index).map(SpinGraphRef::Scoring),
             Self::Coverage(batch) => batch.graphs().get(index).map(SpinGraphRef::Coverage),
         }
     }
@@ -376,21 +380,21 @@ impl<'a> SpinBatchRef<'a> {
 impl ExecutionSupplyBatch for SpinBatchRef<'_> {
     fn hold_enabled(&self) -> bool {
         match self {
-            Self::Scoring(batch) => batch.hold_enabled(),
+            Self::Scoring(batch, _) => batch.hold_enabled(),
             Self::Coverage(batch) => batch.hold_enabled(),
         }
     }
 
     fn projects_unplaced_lookahead(&self) -> bool {
         match self {
-            Self::Scoring(batch) => batch.projects_unplaced_lookahead(),
+            Self::Scoring(batch, _) => batch.projects_unplaced_lookahead(),
             Self::Coverage(batch) => batch.projects_unplaced_lookahead(),
         }
     }
 
     fn projects_standard_bag_lookahead(&self) -> bool {
         match self {
-            Self::Scoring(batch) => batch.projects_standard_bag_lookahead(),
+            Self::Scoring(batch, _) => batch.projects_standard_bag_lookahead(),
             Self::Coverage(batch) => batch.projects_standard_bag_lookahead(),
         }
     }
@@ -668,7 +672,7 @@ impl TSpinCoverageOnlyMaterializer {
     pub fn checked_target_memory_projection(
         batch: &ExactScoringExecutionBatch,
     ) -> Option<TSpinCoverageMemoryProjection> {
-        SpinBatchRef::Scoring(batch).checked_memory_projection()
+        SpinBatchRef::from_scoring(batch)?.checked_memory_projection()
     }
 
     pub fn checked_spin_batch_memory_projection(
@@ -684,7 +688,7 @@ impl TSpinCoverageOnlyMaterializer {
         Self::materialize_target(
             batch,
             SpinCoverageTarget::TSpinSingle,
-            0..batch.patterns().len(),
+            0..batch.pattern_count(),
             control,
         )
     }
@@ -709,7 +713,7 @@ impl TSpinCoverageOnlyMaterializer {
         control: &ExecutionControl,
     ) -> Result<TSpinCoverageOnlyMaterialization, ExactScoringExecutionCancelled> {
         Self::materialize_batch(
-            SpinBatchRef::Scoring(batch),
+            SpinBatchRef::from_scoring(batch).ok_or(ExactScoringExecutionCancelled)?,
             Some(target),
             pattern_range,
             control,
@@ -728,7 +732,8 @@ impl TSpinCoverageOnlyMaterializer {
         TSpinCoverageMaterializationError,
     > {
         Self::materialize_batch_with_memory_limit(
-            SpinBatchRef::Scoring(batch),
+            SpinBatchRef::from_scoring(batch)
+                .ok_or(TSpinCoverageMaterializationError::ProjectionOverflow)?,
             Some(target),
             pattern_range,
             control,
@@ -777,7 +782,12 @@ impl TSpinCoverageOnlyMaterializer {
         pattern_range: Range<usize>,
         control: &ExecutionControl,
     ) -> Result<TSpinCoverageOnlyMaterialization, ExactScoringExecutionCancelled> {
-        Self::materialize_batch(SpinBatchRef::Scoring(batch), None, pattern_range, control)
+        Self::materialize_batch(
+            SpinBatchRef::from_scoring(batch).ok_or(ExactScoringExecutionCancelled)?,
+            None,
+            pattern_range,
+            control,
+        )
     }
 
     pub fn materialize_all_paths_with_memory_limit(
@@ -791,7 +801,8 @@ impl TSpinCoverageOnlyMaterializer {
         TSpinCoverageMaterializationError,
     > {
         Self::materialize_batch_with_memory_limit(
-            SpinBatchRef::Scoring(batch),
+            SpinBatchRef::from_scoring(batch)
+                .ok_or(TSpinCoverageMaterializationError::ProjectionOverflow)?,
             None,
             pattern_range,
             control,

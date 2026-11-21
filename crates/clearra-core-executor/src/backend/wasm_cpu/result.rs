@@ -26,7 +26,7 @@ use clearra_coverage::{
 use clearra_geometry::layout::board64_layout::Board64Layout;
 use clearra_pc_graph::request::RequestedSearchBackend;
 use clearra_problem::{PcChanceEvidencePolicy, SearchOutputPolicy, SearchProblem};
-use clearra_replay::ExactScoringExecutionBatch;
+use clearra_replay::{ExactScoringExecutionBatch, ReplayPatternRows};
 use clearra_rules::profile::rule_capability::RuleCapability;
 use clearra_supply::pattern_universe::{PackingPatternMembershipKind, PieceMultisetKey};
 
@@ -4442,8 +4442,13 @@ impl WasmExactSearchSession {
             || execution_constraints.requested()
             || save_execution_requested
             || path_execution_requested;
+        let replay_only = path_execution_requested
+            && !scoring_requested
+            && !execution_constraints.requested()
+            && !save_execution_requested;
         let scoring_batch = if execution_evidence_requested {
-            match self.prepare_exact_scoring_execution_batch(path_execution_requested) {
+            match self.prepare_exact_scoring_execution_batch(path_execution_requested, replay_only)
+            {
                 Ok(batch) => Some(batch),
                 Err(WasmExactSearchError::Cancelled) => return Ok(ExactSearchAdvance::Cancelled),
                 Err(error) => return Err(error),
@@ -4471,6 +4476,7 @@ impl WasmExactSearchSession {
     fn prepare_exact_scoring_execution_batch(
         &mut self,
         profile_pc_path: bool,
+        allow_bag_ordinals: bool,
     ) -> Result<ExactScoringExecutionBatch, WasmExactSearchError> {
         let control = self.execution_control.clone();
         let check_cancelled = || {
@@ -4597,6 +4603,71 @@ impl WasmExactSearchSession {
             control.report_progress("complete-replay-queues", 0, Some(pattern_count as u64));
         }
         check_cancelled()?;
+        let graph_bytes = graph_outer_bytes
+            .checked_add(retained_graph_nested_bytes)
+            .ok_or_else(|| self.scoring_memory_projection_overflow())?;
+        let ordinals = if allow_bag_ordinals
+            && self.problem.initial_hold().cursor() == 0
+            && !self.problem.supply().projects_unplaced_lookahead()
+            && !self.problem.supply().projects_standard_bag_lookahead()
+        {
+            universe.complete_standard_bag_ordinals()
+        } else {
+            None
+        };
+        let (patterns, rows_written) = if let Some(ordinals) = ordinals {
+            (ReplayPatternRows::StandardBag(ordinals), 0)
+        } else {
+            let rows = self.prepare_dense_scoring_pattern_rows(
+                universe,
+                graph_bytes,
+                profile_pc_path,
+                &control,
+                &check_cancelled,
+            )?;
+            let rows_written = rows.len() as u64;
+            (ReplayPatternRows::Dense(rows), rows_written)
+        };
+        if let Some(span) = pattern_span {
+            span.finish(rows_written);
+        }
+        check_cancelled()?;
+        let (kick_table_id, rule_profile_id) = replay_profile_ids(&self.problem);
+        let batch = ExactScoringExecutionBatch::new_with_pattern_rows(
+            layout,
+            self.catalog.initial_board(),
+            patterns,
+            self.problem.initial_hold().cursor(),
+            self.problem.initial_hold().hold_piece(),
+            self.problem.supply().hold_enabled(),
+            self.problem.supply().projects_unplaced_lookahead(),
+            self.problem.supply().projects_standard_bag_lookahead(),
+            kick_table_id,
+            rule_profile_id,
+            graphs,
+            complete,
+        );
+        let batch_bytes = (core::mem::size_of::<ExactScoringExecutionBatch>() as u128)
+            .checked_add(
+                batch
+                    .checked_nested_retained_bytes()
+                    .ok_or_else(|| self.scoring_memory_projection_overflow())?,
+            )
+            .ok_or_else(|| self.scoring_memory_projection_overflow())?;
+        self.ensure_score_session_memory_bound(batch_bytes)?;
+        Ok(batch)
+    }
+
+    fn prepare_dense_scoring_pattern_rows(
+        &self,
+        universe: &clearra_supply::pattern_universe::MaterializedPatternUniverse,
+        graph_bytes: u128,
+        profile_pc_path: bool,
+        control: &ExecutionControl,
+        check_cancelled: &impl Fn() -> Result<(), WasmExactSearchError>,
+    ) -> Result<Vec<Vec<clearra_core_domain::piece::piece_kind::PieceKind>>, WasmExactSearchError>
+    {
+        let pattern_count = universe.pattern_count();
         let pattern_outer_bytes = (pattern_count as u128)
             .checked_mul(
                 core::mem::size_of::<Vec<clearra_core_domain::piece::piece_kind::PieceKind>>()
@@ -4618,9 +4689,6 @@ impl WasmExactSearchSession {
                 )
                 .ok_or_else(|| self.scoring_memory_projection_overflow())?;
         }
-        let graph_bytes = graph_outer_bytes
-            .checked_add(retained_graph_nested_bytes)
-            .ok_or_else(|| self.scoring_memory_projection_overflow())?;
         self.ensure_score_session_memory_bound(
             graph_bytes
                 .checked_add(pattern_outer_bytes)
@@ -4696,34 +4764,7 @@ impl WasmExactSearchSession {
             }
             patterns.push(pattern);
         }
-        if let Some(span) = pattern_span {
-            span.finish(patterns.len() as u64);
-        }
-        check_cancelled()?;
-        let (kick_table_id, rule_profile_id) = replay_profile_ids(&self.problem);
-        let batch = ExactScoringExecutionBatch::new(
-            layout,
-            self.catalog.initial_board(),
-            patterns,
-            self.problem.initial_hold().cursor(),
-            self.problem.initial_hold().hold_piece(),
-            self.problem.supply().hold_enabled(),
-            self.problem.supply().projects_unplaced_lookahead(),
-            self.problem.supply().projects_standard_bag_lookahead(),
-            kick_table_id,
-            rule_profile_id,
-            graphs,
-            complete,
-        );
-        let batch_bytes = (core::mem::size_of::<ExactScoringExecutionBatch>() as u128)
-            .checked_add(
-                batch
-                    .checked_nested_retained_bytes()
-                    .ok_or_else(|| self.scoring_memory_projection_overflow())?,
-            )
-            .ok_or_else(|| self.scoring_memory_projection_overflow())?;
-        self.ensure_score_session_memory_bound(batch_bytes)?;
-        Ok(batch)
+        Ok(patterns)
     }
 
     fn scoring_memory_projection_overflow(&self) -> WasmExactSearchError {
@@ -7021,6 +7062,40 @@ mod tests {
             }
             assert!(matches!(outcome, ExactSearchAdvance::Cancelled), "{stage}");
         }
+    }
+
+    #[test]
+    fn compact_pc_path_keeps_original_standard_bag_ordinals() {
+        let query = PcScenarioQuery::new(
+            PcScenarioBoard::standard_10(1, 0x3f0),
+            PcQueueInput::standard_7_bag(),
+            PieceWindow::new(1),
+        )
+        .with_allow_hold(false)
+        .with_exact_pieces(Some(1))
+        .with_count_policy(PcCountPolicy::CountAll)
+        .with_objective(ObjectivePolicy::all())
+        .with_execution_policy(PcExecutionPolicy::default().with_workers(1));
+        let problem = ProblemCompiler::compile_scenario_pc(&query)
+            .unwrap()
+            .with_pc_path_v2_evidence();
+        let result =
+            WasmCpuSearchBackend::execute_with_control(&problem, &ExecutionControl::default())
+                .unwrap();
+        let batch = result.exact_scoring_execution_batch().unwrap();
+        let universe = problem.piece_source().materialized_universe().unwrap();
+        assert!(batch.standard_bag_ordinals().is_some());
+        assert!(batch.dense_patterns().is_none());
+        assert_eq!(batch.pattern_count(), PieceKind::STANDARD_TETROMINOES.len());
+        assert_eq!(batch.graphs().len(), 1);
+        for ordinal in 0..universe.pattern_count() {
+            let expected = universe.try_sequence_at(ordinal).unwrap();
+            assert_eq!(
+                batch.pattern_at(ordinal).unwrap().as_ref(),
+                expected.as_ref()
+            );
+        }
+        assert!(batch.pattern_at(universe.pattern_count()).is_none());
     }
 
     #[test]

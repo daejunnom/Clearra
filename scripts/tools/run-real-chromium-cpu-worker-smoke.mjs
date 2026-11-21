@@ -14,7 +14,7 @@ import { createClearraWasmBuildContract, clearraWasmBuildContractsEqual }
   from './clearra-wasm-build-contract.mjs';
 import { readChromiumGateWasmInput } from './chromium-gate-wasm-input.mjs';
 import { acquireManagedTransientDirectory } from './managed-transient-directory.mjs';
-import { COMPACT_REPLAY_PROBE_COMMAND, compactReplayProbeIdentity }
+import { COMPACT_REPLAY_PROBE_COMMAND, STANDARD_BAG_REPLAY_PROBE_COMMAND, compactReplayProbeIdentity }
   from './paired-compact-replay-probe.mjs';
 
 const SELF = fileURLToPath(import.meta.url);
@@ -167,6 +167,9 @@ const tests = [
   { label: 'pc-compact-replay', workers: 1, kind: 'pc-path-family.v2',
     page: 'replay', compact: true, targetLines: 1,
     command: COMPACT_REPLAY_PROBE_COMMAND.replace(/ --workers 1$/u, '') },
+  { label: 'pc-compact-standard-bag-replay', workers: 1, kind: 'pc-path-family.v2',
+    page: 'replay', compact: true, targetLines: 1, patternCount: '7',
+    command: STANDARD_BAG_REPLAY_PROBE_COMMAND.replace(/ --workers 1$/u, '') },
   // Empty physical evidence is not a verifier-activity witness. Use serial
   // readback for the two valid-but-empty products instead of requiring peers.
   { label: 'pc-forced-7l-b2b-empty-minimum', workers: 1, kind: 'pc-minimum-cover.v2',
@@ -605,7 +608,7 @@ function typedProjection(test, execution, forced24GeometryKey) {
       assert.equal(page, null);
       assert.equal(frames, null);
     } else if (test.compact) {
-      compactReplayProbeIdentity(product.result_kind, payload);
+      compactReplayProbeIdentity(product.result_kind, payload, test.patternCount);
       assert.equal(payload.page_source_available, true);
       assert.ok(page, test.label + ' did not read the live replay source');
       assert.deepEqual(page.witnesses, payload.witnesses);

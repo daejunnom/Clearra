@@ -555,6 +555,9 @@ impl ExactScoringExecutionMaterializer {
         batch: &ExactScoringExecutionBatch,
         control: &ExecutionControl,
     ) -> Result<ExactScoringExecutionMaterialization, ExactScoringExecutionCancelled> {
+        let patterns = batch
+            .dense_patterns()
+            .ok_or(ExactScoringExecutionCancelled)?;
         let mut aggregates = Vec::with_capacity(batch.graphs().len());
         let mut complete = batch.complete();
 
@@ -568,7 +571,7 @@ impl ExactScoringExecutionMaterializer {
                 Some(batch.graphs().len() as u64),
             );
             let mut executions = Vec::new();
-            for (pattern_id, sequence) in batch.patterns().iter().enumerate() {
+            for (pattern_id, sequence) in patterns.iter().enumerate() {
                 let (mut terminal_executions, cell_complete) =
                     materialize_terminal_replays_for_cell(
                         batch, graph, sequence, pattern_id, control,
@@ -621,7 +624,7 @@ impl ExactScoringExecutionMaterializer {
         Self::materialize_complete_replay_graph_range(
             batch,
             0..batch.graphs().len(),
-            0..batch.patterns().len(),
+            0..batch.pattern_count(),
             true,
             control,
             limits,
@@ -649,7 +652,7 @@ impl ExactScoringExecutionMaterializer {
         Self::materialize_complete_replay_graph_range(
             batch,
             graph_index..graph_index + 1,
-            0..batch.patterns().len(),
+            0..batch.pattern_count(),
             true,
             control,
             limits,
@@ -672,7 +675,7 @@ impl ExactScoringExecutionMaterializer {
         ),
         ExactReplayMaterializationError,
     > {
-        if graph_index >= batch.graphs().len() || pattern_id >= batch.patterns().len() {
+        if graph_index >= batch.graphs().len() || pattern_id >= batch.pattern_count() {
             return Err(ExactReplayMaterializationError::InvalidEvidence);
         }
         Self::materialize_complete_replay_graph_range(
@@ -743,18 +746,28 @@ impl ExactScoringExecutionMaterializer {
                         .checked_mul(core::mem::size_of::<HoldDecision>() as u128)
                         .and_then(|hold_bytes| bytes.checked_add(hold_bytes))
                 })
+                .and_then(|bytes| {
+                    let pattern_bytes = if batch.standard_bag_ordinals().is_some() {
+                        core::mem::size_of::<clearra_replay::ReplayPattern<'_>>() as u128
+                    } else {
+                        0
+                    };
+                    bytes.checked_add(pattern_bytes)
+                })
                 .ok_or(ExactReplayMaterializationError::ProjectionOverflow)?;
             budget.ensure_peak(0, scratch_bytes)?;
 
             let mut executions = Vec::new();
             for pattern_id in pattern_range.clone() {
-                let sequence = &batch.patterns()[pattern_id];
+                let pattern = batch
+                    .pattern_at(pattern_id)
+                    .ok_or(ExactReplayMaterializationError::InvalidEvidence)?;
                 path.clear();
                 holds.clear();
                 let cell_complete = visit_complete_replay_paths(
                     batch,
                     graph,
-                    sequence,
+                    pattern.as_ref(),
                     pattern_id,
                     SupplyState {
                         node: graph.root(),
@@ -848,6 +861,7 @@ impl ExactScoringExecutionMaterializer {
         batch: &ExactScoringExecutionBatch,
         profile_storage_bytes: u128,
     ) -> Option<ExactScoreCellMemoryProjection> {
+        let patterns = batch.dense_patterns()?;
         let max_path_len = batch
             .graphs()
             .iter()
@@ -856,7 +870,7 @@ impl ExactScoringExecutionMaterializer {
             .unwrap_or(0);
         checked_score_cell_memory_projection_for_shape(
             batch.graphs().len(),
-            batch.patterns().len(),
+            patterns.len(),
             max_path_len,
             profile_storage_bytes,
         )
@@ -972,6 +986,9 @@ impl ExactScoringExecutionMaterializer {
         (ExactScoreCellMaterialization, ExactScoreCellMemoryReport),
         ExactScoreCellMaterializationError,
     > {
+        let patterns = batch
+            .dense_patterns()
+            .ok_or(ExactScoreCellMaterializationError::ProjectionOverflow)?;
         let evaluation_policy = ScoreEvaluationPolicy::tetrio_pc(score_policy.initial_b2b());
         let mut scored_executions = Vec::new();
         scored_executions
@@ -995,7 +1012,7 @@ impl ExactScoringExecutionMaterializer {
                 graph_index as u64,
                 Some(batch.graphs().len() as u64),
             );
-            for (pattern_id, sequence) in batch.patterns().iter().enumerate() {
+            for (pattern_id, sequence) in patterns.iter().enumerate() {
                 path.clear();
                 holds.clear();
                 let mut best = None;
@@ -1085,6 +1102,9 @@ impl ExactScoringExecutionMaterializer {
         retain_replays: bool,
         control: &ExecutionControl,
     ) -> Result<ExactScoringExecutionMaterialization, ExactScoringExecutionCancelled> {
+        let patterns = batch
+            .dense_patterns()
+            .ok_or(ExactScoringExecutionCancelled)?;
         let profile = crate::score_profile_selection::score_profile(score_policy);
         let evaluation_policy = ScoreEvaluationPolicy::tetrio_pc(score_policy.initial_b2b());
         let mut aggregates = if retain_replays {
@@ -1107,7 +1127,7 @@ impl ExactScoringExecutionMaterializer {
                 Some(batch.graphs().len() as u64),
             );
             let mut executions = Vec::new();
-            for (pattern_id, sequence) in batch.patterns().iter().enumerate() {
+            for (pattern_id, sequence) in patterns.iter().enumerate() {
                 let mut path = Vec::new();
                 let mut holds = Vec::new();
                 let mut best = None;

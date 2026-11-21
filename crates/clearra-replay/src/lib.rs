@@ -28,8 +28,8 @@ pub use replay::{
     ReplayScoreBasisEvent, ReplayTrace, ReplayTraceBufferBudget, RowMask,
 };
 pub use scoring_execution::{
-    ExactScoringExecutionBatch, ExactScoringExecutionGraph, ScoringExecutionEdge,
-    ScoringExecutionNode, ScoringLockEvidence,
+    ExactScoringExecutionBatch, ExactScoringExecutionGraph, ReplayPattern, ReplayPatternRows,
+    ScoringExecutionEdge, ScoringExecutionNode, ScoringLockEvidence,
 };
 pub use spin_coverage_execution::{SpinCoverageExecutionBatch, SpinCoverageExecutionGraph};
 pub use trace::{

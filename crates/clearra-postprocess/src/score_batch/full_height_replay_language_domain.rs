@@ -56,11 +56,25 @@ impl ReplayLanguageOutput for FullHeightCandidateExecution {
 
 impl ReplayLanguageBatch for FullHeightExecutionBatch {
     type Graph = SpinCoverageExecutionGraph;
+    type PatternCache = ();
     fn graph(&self, index: usize) -> Option<&Self::Graph> {
         self.execution().graphs().get(index)
     }
-    fn patterns(&self) -> &[Vec<PieceKind>] {
-        self.execution().patterns()
+    fn pattern_count(&self) -> usize {
+        self.execution().patterns().len()
+    }
+    fn load_pattern_cache(&self, index: usize) -> Option<Self::PatternCache> {
+        (index < self.pattern_count()).then_some(())
+    }
+    fn selected_pattern<'a>(
+        &'a self,
+        index: usize,
+        _cache: &'a Self::PatternCache,
+    ) -> Option<&'a [PieceKind]> {
+        self.execution().patterns().get(index).map(Vec::as_slice)
+    }
+    fn pattern_matches(&self, index: usize, expected: &[PieceKind]) -> bool {
+        self.selected_pattern(index, &()) == Some(expected)
     }
     fn initial_cursor(&self) -> u16 {
         self.execution().initial_cursor()

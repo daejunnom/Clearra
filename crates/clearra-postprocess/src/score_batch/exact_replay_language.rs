@@ -219,6 +219,7 @@ struct ReplayLanguageSession<D: ReplayLanguageDomain> {
     batches: ReplayBatchOwner<D::Batch>,
     locations: ExactReplayGraphLocations,
     pattern_id: usize,
+    pattern_cache: <D::Batch as ReplayLanguageBatch>::PatternCache,
     limits: Limits,
     phase: Phase,
     nfa: Vec<NfaNode<D::State>>,
@@ -585,6 +586,7 @@ impl<D: ReplayLanguageDomain> ReplayLanguageSession<D> {
             batches,
             locations,
             pattern_id,
+            pattern_cache: Default::default(),
             limits,
             phase: Phase::Roots,
             nfa: Vec::new(),
@@ -888,12 +890,16 @@ impl<D: ReplayLanguageDomain> ReplayLanguageSession<D> {
                     .ok_or(Error::InvalidEvidence)?;
                 let graph = batch.graph(location.graph).ok_or(Error::InvalidEvidence)?;
                 if !batch.complete()
-                    || self.pattern_id >= batch.patterns().len()
+                    || self.pattern_id >= batch.pattern_count()
                     || graph.node(graph.root()).is_none()
                 {
                     return Err(Error::InvalidEvidence);
                 }
-                if self.index != 0 {
+                if self.index == 0 {
+                    self.pattern_cache = batch
+                        .load_pattern_cache(self.pattern_id)
+                        .ok_or(Error::InvalidEvidence)?;
+                } else {
                     let first = locations[0];
                     let first_batch = self
                         .batches
@@ -906,8 +912,14 @@ impl<D: ReplayLanguageDomain> ReplayLanguageSession<D> {
                         || !D::same_frame(batch, first_batch)
                         || batch.initial_cursor() != first_batch.initial_cursor()
                         || batch.initial_hold() != first_batch.initial_hold()
-                        || batch.patterns().get(self.pattern_id)
-                            != first_batch.patterns().get(self.pattern_id)
+                        || (location.batch != first.batch
+                            && !batch.has_same_ordinal_axis(first_batch)
+                            && !batch.pattern_matches(
+                                self.pattern_id,
+                                first_batch
+                                    .selected_pattern(self.pattern_id, &self.pattern_cache)
+                                    .ok_or(Error::InvalidEvidence)?,
+                            ))
                         || batch.hold_enabled() != first_batch.hold_enabled()
                         || batch.projects_unplaced_lookahead()
                             != first_batch.projects_unplaced_lookahead()
@@ -1070,7 +1082,11 @@ impl<D: ReplayLanguageDomain> ReplayLanguageSession<D> {
         let graph = batch.graph(location.graph).ok_or(Error::InvalidEvidence)?;
         let node = graph.node(key.supply.node).ok_or(Error::InvalidEvidence)?;
         let edges = graph.checked_edges(node).ok_or(Error::InvalidEvidence)?;
-        let sequence = &batch.patterns()[self.pattern_id];
+        // The roots check binds every participating batch to this same row.
+        // In particular, an ordinal row is decoded only once per session.
+        let sequence = self.batches[self.locations.as_slice()[0].batch]
+            .selected_pattern(self.pattern_id, &self.pattern_cache)
+            .ok_or(Error::InvalidEvidence)?;
         if node.accepting() {
             let accepted = terminal_supply_state_is_accepted(batch, sequence, key.supply);
             // Every counted witness is board- and supply-bound. Nondefault

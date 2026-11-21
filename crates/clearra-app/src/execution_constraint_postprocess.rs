@@ -435,6 +435,11 @@ fn apply_execution_constraints_inner(
         })?;
 
     for batch in result.exact_scoring_execution_batches() {
+        if batch.dense_patterns().is_none() {
+            return Err(CoreExecutionError::RuntimeUnavailable {
+                component: "b2b_preservation_dense_patterns_required",
+            });
+        }
         let scratch = checked_constraint_scratch_bytes(
             checkpoint_bytes,
             &authoritative_coverage,
@@ -479,7 +484,7 @@ fn apply_execution_constraints_inner(
         let (materialized, materialization_report) =
             TSpinCoverageOnlyMaterializer::materialize_all_paths_with_memory_limit(
                 &filtered,
-                0..filtered.patterns().len(),
+                0..filtered.pattern_count(),
                 control,
                 filtered_live,
                 materialization_cap,
@@ -2544,7 +2549,11 @@ fn retain_accepted_scoring_batches(
         retained.push(ExactScoringExecutionBatch::new(
             batch.layout(),
             batch.initial_occupied(),
-            try_clone_patterns(batch.patterns())?,
+            try_clone_patterns(batch.dense_patterns().ok_or(
+                CoreExecutionError::RuntimeUnavailable {
+                    component: "b2b_preservation_dense_patterns_required",
+                },
+            )?)?,
             batch.initial_cursor(),
             batch.initial_hold(),
             batch.hold_enabled(),

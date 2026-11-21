@@ -950,6 +950,95 @@ mod memory_tests {
     }
 
     #[test]
+    fn ordinal_backing_preserves_compact_replay_digest_and_first_page() {
+        use clearra_objectives::policy::objective_policy::ObjectivePolicy;
+        use clearra_pc_graph::request::{
+            PcCountPolicy, PcExecutionPolicy, PcQueueInput, PcScenarioBoard, PcScenarioQuery,
+            PieceWindow,
+        };
+        use clearra_replay::ReplayPatternRows;
+
+        let _resource_guard =
+            crate::execution_resource_test_support::execution_resource_test_guard();
+        let query = PcScenarioQuery::new(
+            PcScenarioBoard::standard_10(2, 0xf3fcf),
+            PcQueueInput::standard_7_bag(),
+            PieceWindow::new(1),
+        )
+        .with_exact_pieces(Some(1))
+        .with_allow_hold(false)
+        .with_execution_policy(PcExecutionPolicy::mvp_default().with_workers(1))
+        .with_count_policy(PcCountPolicy::CountAll)
+        .with_objective(ObjectivePolicy::all());
+        let problem = clearra_problem::ProblemCompiler::compile_scenario_pc(&query)
+            .unwrap()
+            .with_pc_path_v2_evidence();
+        let control = ExecutionControl::default();
+        let result =
+            clearra_core_executor::WasmCpuSearchBackend::execute_with_control(&problem, &control)
+                .unwrap();
+        let [template] = result.exact_scoring_execution_batches() else {
+            panic!("one tiny replay source expected");
+        };
+        let universe = problem.piece_source().materialized_universe().unwrap();
+        let ordinals = universe.complete_standard_bag_ordinals().unwrap();
+        assert_eq!(ordinals.len(), 7);
+        let dense_rows: Vec<_> = (0..ordinals.len())
+            .map(|id| universe.sequence_at(id).into_owned())
+            .collect();
+        let build = |patterns| {
+            ExactScoringExecutionBatch::new_with_pattern_rows(
+                template.layout(),
+                template.initial_occupied(),
+                patterns,
+                template.initial_cursor(),
+                template.initial_hold(),
+                template.hold_enabled(),
+                template.projects_unplaced_lookahead(),
+                template.projects_standard_bag_lookahead(),
+                template.kick_table_id(),
+                template.rule_profile_id(),
+                template.graphs().to_vec(),
+                template.complete(),
+            )
+        };
+        let dense = build(ReplayPatternRows::Dense(dense_rows.clone()));
+        let ordinal = build(ReplayPatternRows::StandardBag(ordinals));
+        let mut different = dense_rows;
+        different.swap(0, 1);
+        let different = build(ReplayPatternRows::Dense(different));
+        assert!(crate::pc_replay_source_digest::pc_replay_source_hasher(
+            &problem,
+            &[ordinal.clone(), different],
+        )
+        .is_err());
+        let prepare = |batch| {
+            let result = result
+                .clone()
+                .with_exact_scoring_execution_batch(Some(batch));
+            let mut session =
+                PcReplaySourceBuildSession::new(&problem, &result, u128::MAX).unwrap();
+            while !session.advance(64, &control).unwrap() {}
+            session.complete().unwrap()
+        };
+        let dense_source = prepare(dense);
+        let ordinal_source = prepare(ordinal);
+        assert!(dense_source.witness_count() > 0);
+        assert_eq!(
+            dense_source.identity_sha256(),
+            ordinal_source.identity_sha256()
+        );
+        assert_eq!(dense_source.witness_count(), ordinal_source.witness_count());
+        let dense_page = PcReplayPageStore::new(dense_source)
+            .page(1, 1, &control)
+            .unwrap();
+        let ordinal_page = PcReplayPageStore::new(ordinal_source)
+            .page(1, 1, &control)
+            .unwrap();
+        assert_eq!(dense_page, ordinal_page);
+    }
+
+    #[test]
     fn replay_external_response_projection_counts_core_heap_only_once() {
         let _resource_guard =
             crate::execution_resource_test_support::execution_resource_test_guard();
@@ -1063,7 +1152,7 @@ mod memory_tests {
         let (problem, result) = tiny_replay_source();
         let original = result.exact_scoring_execution_batch_owner().unwrap();
         let graph_pointer = original[0].graphs().as_ptr();
-        let pattern_pointer = original[0].patterns().as_ptr();
+        let pattern_pointer = original[0].dense_patterns().unwrap().as_ptr();
         let mut session = PcReplaySourceBuildSession::new(&problem, &result, u128::MAX).unwrap();
         let ReplayBatches::Compact(Some(shared)) = &session.source.batches else {
             panic!("expected the Core-owned compact replay evidence");
@@ -1101,7 +1190,10 @@ mod memory_tests {
             panic!("completed pager lost the Core allocation");
         };
         assert_eq!(shared[0].graphs().as_ptr(), graph_pointer);
-        assert_eq!(shared[0].patterns().as_ptr(), pattern_pointer);
+        assert_eq!(
+            shared[0].dense_patterns().unwrap().as_ptr(),
+            pattern_pointer
+        );
     }
 
     #[test]

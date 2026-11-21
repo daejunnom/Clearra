@@ -1,5 +1,7 @@
 use clearra_core_domain::{
-    piece::{piece_kind::PieceKind, rotation::RotationState},
+    piece::{
+        piece_kind::PieceKind, rotation::RotationState, standard_bag_ordinals::StandardBagOrdinals,
+    },
     solution::normalized_tiling_solution::StandardBoard64TilingIdentity,
 };
 use clearra_geometry::layout::board64_layout::Board64Layout;
@@ -327,11 +329,34 @@ impl ExactScoringExecutionGraph {
     }
 }
 
+/// Closed queue backing. The ordinal form is the complete, original rank
+/// axis; it is not a sampled or filtered list of queues.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ReplayPatternRows {
+    Dense(Vec<Vec<PieceKind>>),
+    StandardBag(StandardBagOrdinals),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ReplayPattern<'a> {
+    Dense(&'a [PieceKind]),
+    StandardBag { pieces: [PieceKind; 11], len: usize },
+}
+
+impl AsRef<[PieceKind]> for ReplayPattern<'_> {
+    fn as_ref(&self) -> &[PieceKind] {
+        match self {
+            Self::Dense(pieces) => pieces,
+            Self::StandardBag { pieces, len } => &pieces[..*len],
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExactScoringExecutionBatch {
     layout: Board64Layout,
     initial_occupied: u64,
-    patterns: Vec<Vec<PieceKind>>,
+    patterns: ReplayPatternRows,
     initial_cursor: u16,
     initial_hold: Option<PieceKind>,
     hold_enabled: bool,
@@ -349,6 +374,37 @@ impl ExactScoringExecutionBatch {
         layout: Board64Layout,
         initial_occupied: u64,
         patterns: Vec<Vec<PieceKind>>,
+        initial_cursor: u16,
+        initial_hold: Option<PieceKind>,
+        hold_enabled: bool,
+        projects_unplaced_lookahead: bool,
+        projects_standard_bag_lookahead: bool,
+        kick_table_id: u64,
+        rule_profile_id: u64,
+        graphs: Vec<ExactScoringExecutionGraph>,
+        complete: bool,
+    ) -> Self {
+        Self::new_with_pattern_rows(
+            layout,
+            initial_occupied,
+            ReplayPatternRows::Dense(patterns),
+            initial_cursor,
+            initial_hold,
+            hold_enabled,
+            projects_unplaced_lookahead,
+            projects_standard_bag_lookahead,
+            kick_table_id,
+            rule_profile_id,
+            graphs,
+            complete,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_pattern_rows(
+        layout: Board64Layout,
+        initial_occupied: u64,
+        patterns: ReplayPatternRows,
         initial_cursor: u16,
         initial_hold: Option<PieceKind>,
         hold_enabled: bool,
@@ -391,8 +447,38 @@ impl ExactScoringExecutionBatch {
         self.initial_occupied
     }
 
-    pub fn patterns(&self) -> &[Vec<PieceKind>] {
-        &self.patterns
+    pub fn pattern_count(&self) -> usize {
+        match &self.patterns {
+            ReplayPatternRows::Dense(rows) => rows.len(),
+            ReplayPatternRows::StandardBag(ordinal) => ordinal.len(),
+        }
+    }
+
+    /// Dense-only capabilities must explicitly validate their backing. An
+    /// ordinal source is never converted to an empty slice or expanded here.
+    pub fn dense_patterns(&self) -> Option<&[Vec<PieceKind>]> {
+        match &self.patterns {
+            ReplayPatternRows::Dense(rows) => Some(rows),
+            ReplayPatternRows::StandardBag(_) => None,
+        }
+    }
+
+    pub fn standard_bag_ordinals(&self) -> Option<StandardBagOrdinals> {
+        match &self.patterns {
+            ReplayPatternRows::StandardBag(ordinal) => Some(*ordinal),
+            ReplayPatternRows::Dense(_) => None,
+        }
+    }
+
+    pub fn pattern_at(&self, ordinal: usize) -> Option<ReplayPattern<'_>> {
+        match &self.patterns {
+            ReplayPatternRows::Dense(rows) => {
+                rows.get(ordinal).map(|row| ReplayPattern::Dense(row))
+            }
+            ReplayPatternRows::StandardBag(source) => source
+                .sequence_at(ordinal)
+                .map(|(pieces, len)| ReplayPattern::StandardBag { pieces, len }),
+        }
     }
 
     pub const fn initial_cursor(&self) -> u16 {
@@ -435,14 +521,7 @@ impl ExactScoringExecutionBatch {
     /// Outer vector slots and every nested pattern/graph allocation are counted
     /// exactly once from their owning capacities.
     pub fn checked_nested_retained_bytes(&self) -> Option<u128> {
-        let mut bytes = (self.patterns.capacity() as u128)
-            .checked_mul(core::mem::size_of::<Vec<PieceKind>>() as u128)?;
-        for pattern in &self.patterns {
-            bytes = bytes.checked_add(
-                (pattern.capacity() as u128)
-                    .checked_mul(core::mem::size_of::<PieceKind>() as u128)?,
-            )?;
-        }
+        let mut bytes = self.checked_pattern_storage_bytes(false)?;
         bytes = bytes.checked_add(
             (self.graphs.capacity() as u128)
                 .checked_mul(core::mem::size_of::<ExactScoringExecutionGraph>() as u128)?,
@@ -455,13 +534,7 @@ impl ExactScoringExecutionBatch {
 
     /// Heap storage requested by `Clone`, excluding the cloned inline batch.
     pub fn checked_clone_nested_bytes(&self) -> Option<u128> {
-        let mut bytes = (self.patterns.len() as u128)
-            .checked_mul(core::mem::size_of::<Vec<PieceKind>>() as u128)?;
-        for pattern in &self.patterns {
-            bytes = bytes.checked_add(
-                (pattern.len() as u128).checked_mul(core::mem::size_of::<PieceKind>() as u128)?,
-            )?;
-        }
+        let mut bytes = self.checked_pattern_storage_bytes(true)?;
         bytes = bytes.checked_add(
             (self.graphs.len() as u128)
                 .checked_mul(core::mem::size_of::<ExactScoringExecutionGraph>() as u128)?,
@@ -470,6 +543,21 @@ impl ExactScoringExecutionBatch {
             bytes = bytes.checked_add(graph.checked_clone_nested_bytes()?)?;
         }
         Some(bytes)
+    }
+
+    fn checked_pattern_storage_bytes(&self, cloning: bool) -> Option<u128> {
+        let ReplayPatternRows::Dense(rows) = &self.patterns else {
+            // The descriptor is inline, already included in size_of::<Self>.
+            return Some(0);
+        };
+        let outer = if cloning { rows.len() } else { rows.capacity() };
+        let initial = (outer as u128).checked_mul(core::mem::size_of::<Vec<PieceKind>>() as u128)?;
+        rows.iter().try_fold(initial, |bytes, row| {
+            let slots = if cloning { row.len() } else { row.capacity() };
+            bytes.checked_add(
+                (slots as u128).checked_mul(core::mem::size_of::<PieceKind>() as u128)?,
+            )
+        })
     }
 
     /// Peak bytes while this batch and a fieldwise clone coexist.
@@ -484,6 +572,36 @@ impl ExactScoringExecutionBatch {
 #[cfg(test)]
 mod retained_memory_projection_tests {
     use super::*;
+
+    #[test]
+    fn standard_bag_batch_retains_no_queue_heap_and_bounds_ordinal_lookup() {
+        let ordinals = StandardBagOrdinals::new(11).unwrap();
+        let batch = ExactScoringExecutionBatch::new_with_pattern_rows(
+            Board64Layout::standard_10_by_lines(4).unwrap(),
+            0,
+            ReplayPatternRows::StandardBag(ordinals),
+            0,
+            None,
+            true,
+            false,
+            false,
+            1,
+            1,
+            Vec::new(),
+            true,
+        );
+        assert_eq!(batch.pattern_count(), 4_233_600);
+        assert_eq!(batch.checked_nested_retained_bytes(), Some(0));
+        assert_eq!(batch.checked_clone_nested_bytes(), Some(0));
+        assert!(batch.dense_patterns().is_none());
+        assert!(batch.pattern_at(batch.pattern_count()).is_none());
+        let last = batch.pattern_at(batch.pattern_count() - 1).unwrap();
+        assert!(last
+            .as_ref()
+            .iter()
+            .map(|kind| kind.as_ascii())
+            .eq("LJZSTOILJZS".chars()));
+    }
 
     #[test]
     fn scoring_batch_projection_counts_owner_capacities_and_clone_lengths() {
