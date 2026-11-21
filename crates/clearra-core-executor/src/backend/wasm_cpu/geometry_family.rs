@@ -171,6 +171,42 @@ impl GeometrySolutionFamily {
         Some(counts)
     }
 
+    /// Counts paths and bounds pending DFS tasks, including continuations
+    /// from a Product.
+    /// Append changes only the current task; Union leaves the right sibling
+    /// on the stack while visiting the left; Product concatenates walks.
+    #[cfg(all(feature = "parallel", not(target_family = "wasm")))]
+    pub(super) fn parallel_traversal_tables(
+        &self,
+        root: u32,
+        is_cancelled: impl Fn() -> bool,
+    ) -> Option<(Vec<u128>, usize)> {
+        let entries = (self.node_count as usize).checked_add(2)?;
+        let mut counts = Vec::new();
+        counts.try_reserve_exact(entries).ok()?;
+        counts.resize(entries, 0_u128);
+        counts[FAMILY_EMPTY as usize] = 1;
+        let mut pending = Vec::new();
+        pending.try_reserve_exact(entries).ok()?;
+        pending.resize(entries, 0_usize);
+        for reference in 2..self.node_count + 2 {
+            if reference & 4095 == 0 && is_cancelled() {
+                return None;
+            }
+            let node = self.node(reference)?;
+            counts[reference as usize] = self.path_count_for_reference(reference, &counts)?;
+            let left = *pending.get(node.left as usize)?;
+            pending[reference as usize] = match node.kind {
+                FamilyNodeKind::Append => left,
+                FamilyNodeKind::Union => {
+                    left.checked_add(1)?.max(*pending.get(node.right as usize)?)
+                }
+                FamilyNodeKind::Product => left.checked_add(*pending.get(node.right as usize)?)?,
+            };
+        }
+        Some((counts, pending.get(root as usize)?.checked_add(1)?))
+    }
+
     /// Direct and resumable owners use the same checked DAG recurrence.
     /// A resumable owner supplies only the already counted prefix.
     pub(super) fn path_count_for_reference(&self, reference: u32, counts: &[u128]) -> Option<u128> {

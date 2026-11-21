@@ -699,9 +699,9 @@ assert.equal(
     }
     return offer;
   };
-  const publish = authority.publish.bind(authority);
-  authority.publish = async (token) => {
-    const permit = await publish(token);
+  const publish = authority.acceptAndPublish.bind(authority);
+  authority.acceptAndPublish = async (token, acceptance) => {
+    const permit = await publish(token, acceptance);
     if (token.taskId.endsWith(':finish')) {
       finishPublished.resolve();
       await releaseFinish.promise;
@@ -1565,7 +1565,7 @@ for (const size of [1, 3, 11]) {
   await profiled.finish(() => undefined);
   const report = profiled.finishTransportProfile();
   for (const operation of ['initialize', 'consume', 'finish']) {
-    for (const stage of ['prepare', 'offered', 'offer_round_trip', 'accepted', 'published',
+    for (const stage of ['prepare', 'offered', 'offer_round_trip', 'accepted_and_published',
       'posted_to_start_notice', 'running_commit', 'run_grant_to_reply', 'result_hash', 'result_sealed',
       'result_applied', 'completed']) {
       const summary = report.timings[`${operation}.${stage}`];

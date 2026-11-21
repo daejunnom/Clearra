@@ -2309,16 +2309,31 @@ impl FamilyEnumerator {
         desired_partition_count: usize,
         path_counts: Vec<u128>,
     ) -> Result<(Vec<Self>, usize), Self> {
+        self.split_parallel_enumerators(desired_partition_count, path_counts, false)
+    }
+
+    #[cfg(feature = "parallel")]
+    #[allow(clippy::result_large_err)]
+    fn split_parallel_enumerators(
+        self,
+        desired_partition_count: usize,
+        path_counts: Vec<u128>,
+        preserve_traversal_order: bool,
+    ) -> Result<(Vec<Self>, usize), Self> {
         if self.tasks.len() != 1 {
             return Err(self);
         }
         let task = self.tasks[0];
-        let mut seeds = vec![TraversalSeed {
+        let mut seeds = Vec::new();
+        if preserve_traversal_order && seeds.try_reserve_exact(desired_partition_count).is_err() {
+            return Err(self);
+        }
+        seeds.push(TraversalSeed {
             task,
             rows: self.rows,
             weight: traversal_weight(task, &path_counts),
             splittable: true,
-        }];
+        });
         while seeds.len() < desired_partition_count {
             let Some((index, seed)) = seeds
                 .iter()
@@ -2335,7 +2350,11 @@ impl FamilyEnumerator {
                         return Err(self);
                     }
                     seeds[index] = left;
-                    seeds.push(right);
+                    if preserve_traversal_order {
+                        seeds.insert(index + 1, right);
+                    } else {
+                        seeds.push(right);
+                    }
                 }
                 None => seeds[index].splittable = false,
             }
@@ -2349,10 +2368,15 @@ impl FamilyEnumerator {
             return Err(self);
         }
         for seed in seeds {
+            let mut tasks = Vec::new();
+            if tasks.try_reserve_exact(1).is_err() {
+                return Err(self);
+            }
+            tasks.push(seed.task);
             enumerators.push(Self {
                 targets: Arc::clone(&self.targets),
                 family: Arc::clone(&self.family),
-                tasks: vec![seed.task],
+                tasks,
                 rows: seed.rows,
                 target_depth: self.target_depth,
                 retained_limit_bytes: None,
@@ -2366,6 +2390,14 @@ impl FamilyEnumerator {
     fn next_candidate(
         &mut self,
         catalog: &GeometryCatalog,
+    ) -> Result<Option<GeometryCandidate>, ()> {
+        self.next_candidate_with_stack(catalog, true)
+    }
+
+    fn next_candidate_with_stack(
+        &mut self,
+        catalog: &GeometryCatalog,
+        allow_stack_growth: bool,
     ) -> Result<Option<GeometryCandidate>, ()> {
         while let Some(mut task) = self.tasks.pop() {
             loop {
@@ -2399,6 +2431,9 @@ impl FamilyEnumerator {
                     FamilyNodeKind::Union => {
                         let mut right = task;
                         right.family = node.right;
+                        if !allow_stack_growth && self.tasks.len() == self.tasks.capacity() {
+                            return Err(());
+                        }
                         self.push_task(right)?;
                         task.family = node.left;
                     }
@@ -2559,6 +2594,44 @@ mod family_enumerator_stack_tests {
                 (vec![7, 22], c, Some(1)),
                 (vec![7, 22], d, Some(1)),
                 (vec![7, 21], d, Some(1)),
+            ]
+        );
+    }
+
+    #[cfg(all(feature = "parallel", not(target_family = "wasm")))]
+    #[test]
+    fn bounded_tiling_partitions_keep_the_serial_product_order() {
+        let mut family = GeometrySolutionFamily::new();
+        let a = family.append(21, FAMILY_EMPTY).unwrap();
+        let b = family.append(22, FAMILY_EMPTY).unwrap();
+        let c = family.append(23, FAMILY_EMPTY).unwrap();
+        let d = family.append(24, FAMILY_EMPTY).unwrap();
+        let left = family.union(a, b).unwrap();
+        let right = family.union(c, d).unwrap();
+        let product = family.product(left, right).unwrap();
+        let root = family.append(7, product).unwrap();
+        let (counts, stack_capacity) = family.parallel_traversal_tables(root, || false).unwrap();
+        assert_eq!(counts[root as usize], 4);
+        assert_eq!(stack_capacity, 3, "one seed and both pending right tasks");
+        let enumerator =
+            FamilyEnumerator::try_new_bounded(Arc::from([]), family, root, 3, u128::MAX).unwrap();
+        let (partitions, _) = enumerator
+            .split_parallel_enumerators(4, counts, true)
+            .unwrap();
+        let shapes: Vec<_> = partitions
+            .iter()
+            .map(|branch| {
+                let seed = branch.tasks[0];
+                (&branch.rows[..usize::from(seed.depth)], seed.family)
+            })
+            .collect();
+        assert_eq!(
+            shapes,
+            vec![
+                (&[7, 21][..], c),
+                (&[7, 21][..], d),
+                (&[7, 22][..], c),
+                (&[7, 22][..], d),
             ]
         );
     }
@@ -3132,6 +3205,48 @@ pub(super) struct ParallelGeometryPlan {
     pub searches: Vec<GeometrySearch>,
     pub group_pattern_index_bytes: usize,
     pub shared_family_bytes: usize,
+}
+
+#[cfg(all(feature = "parallel", not(target_family = "wasm")))]
+pub(super) struct CompactTilingBranch(FamilyEnumerator);
+
+#[cfg(all(feature = "parallel", not(target_family = "wasm")))]
+pub(super) struct CompactTilingPlan {
+    pub branches: Vec<CompactTilingBranch>,
+    pub candidate_count: usize,
+    /// Shared immutable backing and initial per-branch stacks are charged once.
+    pub retained_upper_bound: u128,
+    pub worker_stack_capacity: usize,
+}
+
+#[cfg(all(feature = "parallel", not(target_family = "wasm")))]
+impl CompactTilingBranch {
+    pub fn count(&self) -> u128 {
+        self.0.candidate_count.expect("split branch has a weight")
+    }
+
+    /// The initial stack stays counted in the plan. Reserve a replacement
+    /// buffer before search; slow-path reallocations are prohibited.
+    pub fn reserve_stack(&mut self, capacity: usize) -> Option<()> {
+        let additional = capacity.checked_sub(self.0.tasks.len())?;
+        self.0.tasks.try_reserve_exact(additional).ok()?;
+        (self.0.tasks.capacity() <= capacity).then_some(())
+    }
+
+    pub fn next(
+        &mut self,
+        catalog: &GeometryCatalog,
+    ) -> Result<Option<GeometryCandidate>, WasmExactSearchError> {
+        self.0
+            .next_candidate_with_stack(catalog, false)
+            .map_err(|()| {
+                WasmExactSearchError::InvalidProblem("compact_parallel_tiling_traversal_invalid")
+            })
+    }
+
+    pub const fn stack_bytes(capacity: usize) -> u128 {
+        (capacity as u128) * (core::mem::size_of::<TraversalTask>() as u128)
+    }
 }
 
 #[cfg(feature = "parallel")]
@@ -4148,6 +4263,131 @@ impl GeometrySearch {
         Ok(self.prepare_compiled_parallel(balanced_workers, path_counts))
     }
 
+    /// Prepares an exact partition of the bounded compact terminal geometry;
+    /// unlike standard parallel search this never compiles an uncapped family.
+    #[cfg(all(feature = "parallel", not(target_family = "wasm")))]
+    pub fn prepare_compact_tiling_parallel(
+        &mut self,
+        catalog: &GeometryCatalog,
+        control: &clearra_core_domain::execution_cancellation::ExecutionControl,
+        workers: usize,
+        bound: crate::resource::ExecutionMemoryBound,
+        base: u128,
+    ) -> Result<Option<CompactTilingPlan>, WasmExactSearchError> {
+        use crate::performance::{ExecutorSearchStage, SearchStageSpan};
+        let _stage =
+            SearchStageSpan::begin(ExecutorSearchStage::WasmParallelGeometryCompileAndSplit);
+        if control.is_cancelled() {
+            return Err(WasmExactSearchError::Cancelled);
+        }
+        let limit = bound.cap_bytes().checked_sub(base).ok_or_else(|| {
+            WasmExactSearchError::resource_admission(
+                bound.ensure(base, 1).expect_err("nonzero checked geometry"),
+            )
+        })?;
+        let mut progress_ticks = 0_usize;
+        while self.target_preparation.is_some() || self.compiler.is_some() {
+            if control.is_cancelled() {
+                return Err(WasmExactSearchError::Cancelled);
+            }
+            match self.advance_with_retained_limit(catalog, limit) {
+                GeometryAdvance::Pending => {}
+                GeometryAdvance::ResourceIncomplete(reason)
+                    if reason.ends_with("memory_capacity_exceeded") =>
+                {
+                    return Err(WasmExactSearchError::resource_admission(
+                        bound
+                            .ensure(bound.cap_bytes(), 1)
+                            .expect_err("geometry exceeds memory"),
+                    ));
+                }
+                GeometryAdvance::ResourceIncomplete(reason) => {
+                    return Err(WasmExactSearchError::InvalidProblem(reason))
+                }
+                _ => {
+                    return Err(WasmExactSearchError::InvalidProblem(
+                        "compact_parallel_tiling_compile_state_invalid",
+                    ))
+                }
+            }
+            progress_ticks = progress_ticks.wrapping_add(1);
+            if progress_ticks & 1023 == 0 {
+                control.report_progress("geometry", self.expanded_nodes as u64, None);
+            }
+        }
+        control.report_progress("geometry", self.expanded_nodes as u64, None);
+        let Some(enumerator) = self.enumerator.as_ref() else {
+            return Ok(None);
+        };
+        let [root] = enumerator.tasks.as_slice() else {
+            return Ok(None);
+        };
+        let root_reference = root.family;
+        let retained = self.retained_bytes() as u128;
+        let partitions = workers
+            .checked_mul(8)
+            .ok_or_else(compact_tiling_projection_error)?;
+        let table_entries = u128::from(enumerator.family.node_count()) + 2;
+        let scratch =
+            table_entries * (core::mem::size_of::<u128>() + core::mem::size_of::<usize>()) as u128;
+        let partition_bytes = (partitions as u128)
+            * (core::mem::size_of::<TraversalSeed>()
+                + core::mem::size_of::<FamilyEnumerator>()
+                + core::mem::size_of::<CompactTilingBranch>()
+                + core::mem::size_of::<TraversalTask>()) as u128;
+        let retained_upper_bound = retained
+            .checked_add(partition_bytes)
+            .ok_or_else(compact_tiling_projection_error)?;
+        bound
+            .ensure(
+                base,
+                retained_upper_bound
+                    .checked_add(scratch)
+                    .ok_or_else(compact_tiling_projection_error)?,
+            )
+            .map_err(WasmExactSearchError::resource_admission)?;
+        let tables = enumerator
+            .family
+            .parallel_traversal_tables(root_reference, || control.is_cancelled());
+        if control.is_cancelled() {
+            return Err(WasmExactSearchError::Cancelled);
+        }
+        let (counts, worker_stack_capacity) = tables.ok_or_else(compact_tiling_projection_error)?;
+        let total = counts[root_reference as usize];
+        if total < 2 {
+            return Ok(None);
+        }
+        let candidate_count =
+            usize::try_from(total).map_err(|_| compact_tiling_projection_error())?;
+        let enumerator = self
+            .enumerator
+            .take()
+            .expect("compact enumerator was checked");
+        let partitions = match enumerator.split_parallel_enumerators(partitions, counts, true) {
+            Ok((partitions, _)) if partitions.len() >= 2 => partitions,
+            Ok((mut partitions, _)) => {
+                self.enumerator = partitions.pop();
+                return Ok(None);
+            }
+            Err(enumerator) => {
+                self.enumerator = Some(enumerator);
+                return Err(compact_tiling_projection_error());
+            }
+        };
+        let mut branches = Vec::new();
+        branches
+            .try_reserve_exact(partitions.len())
+            .map_err(|_| compact_tiling_projection_error())?;
+        branches.extend(partitions.into_iter().map(CompactTilingBranch));
+        self.candidate_family_count = Some(total);
+        Ok(Some(CompactTilingPlan {
+            branches,
+            candidate_count,
+            retained_upper_bound,
+            worker_stack_capacity,
+        }))
+    }
+
     #[cfg(all(feature = "parallel", feature = "local-search-ab", target_os = "linux"))]
     fn publish_parallel_preparation_memory(
         &self,
@@ -4438,5 +4678,10 @@ impl GeometrySearch {
                 .as_ref()
                 .map_or(0, |targets| target_bytes(targets))
     }
+}
+
+#[cfg(all(feature = "parallel", not(target_family = "wasm")))]
+fn compact_tiling_projection_error() -> WasmExactSearchError {
+    WasmExactSearchError::InvalidProblem("compact_parallel_tiling_projection_unavailable")
 }
 // SRP rationale: this module has one behavior-level change reason: exact WASM geometry search session transitions.

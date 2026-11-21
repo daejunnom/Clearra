@@ -33,6 +33,9 @@ use clearra_supply::pattern_universe::{PackingPatternMembershipKind, PieceMultis
 #[path = "compact_pc_failed_queue.rs"]
 pub(super) mod compact_pc_failed_queue;
 pub use compact_pc_failed_queue::WasmCompactPcFailedQueueSession;
+#[cfg(all(feature = "parallel", not(target_family = "wasm")))]
+#[path = "compact_tiling_parallel.rs"]
+mod compact_tiling_parallel;
 
 use crate::{
     pc_chance_coverage_evidence::{
@@ -1109,10 +1112,12 @@ impl WasmExactSearchSession {
             problem.as_ref(),
             checked_external_retained_upper_bound_bytes,
             authority,
-            if cfg!(target_family = "wasm") || !problem.objective().score().requested() {
-                1
-            } else {
+            if !cfg!(target_family = "wasm")
+                && (problem.objective().score().requested() || cfg!(feature = "parallel"))
+            {
                 problem.backend_policy().workers()
+            } else {
+                1
             },
         )
         .map_err(WasmExactSearchError::resource_admission)?;
@@ -1974,12 +1979,107 @@ impl WasmExactSearchSession {
         worker_count: usize,
         control: &ExecutionControl,
     ) -> Result<Option<CoreExecutionResult>, WasmExactSearchError> {
+        #[cfg(not(target_family = "wasm"))]
+        if self.canonical_tiling_terminal_authorized() && worker_count > 1 {
+            return self.execute_compact_tiling_parallel(worker_count, control);
+        }
         #[cfg(any(test, feature = "local-search-ab"))]
         let terminal_identity_move =
             std::env::var_os("CLEARRA_TERMINAL_IDENTITY_MOVE").is_some_and(|mode| mode == "1");
         #[cfg(not(any(test, feature = "local-search-ab")))]
         let terminal_identity_move = false;
         self.execute_parallel_with_identity_storage(worker_count, control, terminal_identity_move)
+    }
+
+    #[cfg(all(feature = "parallel", not(target_family = "wasm")))]
+    fn execute_compact_tiling_parallel(
+        &mut self,
+        workers: usize,
+        control: &ExecutionControl,
+    ) -> Result<Option<CoreExecutionResult>, WasmExactSearchError> {
+        if self.finished
+            || self.packing_candidate_count != 0
+            || self.problem.allowed_colored_solution_identities().is_some()
+            || control.partition().count() != 1
+        {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "compact_parallel_tiling_requires_fresh_complete_family",
+            ));
+        }
+        // The aggregate memory cap is supported; global work counters are
+        // not interchangeable with per-branch counters. Reject rather than
+        // silently slowing an explicit request or exceeding its node budget.
+        if self.problem.budget().max_nodes() != 0
+            || self.problem.backend_request().max_candidates() != 0
+            || self.problem.backend_request().max_frontier_states() != 0
+        {
+            if self.problem.backend_policy().worker_policy()
+                == clearra_pc_graph::request::WorkerPolicy::Auto
+            {
+                self.parallel_decision_reason = "explicit-work-cap-requires-serial-accounting";
+                return Ok(None);
+            }
+            return Err(WasmExactSearchError::InvalidProblem(
+                "compact_parallel_tiling_explicit_work_cap_unsupported",
+            ));
+        }
+        self.execution_control = control.clone();
+        let bound = self._execution_admission.memory_bound();
+        let base = self
+            .checked_allocation_guard_retained_bytes()
+            .and_then(|bytes| bytes.checked_sub(self.geometry.retained_bytes() as u128))
+            .ok_or_else(|| {
+                self.memory_projection_unavailable("compact parallel tiling retained projection")
+            })?;
+        let Some(plan) = self.geometry.prepare_compact_tiling_parallel(
+            &self.catalog,
+            control,
+            workers,
+            bound,
+            base,
+        )?
+        else {
+            self.parallel_decision_reason = "small-compiled-candidate-family";
+            return Ok(None);
+        };
+        let rank = Arc::clone(self.tiling_canonical_rank_by_source.as_ref().ok_or(
+            WasmExactSearchError::InvalidProblem("wasm_tiling_canonical_rank_unavailable"),
+        )?);
+        let outcome = compact_tiling_parallel::execute(
+            plan,
+            Arc::clone(&self.catalog),
+            rank,
+            control,
+            workers,
+            self.cpu_warmup_requested,
+            bound,
+            base,
+        )?;
+        self.packing_candidate_count = outcome.identities.len();
+        self.packing_candidate_digest = outcome.candidate_digest;
+        self.representative_identity = outcome.first_identity;
+        self.representative_candidate_id = outcome
+            .first_identity
+            .map(|identity| identity.bucket_hash());
+        self.representative_rank = outcome.first_identity.map(|_| 0);
+        self.compact_tiling_identities = Some(outcome.identities);
+        self.workers_used = outcome.workers_used;
+        self.parallel_active_workers = outcome.active_workers;
+        self.parallel_minimum_worker_candidates = outcome.minimum_worker_candidates;
+        self.parallel_maximum_worker_candidates = outcome.maximum_worker_candidates;
+        self.parallel_decision_reason = "parallel-immutable-family-queue";
+        self.cpu_warmup_performed = self.cpu_warmup_requested;
+        self.peak_cpu_bytes = self
+            .peak_cpu_bytes
+            .max(usize::try_from(outcome.retained_upper_bound).unwrap_or(usize::MAX));
+        self.ensure_session_memory_bound(0)?;
+        match self.complete()? {
+            ExactSearchAdvance::Completed(result) => Ok(Some(result)),
+            ExactSearchAdvance::Cancelled => Err(WasmExactSearchError::Cancelled),
+            ExactSearchAdvance::Pending => Err(WasmExactSearchError::InvalidProblem(
+                "compact_parallel_tiling_terminal_invalid",
+            )),
+        }
     }
 
     #[cfg(feature = "parallel")]

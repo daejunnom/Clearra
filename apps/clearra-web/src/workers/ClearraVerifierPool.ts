@@ -867,9 +867,9 @@ class VerifierClient {
       this.requireWorker(worker);
       const offer = await this.transportProfile.measure('offered', operation, () => authority.offered(token));
       const acceptance = await this.transportProfile.measure('offer_round_trip', operation, () => this.sendDelegationOffer(worker, authority, token, offer));
-      await this.transportProfile.measure('accepted', operation, () => authority.accepted(token, acceptance));
       this.requireWorker(worker);
-      const permit = await this.transportProfile.measure('published', operation, () => authority.publish(token));
+      const permit = await this.transportProfile.measure('accepted_and_published', operation,
+        () => authority.acceptAndPublish(token, acceptance));
       this.requireWorker(worker);
       return { authority, token, permit, profile: this.transportProfile, operation };
     } catch (error) {

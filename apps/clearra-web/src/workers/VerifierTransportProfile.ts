@@ -1,7 +1,7 @@
 // SRP: bounded, opt-in timing summaries only; never an execution authority.
 export type TransportOperation = 'initialize' | 'consume' | 'finish';
 export type TransportStage = 'ready_client_wait' | 'prewarm_new' | 'prewarm_reuse' |
-  'payload_hash' | 'prepare' | 'offered' | 'offer_round_trip' | 'accepted' | 'published' |
+  'payload_hash' | 'prepare' | 'offered' | 'offer_round_trip' | 'accepted_and_published' |
   'posted_to_start_notice' | 'running_commit' | 'run_grant_to_reply' | 'result_hash' |
   'result_sealed' | 'result_apply' | 'result_applied' | 'completed';
 type Summary = { count: number; failed: number; total_ms: number; max_ms: number };

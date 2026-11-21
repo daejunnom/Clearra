@@ -315,11 +315,7 @@ impl WasmCpuSearchSession {
         checked_external_retained_upper_bound_bytes: u128,
         authority: &WasmCpuTerminalResourceAuthority,
     ) -> Result<Self, WasmCpuSearchError> {
-        let allow_native_parallel = cfg!(not(target_family = "wasm"))
-            && (problem.objective().score().requested()
-                || (cfg!(feature = "parallel")
-                    && problem.visible_height() > 6
-                    && problem.output_policy() == SearchOutputPolicy::TilingOnly));
+        let allow_native_parallel = native_shared_terminal_parallel_eligible(problem.as_ref());
         validate_shared_terminal_problem(problem.as_ref(), true, allow_native_parallel)?;
         if problem.visible_height() > 6 && problem.objective().score().requested() {
             return Ok(Self {
@@ -541,9 +537,9 @@ impl WasmCpuSearchBackend {
         super::wasm_cpu::builtin_accelerators_match_rule(rule, verified)
     }
 
-    /// This capability describes only the native four-word Tiling worker
-    /// runner, not browser distribution or ordinary PC product reducers.
-    pub const fn supports_extended_native_tiling_workers() -> bool {
+    /// Native typed Tiling owns its entire compute width before compilation.
+    /// Browser distribution reserves compute separately in each realm.
+    pub const fn supports_native_tiling_workers() -> bool {
         cfg!(all(feature = "parallel", not(target_family = "wasm")))
     }
 
@@ -982,13 +978,9 @@ impl WasmCpuSearchBackend {
         ) -> R,
     ) -> R {
         let worker_count = runtime_worker_count(problem.backend_policy().workers());
-        let native_score_parallel_authorized = cfg!(not(target_family = "wasm"))
-            && (problem.objective().score().requested()
-                || (cfg!(feature = "parallel")
-                    && problem.visible_height() > 6
-                    && problem.output_policy() == SearchOutputPolicy::TilingOnly));
+        let native_parallel_authorized = native_shared_terminal_parallel_eligible(problem.as_ref());
         #[cfg(not(feature = "parallel"))]
-        if native_score_parallel_authorized
+        if native_parallel_authorized
             && worker_count > 1
             && Self::distributed_execution_is_worthwhile(problem.as_ref())
         {
@@ -1002,15 +994,15 @@ impl WasmCpuSearchBackend {
             Ok(session) => session,
             Err(error) => return terminal(Err(error), None),
         };
-        // For native typed score and extended Tiling, this is a deterministic exact-family
+        // For native typed score and Tiling, this is a deterministic exact-family
         // decomposition used by ordinary native PC search. The one request-
         // scoped child lease owns all N compute slots, so this does not create
         // nested resource owners: parallel_search submits N-1 pool jobs, runs
         // one branch on the caller, then restores canonical branch order before
-        // the terminal callback. Compact typed Tiling and WASM shared sessions
-        // retain their existing one-compute-slot serial authority.
+        // the terminal callback. WASM shared sessions retain one local
+        // compute slot; browser distribution owns peers separately.
         #[cfg(feature = "parallel")]
-        if native_score_parallel_authorized && worker_count > 1 {
+        if native_parallel_authorized && worker_count > 1 {
             match session.execute_parallel_if_worthwhile(worker_count, control) {
                 Ok(Some(result)) => {
                     return terminal(
@@ -1040,6 +1032,14 @@ impl WasmCpuSearchBackend {
             Some(WasmCpuSearchTerminalAuthority { session: &session }),
         )
     }
+}
+
+fn native_shared_terminal_parallel_eligible(problem: &SearchProblem) -> bool {
+    cfg!(not(target_family = "wasm"))
+        && (problem.objective().score().requested()
+            || (WasmCpuSearchBackend::supports_native_tiling_workers()
+                && problem.output_policy() == SearchOutputPolicy::TilingOnly
+                && problem.objective().kind() == ObjectiveKind::Tiling))
 }
 
 fn validate_shared_terminal_problem(
@@ -1958,6 +1958,76 @@ mod coverage_summary_tests {
             authority.try_acquire_compute_child(2).is_err(),
             "a child cannot silently overcommit the compute width held by its parent"
         );
+    }
+
+    #[test]
+    #[cfg(all(feature = "parallel", not(target_family = "wasm")))]
+    fn compact_typed_tiling_workers_preserve_serial_family_and_live_terminal_proof() {
+        use crate::PcTilingMemoryAdmissionEvidence;
+        use clearra_core_domain::pc::pc_target::PcTarget;
+        use clearra_pc_graph::request::{OpeningPcSearchQuery, PcHoldPolicy, WorkerPolicy};
+
+        if WorkerPolicy::hardware_worker_limit() < 2 {
+            return;
+        }
+        let _resource_guard = score_resource_test_guard();
+        let policy = PcExecutionPolicy::mvp_default()
+            .with_requested_backend(RequestedSearchBackend::Cpu)
+            .with_allow_backend_fallback(false)
+            .with_use_all_logical_processors(true);
+        let run = |n| {
+            let query = OpeningPcSearchQuery::new(PcTarget::two_lines())
+                .with_queue(PcQueueInput::fixed_sequence(FixedSequence::new(vec![
+                    PieceKind::I,
+                    PieceKind::I,
+                    PieceKind::O,
+                    PieceKind::O,
+                    PieceKind::O,
+                ])))
+                .with_hold_policy(PcHoldPolicy::Disabled)
+                .with_objective(ObjectivePolicy::tiling())
+                .with_execution_policy(policy.clone().with_workers(n));
+            let problem = Arc::new(ProblemCompiler::compile_opening_pc_tiling(&query).unwrap());
+            let parent =
+                WasmCpuTerminalResourceAuthority::try_acquire_full_capacity_with_compute_units(n)
+                    .unwrap();
+            WasmCpuSearchBackend::execute_shared_under_authority_with_control_and_terminal(
+                problem,
+                64 * 1024,
+                &parent,
+                &ExecutionControl::default(),
+                |result, terminal| {
+                    let result = result.expect("complete compact typed Tiling");
+                    let terminal = terminal.expect("live terminal compute and memory admission");
+                    terminal.validate_public_result_memory(&result).unwrap();
+                    assert!(matches!(
+                        terminal.validate_public_result_memory_with_future(
+                            &result,
+                            parent.memory_capacity_bytes()
+                        ),
+                        Err(WasmCpuSearchError::ResourceAdmission { .. })
+                    ));
+                    assert_eq!(
+                        result.pc_tiling_memory_admission_evidence(),
+                        Some(PcTilingMemoryAdmissionEvidence::WasmTerminalAuthority)
+                    );
+                    assert!(result.pc_tiling_family_publication_contract_is_valid());
+                    assert_eq!(result.usize_field("workers_used"), Some(n));
+                    assert_eq!(result.usize_field("parallel_active_workers"), Some(n));
+                    let store = result
+                        .tiling_solution_page_store()
+                        .expect("exact page identity");
+                    (
+                        store.normalized_hash().to_owned(),
+                        store.page_keys(0, 100).unwrap(),
+                    )
+                },
+            )
+        };
+        let serial = run(1);
+        let parallel = run(2);
+        assert_eq!(parallel, serial);
+        assert_eq!(serial.1.len(), 4);
     }
 
     #[test]

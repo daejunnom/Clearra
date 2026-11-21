@@ -123,6 +123,10 @@ export interface DelegationJournal {
     applied: DelegationEventDraft,
     completed: DelegationEventDraft
   ): Promise<readonly [DelegationEvent, DelegationEvent]>;
+  appendPublicationPair?(
+    accepted: DelegationEventDraft,
+    published: DelegationEventDraft
+  ): Promise<readonly [DelegationEvent, DelegationEvent]>;
   resetIfHead(expectedEventSha256: string): Promise<void>;
   quarantine(reason: string): Promise<void>;
   close(): void;
@@ -189,8 +193,13 @@ export class MemoryDelegationJournal implements DelegationJournal {
   }
 
   appendTerminalPair(applied: DelegationEventDraft, completed: DelegationEventDraft) {
-    assertTerminalPairDrafts(applied, completed);
+    assertAtomicPairDrafts(applied, completed, 'result-applied', 'completed');
     return this.appendDrafts([applied, completed]).then((events) => [events[0], events[1]] as const);
+  }
+
+  appendPublicationPair(accepted: DelegationEventDraft, published: DelegationEventDraft) {
+    assertAtomicPairDrafts(accepted, published, 'accepted', 'published');
+    return this.appendDrafts([accepted, published]).then((events) => [events[0], events[1]] as const);
   }
 
   private appendDrafts(drafts: readonly [DelegationEventDraft] | readonly [DelegationEventDraft, DelegationEventDraft]) {
@@ -380,8 +389,13 @@ export class IndexedDbDelegationJournal implements DelegationJournal {
   }
 
   appendTerminalPair(applied: DelegationEventDraft, completed: DelegationEventDraft) {
-    assertTerminalPairDrafts(applied, completed);
+    assertAtomicPairDrafts(applied, completed, 'result-applied', 'completed');
     return this.appendDrafts([applied, completed]).then((events) => [events[0], events[1]] as const);
+  }
+
+  appendPublicationPair(accepted: DelegationEventDraft, published: DelegationEventDraft) {
+    assertAtomicPairDrafts(accepted, published, 'accepted', 'published');
+    return this.appendDrafts([accepted, published]).then((events) => [events[0], events[1]] as const);
   }
 
   private appendDrafts(drafts: readonly [DelegationEventDraft] | readonly [DelegationEventDraft, DelegationEventDraft]) {
@@ -750,23 +764,7 @@ export class DurableDelegationAuthority {
   async accepted(token: DelegationToken, acceptance: DelegationAcceptance): Promise<void> {
     const now = this.now();
     const state = this.state(token);
-    if (
-      acceptance.taskId !== token.taskId ||
-      acceptance.fencingTokenDecimal !== token.fencingTokenDecimal ||
-      !isPositiveU64Decimal(acceptance.workerId) ||
-      !isSha256(acceptance.reservationSha256)
-    ) {
-      throw new DurableDelegationError(
-        'worker-rejected-offer',
-        'worker acceptance does not match the offered delegation'
-      );
-    }
-    if (
-      state.offeredAtUnixMs === null ||
-      now - state.offeredAtUnixMs > OFFER_ACCEPT_TIMEOUT_MS
-    ) {
-      throw new DurableDelegationError('offer-expired', 'delegation offer acceptance expired');
-    }
+    validateAcceptance(token, state, acceptance, now);
     await this.transition(
       token,
       'accepted',
@@ -778,10 +776,63 @@ export class DurableDelegationAuthority {
     state.reservationSha256 = acceptance.reservationSha256;
   }
 
+  /** One storage commit for the adjacent transitions. Both chain events are
+   * preserved, and neither a permit nor an in-memory phase is published early. */
+  async acceptAndPublish(
+    token: DelegationToken, acceptance: DelegationAcceptance
+  ): Promise<ExecutableDelegationPermit> {
+    if (!this.journal.appendPublicationPair) {
+      await this.accepted(token, acceptance);
+      return this.publish(token);
+    }
+    const acceptedAt = this.now();
+    const ownedAcceptance = { ...acceptance };
+    const operation = this.mutationTail.then(async () => {
+      const state = this.state(token);
+      validateAcceptance(token, state, ownedAcceptance, acceptedAt);
+      if (!validTransition(state.phase, 'accepted')) {
+        throw new DurableDelegationError(
+          'invalid-transition', `invalid delegation transition ${state.phase} -> accepted`
+        );
+      }
+      const publishedAt = this.now();
+      const accepted: DelegationEventDraft = {
+        ...eventIdentity(state.identity, state.budget, state.fencingTokenDecimal),
+        phase: 'accepted',
+        workerId: ownedAcceptance.workerId,
+        reservationSha256: ownedAcceptance.reservationSha256,
+        resultSha256: state.resultSha256,
+        workerReplySha256: state.workerReplySha256,
+        timestampUnixMsDecimal: String(acceptedAt),
+        reason: null
+      };
+      const published: DelegationEventDraft = {
+        ...accepted, phase: 'published', timestampUnixMsDecimal: String(publishedAt)
+      };
+      let event: DelegationEvent;
+      try {
+        [, event] = await this.journal.appendPublicationPair!(accepted, published);
+      } catch (error) {
+        throw asDelegationJournalFailure(error, 'persist delegation publication pair');
+      }
+      state.workerId = ownedAcceptance.workerId;
+      state.reservationSha256 = ownedAcceptance.reservationSha256;
+      state.phase = 'published';
+      return this.committedPublication(state, event, publishedAt);
+    });
+    this.mutationTail = operation.then(() => undefined, () => undefined);
+    return operation;
+  }
+
   async publish(token: DelegationToken): Promise<ExecutableDelegationPermit> {
     const now = this.now();
     const event = await this.transition(token, 'published', now);
-    const state = this.state(token);
+    return this.committedPublication(this.state(token), event, now);
+  }
+
+  private committedPublication(
+    state: DelegationState, event: DelegationEvent, now: number
+  ): ExecutableDelegationPermit {
     state.lastHeartbeatUnixMs = now;
     state.lastPersistedRenewalUnixMs = now;
     if (!state.workerId) {
@@ -1359,15 +1410,37 @@ export async function sha256Hex(value: string | ArrayBuffer): Promise<string> {
     .join('');
 }
 
-function assertTerminalPairDrafts(applied: DelegationEventDraft, completed: DelegationEventDraft): void {
+function validateAcceptance(
+  token: DelegationToken, state: DelegationState, acceptance: DelegationAcceptance, now: number
+): void {
+  if (
+    acceptance.taskId !== token.taskId ||
+    acceptance.fencingTokenDecimal !== token.fencingTokenDecimal ||
+    !isPositiveU64Decimal(acceptance.workerId) ||
+    !isSha256(acceptance.reservationSha256)
+  ) {
+    throw new DurableDelegationError(
+      'worker-rejected-offer',
+      'worker acceptance does not match the offered delegation'
+    );
+  }
+  if (state.offeredAtUnixMs === null || now - state.offeredAtUnixMs > OFFER_ACCEPT_TIMEOUT_MS) {
+    throw new DurableDelegationError('offer-expired', 'delegation offer acceptance expired');
+  }
+}
+
+function assertAtomicPairDrafts(
+  first: DelegationEventDraft, second: DelegationEventDraft,
+  firstPhase: DelegationPhase, secondPhase: DelegationPhase
+): void {
   const identicalFields = [
     'jobId', 'taskId', 'coordinatorId', 'payloadSha256', 'requestSha256',
     'computeUnitsDecimal', 'memoryBytesDecimal', 'fencingTokenDecimal',
     'workerId', 'reservationSha256', 'resultSha256', 'workerReplySha256', 'reason'
   ] as const;
-  if (applied.phase !== 'result-applied' || completed.phase !== 'completed' ||
-      identicalFields.some((key) => applied[key] !== completed[key])) {
-    throw new DurableDelegationError('invalid-transition', 'atomic terminal pair has mismatched identity or phases');
+  if (first.phase !== firstPhase || second.phase !== secondPhase ||
+      identicalFields.some((key) => first[key] !== second[key])) {
+    throw new DurableDelegationError('invalid-transition', 'atomic delegation pair has mismatched identity or phases');
   }
 }
 

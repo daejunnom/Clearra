@@ -1,4 +1,10 @@
+import { sharedBrowserHostCapabilitySnapshot } from '@clearra/ui/wasm-host';
+
 const params = new URLSearchParams(location.search);
+// The product worker deliberately assumes a one-CPU host until a real
+// main-thread snapshot arrives. Bare benchmark messages must not force
+// every explicit multiworker command into that conservative boundary.
+const hostCapabilitySnapshot = sharedBrowserHostCapabilitySnapshot();
 const commandText = params.get('command');
 const status = document.querySelector<HTMLPreElement>('#status');
 const prewarmWorkerCount = parseOptionalPositiveInteger(params.get('prewarmWorkers'));
@@ -58,6 +64,7 @@ worker.onmessage = (message: MessageEvent<Record<string, unknown>>) => {
       worker.postMessage({
         type: 'run_command_text',
         commandText,
+        hostCapabilitySnapshot,
         prewarmWorkerCount: runtimePrewarmWorkerCount
       });
     }
@@ -109,10 +116,11 @@ worker.onerror = (event) => {
 
 if (prewarmWorkerCount === null) {
   if (runtimePrewarmWorkerCount === null) {
-    worker.postMessage({ type: 'run_command_text', commandText });
+    worker.postMessage({ type: 'run_command_text', commandText, hostCapabilitySnapshot });
   } else {
     worker.postMessage({
       type: 'prewarm_runtime',
+      hostCapabilitySnapshot,
       workerCount: runtimePrewarmWorkerCount
     });
   }
@@ -147,6 +155,7 @@ async function complete(result: Record<string, unknown>, canRepeat = false) {
     worker.postMessage({
       type: 'run_command_text',
       commandText,
+      hostCapabilitySnapshot,
       ...(runtimePrewarmWorkerCount === null ? {} : { prewarmWorkerCount: runtimePrewarmWorkerCount })
     });
     return;

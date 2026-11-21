@@ -226,6 +226,39 @@ async function verifyCompactChanceRunnerParity(cliPath) {
   return workers;
 }
 
+function verifyCompactTilingWorkerParity(cliPath) {
+  // This is the existing-field incident, not an exhaustive empty-board
+  // benchmark. Explicit workers expose the closed terminal admission path;
+  // an auto limit could appear to pass by silently taking the serial path.
+  const args = ['pc', 'tiling', '--board-mask', '0x3c0f03c0f', '--height', '4',
+    '--lines', '4', '--pieces', '6', '--patterns', 'P7', '--hold', 'empty',
+    '--backend', 'cpu', '--no-backend-fallback'];
+  const run = workers => JSON.parse(invoke(cliPath, [
+    '--format', 'json', '--include-solution-data', ...args, '--workers', String(workers),
+  ], {
+    env: { ...process.env, CLEARRA_EXPECTED_VCPUS: String(workers) },
+    label: `direct compact PC Tiling, ${workers} worker(s)`,
+  }));
+  const result = workers => {
+    const result = run(workers);
+    assert.equal(result.kind, 'pc-tiling-family.v1');
+    assert.equal(result.runtime_identity?.source_commit, sourceCommit);
+    assert.equal(result.runtime_identity?.engine_build_id, sourceCommit);
+    const { summary } = result;
+    assert.equal(summary.actual_backend, 'wasm-cpu');
+    assert.equal(Number(summary.workers_used), workers);
+    assert.equal(String(summary.cpu_parallel_execution), String(workers > 1));
+    assert.equal(summary.count_complete, true);
+    assert.equal(Number(summary.unique_solution_count), 2_260);
+    return [summary.normalized_solution_set_hash, summary.packing_candidate_count];
+  };
+  const serial = result(1);
+  assert.equal(serial[0], 'cts1:a2f1ca371f329437');
+  if (availableParallelism() < 2) return 1;
+  assert.deepEqual(result(2), serial, 'parallel compact tiling changed the complete family');
+  return 2;
+}
+
 async function verifyCompactReplayRunnerParity(cliPath, next, expectedPatternCount) {
   // Use the same one-lock fixture as the Chromium smoke. The alias must
   // reach the exact approved CLI's result, not a compatibility reducer.
@@ -313,6 +346,7 @@ test('real full-height CLI families survive Discord runner and render all physic
   }
   assertFixtureCoverage(completed, [...planned].flatMap(([profile, inputs]) => inputs.map(input =>
     [profile, input.name, input.product, input.kind, input.preserveB2b])), 'real full-height CLI/Discord products');
+  t.diagnostic(`compact 4L P7 typed Tiling checked with ${verifyCompactTilingWorkerParity(cliPath)} worker(s)`);
   t.diagnostic(`compact 4L P7 CLI/Discord chance matched with ${await verifyCompactChanceRunnerParity(cliPath)} worker(s)`);
   await verifyCompactReplayRunnerParity(cliPath, 'I', '1');
   await verifyCompactReplayRunnerParity(cliPath, 'P1', '7');

@@ -42,6 +42,10 @@ export default defineConfig({
         repository,
         'packages/clearra-ui/src/lib/wasm/wasmWorkerLifecycle.ts'
       ),
+      '@clearra/ui/wasm-host': resolve(
+        repository,
+        'packages/clearra-ui/src/lib/wasm/hostCapabilitySnapshot.ts'
+      ),
       '@clearra/ui/wasm': resolve(repository, 'packages/clearra-ui/src/lib/wasm/index.ts')
     }
   },

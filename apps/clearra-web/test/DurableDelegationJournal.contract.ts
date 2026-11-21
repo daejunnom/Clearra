@@ -323,6 +323,73 @@ assert.deepEqual(
 );
 indexedJournal.close();
 
+{
+  const factory = new FakeIdbFactory();
+  const journal = await IndexedDbDelegationJournal.open(factory as unknown as IDBFactory, 'atomic-publication');
+  let now = 1_000;
+  const authority = await DurableDelegationAuthority.recover(journal, () => now);
+  const token = await authority.prepare(identity('atomic-publication'), budget());
+  await authority.offered(token);
+  const acceptance = {
+    taskId: token.taskId, fencingTokenDecimal: token.fencingTokenDecimal,
+    workerId: '1', reservationSha256: '33'.repeat(32)
+  };
+  const before = await journal.load();
+  const eventStore = factory.database.stores.get('delegation-events-v1')!;
+  const metaStore = factory.database.stores.get('delegation-meta-v1')!;
+  const previousHead = structuredClone(metaStore.get('head'));
+  await assert.rejects(authority.acceptAndPublish({ ...token, fencingTokenDecimal: '999' }, acceptance), /stale/);
+  await assert.rejects(authority.acceptAndPublish(token, { ...acceptance, reservationSha256: 'invalid' }), /does not match/);
+  now += OFFER_ACCEPT_TIMEOUT_MS + 1;
+  await assert.rejects(authority.acceptAndPublish(token, acceptance), /acceptance expired/);
+  now = 1_000;
+  for (const write of [1, 2, 3]) {
+    factory.database.failWriteAt = write;
+    await assert.rejects(authority.acceptAndPublish(token, acceptance), (error: unknown) => {
+      assert.ok(error instanceof Error && error.cause instanceof Error);
+      assert.match(error.cause.message, /synthetic atomic write failure/);
+      return true;
+    });
+    assert.equal(authority.phase(token), 'offered');
+    assert.equal(eventStore.size, before.length);
+    assert.deepEqual(metaStore.get('head'), previousHead);
+  }
+  const transactionStart = factory.database.transactionModes.length;
+  factory.database.holdWriteCompletion = true;
+  let permitDelivered = false;
+  const pendingPermit = authority.acceptAndPublish(token, acceptance).then((permit) => {
+    permitDelivered = true;
+    return permit;
+  });
+  await factory.database.waitForHeldWrite();
+  assert.equal(permitDelivered, false, 'no executable permit can leave a transaction before its commit');
+  assert.equal(authority.phase(token), 'offered');
+  assert.equal(eventStore.size, before.length);
+  factory.database.releaseHeldWrite();
+  const permit = await pendingPermit;
+  assert.equal(authority.phase(token), 'published');
+  assert.deepEqual(factory.database.transactionModes.slice(transactionStart), ['readwrite']);
+  const events = await journal.load();
+  assert.deepEqual(events.slice(-2).map((event) => event.phase), ['accepted', 'published']);
+  assert.equal(events.at(-1)!.previousEventSha256, events.at(-2)!.eventSha256);
+  assert.equal(permit.publicationSha256, events.at(-1)!.eventSha256);
+  assert.equal(permit.publicationSequenceDecimal, events.at(-1)!.sequenceDecimal);
+  const legacyJournal = new MemoryDelegationJournal();
+  const legacy: DelegationJournal = {
+    load: () => legacyJournal.load(), append: (draft) => legacyJournal.append(draft),
+    resetIfHead: (head) => legacyJournal.resetIfHead(head),
+    quarantine: (reason) => legacyJournal.quarantine(reason), close: () => legacyJournal.close()
+  };
+  const reference = await DurableDelegationAuthority.recover(legacy, () => now);
+  const referenceToken = await reference.prepare(identity('atomic-publication'), budget());
+  await reference.offered(referenceToken);
+  assert.deepEqual(await reference.acceptAndPublish(referenceToken, acceptance), permit);
+  assert.deepEqual(events, await legacyJournal.load(), 'one commit preserves both legacy chain records byte for byte');
+  await assert.rejects(DurableDelegationAuthority.recover(new MemoryDelegationJournal(events), () => now),
+    /unresolved.*published/, 'committed publication never authorizes a process restart to run the old task');
+  journal.close();
+}
+
 async function prepareSealed(journal: DelegationJournal, task: string) {
   const authority = await DurableDelegationAuthority.recover(journal, () => 1_000);
   const token = await authority.prepare(identity(task), budget());
@@ -654,6 +721,31 @@ assert.deepEqual(
   ]
 );
 pool.cancel();
+
+{
+  const factory = new FakeIdbFactory();
+  const journal = await IndexedDbDelegationJournal.open(factory as unknown as IDBFactory, 'cancel-publication');
+  const authority = await DurableDelegationAuthority.recover(journal);
+  const worker = new DelegationContractWorker();
+  const pool = new ClearraVerifierPool(() => worker as unknown as Worker, { delegationAuthority: authority });
+  const append = journal.appendPublicationPair.bind(journal);
+  journal.appendPublicationPair = (accepted, published) => {
+    factory.database.holdWriteCompletion = true;
+    return append(accepted, published);
+  };
+  const initializing = pool.initialize('clearra pc --lines 4', 1, undefined, 'cancel-publication');
+  await factory.database.waitForHeldWrite();
+  const before = worker.messageTypes;
+  pool.cancel();
+  factory.database.releaseHeldWrite();
+  await initializing;
+  assert.equal(worker.terminated, true);
+  assert.deepEqual(before, ['prewarm', 'delegation-offer']);
+  assert.deepEqual(worker.messageTypes, before, 'a late publication cannot send bytes or grant execution to a retired worker');
+  assert.deepEqual((await journal.load()).map((event) => event.phase),
+    ['prepared', 'offered', 'accepted', 'published', 'failed-closed']);
+  journal.close();
+}
 }
 
 function identity(taskId: string) {
