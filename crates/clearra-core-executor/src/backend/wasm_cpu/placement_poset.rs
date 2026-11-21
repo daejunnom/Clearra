@@ -617,6 +617,17 @@ impl CandidateGeometry {
         self.project_frame(deleted)
     }
 
+    #[cfg(feature = "placement-dependency-pc")]
+    pub(super) fn symbolic_deleted_rows(&self, executed: u16) -> u16 {
+        self.clear_conditions.deleted_rows(executed)
+    }
+
+    #[cfg(feature = "placement-dependency-pc")]
+    pub(super) fn symbolic_physical_board(&self, executed: u16, deleted: u16) -> u64 {
+        let board = board_for_operations(self.initial_board, &self.cells, executed);
+        self.row_projection(deleted).physical_board(board)
+    }
+
     /// Start only with small Boolean candidates with a geometric support
     /// disjunction, either initially or after a clear induced by just one
     /// concrete operation. This admission does not prove a physical move.
@@ -1028,7 +1039,7 @@ fn predecessor_closure(mut operations: u16, predecessors: &[u16; MAX_BOARD64_PIE
     operations
 }
 
-#[cfg(any(test, feature = "local-search-ab"))]
+#[cfg(any(test, feature = "local-search-ab", feature = "placement-dependency-pc"))]
 fn board_for_operations(
     mut board: u64,
     physical_cells: &[u64; MAX_BOARD64_PIECES],

@@ -248,6 +248,34 @@ pub(super) enum WasmExactSearchError {
     Cancelled,
 }
 
+pub(super) const PC_PLACEMENT_DEPENDENCY_UNSUPPORTED: &str =
+    "wasm_placement_dependency_request_unsupported";
+
+fn ensure_pc_placement_dependency_mode(
+    problem: &clearra_problem::SearchProblem,
+) -> Result<(), WasmExactSearchError> {
+    if problem.backend_policy().precompute_build_dependencies()
+        && !(cfg!(feature = "placement-dependency-pc")
+            && problem.pc_placement_dependency_requested())
+    {
+        return Err(WasmExactSearchError::InvalidProblem(
+            PC_PLACEMENT_DEPENDENCY_UNSUPPORTED,
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_no_pc_placement_dependency_mode(
+    problem: &clearra_problem::SearchProblem,
+) -> Result<(), WasmExactSearchError> {
+    if problem.backend_policy().precompute_build_dependencies() {
+        return Err(WasmExactSearchError::InvalidProblem(
+            PC_PLACEMENT_DEPENDENCY_UNSUPPORTED,
+        ));
+    }
+    Ok(())
+}
+
 impl WasmExactSearchError {
     pub(super) fn resource_admission(
         report: clearra_core_domain::resource::ResourceReport,

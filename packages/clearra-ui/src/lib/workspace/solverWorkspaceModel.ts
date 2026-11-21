@@ -452,6 +452,7 @@ export function workspaceDependencyPreanalysisAvailable(request: SolverWorkspace
       !Number.isInteger(request.lines) || request.lines < 1 || request.lines > 4 ||
       (request.rule !== 'srs-plus' && request.rule !== 'jstris-180') ||
       request.queueKnowledge !== 'oracle' || request.preserveB2B || request.tablebaseEnabled ||
+      request.maxPatterns !== undefined ||
       request.boardMask !== trimBoardMask(request.boardMask, request.lines)) {
     return false;
   }

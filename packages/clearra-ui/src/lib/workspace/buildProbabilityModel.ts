@@ -157,6 +157,9 @@ export function normalizeBuildProbabilityRequest(
   }
   return {
     ...request,
+    // Older workspace drafts can contain this retired Build-only control.
+    // The strict placement proof is supported only by PC products.
+    precomputeBuildDependencies: false,
     spinProfile:
       request.aggregation === 'spin' || request.preserveB2B
         ? request.spinProfile
@@ -333,11 +336,7 @@ export function buildProbabilityCommandArguments(request: BuildProbabilityReques
     }
     if (request.preserveB2B) tokens.push('--preserve-b2b');
     if (request.solutionProbabilities) tokens.push('--solution-probabilities');
-    tokens.push(
-      request.precomputeBuildDependencies
-        ? '--build-dependency-dag'
-        : '--no-build-dependency-dag'
-    );
+    tokens.push('--no-build-dependency-dag');
   }
   if (request.resultMode !== 'minimum-solutions') {
     // Transmit the selected product explicitly, including All Solutions. This

@@ -35,6 +35,7 @@ const bundle = await build({
       } from './src/lib/workspace/solverWorkspaceModel.ts';
       export {
         BUILD_PROBABILITY_PRIMARY_METRIC,
+        buildProbabilityCommand,
         createDefaultBuildProbabilityRequest,
         normalizeBuildProbabilityRequest,
         updateBuildProbabilityDraft
@@ -937,6 +938,18 @@ test('product-retention budget is bounded independently of transfer and worker c
   }
   assert.equal(snapshotForMemory(4).wasmTransferByteCap, 128 * MIB);
   assert.equal(production.wasmProductRetentionByteCap(snapshotForMemory(4)), 256 * MIB);
+});
+
+test('an old Build workspace draft cannot enable PC placement dependency analysis', () => {
+  const request = {
+    ...production.createDefaultBuildProbabilityRequest(),
+    height: 1,
+    targetMask: 15n,
+    queue: 'I',
+    precomputeBuildDependencies: true
+  };
+  assert.equal(production.normalizeBuildProbabilityRequest(request).precomputeBuildDependencies, false);
+  assert.ok(!production.buildProbabilityCommand(request).split(' ').includes('--build-dependency-dag'));
 });
 
 test('build probability primary metric is explicitly oracle and distinct from finesse knowledge', () => {

@@ -705,6 +705,32 @@ impl SymbolicPrefixOrders {
             &mut work.language_transitions,
         )
     }
+
+    #[cfg(feature = "placement-dependency-pc")]
+    pub(super) fn terminal_prefix(&self) -> u16 {
+        (1_u16 << self.operation_count) - 1
+    }
+
+    #[cfg(feature = "placement-dependency-pc")]
+    pub(super) fn live_operations_after(
+        &self,
+        prefix: u16,
+    ) -> impl Iterator<Item = (usize, PieceKind)> + '_ {
+        let prefix = usize::from(prefix);
+        let contains = |prefix: usize, words: &[u64; MAX_PREFIX_WORDS]| {
+            words[prefix / 64] & (1_u64 << (prefix % 64)) != 0
+        };
+        self.pieces[..self.operation_count]
+            .iter()
+            .copied()
+            .enumerate()
+            .filter(move |&(operation, _)| {
+                let added = 1_usize << operation;
+                prefix & added == 0
+                    && contains(prefix, &self.permitted_parents[operation])
+                    && contains(prefix | added, &self.active_prefixes)
+            })
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

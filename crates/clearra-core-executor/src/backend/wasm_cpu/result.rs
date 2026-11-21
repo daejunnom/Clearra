@@ -1521,7 +1521,7 @@ impl WasmExactSearchSession {
                 "wasm_tiling_only_option_conflict",
             ));
         }
-        Ok(())
+        super::ensure_pc_placement_dependency_mode(problem)
     }
 
     fn new_with_external_geometry_catalog(

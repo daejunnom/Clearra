@@ -506,9 +506,11 @@ struct OracleCaseOutcome {
 #[cfg(feature = "placement-dependency-pc")]
 #[test]
 fn product_pc_placement_dependencies_match_concrete_p7_coverage() {
+    use super::super::super::buildup::with_product_verifier_counts;
+
     let origin = P7Origin::new(CTK_ORIGIN);
-    let run = |precompute_dependencies| {
-        let problem = ProblemCompiler::compile_scenario_pc(
+    let make_problem = |precompute_dependencies, count, output: SearchOutputPolicy| {
+        ProblemCompiler::compile_scenario_pc(
             &PcScenarioQuery::new(
                 PcScenarioBoard::standard_10(u16::from(PROOF_HEIGHT), origin.initial),
                 PcQueueInput::standard_7_bag(),
@@ -518,9 +520,9 @@ fn product_pc_placement_dependencies_match_concrete_p7_coverage() {
             .with_allow_hold(true)
             .with_exact_pieces(Some(origin.locks))
             .with_supply_window_size(SupplyWindowSize::new(DRAWS))
-            .with_count_policy(PcCountPolicy::CountUnique)
+            .with_count_policy(count)
             .with_solution_probability_policy(PcSolutionProbabilityPolicy::Include)
-            .with_retained_trace_limit(0)
+            .with_retained_trace_limit(usize::from(output.retains_representative_trace()))
             .with_execution_policy(
                 PcExecutionPolicy::mvp_default()
                     .with_requested_backend(RequestedSearchBackend::Cpu)
@@ -533,27 +535,65 @@ fn product_pc_placement_dependencies_match_concrete_p7_coverage() {
             ),
         )
         .unwrap()
-        .with_output_policy(SearchOutputPolicy::CoverageSummary);
-        WasmCpuSearchBackend::execute_with_control(&problem, &ExecutionControl::default())
-            .expect("complete product P7 run")
+        .with_output_policy(output)
     };
-
-    let concrete = run(false);
-    let dependency = run(true);
-    assert_eq!(concrete.solution_coverages().len(), 246);
+    let run = |precompute_dependencies, output| {
+        let problem = make_problem(precompute_dependencies, PcCountPolicy::CountUnique, output);
+        with_product_verifier_counts(|| {
+            WasmCpuSearchBackend::execute_with_control(&problem, &ExecutionControl::default())
+                .expect("complete product P7 run")
+        })
+    };
+    for output in [
+        SearchOutputPolicy::Summary,
+        SearchOutputPolicy::CoverageSummary,
+    ] {
+        let (concrete, (default_build_up, default_proof)) = run(false, output);
+        let (dependency, (selected_build_up, selected_proof)) = run(true, output);
+        assert_eq!(default_proof, 0, "the default must not call the proof");
+        assert!(default_build_up > 0, "the default uses BuildUp");
+        assert_eq!(
+            selected_build_up, 0,
+            "the proof may not fall back to BuildUp"
+        );
+        assert!(selected_proof > 0, "the explicit option selects the proof");
+        assert_eq!(concrete.solution_coverages().len(), 246);
+        assert_eq!(
+            dependency.solution_coverages(),
+            concrete.solution_coverages()
+        );
+        assert_eq!(
+            dependency.field("coverage_probability"),
+            concrete.field("coverage_probability")
+        );
+        assert!(concrete.usize_field("total_build_order_nodes").unwrap() > 0);
+        assert_eq!(dependency.usize_field("total_build_order_nodes"), Some(0));
+        assert_eq!(dependency.usize_field("total_reachability_states"), Some(0));
+        assert_eq!(dependency.path_steps(), concrete.path_steps());
+        assert_eq!(
+            dependency.path_steps().len(),
+            if output.retains_representative_trace() {
+                origin.locks
+            } else {
+                0
+            }
+        );
+    }
+    let (unsupported, calls) = with_product_verifier_counts(|| {
+        WasmCpuSearchBackend::execute_with_control(
+            &make_problem(true, PcCountPolicy::CountAll, SearchOutputPolicy::Summary),
+            &ExecutionControl::default(),
+        )
+    });
+    assert!(matches!(
+        unsupported,
+        Err(crate::WasmCpuSearchError::Unsupported { .. })
+    ));
     assert_eq!(
-        dependency.solution_coverages(),
-        concrete.solution_coverages()
+        calls,
+        (0, 0),
+        "an unsupported opt-in must not switch search algorithms",
     );
-    assert_eq!(
-        dependency.field("coverage_probability"),
-        concrete.field("coverage_probability")
-    );
-    assert!(concrete
-        .usize_field("total_build_order_nodes")
-        .is_some_and(|nodes| nodes > 0));
-    assert_eq!(dependency.usize_field("total_build_order_nodes"), Some(0));
-    assert_eq!(dependency.usize_field("total_reachability_states"), Some(0));
 }
 
 fn verify_oracle_case(

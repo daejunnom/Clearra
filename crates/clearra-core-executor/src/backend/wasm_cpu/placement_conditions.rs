@@ -717,7 +717,7 @@ impl GroupedClearConditions {
 
     /// Which original rows complete for these execution bits. This says
     /// nothing about whether a legal order can reach the execution set.
-    #[cfg(any(test, feature = "local-search-ab"))]
+    #[cfg(any(test, feature = "local-search-ab", feature = "placement-dependency-pc"))]
     pub(super) fn deleted_rows(&self, executed: u16) -> u16 {
         self.active_groups().iter().fold(0, |deleted, group| {
             if group.contributors & !executed == 0 {

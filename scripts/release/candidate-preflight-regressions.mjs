@@ -38,9 +38,12 @@ export const CANDIDATE_RUST_REGRESSIONS = Object.freeze([
     'canonical_ready_reads_do_not_enumerate_hidden_ties_and_explicit_pages_preserve_all_ties',
     'member_pages_are_fixed_at_one_hundred_without_losing_candidate_identity',
     'ordered_solution_probability_',
+    'placement_dependency_opt_in_keeps_pc_chance_and_replay_contracts_distinct',
   ].map((filter) => ({ package: 'clearra-app', filter, exact: false, parallel: true })),
   ...['native_parallel_minimum_cover_', 'ordered_solution_probability_',
-    'product_pc_placement_dependencies_match_concrete_p7_coverage'].map((filter) => ({
+    'product_pc_placement_dependencies_match_concrete_p7_coverage',
+    'compact_build_ilc_dependencies_skip_only_impossible_witness_work',
+    'full_height_build_ilc_dependencies_preserve_the_complete_result'].map((filter) => ({
     package: 'clearra-core-executor', filter, exact: false, parallel: true, features: CORE_FEATURES,
   })),
   { package: 'clearra-pc-graph', filter: 'compiled_query_equality_', exact: false, parallel: false },

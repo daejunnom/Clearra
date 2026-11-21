@@ -343,7 +343,10 @@ jobs:
         shell: powershell
         run: |
           . ./scripts/lib/clearra-path-helpers.ps1
-          Ensure-ClearraBuildArtifactCache -RepositoryRoot $env:GITHUB_WORKSPACE -Purpose experiment
+          # Hosted focused tests do not reuse incremental objects across
+          # runs. Use the managed non-incremental storage profile; the job
+          # still has no release evidence, upload or deployment authority.
+          Ensure-ClearraBuildArtifactCache -RepositoryRoot $env:GITHUB_WORKSPACE -Purpose product
           try {
             & node scripts/release/candidate-preflight-regressions.mjs
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

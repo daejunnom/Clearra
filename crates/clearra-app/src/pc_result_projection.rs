@@ -315,6 +315,7 @@ pub(crate) fn validate_opening_pc_result_projection(
     query: &OpeningPcSearchQuery,
     projection: PcResultProjection,
 ) -> Result<ValidatedPcResultProjection, &'static str> {
+    validate_pc_dependency_projection(query.execution_policy(), projection)?;
     let validated = ValidatedPcResultProjection {
         projection,
         provenance: PcResultProblemProvenance::Opening,
@@ -400,6 +401,7 @@ pub(crate) fn validate_scenario_pc_result_projection(
     query: &PcScenarioQuery,
     projection: PcResultProjection,
 ) -> Result<ValidatedPcResultProjection, &'static str> {
+    validate_pc_dependency_projection(query.execution_policy(), projection)?;
     let validated = ValidatedPcResultProjection {
         projection,
         provenance: PcResultProblemProvenance::InitialFieldScenario,
@@ -620,6 +622,28 @@ fn validate_pc_chance_scenario_request_contract(
     }
     if query.allowed_colored_solution_identities().is_some() {
         return Err("pc chance does not accept caller-selected solution identities");
+    }
+    Ok(())
+}
+
+fn validate_pc_dependency_projection(
+    policy: &PcExecutionPolicy,
+    projection: PcResultProjection,
+) -> Result<(), &'static str> {
+    if !policy.precompute_build_dependencies() {
+        return Ok(());
+    }
+    // Reject competing providers before either one can do work. The
+    // compiled Core request checks the remaining board and supply rules.
+    if policy.tablebase_requested()
+        || !matches!(
+            projection,
+            PcResultProjection::Standard | PcResultProjection::ChanceProbabilityV2(_)
+        )
+    {
+        return Err(
+            "placement dependency analysis does not accept a tablebase or another PC result mode",
+        );
     }
     Ok(())
 }
@@ -1284,6 +1308,16 @@ mod tests {
         for projection in [PcResultProjection::Standard, chance] {
             assert!(validate_opening_pc_result_projection(&opening, projection).is_ok());
             assert!(validate_scenario_pc_result_projection(&scenario, projection).is_ok());
+            assert!(validate_opening_pc_result_projection(
+                &opening.clone().with_execution_policy(
+                    opening
+                        .execution_policy()
+                        .clone()
+                        .with_tablebase_requested(true),
+                ),
+                projection,
+            )
+            .is_err());
         }
         assert!(validate_opening_pc_result_projection(
             &opening.with_objective(ObjectivePolicy::all()),

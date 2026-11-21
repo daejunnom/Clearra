@@ -2124,27 +2124,37 @@ fn verify_candidate_for_completion_mode(
             profile_scale,
         );
     }
-    #[cfg(feature = "placement-dependency-pc")]
-    if use_builtin_rule
-        && matches!(completion, BuildCompletion::ClearToEmpty)
-        && !retain_trace
-        && !finesse_requested
-        && !finesse_spin_coverage_requested
-        && !witness_mode.enabled()
-        && placement_dependency::supports_product(problem, catalog, candidate, target)
-    {
-        if let Some(result) = placement_dependency::verify_product(
-            problem,
-            catalog,
-            candidate,
-            workspace,
-            control,
-            profile_scale,
-        )? {
-            return Ok(result);
+    if problem.backend_policy().precompute_build_dependencies() {
+        super::ensure_pc_placement_dependency_mode(problem)?;
+        #[cfg(feature = "placement-dependency-pc")]
+        {
+            if !use_builtin_rule
+                || !matches!(completion, BuildCompletion::ClearToEmpty)
+                || finesse_requested
+                || finesse_spin_coverage_requested
+                || witness_mode.enabled()
+            {
+                return Err(WasmExactSearchError::InvalidProblem(
+                    super::PC_PLACEMENT_DEPENDENCY_UNSUPPORTED,
+                ));
+            }
+            placement_dependency::validate_candidate_scope(catalog, candidate, target)?;
+            return placement_dependency::verify_product(
+                problem,
+                catalog,
+                candidate,
+                workspace,
+                retain_trace,
+                control,
+                profile_scale,
+            );
         }
     }
-    if RealizationFeasibilityWorkspace::dependency_relaxation_is_infeasible(catalog, candidate) {
+    // Preserve the explicitly selected local A/B axis, outside product
+    // builds. The product's default BuildUp never runs this prepass.
+    if cfg!(feature = "local-search-ab")
+        && RealizationFeasibilityWorkspace::dependency_relaxation_is_infeasible(catalog, candidate)
+    {
         return Ok(infeasible_candidate_result(0));
     }
     let movement_proofs = CandidateMovementProofs::default();
@@ -2196,6 +2206,8 @@ fn verify_candidate_for_completion_mode(
         }
         proofs
     };
+    #[cfg(all(test, feature = "placement-dependency-pc"))]
+    record_product_verifier(false);
     workspace.reachability.configure(candidate.row_ids().len());
     workspace.reachability.configure_kick_profile(
         kick_profile_id,
@@ -2238,6 +2250,35 @@ fn verify_candidate_for_completion_mode(
     );
     workspace.recycle_projection(projection);
     result
+}
+
+#[cfg(all(test, feature = "placement-dependency-pc"))]
+thread_local! {
+    static PRODUCT_VERIFIER_COUNTS: std::cell::Cell<Option<(usize, usize)>> = const {
+        std::cell::Cell::new(None)
+    };
+}
+
+#[cfg(all(test, feature = "placement-dependency-pc"))]
+fn record_product_verifier(dependency: bool) {
+    if let Some((build_up, proof)) = PRODUCT_VERIFIER_COUNTS.get() {
+        PRODUCT_VERIFIER_COUNTS.set(Some((
+            build_up + usize::from(!dependency),
+            proof + usize::from(dependency),
+        )));
+    }
+}
+
+#[cfg(all(test, feature = "placement-dependency-pc"))]
+pub(super) fn with_product_verifier_counts<T>(run: impl FnOnce() -> T) -> (T, (usize, usize)) {
+    struct Restore(Option<(usize, usize)>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            PRODUCT_VERIFIER_COUNTS.set(self.0);
+        }
+    }
+    let _restore = Restore(PRODUCT_VERIFIER_COUNTS.replace(Some((0, 0))));
+    (run(), PRODUCT_VERIFIER_COUNTS.get().unwrap())
 }
 
 // Evidence lives only until this candidate's fallback graph is constructed.
@@ -6542,24 +6583,22 @@ fn first_pattern_path(
         }
         let node = &graph.nodes[state.node as usize];
         if node.accepting() {
-            let projected_terminal_cursor = sequence.len().checked_add(1);
-            return !projects_unplaced_lookahead
-                || (state.cursor as usize == sequence.len() && state.hold.is_none())
-                || (Some(state.cursor as usize) == projected_terminal_cursor
-                    && state.hold.is_some());
+            return accepts_pattern_path(sequence.len(), projects_unplaced_lookahead, state);
         }
         for edge in graph
             .edges(state.node as usize)
             .iter()
             .filter(|edge| graph.nodes[edge.to as usize].live)
         {
-            if projects_unplaced_lookahead
-                && hold_enabled
-                && state.cursor as usize == sequence.len()
-                && state.hold == Some(edge.piece)
-                && graph.nodes[edge.to as usize].accepting()
-                && (!projects_standard_bag_lookahead
-                    || first_standard_bag_lookahead(sequence).is_none())
+            if graph.nodes[edge.to as usize].accepting()
+                && can_release_held_at_terminal(
+                    sequence,
+                    hold_enabled,
+                    projects_unplaced_lookahead,
+                    projects_standard_bag_lookahead,
+                    state,
+                    edge.piece,
+                )
             {
                 path.push(CorePathStep::new(
                     edge.piece,
@@ -6627,6 +6666,32 @@ fn first_pattern_path(
         &mut path,
     );
     path
+}
+
+fn accepts_pattern_path(
+    sequence_len: usize,
+    projects_unplaced_lookahead: bool,
+    state: CoverageState,
+) -> bool {
+    let cursor = usize::from(state.cursor);
+    !projects_unplaced_lookahead
+        || (cursor == sequence_len && state.hold.is_none())
+        || (Some(cursor) == sequence_len.checked_add(1) && state.hold.is_some())
+}
+
+fn can_release_held_at_terminal(
+    sequence: &[PieceKind],
+    hold_enabled: bool,
+    projects_unplaced_lookahead: bool,
+    projects_standard_bag_lookahead: bool,
+    state: CoverageState,
+    required_piece: PieceKind,
+) -> bool {
+    projects_unplaced_lookahead
+        && hold_enabled
+        && usize::from(state.cursor) == sequence.len()
+        && state.hold == Some(required_piece)
+        && (!projects_standard_bag_lookahead || first_standard_bag_lookahead(sequence).is_none())
 }
 
 pub(super) fn representative_pattern_path(

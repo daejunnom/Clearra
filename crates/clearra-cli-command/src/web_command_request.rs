@@ -1523,6 +1523,12 @@ impl WebCommandRequest {
         self.validate_typed_pc_state()?;
         self.validate_build_v2_state()?;
         self.validate_setup_score_state()?;
+        if self.build_probability.is_some() && self.precompute_build_dependencies {
+            return Err(WebCommandError::new(
+                WebCommandErrorCode::InvalidValue,
+                "placement dependency analysis is available only for supported PC searches",
+            ));
+        }
         if self.command_kind == "verify" {
             let request = match self.verify_scope.as_deref() {
                 Some("kicks") => {

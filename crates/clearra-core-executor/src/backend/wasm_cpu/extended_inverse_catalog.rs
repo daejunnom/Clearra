@@ -408,6 +408,7 @@ impl ExtendedInverseCatalog {
 
     /// A necessary ILC prerequisite, not an instantiated lock. Deliberately
     /// ignore invalidated poses and collisions to keep the predicate monotone.
+    #[cfg(test)]
     pub(super) fn realization_requirement_is_satisfied(
         &self,
         row_id: u32,

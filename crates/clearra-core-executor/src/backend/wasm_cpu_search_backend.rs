@@ -1082,7 +1082,9 @@ fn validate_shared_terminal_problem(
 }
 
 fn should_use_webgpu(problem: &SearchProblem) -> bool {
-    if !problem.backend_policy().runtime_webgpu_available() {
+    if problem.backend_policy().precompute_build_dependencies()
+        || !problem.backend_policy().runtime_webgpu_available()
+    {
         return false;
     }
     let requested = problem.backend_policy().requested_backend();
@@ -1153,6 +1155,9 @@ fn runtime_worker_count(requested: usize) -> usize {
 
 pub(super) fn map_error(error: WasmExactSearchError) -> WasmCpuSearchError {
     match error {
+        WasmExactSearchError::InvalidProblem(
+            reason @ super::wasm_cpu::PC_PLACEMENT_DEPENDENCY_UNSUPPORTED,
+        ) => WasmCpuSearchError::Unsupported { reason },
         WasmExactSearchError::InvalidProblem(reason) => {
             WasmCpuSearchError::InvalidProblem { reason }
         }

@@ -44,14 +44,15 @@ use crate::{
 #[path = "extended_pc_distributed.rs"]
 pub(super) mod pc_distributed;
 
+#[cfg(test)]
+use super::realization_feasibility::dependency_relaxation_stalls;
 use super::{
     build_probability::{
-        build_dependency_preanalysis_enabled, build_pattern_coverage_aggregation,
-        costed_finesse_language, exact_bool_field, exact_solution_probabilities_requested,
-        exact_usize_field, solution_coverage_union_matches_global,
-        validate_distributed_coverage_aggregation_surface, validate_distributed_coverage_authority,
-        validate_worker_partial_probability_surface, BuildProbabilityAdvance,
-        FinesseSearchMaterial,
+        build_pattern_coverage_aggregation, costed_finesse_language, exact_bool_field,
+        exact_solution_probabilities_requested, exact_usize_field,
+        solution_coverage_union_matches_global, validate_distributed_coverage_aggregation_surface,
+        validate_distributed_coverage_authority, validate_worker_partial_probability_surface,
+        BuildProbabilityAdvance, FinesseSearchMaterial,
     },
     buildup::{representative_pattern_path, PreparedFinesseLanguage},
     coverage_product::CoverageProductEvaluator,
@@ -68,9 +69,7 @@ use super::{
     extended_geometry::{ExtendedGeometryAdvance, ExtendedGeometrySearch},
     extended_inverse_catalog::ExtendedInverseCatalog,
     kick_profiles::replay_profile_ids,
-    mix_digest,
-    realization_feasibility::dependency_relaxation_stalls,
-    WasmExactSearchError,
+    mix_digest, WasmExactSearchError,
 };
 
 pub(super) struct ExtendedBuildProbabilitySession {
@@ -84,6 +83,7 @@ pub(super) struct ExtendedBuildProbabilitySession {
     // private workspace/reducer state, never Arc::strong_count snapshots.
     shared_immutable_owners: bool,
     geometry: ExtendedGeometrySearch,
+    #[cfg(test)]
     analyze_inverse_dependencies: bool,
     build_order_workspace: ExtendedBuildOrderWorkspace,
     coverage_evaluator: CoverageProductEvaluator,
@@ -139,6 +139,7 @@ enum ExtendedFamilyPurpose {
     Pc,
 }
 
+#[cfg(test)]
 fn extended_build_dependencies_stall(catalog: &ExtendedInverseCatalog, rows: &[u32]) -> bool {
     if !(1..=60).contains(&rows.len())
         || !(1..=24).contains(&catalog.height())
@@ -347,6 +348,7 @@ impl ExtendedBuildProbabilitySession {
             catalog: Arc::clone(&self.catalog),
             shared_immutable_owners: true,
             geometry: ExtendedGeometrySearch::private_verifier_placeholder(),
+            #[cfg(test)]
             analyze_inverse_dependencies: false,
             build_order_workspace: ExtendedBuildOrderWorkspace::new(
                 self.field.width(),
@@ -415,6 +417,7 @@ impl ExtendedBuildProbabilitySession {
         purpose: ExtendedFamilyPurpose,
     ) -> Result<Self, WasmExactSearchError> {
         super::ensure_connected_kick_profile(problem)?;
+        super::ensure_no_pc_placement_dependency_mode(problem)?;
         if aggregation.is_tiling_only() && problem.solution_probability_policy().requested() {
             return Err(WasmExactSearchError::InvalidProblem(
                 "wasm_build_solution_probabilities_unavailable_with_tiling",
@@ -546,13 +549,8 @@ impl ExtendedBuildProbabilitySession {
             catalog: Arc::new(catalog),
             shared_immutable_owners: false,
             geometry,
-            analyze_inverse_dependencies: purpose == ExtendedFamilyPurpose::Build
-                && build_dependency_preanalysis_enabled(
-                    problem,
-                    field,
-                    aggregation,
-                    finesse_requested,
-                ),
+            #[cfg(test)]
+            analyze_inverse_dependencies: false,
             build_order_workspace,
             coverage_evaluator: CoverageProductEvaluator::default(),
             covered_patterns,
@@ -803,6 +801,7 @@ impl ExtendedBuildProbabilitySession {
             }
             self.buildable_tilings.insert(tiling.clone());
         }
+        #[cfg(test)]
         if self.analyze_inverse_dependencies {
             if control.is_cancelled() {
                 return Err(WasmExactSearchError::Cancelled);
@@ -4337,7 +4336,7 @@ mod tests {
                     BuildProbabilityAggregation::Buildability,
                 )
                 .unwrap();
-                assert!(session.analyze_inverse_dependencies);
+                assert!(!session.analyze_inverse_dependencies);
                 session.analyze_inverse_dependencies = analyze;
                 let control = ExecutionControl::default();
                 for _ in 0..256 {

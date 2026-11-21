@@ -13,16 +13,23 @@ use super::{certified_language_result, BuildUpWorkspace, CandidateBuildResult};
 use crate::performance::{ExecutorSearchStage, SearchStageSpan};
 
 #[cfg(feature = "placement-dependency-pc")]
+mod witness;
+
+#[cfg(feature = "placement-dependency-pc")]
+#[allow(clippy::too_many_arguments)]
 pub(super) fn verify_product(
     problem: &SearchProblem,
     catalog: &GeometryCatalog,
     candidate: &GeometryCandidate,
     workspace: &mut BuildUpWorkspace,
+    retain_trace: bool,
     control: &ExecutionControl,
     profile_scale: u64,
-) -> Result<Option<CandidateBuildResult>, WasmExactSearchError> {
-    use super::super::symbolic_prefix_orders::{with_product_prefix_order, SymbolicPrefixRefusal};
+) -> Result<CandidateBuildResult, WasmExactSearchError> {
+    use super::super::symbolic_prefix_orders::with_product_prefix_order;
 
+    #[cfg(test)]
+    super::record_product_verifier(true);
     let span =
         SearchStageSpan::begin_scaled(ExecutorSearchStage::PlacementDependencyPc, profile_scale);
     let result = with_product_prefix_order(|work| {
@@ -34,36 +41,32 @@ pub(super) fn verify_product(
             control,
             profile_scale,
             work,
-            PrefixEvaluation::Product,
+            PrefixEvaluation::Product { retain_trace },
         )
     });
     span.finish(u64::from(result.is_ok()));
-    match result {
-        Ok(result) => Ok(Some(result)),
-        Err(PrefixEvaluationError::Refused(SymbolicPrefixRefusal::Cancelled)) => {
-            Err(WasmExactSearchError::Cancelled)
-        }
-        Err(PrefixEvaluationError::Execution(error)) => Err(error),
-        // A refusal is not a reachability conclusion. Use the concrete
-        // verifier when this path cannot certify a candidate.
-        Err(PrefixEvaluationError::UnsupportedSupply | PrefixEvaluationError::Refused(_)) => {
-            Ok(None)
-        }
-    }
+    // A bounded refusal is neither a negative result nor permission to
+    // start the unrequested BuildUp verifier.
+    result.map_err(map_prefix_error)
 }
 
 #[cfg(feature = "placement-dependency-pc")]
-pub(super) fn supports_product(
-    problem: &SearchProblem,
+pub(super) fn validate_candidate_scope(
     catalog: &GeometryCatalog,
     candidate: &GeometryCandidate,
     target: &TargetGroup,
-) -> bool {
-    problem.pc_placement_dependency_requested()
-        && catalog.width() == 10
+) -> Result<(), WasmExactSearchError> {
+    if catalog.width() == 10
         && (1..=4).contains(&catalog.height())
         && (1..=10).contains(&candidate.row_ids().len())
         && target.pattern_index.is_none()
+    {
+        Ok(())
+    } else {
+        Err(WasmExactSearchError::InvalidProblem(
+            "wasm_placement_dependency_candidate_unsupported",
+        ))
+    }
 }
 
 #[cfg(any(
@@ -82,7 +85,7 @@ pub(super) fn verify_strict(
     control: &ExecutionControl,
     profile_scale: u64,
 ) -> Result<CandidateBuildResult, WasmExactSearchError> {
-    use super::super::symbolic_prefix_orders::{record_strict_prefix_work, SymbolicPrefixRefusal};
+    use super::super::symbolic_prefix_orders::record_strict_prefix_work;
 
     record_strict_prefix_work(|work| {
         evaluate_prefix_order(
@@ -96,7 +99,12 @@ pub(super) fn verify_strict(
             PrefixEvaluation::NativeExperiment,
         )
     })
-    .map_err(|error| match error {
+    .map_err(map_prefix_error)
+}
+
+fn map_prefix_error(error: PrefixEvaluationError) -> WasmExactSearchError {
+    use super::super::symbolic_prefix_orders::SymbolicPrefixRefusal;
+    match error {
         PrefixEvaluationError::UnsupportedSupply => {
             WasmExactSearchError::InvalidProblem("wasm_symbolic_prefix_unsupported_supply")
         }
@@ -113,7 +121,7 @@ pub(super) fn verify_strict(
                 WasmExactSearchError::InvalidProblem("wasm_symbolic_prefix_inconsistent_projection")
             }
         },
-    })
+    }
 }
 
 #[cfg(any(
@@ -128,7 +136,7 @@ pub(super) fn verify_strict(
 #[derive(Clone, Copy)]
 enum PrefixEvaluation {
     #[cfg(feature = "placement-dependency-pc")]
-    Product,
+    Product { retain_trace: bool },
     #[cfg(any(
         test,
         all(
@@ -187,7 +195,7 @@ fn evaluate_prefix_order(
     work.candidates_attempted += 1;
     let compile_orders = match evaluation {
         #[cfg(feature = "placement-dependency-pc")]
-        PrefixEvaluation::Product => SymbolicPrefixOrders::compile_product_with_workspace,
+        PrefixEvaluation::Product { .. } => SymbolicPrefixOrders::compile_product_with_workspace,
         #[cfg(any(
             test,
             all(
@@ -210,7 +218,7 @@ fn evaluate_prefix_order(
     .map_err(PrefixEvaluationError::Refused)?;
     let compile_language = match evaluation {
         #[cfg(feature = "placement-dependency-pc")]
-        PrefixEvaluation::Product => SymbolicPrefixOrders::compile_product_language,
+        PrefixEvaluation::Product { .. } => SymbolicPrefixOrders::compile_product_language,
         #[cfg(any(
             test,
             all(
@@ -223,7 +231,7 @@ fn evaluate_prefix_order(
     };
     let language_stage = match evaluation {
         #[cfg(feature = "placement-dependency-pc")]
-        PrefixEvaluation::Product => ExecutorSearchStage::PlacementDependencyPcLanguage,
+        PrefixEvaluation::Product { .. } => ExecutorSearchStage::PlacementDependencyPcLanguage,
         #[cfg(any(
             test,
             all(
@@ -274,5 +282,32 @@ fn evaluate_prefix_order(
         ));
     }
     work.candidates_certified += 1;
-    Ok(certified_language_result(coverage))
+    let result = certified_language_result(coverage);
+    #[cfg(feature = "placement-dependency-pc")]
+    let result = match evaluation {
+        PrefixEvaluation::Product { retain_trace: true } if result.buildable => {
+            let mut result = result;
+            let pattern_id = result
+                .witness_pattern_id
+                .ok_or(PrefixEvaluationError::Execution(
+                    WasmExactSearchError::InvalidProblem(
+                        "wasm_placement_dependency_witness_pattern_missing",
+                    ),
+                ))?;
+            result.representative_path = witness::materialize(
+                problem,
+                catalog,
+                candidate,
+                &orders,
+                pattern_id,
+                &mut workspace.reachability,
+                control,
+                &mut work.pose,
+            )
+            .map_err(PrefixEvaluationError::Execution)?;
+            result
+        }
+        _ => result,
+    };
+    Ok(result)
 }

@@ -51,6 +51,8 @@ use crate::{
     SolutionCoverage, TilingSolutionPageStore,
 };
 
+#[cfg(test)]
+use super::realization_feasibility::RealizationFeasibilityWorkspace;
 use super::{
     buildup::{
         exact_scoring_execution_graph_for_completion,
@@ -67,7 +69,6 @@ use super::{
     exact_collections::{ExactHashMap, ExactHashSet},
     geometry::{GeometryAdvance, GeometryCandidate, GeometrySearch, SharedTargetGroups},
     kick_profiles::replay_profile_ids,
-    realization_feasibility::RealizationFeasibilityWorkspace,
     standard_bag_coverage::StandardBagCoverage,
     WasmExactSearchError, MAX_BOARD64_PIECES,
 };
@@ -284,6 +285,7 @@ impl WasmBuildProbabilitySession {
         finesse: BuildProbabilityFinesseRequest,
         caller_memory: BuildProbabilityCallerMemory,
     ) -> Result<Self, WasmExactSearchError> {
+        super::ensure_no_pc_placement_dependency_mode(problem)?;
         let finesse_metric = finesse.metric();
         let finesse_pattern_knowledge = finesse.pattern_knowledge();
         let finesse_score = finesse.score().cloned();
@@ -2082,23 +2084,6 @@ fn max_usize_field(results: &[&CoreExecutionResult], key: &str) -> usize {
         .unwrap_or(0)
 }
 
-pub(super) fn build_dependency_preanalysis_enabled(
-    problem: &SearchProblem,
-    field: BuildProbabilityField,
-    aggregation: BuildProbabilityAggregation,
-    finesse_requested: bool,
-) -> bool {
-    // Keep other evidence modes and explicitly node-limited executions on
-    // their existing paths. In particular, do not turn an unnormalized
-    // initial field into a successful empty result.
-    aggregation == BuildProbabilityAggregation::Buildability
-        && !finesse_requested
-        && problem.backend_request().max_nodes() == 0
-        && !problem.objective().execution_constraints().requested()
-        && !problem.objective().score().requested()
-        && field.completed_base_row_mask() == 0
-}
-
 pub(super) struct CompactBuildProbabilitySession {
     problem: SearchProblem,
     aggregation: BuildProbabilityAggregation,
@@ -2108,6 +2093,7 @@ pub(super) struct CompactBuildProbabilitySession {
     shared_supply_catalog: CompactBuildProbabilitySharedCatalog,
     catalog: GeometryCatalog,
     geometry: GeometrySearch,
+    #[cfg(test)]
     analyze_inverse_dependencies: bool,
     buildup: BuildUpWorkspace,
     coverage_evaluator: CoverageProductEvaluator,
@@ -2391,6 +2377,7 @@ impl CompactBuildProbabilitySession {
         coexisting_retained_bytes: u128,
     ) -> Result<Self, WasmExactSearchError> {
         super::ensure_connected_kick_profile(problem)?;
+        super::ensure_no_pc_placement_dependency_mode(problem)?;
         if aggregation.is_tiling_only() && problem.solution_probability_policy().requested() {
             return Err(WasmExactSearchError::InvalidProblem(
                 "wasm_build_solution_probabilities_unavailable_with_tiling",
@@ -2510,12 +2497,8 @@ impl CompactBuildProbabilitySession {
             shared_supply_catalog,
             catalog,
             geometry,
-            analyze_inverse_dependencies: build_dependency_preanalysis_enabled(
-                problem,
-                field,
-                aggregation,
-                finesse_requested,
-            ),
+            #[cfg(test)]
+            analyze_inverse_dependencies: false,
             buildup: BuildUpWorkspace::default(),
             coverage_evaluator: CoverageProductEvaluator::default(),
             covered_patterns,
@@ -2636,6 +2619,7 @@ impl CompactBuildProbabilitySession {
         let target = self.geometry.target(candidate.target_index).ok_or(
             WasmExactSearchError::InvalidProblem("wasm_build_probability_target_index_invalid"),
         )?;
+        #[cfg(test)]
         if self.analyze_inverse_dependencies {
             if control.is_cancelled() {
                 return Err(WasmExactSearchError::Cancelled);
@@ -6275,7 +6259,7 @@ mod finesse_integration_tests {
                     BuildProbabilityAggregation::Buildability,
                 )
                 .unwrap();
-                assert!(session.analyze_inverse_dependencies);
+                assert!(!session.analyze_inverse_dependencies);
                 session.analyze_inverse_dependencies = analyze;
                 let control = ExecutionControl::default();
                 for _ in 0..256 {
