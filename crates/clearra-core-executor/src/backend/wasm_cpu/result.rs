@@ -823,6 +823,12 @@ pub(crate) enum ExactSearchAdvance {
     Cancelled,
 }
 
+#[derive(Clone, Copy)]
+enum ExactCompletionRole {
+    Final,
+    DistributedVerifierPartial,
+}
+
 pub(super) enum DistributedGeometryAdvance {
     Pending,
     Candidate {
@@ -2131,7 +2137,7 @@ impl WasmExactSearchSession {
                 self.cpu_warmup_performed = self.cpu_warmup_requested;
                 let terminal_identities =
                     self.absorb_parallel_outcome(outcome, terminal_identity_move)?;
-                match self.complete_internal(true, terminal_identities)? {
+                match self.complete_internal(ExactCompletionRole::Final, terminal_identities)? {
                     ExactSearchAdvance::Completed(result) => Ok(Some(result)),
                     ExactSearchAdvance::Pending | ExactSearchAdvance::Cancelled => {
                         Err(WasmExactSearchError::InvalidProblem(
@@ -3621,22 +3627,7 @@ impl WasmExactSearchSession {
         self.total_reachability_states = self
             .total_reachability_states
             .saturating_add(result.reachability_states);
-        self.peak_cpu_bytes = self.peak_cpu_bytes.max(
-            self.catalog.retained_bytes()
-                + self.geometry.retained_bytes()
-                + self.tablebase_retained_bytes
-                + result.retained_bytes
-                + self.coverage_evaluator.retained_bytes()
-                + self.buildup_workspace.retained_bytes()
-                + self.solution_identity_retained_bytes()
-                + self.coverage_rows_retained_bytes()
-                + self.solution_coverage.as_ref().map_or(0, |coverage| {
-                    coverage.capacity()
-                        * (core::mem::size_of::<StandardBoard64TilingIdentity>()
-                            + core::mem::size_of::<PatternBitSet>())
-                })
-                + self.solution_coverage_bytes,
-        );
+        self.observe_candidate_reduction_memory(result.retained_bytes, profile_scale);
         if self.memory_budget_exceeded() {
             self.mark_truncated("memory_budget_exceeded");
             return self.complete().map(Some);
@@ -3655,6 +3646,11 @@ impl WasmExactSearchSession {
             candidate_hash
         };
         let mut solution_coverage = None;
+        let mutates_retained_coverage =
+            result.covered_patterns.is_some() || result.symbolic_coverage_root.is_some();
+        #[cfg(any(test, feature = "local-search-ab"))]
+        let mutates_retained_coverage =
+            mutates_retained_coverage || self.solution_coverage_capture.is_some();
         #[cfg(any(test, feature = "local-search-ab"))]
         if let Some(capture) = self.solution_coverage_capture.as_ref() {
             capture_candidate_solution_coverage(
@@ -3703,26 +3699,15 @@ impl WasmExactSearchSession {
                 .pattern_verified_execution_count
                 .saturating_add(result.symbolic_covered_pattern_count);
         }
-        self.peak_cpu_bytes = self.peak_cpu_bytes.max(
-            self.catalog
-                .retained_bytes()
-                .saturating_add(self.geometry.retained_bytes())
-                .saturating_add(self.tablebase_retained_bytes)
-                .saturating_add(self.coverage_evaluator.retained_bytes())
-                .saturating_add(self.buildup_workspace.retained_bytes())
-                .saturating_add(self.solution_identity_retained_bytes())
-                .saturating_add(self.coverage_rows_retained_bytes())
-                .saturating_add(result.retained_bytes)
-                .saturating_add(self.solution_coverage.as_ref().map_or(0, |coverage| {
-                    coverage.capacity()
-                        * (core::mem::size_of::<StandardBoard64TilingIdentity>()
-                            + core::mem::size_of::<PatternBitSet>())
-                }))
-                .saturating_add(self.solution_coverage_bytes),
-        );
-        if self.memory_budget_exceeded() {
-            self.mark_truncated("memory_budget_exceeded");
-            return self.complete().map(Some);
+        // When no coverage was recorded or materialized, nothing that contributes
+        // to this retained-size sum changed since the first check. Keep both
+        // observations on any path that can grow coverage or its working memory.
+        if mutates_retained_coverage {
+            self.observe_candidate_reduction_memory(result.retained_bytes, profile_scale);
+            if self.memory_budget_exceeded() {
+                self.mark_truncated("memory_budget_exceeded");
+                return self.complete().map(Some);
+            }
         }
         if result.buildable {
             if let Some(solution_coverage) = solution_coverage {
@@ -4456,16 +4441,16 @@ impl WasmExactSearchSession {
     ) -> Result<ExactSearchAdvance, WasmExactSearchError> {
         self.geometry
             .finish_external(self.packing_candidate_count, 0, 0);
-        self.complete_internal(false, None)
+        self.complete_internal(ExactCompletionRole::DistributedVerifierPartial, None)
     }
 
     fn complete(&mut self) -> Result<ExactSearchAdvance, WasmExactSearchError> {
-        self.complete_internal(true, None)
+        self.complete_internal(ExactCompletionRole::Final, None)
     }
 
     fn complete_internal(
         &mut self,
-        include_normalized_keys: bool,
+        role: ExactCompletionRole,
         terminal_identities: Option<Vec<StandardBoard64TilingIdentity>>,
     ) -> Result<ExactSearchAdvance, WasmExactSearchError> {
         let coverage_span = SearchStageSpan::begin(ExecutorSearchStage::WasmFinalCoverage);
@@ -4568,7 +4553,13 @@ impl WasmExactSearchSession {
             && !scoring_requested
             && !execution_constraints.requested()
             && !save_execution_requested;
-        let scoring_batch = if execution_evidence_requested {
+        // Distributed partials transfer the proven identity set and coverage,
+        // not replay graphs or pattern rows. The final merger owns the sorted
+        // canonical IDs and builds the replay evidence once. A worker still
+        // needs full graphs for its own scoring/constraint postprocess.
+        let defer_replay_to_merger =
+            replay_only && matches!(role, ExactCompletionRole::DistributedVerifierPartial);
+        let scoring_batch = if execution_evidence_requested && !defer_replay_to_merger {
             match self.prepare_exact_scoring_execution_batch(path_execution_requested, replay_only)
             {
                 Ok(batch) => Some(batch),
@@ -4581,6 +4572,7 @@ impl WasmExactSearchSession {
         let solution_identity_count = terminal_identities
             .as_ref()
             .map_or_else(|| self.solution_identity_count(), Vec::len);
+        let include_normalized_keys = matches!(role, ExactCompletionRole::Final);
         let result =
             self.build_result(include_normalized_keys, scoring_batch, terminal_identities)?;
         if (scoring_requested || self.canonical_tiling_terminal_authorized())
@@ -5002,6 +4994,33 @@ impl WasmExactSearchSession {
     fn mark_truncated(&mut self, reason: &'static str) {
         self.truncated_reason.get_or_insert(reason);
         self.count_complete = false;
+    }
+
+    fn observe_candidate_reduction_memory(&mut self, candidate_bytes: usize, profile_scale: u64) {
+        let span = SearchStageSpan::begin_scaled(
+            ExecutorSearchStage::WasmCandidateMemoryAccounting,
+            profile_scale,
+        );
+        let coverage_storage = self.solution_coverage.as_ref().map_or(0, |coverage| {
+            coverage.capacity().saturating_mul(
+                core::mem::size_of::<StandardBoard64TilingIdentity>()
+                    + core::mem::size_of::<PatternBitSet>(),
+            )
+        });
+        let retained = self
+            .catalog
+            .retained_bytes()
+            .saturating_add(self.geometry.retained_bytes())
+            .saturating_add(self.tablebase_retained_bytes)
+            .saturating_add(self.coverage_evaluator.retained_bytes())
+            .saturating_add(self.buildup_workspace.retained_bytes())
+            .saturating_add(self.solution_identity_retained_bytes())
+            .saturating_add(self.coverage_rows_retained_bytes())
+            .saturating_add(candidate_bytes)
+            .saturating_add(coverage_storage)
+            .saturating_add(self.solution_coverage_bytes);
+        self.peak_cpu_bytes = self.peak_cpu_bytes.max(retained);
+        span.finish(1);
     }
 
     fn memory_budget_exceeded(&self) -> bool {
@@ -7218,6 +7237,89 @@ mod tests {
             );
         }
         assert!(batch.pattern_at(universe.pattern_count()).is_none());
+    }
+
+    #[test]
+    fn compact_pc_path_distributed_worker_defers_only_unconstrained_replay_graphs() {
+        let control = ExecutionControl::default();
+        for b2b in [false, true] {
+            let objective = if b2b {
+                ObjectivePolicy::all().with_back_to_back_preservation(SpinProfileSelection::TSpins)
+            } else {
+                ObjectivePolicy::all()
+            };
+            let query = PcScenarioQuery::new(
+                PcScenarioBoard::standard_10(1, 0x3f0),
+                PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::I])),
+                PieceWindow::new(1),
+            )
+            .with_allow_hold(false)
+            .with_exact_pieces(Some(1))
+            .with_count_policy(PcCountPolicy::CountAll)
+            .with_objective(objective)
+            .with_execution_policy(PcExecutionPolicy::default().with_workers(1));
+            let problem = ProblemCompiler::compile_scenario_pc(&query)
+                .unwrap()
+                .with_pc_path_v2_evidence();
+            let direct = WasmCpuSearchBackend::execute_with_control(&problem, &control).unwrap();
+            let mut producer = WasmCpuCandidateProducer::new(&problem).unwrap();
+            let mut verifier = WasmDistributedVerifier::new(&problem).unwrap();
+            let summary = (0..128)
+                .find_map(|_| match producer.advance(&control).unwrap() {
+                    WasmCandidateProducerAdvance::Pending => None,
+                    WasmCandidateProducerAdvance::Candidate(packet) => {
+                        verifier.consume(&packet, &control).unwrap();
+                        None
+                    }
+                    WasmCandidateProducerAdvance::Completed(summary) => Some(summary),
+                    WasmCandidateProducerAdvance::Cancelled => panic!("unexpected cancellation"),
+                })
+                .expect("bounded fixture finishes");
+            assert!(summary.candidate_count > 0);
+            let partial = verifier.finish().unwrap();
+            assert_eq!(
+                partial.bool_field("postprocess_pc_path_requested"),
+                Some(true)
+            );
+            assert_eq!(
+                partial.bool_field("postprocess_execution_complete"),
+                Some(b2b)
+            );
+            assert_eq!(partial.exact_scoring_execution_batch().is_some(), b2b);
+            assert_eq!(partial.normalized_solution_identities().len(), 1);
+            if b2b {
+                // The real worker's App phase still needs this graph to
+                // apply the constraint before it encodes the partial.
+                assert_eq!(
+                    partial.exact_scoring_execution_batch(),
+                    direct.exact_scoring_execution_batch()
+                );
+                continue;
+            }
+            let mut merger = producer.into_merger().unwrap();
+            merger.absorb(&partial).unwrap();
+            let merged = merger.finish(&summary, 1).unwrap();
+            assert_eq!(
+                merged.normalized_solution_identities(),
+                direct.normalized_solution_identities()
+            );
+            assert_eq!(
+                merged.coverage_pattern_words(),
+                direct.coverage_pattern_words()
+            );
+            assert_eq!(
+                merged.field("build_variant_count"),
+                direct.field("build_variant_count")
+            );
+            assert_eq!(
+                merged.exact_scoring_execution_batch(),
+                direct.exact_scoring_execution_batch()
+            );
+            assert_eq!(
+                merged.bool_field("postprocess_execution_complete"),
+                Some(true)
+            );
+        }
     }
 
     #[test]

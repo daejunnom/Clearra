@@ -6,6 +6,24 @@ export const P7P4_STAGE_IDENTITY = Object.freeze({
   solutionSet: 'cts1:98ebe8726537b29f',
   patterns: '4233600',
 });
+const P7P4_REQUIRED_STAGES = [
+  'wasm.geometry.advance',
+  'wasm.candidate.projection',
+  'wasm.candidate.build_order_reachability',
+];
+
+// A nonempty profile could contain only setup/finalization work. Do not
+// present it as evidence about the main search's bottleneck.
+export function requireP7P4ComputeStages(rows) {
+  assert.ok(Array.isArray(rows), 'missing P7P4 stage rows');
+  for (const name of P7P4_REQUIRED_STAGES) {
+    const found = rows.filter(row => row?.name === name);
+    assert.equal(found.length, 1, 'required paired compute stage: ' + name);
+    assert.ok(Number.isSafeInteger(found[0].invocation_count) && found[0].invocation_count > 0 &&
+      Number.isSafeInteger(found[0].work_item_count) && found[0].work_item_count > 0,
+      'unobserved paired compute stage: ' + name);
+  }
+}
 
 export function requireLocalP7P4StageProbe(env = process.env) {
   assert.equal(env.CLEARRA_RUNTIME_SUPERVISED, '1');

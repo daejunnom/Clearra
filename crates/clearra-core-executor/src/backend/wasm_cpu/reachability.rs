@@ -2811,7 +2811,6 @@ fn preferred_scoring_lock_evidence<const LEGACY_T_SPIN: bool>(
         let source_index = usize::from(source.source);
         if template.state_masks[source_index] == INVALID_STATE_MASK
             || board & template.state_masks[source_index] != 0
-            || !reverse_lock_reachable_large(template, board, source_index, scratch).reachable
         {
             continue;
         }
@@ -2819,6 +2818,27 @@ fn preferred_scoring_lock_evidence<const LEGACY_T_SPIN: bool>(
         let target_offset = template.rotation_target_offsets[transition] as usize
             + usize::from(source.prior_target_count);
         let kick_index = template.rotation_kick_indices[target_offset];
+        let is_quarter_turn = source.slot < 2;
+        let rank = if LEGACY_T_SPIN {
+            // Native highest-T-spin trace first tries a final kick at index
+            // four, then any reachable final rotation. Its DFS tie order
+            // within either tier is not part of this evidence contract.
+            (kick_index == 4, false, 0)
+        } else {
+            (
+                is_quarter_turn && kick_index == 4,
+                is_quarter_turn,
+                kick_index,
+            )
+        };
+        // The incumbent was already proved reachable. Only a strictly
+        // better rank can replace it; keeping iteration order preserves the
+        // first reachable predecessor on a tie without another reverse BFS.
+        if best.as_ref().is_some_and(|(current, _)| rank <= *current)
+            || !reverse_lock_reachable_large(template, board, source_index, scratch).reachable
+        {
+            continue;
+        }
         let predecessor = state_from_index(template.width, template.ceiling, source_index);
         let request = match source.slot {
             0 => RotationRequest::Clockwise,
@@ -2834,22 +2854,7 @@ fn preferred_scoring_lock_evidence<const LEGACY_T_SPIN: bool>(
             predecessor.x,
             predecessor.y,
         );
-        let is_quarter_turn = source.slot < 2;
-        let rank = if LEGACY_T_SPIN {
-            // Native highest-T-spin trace first tries a final kick at index
-            // four, then any reachable final rotation. Its DFS tie order
-            // within either tier is not part of this evidence contract.
-            (kick_index == 4, false, 0)
-        } else {
-            (
-                is_quarter_turn && kick_index == 4,
-                is_quarter_turn,
-                kick_index,
-            )
-        };
-        if best.as_ref().is_none_or(|(current, _)| rank > *current) {
-            best = Some((rank, evidence));
-        }
+        best = Some((rank, evidence));
     }
     best.map(|(_, evidence)| evidence)
 }
@@ -4545,6 +4550,152 @@ mod tests {
                 .expect("J must enable the final T rotation");
         assert!(evidence.last_action_was_rotation());
         assert!(evidence.used_kick());
+    }
+
+    // Reference: perform the full reverse search before ranking each
+    // predecessor, including reachable losers and equal-rank moves.
+    fn unpruned_scoring_lock_evidence<const LEGACY_T_SPIN: bool>(
+        template: &ReachabilityTemplate,
+        board: u64,
+        target: State,
+        scratch: &mut ReachabilityScratch,
+    ) -> (Option<clearra_replay::ScoringLockEvidence>, bool) {
+        let Some(target_index) = state_index(template.width, template.ceiling, target) else {
+            return (None, false);
+        };
+        if template.state_masks[target_index] == super::INVALID_STATE_MASK
+            || board & template.state_masks[target_index] != 0
+            || !super::grounded_index(template, board, target_index)
+        {
+            return (None, false);
+        }
+        let start = template.reverse_rotation_offsets[target_index] as usize;
+        let end = template.reverse_rotation_offsets[target_index + 1] as usize;
+        let mut best = None::<((bool, bool, u8), clearra_replay::ScoringLockEvidence)>;
+        let mut tied = false;
+        for source in &template.reverse_rotation_sources[start..end] {
+            let source_index = usize::from(source.source);
+            if !super::reverse_rotation_is_first_success(template, board, *source)
+                || template.state_masks[source_index] == super::INVALID_STATE_MASK
+                || board & template.state_masks[source_index] != 0
+                || !super::reverse_lock_reachable_large(template, board, source_index, scratch)
+                    .reachable
+            {
+                continue;
+            }
+            let transition = source_index * 3 + usize::from(source.slot);
+            let offset = template.rotation_target_offsets[transition] as usize
+                + usize::from(source.prior_target_count);
+            let kick = template.rotation_kick_indices[offset];
+            let quarter_turn = source.slot < 2;
+            let rank = if LEGACY_T_SPIN {
+                (kick == 4, false, 0)
+            } else {
+                (quarter_turn && kick == 4, quarter_turn, kick)
+            };
+            if best.as_ref().is_some_and(|(current, _)| rank == *current) {
+                tied = true;
+            }
+            if best.as_ref().is_none_or(|(current, _)| rank > *current) {
+                let predecessor = state_from_index(template.width, template.ceiling, source_index);
+                let request = match source.slot {
+                    0 => clearra_replay::RotationRequest::Clockwise,
+                    1 => clearra_replay::RotationRequest::CounterClockwise,
+                    _ => clearra_replay::RotationRequest::HalfTurn,
+                };
+                best = Some((
+                    rank,
+                    clearra_replay::ScoringLockEvidence::rotation(
+                        predecessor.rotation,
+                        request,
+                        kick,
+                        target.x - predecessor.x,
+                        target.y - predecessor.y,
+                        predecessor.x,
+                        predecessor.y,
+                    ),
+                ));
+            }
+        }
+        (best.map(|(_, evidence)| evidence), tied)
+    }
+
+    #[test]
+    fn scoring_rotation_rank_pruning_preserves_exact_evidence_and_first_tie() {
+        let mut saw = [false; 2];
+        let mut saw_tie = [false; 2];
+        let mut saw_unavailable = [false; 2];
+        let mut fewer_searches = [false; 2];
+        for profile in [
+            KickTableProfileId::Srs90,
+            KickTableProfileId::SrsPlus,
+            KickTableProfileId::Jstris180,
+        ] {
+            let template = ReachabilityTemplate::compile(5, 4, PieceKind::T, profile);
+            let mut reference_scratch = ReachabilityScratch::default();
+            let mut scratch = ReachabilityScratch::default();
+            for board in [0, 0b00111, 0b11001, 0b01010_10001] {
+                for rotation in RotationState::ALL {
+                    for x in 0..5 {
+                        for y in 0..4 {
+                            let target = State { rotation, x, y };
+                            for (index, legacy) in [false, true].into_iter().enumerate() {
+                                let reference_before = reference_scratch.generation;
+                                let before = scratch.generation;
+                                let (actual, (expected, tied)) = if legacy {
+                                    (
+                                        super::preferred_scoring_lock_evidence::<true>(
+                                            &template,
+                                            board,
+                                            rotation,
+                                            x,
+                                            y,
+                                            &mut scratch,
+                                        ),
+                                        unpruned_scoring_lock_evidence::<true>(
+                                            &template,
+                                            board,
+                                            target,
+                                            &mut reference_scratch,
+                                        ),
+                                    )
+                                } else {
+                                    (
+                                        best_scoring_lock_evidence(
+                                            &template,
+                                            board,
+                                            rotation,
+                                            x,
+                                            y,
+                                            &mut scratch,
+                                        ),
+                                        unpruned_scoring_lock_evidence::<false>(
+                                            &template,
+                                            board,
+                                            target,
+                                            &mut reference_scratch,
+                                        ),
+                                    )
+                                };
+                                assert_eq!(actual, expected, "{profile:?} {target:?} {board:#x}");
+                                saw[index] |= actual.is_some();
+                                saw_unavailable[index] |= actual.is_none();
+                                saw_tie[index] |= tied;
+                                let actual_searches = scratch.generation - before;
+                                let reference_searches =
+                                    reference_scratch.generation - reference_before;
+                                assert!(actual_searches <= reference_searches);
+                                fewer_searches[index] |= actual_searches < reference_searches;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(saw, [true; 2]);
+        assert_eq!(saw_unavailable, [true; 2]);
+        assert_eq!(saw_tie, [true; 2]);
+        assert_eq!(fewer_searches, [true; 2]);
     }
 
     fn board_mask(width: u8, cells: &[(u8, u8)]) -> u64 {

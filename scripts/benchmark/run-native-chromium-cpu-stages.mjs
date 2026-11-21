@@ -7,7 +7,8 @@ import { performance } from 'node:perf_hooks';
 import { fileURLToPath } from 'node:url';
 import { COMPACT_REPLAY_PROBE_ARGS, compactReplayProbeIdentity, verifyCompactReplayProbeStages }
   from '../tools/paired-compact-replay-probe.mjs';
-import { pairedP7P4StageArgs, P7P4_STAGE_IDENTITY, P7P4_STAGE_TIMEOUT_MS, requireLocalP7P4StageProbe }
+import { pairedP7P4StageArgs, P7P4_STAGE_IDENTITY, P7P4_STAGE_TIMEOUT_MS, requireLocalP7P4StageProbe,
+  requireP7P4ComputeStages }
   from '../tools/paired-p7p4-stage-probe.mjs';
 
 // The large case is explicitly local-only; no diagnostic has release authority.
@@ -167,7 +168,10 @@ for (const workers of widths) {
         : productIdentity(sample.search, workers);
       if (expected) assert.deepEqual(identity, expected, 'native/Chromium result differs');
       else expected = identity;
-      if (largeP7P4 && host === 'native') nativeLargeStages = observedStages(sample);
+      if (largeP7P4 && host === 'native') {
+        nativeLargeStages = observedStages(sample);
+        requireP7P4ComputeStages(nativeLargeStages);
+      }
       if (largeP7P4 && host === 'chromium') {
         const peer = sample.search_profile?.verifier_core;
         assert.equal(peer?.scope, 'finished-geometry-verifiers', 'missing browser peer Rust profile');
@@ -175,6 +179,7 @@ for (const workers of widths) {
         assert.equal(peer.expected_workers, workers, 'browser peer profile width mismatch');
         assert.ok(peer.stages.length > 0, 'empty browser peer Rust profile');
         chromiumLargeStages = peer.stages;
+        requireP7P4ComputeStages(chromiumLargeStages);
       }
       if (workers === 1) {
         const stages = observedStages(sample);
