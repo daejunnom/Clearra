@@ -3450,8 +3450,11 @@ fn typed_pc_score_products_preserve_parent_workers_and_match_serial_payload_byte
         );
         let fixed = format!("{base} --workers 2");
 
+        let parsed = runtime
+            .parse_command(&fixed)
+            .unwrap_or_else(|error| panic!("typed pc {product} command: {error:?}"));
         let (child_request, _) = runtime
-            .prepare_distributed_score_child_command_text(&fixed)
+            .prepare_distributed_score_child(parsed)
             .unwrap_or_else(|error| panic!("typed pc {product} child request: {error:?}"))
             .into_parts();
         let child_policy = match child_request.command() {

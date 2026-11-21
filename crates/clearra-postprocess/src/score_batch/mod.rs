@@ -1,5 +1,7 @@
 mod b2b_execution_filter;
 pub mod candidate_execution_aggregate;
+#[cfg(test)]
+mod compact_replay_count;
 mod compact_replay_language_domain;
 mod exact_replay_language;
 mod exact_scoring_execution_materializer;
@@ -17,7 +19,8 @@ pub use b2b_execution_filter::{
 };
 pub use candidate_execution_aggregate::{CandidateExecution, CandidateExecutionAggregate};
 pub use exact_replay_language::{
-    ExactReplayGraphLocation, ExactReplayLanguageSession, FullHeightReplayLanguageSession,
+    ExactReplayGraphLocation, ExactReplayGraphLocations, ExactReplayLanguageSession,
+    FullHeightReplayLanguageSession,
 };
 #[cfg(feature = "stage-profiling")]
 pub use exact_scoring_execution_materializer::ExactScoringExecutionProfile;

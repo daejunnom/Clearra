@@ -189,7 +189,7 @@ impl ReplayBatches {
     }
     pub(super) fn new_language(
         &self,
-        locations: Vec<ExactReplayGraphLocation>,
+        locations: ExactReplayGraphLocations,
         pattern: usize,
         limits: ExactReplayMaterializationLimits,
         guard: &mut impl FnMut(u128) -> Result<(), ExactReplayMaterializationError>,
@@ -211,7 +211,7 @@ impl ReplayBatches {
             Self::FullHeight(b) => {
                 let extra = cursor_extra::<FullHeightReplayLanguageSession>();
                 let limits = cursor_limits(limits, extra)?;
-                FullHeightReplayLanguageSession::new(
+                FullHeightReplayLanguageSession::new_with_locations(
                     Arc::clone(b),
                     locations,
                     pattern,

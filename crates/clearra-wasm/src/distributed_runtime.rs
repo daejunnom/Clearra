@@ -10,6 +10,7 @@ use clearra_app::{
     PreparedDistributedSearch, PreparedDistributedSearchCompletion, PreparedDistributedSetupSearch,
     ProductCapabilityContract,
 };
+use clearra_cli_command::CliCommandRequest;
 use clearra_core_executor::performance::CooperativeWorkQuantum;
 #[cfg(feature = "webgpu-search")]
 use clearra_core_executor::WasmWebGpuCandidateProducer;
@@ -1326,8 +1327,11 @@ impl WasmDistributedCoordinator {
         runtime: &WasmCommandRuntime,
         command_text: &str,
     ) -> Result<WasmDistributedPreparation, WasmCommandRuntimeError> {
-        let prepared = runtime.prepare_command_text(command_text)?;
-        let (request, webgpu_requested) = prepared.into_parts();
+        let PreparedDistributedCommand {
+            request,
+            webgpu_requested,
+            score_source,
+        } = prepare_distributed_command(runtime, command_text)?;
         if matches!(request.command(), AppCommand::RecoveryBuild(_)) {
             let workers = usize::from(request.resource_budget().workers()).max(1);
             if workers < 2 {
@@ -1468,15 +1472,8 @@ impl WasmDistributedCoordinator {
         if !request_needs_distributed_execution(&request) {
             return Ok(WasmDistributedPreparation::Serial);
         }
-        let score_coordinator_worker_count = score_product_worker_count(&request);
-        let request = if score_coordinator_worker_count.is_some() {
-            runtime
-                .prepare_distributed_score_child_command_text(command_text)?
-                .into_parts()
-                .0
-        } else {
-            request
-        };
+        let (request, score_coordinator_worker_count) =
+            prepare_distributed_score_child(runtime, request, score_source)?;
         let prepared = match runtime.app_context().prepare_distributed_search(request) {
             DistributedSearchPreparation::Ready(response) => {
                 return Ok(WasmDistributedPreparation::Ready(
@@ -3647,17 +3644,13 @@ impl WasmDistributedVerifierRuntime {
         runtime: &WasmCommandRuntime,
         command_text: &str,
     ) -> Result<Self, WasmCommandRuntimeError> {
-        let prepared = runtime.prepare_command_text(command_text)?;
-        let (request, _) = prepared.into_parts();
-        let score_workers = score_product_worker_count(&request);
-        let request = if score_workers.is_some() {
-            runtime
-                .prepare_distributed_score_child_command_text(command_text)?
-                .into_parts()
-                .0
-        } else {
-            request
-        };
+        let PreparedDistributedCommand {
+            request,
+            score_source,
+            ..
+        } = prepare_distributed_command(runtime, command_text)?;
+        let (request, score_workers) =
+            prepare_distributed_score_child(runtime, request, score_source)?;
         let prepared = match runtime.app_context().prepare_distributed_search(request) {
             DistributedSearchPreparation::Search(prepared) => prepared,
             DistributedSearchPreparation::Ready(_) => {
@@ -4622,6 +4615,46 @@ fn score_product_worker_count(request: &AppRequest) -> Option<usize> {
         AppCommand::Scenario(command) => Some(command.query().execution_policy().workers()),
         _ => None,
     }
+}
+
+struct PreparedDistributedCommand {
+    request: AppRequest,
+    webgpu_requested: bool,
+    score_source: Option<(usize, CliCommandRequest)>,
+}
+
+fn prepare_distributed_command(
+    runtime: &WasmCommandRuntime,
+    command_text: &str,
+) -> Result<PreparedDistributedCommand, WasmCommandRuntimeError> {
+    let parsed = runtime.parse_command(command_text)?;
+    let (request, webgpu_requested) = runtime.prepare_parsed_command(&parsed)?.into_parts();
+    // Keep the single parsed source only for score products. The coordinator
+    // must still admit the original worker policy before lowering its child.
+    let score_source = score_product_worker_count(&request).map(|workers| (workers, parsed));
+    Ok(PreparedDistributedCommand {
+        request,
+        webgpu_requested,
+        score_source,
+    })
+}
+
+fn prepare_distributed_score_child(
+    runtime: &WasmCommandRuntime,
+    request: AppRequest,
+    score_source: Option<(usize, CliCommandRequest)>,
+) -> Result<(AppRequest, Option<usize>), WasmCommandRuntimeError> {
+    let Some((workers, parsed)) = score_source else {
+        return Ok((request, None));
+    };
+    // The child uses the same compiler with its explicit one-worker policy.
+    // Do not retain the parent's allocated AppRequest across that lowering.
+    drop(request);
+    let child = runtime
+        .prepare_distributed_score_child(parsed)?
+        .into_parts()
+        .0;
+    Ok((child, Some(workers)))
 }
 
 #[cfg(test)]

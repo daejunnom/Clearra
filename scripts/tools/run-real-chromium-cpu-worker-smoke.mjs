@@ -164,6 +164,9 @@ const tests = [
   { label: 'pc-forced-24l-replay', workers: 3, kind: 'pc-path-family.v2',
     page: 'replay', initialMask: mask, targetLines: Number(height), pieces: Number(pieces),
     command: pcProductCommand(forced24, 'path') },
+  { label: 'pc-compact-replay', workers: 1, kind: 'pc-path-family.v2',
+    page: 'replay', compact: true, targetLines: 1,
+    command: COMPACT_REPLAY_PROBE_COMMAND.replace(/ --workers 1$/u, '') },
   // Empty physical evidence is not a verifier-activity witness. Use serial
   // readback for the two valid-but-empty products instead of requiring peers.
   { label: 'pc-forced-7l-b2b-empty-minimum', workers: 1, kind: 'pc-minimum-cover.v2',
@@ -601,6 +604,21 @@ function typedProjection(test, execution, forced24GeometryKey) {
       assert.notEqual(payload.page_source_available, true);
       assert.equal(page, null);
       assert.equal(frames, null);
+    } else if (test.compact) {
+      compactReplayProbeIdentity(product.result_kind, payload);
+      assert.equal(payload.page_source_available, true);
+      assert.ok(page, test.label + ' did not read the live replay source');
+      assert.deepEqual(page.witnesses, payload.witnesses);
+      assert.deepEqual(payload.canonical_witness, page.witnesses[0]);
+      const [step] = payload.canonical_witness.steps;
+      assert.equal(payload.canonical_witness.steps.length, 1);
+      assert.equal(step.active_piece, 'I');
+      assert.equal(step.cleared_lines, '1');
+      assert.equal(BigInt(step.board_before_mask), 0x3f0n);
+      assert.equal(BigInt(step.board_after_line_clear_mask), 0n);
+      assert.equal(frames.length, 3);
+      assert.equal(frames.at(-1).phase, 'after-clear');
+      assert.ok(frames.at(-1).cells.every(cell => cell === null));
     } else {
       assert.equal(payload.materialized_pattern_count, '1');
       assert.equal(payload.geometry_count, '1');

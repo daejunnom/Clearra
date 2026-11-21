@@ -3896,16 +3896,8 @@ impl WasmCommandRuntime {
         &self,
         command_text: &str,
     ) -> Result<AppRequest, WasmCommandRuntimeError> {
-        let request = self
-            .parse_command(command_text)?
-            .with_runtime_webgpu_available(self.host_capabilities.webgpu_available())
-            .to_app_request()
-            .map_err(WasmCommandRuntimeError::from_cli_command)?;
-        validate_build_memory_authorities(&request)?;
-        Ok(
-            request
-                .with_product_retention_budget(self.host_capabilities.product_retention_budget()),
-        )
+        self.prepare_command_text(command_text)
+            .map(|prepared| prepared.request)
     }
 
     pub fn run_command_text(
@@ -3979,9 +3971,15 @@ impl WasmCommandRuntime {
         command_text: &str,
     ) -> Result<PreparedWasmCommand, WasmCommandRuntimeError> {
         let parsed = self.parse_command(command_text)?;
+        self.prepare_parsed_command(&parsed)
+    }
+
+    pub(crate) fn prepare_parsed_command(
+        &self,
+        parsed: &CliCommandRequest,
+    ) -> Result<PreparedWasmCommand, WasmCommandRuntimeError> {
         let webgpu_requested = parsed.requests_webgpu();
         let request = parsed
-            .with_runtime_webgpu_available(self.host_capabilities.webgpu_available())
             .to_app_request()
             .map_err(WasmCommandRuntimeError::from_cli_command)?;
         validate_build_memory_authorities(&request)?;
@@ -3996,14 +3994,12 @@ impl WasmCommandRuntime {
     /// browser coordinator retains the user's worker policy; every producer
     /// and verifier session is deliberately single-threaded so one logical
     /// worker cannot recursively request another worker pool.
-    pub(crate) fn prepare_distributed_score_child_command_text(
+    pub(crate) fn prepare_distributed_score_child(
         &self,
-        command_text: &str,
+        parsed: CliCommandRequest,
     ) -> Result<PreparedWasmCommand, WasmCommandRuntimeError> {
-        let parsed = self.parse_command(command_text)?;
         let webgpu_requested = parsed.requests_webgpu();
         let request = parsed
-            .with_runtime_webgpu_available(self.host_capabilities.webgpu_available())
             .with_workers(1)
             .with_use_all_logical_processors(false)
             .to_app_request()
@@ -4028,7 +4024,7 @@ impl WasmCommandRuntime {
         })
     }
 
-    fn parse_command(
+    pub(crate) fn parse_command(
         &self,
         command_text: &str,
     ) -> Result<CliCommandRequest, WasmCommandRuntimeError> {
@@ -4037,7 +4033,7 @@ impl WasmCommandRuntime {
             self.host_capabilities.logical_processor_count(),
         )
         .map_err(WasmCommandRuntimeError::from_cli_command)?;
-        Ok(request)
+        Ok(request.with_runtime_webgpu_available(self.host_capabilities.webgpu_available()))
     }
 
     pub(crate) fn execute_prepared(

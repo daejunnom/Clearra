@@ -10,8 +10,8 @@ use clearra_core_executor::performance::CooperativeWorkQuantum;
 use clearra_core_executor::{CoreExecutionResult, CorePostProcessExecution};
 use clearra_host_contract::{PcReplayPageMetadata, PcReplayPagePayload};
 use clearra_postprocess::{
-    ExactReplayGraphLocation, ExactReplayLanguageSession, ExactReplayMaterializationError,
-    ExactReplayMaterializationLimits,
+    ExactReplayGraphLocation, ExactReplayGraphLocations, ExactReplayLanguageSession,
+    ExactReplayMaterializationError, ExactReplayMaterializationLimits,
 };
 use clearra_problem::SearchProblem;
 use clearra_replay::ExactScoringExecutionBatch;
@@ -745,21 +745,26 @@ impl PcReplayPageSource {
             .and_then(|n| n.checked_add(self.retained_external_bytes()?))
             .and_then(|n| n.checked_add(additional))
             .ok_or(OVERFLOW)?;
-        ensure_peak(
-            external
-                .checked_add(bytes::<ExactReplayGraphLocation>(locations.len())?)
-                .ok_or(OVERFLOW)?,
-            self.maximum_bytes,
-            guard,
-        )?;
-        let locations = locations.to_vec();
-        ensure_peak(
-            external
-                .checked_add(bytes::<ExactReplayGraphLocation>(locations.capacity())?)
-                .ok_or(OVERFLOW)?,
-            self.maximum_bytes,
-            guard,
-        )?;
+        let locations = if let [location] = locations {
+            ExactReplayGraphLocations::One(*location)
+        } else {
+            ensure_peak(
+                external
+                    .checked_add(bytes::<ExactReplayGraphLocation>(locations.len())?)
+                    .ok_or(OVERFLOW)?,
+                self.maximum_bytes,
+                guard,
+            )?;
+            let locations = locations.to_vec();
+            ensure_peak(
+                external
+                    .checked_add(bytes::<ExactReplayGraphLocation>(locations.capacity())?)
+                    .ok_or(OVERFLOW)?,
+                self.maximum_bytes,
+                guard,
+            )?;
+            ExactReplayGraphLocations::Multiple(locations)
+        };
         let allowance =
             self.maximum_bytes
                 .checked_sub(external)

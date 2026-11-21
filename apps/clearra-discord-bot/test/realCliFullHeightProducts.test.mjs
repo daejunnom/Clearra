@@ -10,9 +10,12 @@ import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import { decodeCtk3 } from 'ctk3';
 import { readCurrentProductRelease } from '../../../scripts/release/current-product-release.mjs';
+import { compactReplayProbeIdentity } from '../../../scripts/tools/paired-compact-replay-probe.mjs';
 import { assertDiscordCanonicalOnlyResult, prepareClearraArguments } from '../src/clearra/command.mjs';
 import { buildCtk3Result } from '../src/clearra/ctk3-result.mjs';
 import { ClearraDirectExecutor } from '../src/clearra/direct-executor.mjs';
+import { findSlashCommand } from '../src/discord/slash-command-catalog.mjs';
+import { buildSlashCommandArguments } from '../src/discord/slash-command-input.mjs';
 import { ClearraCommandRunner } from '../src/job-service/runner.mjs';
 import { renderDocumentGif } from '../src/viewer/gif.mjs';
 import { buildCanonicalPcPathReplayDocument, PC_PATH_REPLAY_FRAME_DELAY_MS }
@@ -223,6 +226,53 @@ async function verifyCompactChanceRunnerParity(cliPath) {
   return workers;
 }
 
+async function verifyCompactReplayRunnerParity(cliPath) {
+  // Use the same one-lock fixture as the Chromium smoke. The alias must
+  // reach the exact approved CLI's result, not a compatibility reducer.
+  const options = [
+    { name: 'field', type: 3, value: 'grid:____######' },
+    { name: 'next', type: 3, value: 'I' },
+    { name: 'lines', type: 4, value: 1 },
+    { name: 'hold', type: 3, value: 'disabled' },
+    { name: 'kicktable', type: 3, value: 'srs-plus' },
+  ];
+  const grouped = buildSlashCommandArguments(findSlashCommand('pc'), [
+    { name: 'path', type: 1, options },
+  ]);
+  const alias = buildSlashCommandArguments(findSlashCommand('path'), options);
+  assert.deepEqual(alias, grouped);
+  assert.deepEqual(alias, ['pc', 'path', '--lines', '1', '--board-mask', '0x3f0',
+    '--height', '1', '--pieces', '1', '--queue', 'I', '--no-hold', '--rule', 'srs-plus']);
+  const request = [...alias, '--backend', 'cpu'];
+  const authority = { workers: 1, logicalProcessors: 1, outputFormat: 'json',
+    includeSolutionData: true };
+  const expectedVcpus = 1;
+  const stdout = invoke(cliPath, prepareClearraArguments(request, authority), {
+    env: { ...process.env, CLEARRA_EXPECTED_VCPUS: String(expectedVcpus) },
+    label: 'direct compact PC replay',
+  });
+  const raw = JSON.parse(stdout);
+  const identity = compactReplayProbeIdentity(raw.kind, raw.summary);
+  assert.equal(raw.runtime_identity?.source_commit, sourceCommit);
+  const runner = new ClearraCommandRunner({
+    executable: cliPath, processLogicalProcessors: 1, expectedVcpus,
+    searchWorkersPerSession: 1, useAllLogicalProcessors: false,
+    searchTimeoutMs: PROCESS_TIMEOUT_MS, maxOutputBytes: PROCESS_OUTPUT_BYTES,
+    terminationGraceMs: 1_000,
+  });
+  const actual = await runner.execute({ arguments: request, timeoutClass: 'pc_reverse',
+    deadlineUnixMs: Date.now() + PROCESS_TIMEOUT_MS, maxOutputBytes: PROCESS_OUTPUT_BYTES });
+  if (actual.exitCode !== 0) assert.fail(`Discord compact PC replay: ${processFailure(actual)}`);
+  assert.equal(actual.terminationReason, 'exit');
+  const projected = JSON.parse(actual.stdout);
+  const direct = assertDiscordCanonicalOnlyResult({ exitCode: 0, signal: null, stderr: '', stdout });
+  assert.deepEqual(projected, JSON.parse(direct.stdout));
+  assert.equal(projected.summary.canonical_witness.normalized_trace_key, identity.canonical_witness);
+  const replay = buildCanonicalPcPathReplayDocument(projected);
+  assert.equal(replay.frameCount, 3);
+  assert.ok(replay.document.pages.at(-1).cells.every(cell => cell === null));
+}
+
 test('real full-height CLI families survive Discord runner and render all physical rows', {
   skip: !executable && !sourceCommit && packagedVersion === undefined, timeout: 120_000,
 }, async t => {
@@ -263,6 +313,8 @@ test('real full-height CLI families survive Discord runner and render all physic
   assertFixtureCoverage(completed, [...planned].flatMap(([profile, inputs]) => inputs.map(input =>
     [profile, input.name, input.product, input.kind, input.preserveB2b])), 'real full-height CLI/Discord products');
   t.diagnostic(`compact 4L P7 CLI/Discord chance matched with ${await verifyCompactChanceRunnerParity(cliPath)} worker(s)`);
+  await verifyCompactReplayRunnerParity(cliPath);
+  t.diagnostic('compact 1L /path and /pc path use the same CLI replay reducer and canonical witness');
   assert.equal(await realpath(cliPath), cliPath);
   assert.equal(createHash('sha256').update(await readFile(cliPath)).digest('hex'), digest,
     'the built binary must not change during exact-source readback');

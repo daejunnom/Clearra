@@ -131,6 +131,39 @@ fn session(batches: Arc<[ExactScoringExecutionBatch]>, cap: usize) -> ExactRepla
 }
 
 #[test]
+fn inline_single_graph_matches_owned_locations_under_fixed_queue_and_exact_limits() {
+    let batches: Arc<[ExactScoringExecutionBatch]> =
+        vec![batch(vec![graph(&[&[0, 2], &[2, 0]], 2)], 2, false)].into();
+    let location = ExactReplayGraphLocation { batch: 0, graph: 0 };
+    let inline = |cap| {
+        ExactReplayLanguageSession::new_with_locations(
+            Arc::clone(&batches),
+            ExactReplayGraphLocations::One(location),
+            0,
+            limits(cap),
+            &mut |_| Ok(()),
+        )
+        .unwrap()
+    };
+    let mut owned = session(Arc::clone(&batches), 100);
+    let mut single = inline(100);
+    assert_eq!(
+        single.checked_retained_bytes().unwrap() + size_of::<ExactReplayGraphLocation>() as u128,
+        owned.checked_retained_bytes().unwrap(),
+    );
+    complete(&mut owned).unwrap();
+    complete(&mut single).unwrap();
+    assert_eq!(single.count(), Some(2));
+    assert_eq!(single.count(), owned.count());
+    assert_eq!(all(&single), all(&owned));
+    assert_eq!(all(&single), oracle(&batches));
+    assert_eq!(
+        complete(&mut inline(1)),
+        Err(Error::ExecutionLimitExceeded { max_executions: 1 }),
+    );
+}
+
+#[test]
 fn deterministic_nondeterministic_and_cross_location_union_match_exhaustive() {
     for hold in [false, true] {
         // Equal first label -> different hidden states, overlapping suffix, and

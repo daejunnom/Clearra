@@ -111,7 +111,7 @@ test("slash ingress rejects ordinary Gateway messages and handles Gateway intera
   assert.match(responses[1].data.content, /render\|to-gray\|mirror/u);
 });
 
-test("Gateway grouped /pc path reaches the canonical CLI authority while legacy /path stays separate", async () => {
+test("Gateway grouped /pc path and its /path alias reach the same canonical CLI authority", async () => {
   const executions = [];
   const edits = [];
   const rest = {
@@ -177,7 +177,18 @@ test("Gateway grouped /pc path reaches the canonical CLI authority while legacy 
     "--include-solution-data",
   ]);
   assert.equal(executions[0].options.timeoutClass, "pc_reverse");
-  assert.equal(edits.length, 1);
+  assert.deepEqual(
+    await ingress.acceptDispatch("INTERACTION_CREATE", {
+      ...interaction,
+      id: "gateway-short-path",
+      data: { type: 1, name: "path", options: interaction.data.options[0].options },
+    }),
+    { accepted: true },
+  );
+  assert.equal(executions.length, 2);
+  assert.deepEqual(executions[1].arguments_, executions[0].arguments_);
+  assert.equal(executions[1].options.timeoutClass, "pc_reverse");
+  assert.equal(edits.length, 2);
   bot.stop();
 });
 

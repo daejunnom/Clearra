@@ -36,6 +36,30 @@ pub struct ExactReplayGraphLocation {
     pub graph: usize,
 }
 
+/// One immutable source location needs no per-cell allocation. Distinct
+/// locations still use the exact union cursor and its guarded heap storage.
+#[derive(Debug)]
+pub enum ExactReplayGraphLocations {
+    One(ExactReplayGraphLocation),
+    Multiple(Vec<ExactReplayGraphLocation>),
+}
+
+impl ExactReplayGraphLocations {
+    fn as_slice(&self) -> &[ExactReplayGraphLocation] {
+        match self {
+            Self::One(location) => std::slice::from_ref(location),
+            Self::Multiple(locations) => locations,
+        }
+    }
+
+    fn retained_bytes(&self) -> Result<u128, Error> {
+        match self {
+            Self::One(_) => Ok(0),
+            Self::Multiple(locations) => bytes(locations),
+        }
+    }
+}
+
 // Fixed stack labels reuse the canonical writer; decimal fields are compared as
 // bytes, not numeric tuples. 192 covers even usize::MAX cursor text; overflow is
 // explicitly rejected rather than truncating a label.
@@ -193,7 +217,7 @@ impl<B> core::ops::Deref for ReplayBatchOwner<B> {
 #[derive(Debug)]
 struct ReplayLanguageSession<D: ReplayLanguageDomain> {
     batches: ReplayBatchOwner<D::Batch>,
-    locations: Vec<ExactReplayGraphLocation>,
+    locations: ExactReplayGraphLocations,
     pattern_id: usize,
     limits: Limits,
     phase: Phase,
@@ -290,6 +314,21 @@ fn reserve<T>(
         guard,
     )?;
     Ok(delta)
+}
+
+// Borrow the vectors only after computing the whole live projection, and
+// compute it only if reserve can actually allocate. The explicit end-of-step
+// guard and both pre/post-growth guards remain unchanged.
+macro_rules! reserve_session {
+    ($session:ident, $destination:expr, $additional:expr, $guard:expr) => {{
+        let additional = $additional;
+        if additional <= $destination.capacity() - $destination.len() {
+            Ok(0)
+        } else {
+            let base = $session.owned()?;
+            reserve(&mut $destination, additional, base, $session.limits, $guard)
+        }
+    }};
 }
 
 struct KeyHash(u64);
@@ -429,7 +468,7 @@ impl<D: ReplayLanguageDomain> ReplayLanguageSession<D> {
         if root_key.depth != 0 || path.is_empty() {
             return Err(Error::InvalidEvidence);
         }
-        let location = self.locations[root_key.location];
+        let location = self.locations.as_slice()[root_key.location];
         let batch = &self.batches[location.batch];
         let graph = batch.graph(location.graph).ok_or(Error::InvalidEvidence)?;
         let candidate = D::project_selected(
@@ -493,6 +532,7 @@ impl<D: ReplayLanguageDomain> ReplayLanguageSession<D> {
         let mut node = root;
         let mut path = Vec::new();
         let mut holds = Vec::new();
+        let original = self.owned()?;
         loop {
             if control.is_cancelled() {
                 return Err(Error::Cancelled);
@@ -511,14 +551,12 @@ impl<D: ReplayLanguageDomain> ReplayLanguageSession<D> {
             rank = rank
                 .checked_sub(preceding)
                 .ok_or(Error::ProjectionOverflow)?;
-            let base = self
-                .owned()?
+            let base = original
                 .checked_add(bytes(&path)?)
                 .and_then(|n| n.checked_add(bytes(&holds).ok()?))
                 .ok_or(Error::ProjectionOverflow)?;
             reserve(&mut path, 1, base, self.limits, guard)?;
-            let base = self
-                .owned()?
+            let base = original
                 .checked_add(bytes(&path)?)
                 .and_then(|n| n.checked_add(bytes(&holds).ok()?))
                 .ok_or(Error::ProjectionOverflow)?;
@@ -535,12 +573,12 @@ impl<D: ReplayLanguageDomain> ReplayLanguageSession<D> {
 
     pub fn new(
         batches: ReplayBatchOwner<D::Batch>,
-        locations: Vec<ExactReplayGraphLocation>,
+        locations: ExactReplayGraphLocations,
         pattern_id: usize,
         limits: Limits,
         guard: &mut impl FnMut(u128) -> Result<(), Error>,
     ) -> Result<Self, Error> {
-        if locations.is_empty() {
+        if locations.as_slice().is_empty() {
             return Err(Error::InvalidEvidence);
         }
         let session = Self {
@@ -591,7 +629,7 @@ impl<D: ReplayLanguageDomain> ReplayLanguageSession<D> {
             .checked_add(self.nested_bytes)
             .ok_or(Error::ProjectionOverflow)?;
         for extra in [
-            bytes(&self.locations)?,
+            self.locations.retained_bytes()?,
             bytes(&self.nfa)?,
             bytes(&self.nfa_table)?,
             bytes(&self.roots)?,
@@ -732,6 +770,13 @@ impl<D: ReplayLanguageDomain> ReplayLanguageSession<D> {
             self.limits,
             guard,
         )?;
+        if length == 0 {
+            // Initial tables have exactly 16 slots. Initialize this bounded
+            // constant in the already-admitted primitive, rather than
+            // requiring 16 extra caller turns for every cell. Later growth
+            // depends on the search and remains cooperatively incremental.
+            self.rehash.resize(self.rehash_target, 0);
+        }
         self.rehash_kind = kind;
         self.rehash_index = 0;
         Ok(true)
@@ -764,8 +809,7 @@ impl<D: ReplayLanguageDomain> ReplayLanguageSession<D> {
             }
             slot = (slot + 1) & (self.nfa_table.len() - 1);
         }
-        let base = self.owned()?;
-        reserve(&mut self.nfa, 1, base, self.limits, guard)?;
+        reserve_session!(self, self.nfa, 1, guard)?;
         let index = self.nfa.len();
         self.nfa.push(NfaNode {
             key,
@@ -804,8 +848,7 @@ impl<D: ReplayLanguageDomain> ReplayLanguageSession<D> {
             }
             slot = (slot + 1) & (self.dfa_table.len() - 1);
         }
-        let base = self.owned()?;
-        reserve(&mut self.dfa, 1, base, self.limits, guard)?;
+        reserve_session!(self, self.dfa, 1, guard)?;
         let accepting = self
             .subset
             .iter()
@@ -833,42 +876,48 @@ impl<D: ReplayLanguageDomain> ReplayLanguageSession<D> {
         }
         match self.phase {
             Phase::Roots => {
-                if self.index == self.locations.len() {
+                let locations = self.locations.as_slice();
+                if self.index == locations.len() {
                     self.switch(Phase::Nfa);
                     return Ok(());
                 }
-                let location = self.locations[self.index];
+                let location = locations[self.index];
                 let batch = self
                     .batches
                     .get(location.batch)
                     .ok_or(Error::InvalidEvidence)?;
                 let graph = batch.graph(location.graph).ok_or(Error::InvalidEvidence)?;
-                let first = self.locations[0];
-                let first_batch = self
-                    .batches
-                    .get(first.batch)
-                    .ok_or(Error::InvalidEvidence)?;
-                let first_graph = first_batch
-                    .graph(first.graph)
-                    .ok_or(Error::InvalidEvidence)?;
                 if !batch.complete()
                     || self.pattern_id >= batch.patterns().len()
                     || graph.node(graph.root()).is_none()
-                    || !graph.same_candidate(first_graph)
-                    || !D::same_frame(batch, first_batch)
-                    || batch.initial_cursor() != first_batch.initial_cursor()
-                    || batch.initial_hold() != first_batch.initial_hold()
-                    || batch.patterns().get(self.pattern_id)
-                        != first_batch.patterns().get(self.pattern_id)
-                    || batch.hold_enabled() != first_batch.hold_enabled()
-                    || batch.projects_unplaced_lookahead()
-                        != first_batch.projects_unplaced_lookahead()
-                    || batch.projects_standard_bag_lookahead()
-                        != first_batch.projects_standard_bag_lookahead()
-                    || batch.kick_table_id() != first_batch.kick_table_id()
-                    || batch.rule_profile_id() != first_batch.rule_profile_id()
                 {
                     return Err(Error::InvalidEvidence);
+                }
+                if self.index != 0 {
+                    let first = locations[0];
+                    let first_batch = self
+                        .batches
+                        .get(first.batch)
+                        .ok_or(Error::InvalidEvidence)?;
+                    let first_graph = first_batch
+                        .graph(first.graph)
+                        .ok_or(Error::InvalidEvidence)?;
+                    if !graph.same_candidate(first_graph)
+                        || !D::same_frame(batch, first_batch)
+                        || batch.initial_cursor() != first_batch.initial_cursor()
+                        || batch.initial_hold() != first_batch.initial_hold()
+                        || batch.patterns().get(self.pattern_id)
+                            != first_batch.patterns().get(self.pattern_id)
+                        || batch.hold_enabled() != first_batch.hold_enabled()
+                        || batch.projects_unplaced_lookahead()
+                            != first_batch.projects_unplaced_lookahead()
+                        || batch.projects_standard_bag_lookahead()
+                            != first_batch.projects_standard_bag_lookahead()
+                        || batch.kick_table_id() != first_batch.kick_table_id()
+                        || batch.rule_profile_id() != first_batch.rule_profile_id()
+                    {
+                        return Err(Error::InvalidEvidence);
+                    }
                 }
                 let key = NfaKey {
                     location: self.index,
@@ -881,15 +930,14 @@ impl<D: ReplayLanguageDomain> ReplayLanguageSession<D> {
                     depth: 0,
                 };
                 let root = self.intern_nfa(key, guard)?;
-                let base = self.owned()?;
-                reserve(&mut self.roots, 1, base, self.limits, guard)?;
+                reserve_session!(self, self.roots, 1, guard)?;
                 self.roots.push(root);
                 self.index += 1;
             }
             Phase::Nfa => self.expand_nfa(guard)?,
             Phase::NfaCount => {
                 if self.index == self.nfa.len() {
-                    if self.locations.len() == 1 && self.deterministic {
+                    if self.locations.as_slice().len() == 1 && self.deterministic {
                         let count = self.nfa[self.roots[0]].raw_count;
                         if count > self.limits.max_executions() {
                             return Err(Error::ExecutionLimitExceeded {
@@ -938,8 +986,7 @@ impl<D: ReplayLanguageDomain> ReplayLanguageSession<D> {
                     self.roots.len()
                 };
                 if self.member_index < members {
-                    let base = self.owned()?;
-                    reserve(&mut self.subset, 1, base, self.limits, guard)?;
+                    reserve_session!(self, self.subset, 1, guard)?;
                     self.subset.push(
                         self.roots[if self.index < self.roots.len() {
                             self.index
@@ -950,8 +997,7 @@ impl<D: ReplayLanguageDomain> ReplayLanguageSession<D> {
                     self.member_index += 1;
                 } else {
                     let root = self.intern_subset(guard)?;
-                    let base = self.owned()?;
-                    reserve(&mut self.prefix_roots, 1, base, self.limits, guard)?;
+                    reserve_session!(self, self.prefix_roots, 1, guard)?;
                     self.prefix_roots.push(root);
                     self.index += 1;
                     self.member_index = 0;
@@ -1019,7 +1065,7 @@ impl<D: ReplayLanguageDomain> ReplayLanguageSession<D> {
             return Ok(());
         }
         let key = self.nfa[self.index].key;
-        let location = self.locations[key.location];
+        let location = self.locations.as_slice()[key.location];
         let batch = &self.batches[location.batch];
         let graph = batch.graph(location.graph).ok_or(Error::InvalidEvidence)?;
         let node = graph.node(key.supply.node).ok_or(Error::InvalidEvidence)?;
@@ -1122,8 +1168,7 @@ impl<D: ReplayLanguageDomain> ReplayLanguageSession<D> {
                     },
                     guard,
                 )?;
-                let base = self.owned()?;
-                let delta = reserve(&mut self.nfa[self.index].edges, 1, base, self.limits, guard)?;
+                let delta = reserve_session!(self, self.nfa[self.index].edges, 1, guard)?;
                 self.nested_bytes = self
                     .nested_bytes
                     .checked_add(delta)
@@ -1175,8 +1220,7 @@ impl<D: ReplayLanguageDomain> ReplayLanguageSession<D> {
                     },
                 };
                 if let Err(position) = self.choices.binary_search(&choice) {
-                    let base = self.owned()?;
-                    reserve(&mut self.choices, 1, base, self.limits, guard)?;
+                    reserve_session!(self, self.choices, 1, guard)?;
                     self.choices.insert(position, choice);
                 }
                 self.edge_index += 1;
@@ -1188,19 +1232,16 @@ impl<D: ReplayLanguageDomain> ReplayLanguageSession<D> {
         }
         if self.group_end < self.choices.len() {
             let choice = self.choices[self.group_end];
-            let base = self.owned()?;
-            reserve(&mut self.subset, 1, base, self.limits, guard)?;
+            reserve_session!(self, self.subset, 1, guard)?;
             self.subset.push(choice.destination);
-            let base = self.owned()?;
-            reserve(&mut self.predecessors, 1, base, self.limits, guard)?;
+            reserve_session!(self, self.predecessors, 1, guard)?;
             self.predecessors.push(choice.predecessor);
             self.group_end += 1;
             if self.group_end == self.choices.len()
                 || self.choices[self.group_end].label != choice.label
             {
                 let destination = self.intern_subset(guard)?;
-                let base = self.owned()?;
-                let delta = reserve(&mut self.dfa[self.index].edges, 1, base, self.limits, guard)?;
+                let delta = reserve_session!(self, self.dfa[self.index].edges, 1, guard)?;
                 self.nested_bytes = self
                     .nested_bytes
                     .checked_add(delta)
@@ -1246,6 +1287,22 @@ macro_rules! language_cursor {
             pub fn new(
                 batches: Arc<[$batch]>,
                 locations: Vec<ExactReplayGraphLocation>,
+                pattern_id: usize,
+                limits: Limits,
+                guard: &mut impl FnMut(u128) -> Result<(), Error>,
+            ) -> Result<Self, Error> {
+                Self::new_with_locations(
+                    batches,
+                    ExactReplayGraphLocations::Multiple(locations),
+                    pattern_id,
+                    limits,
+                    guard,
+                )
+            }
+
+            pub fn new_with_locations(
+                batches: Arc<[$batch]>,
+                locations: ExactReplayGraphLocations,
                 pattern_id: usize,
                 limits: Limits,
                 guard: &mut impl FnMut(u128) -> Result<(), Error>,
@@ -1305,7 +1362,7 @@ impl ExactReplayLanguageSession {
     /// The caller accounts for the shared allocation, not this cursor handle.
     pub fn new_shared_batches(
         batches: Arc<Vec<ExactScoringExecutionBatch>>,
-        locations: Vec<ExactReplayGraphLocation>,
+        locations: ExactReplayGraphLocations,
         pattern_id: usize,
         limits: Limits,
         guard: &mut impl FnMut(u128) -> Result<(), Error>,

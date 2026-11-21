@@ -1,4 +1,24 @@
+import { classifyClearraTextCommand } from "../clearra/text-command.mjs";
+import {
+  activeDiscordSearchCapabilities,
+  hiddenTextSearchCapabilities,
+} from "../discord/capability-registry.mjs";
 import { isTextManagementCandidate } from "../discord/management-command.mjs";
+
+// The parser shares slash schemas, so a recognized path alone does not confer
+// text ownership. In particular, slash-only searches and settings must not
+// turn an otherwise unowned prefixed message into Clearra work.
+const CLEARRA_TEXT_IDENTITIES = new Set(["help"]);
+for (const capability of [
+  ...activeDiscordSearchCapabilities(),
+  ...hiddenTextSearchCapabilities(),
+]) {
+  if (capability.canonical.text) CLEARRA_TEXT_IDENTITIES.add(capability.id);
+  for (const route of [capability.canonical, ...capability.aliases]) {
+    if (!route.text) continue;
+    CLEARRA_TEXT_IDENTITIES.add([route.root, route.subcommand].filter(Boolean).join("."));
+  }
+}
 
 /**
  * Owns deterministic cross-bot message ownership. It deliberately classifies
@@ -12,6 +32,7 @@ export class OracleMessageArbitration {
         ? config.oracleCommandPrefixes.map(String)
         : ["$", ">"],
     );
+    this.textEnabled = Boolean(config.oracleTextEnabled);
     this.sfinderManGuildIds = new Set(
       Array.isArray(config.oracleSfinderManGuildIds)
         ? config.oracleSfinderManGuildIds.map(String)
@@ -25,14 +46,24 @@ export class OracleMessageArbitration {
       return false;
     }
     return !isTextManagementInvocation(message?.content, this.commandPrefixes) &&
-      !isClearraOnlyTextInvocation(message?.content, this.commandPrefixes);
+      !this.#ownsClearraTextInvocation(message?.content);
   }
 
   delegatesAcceptedCandidate(message, botUserId, managementMessage) {
     if (!this.#isSfinderManGuildUserMessage(message, botUserId)) return false;
     return !managementMessage &&
       !isTextManagementInvocation(message?.content, this.commandPrefixes) &&
-      !isClearraOnlyTextInvocation(message?.content, this.commandPrefixes);
+      !this.#ownsClearraTextInvocation(message?.content);
+  }
+
+  #ownsClearraTextInvocation(content) {
+    return this.commandPrefixes.some((prefix) => {
+      const identity = classifyClearraTextCommand(content, prefix);
+      // Retain the existing explicit GIF recovery exception. Search/help
+      // ownership applies only when the ordinary text feature is enabled.
+      return identity === "render-file" ||
+        (this.textEnabled && CLEARRA_TEXT_IDENTITIES.has(identity));
+    });
   }
 
   #isSfinderManGuildUserMessage(message, botUserId) {
@@ -52,19 +83,4 @@ function isNonemptyPrefixedText(content, prefixes) {
     source.startsWith(prefix) &&
     source.slice(prefix.length).trim().length > 0
   );
-}
-
-function isClearraOnlyTextInvocation(content, prefixes) {
-  const source = String(content ?? "").trimStart();
-  for (const prefix of prefixes) {
-    if (!prefix || !source.startsWith(prefix)) continue;
-    const command = source
-      .slice(prefix.length)
-      .trimStart()
-      .split(/\s+/u, 1)[0]
-      ?.toLowerCase()
-      .replaceAll("_", "-");
-    return command === "render-file";
-  }
-  return false;
 }

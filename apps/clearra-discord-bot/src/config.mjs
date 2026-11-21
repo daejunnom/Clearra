@@ -264,10 +264,9 @@ export function loadDiscordBotConfig(environment = process.env, runtime = {}) {
     oracleTextEnabled,
     oracleAllowedChannelIds,
     oracleAllowAllTextChannels,
-    // Coexistence is configured by guild instead of inferred from response
-    // timing. That keeps ownership deterministic when both bots receive the
-    // same Discord dispatch and prevents a late Sfinder-man response from
-    // racing a Clearra search or GIF render.
+    // In configured coexistence guilds Clearra keeps its registered text
+    // commands and yields unowned prefixes and ambient rendering. This is
+    // Clearra's local decision, not a setting for the other bot.
     oracleSfinderManGuildIds,
     oracleCommandPrefixes: Object.freeze(["$", ">"]),
     oracleMaxInputChars: boundedPositiveInteger(

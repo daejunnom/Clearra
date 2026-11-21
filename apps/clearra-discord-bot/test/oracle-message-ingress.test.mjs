@@ -168,19 +168,22 @@ test("Oracle ingress delegates only supported messages and deduplicates accepted
   );
 });
 
-test("Sfinder-man guild ownership delegates search and ambient render before local work", async () => {
+test("coexistence keeps registered Clearra commands and delegates other messages before local work", async () => {
   const handled = [];
+  const inspected = [];
   const outcomes = [];
   const ingress = createIngress(
     {
       acceptsOracleMessage(candidate) {
-        return candidate.content.startsWith("$pc path ") ||
-          candidate.content.startsWith("v115@") ||
-          candidate.content.startsWith("ctk3_") ||
+        inspected.push(candidate.id);
+        return candidate.content !== "normal conversation" && (
+          /^[$>]/u.test(candidate.content) ||
+          /^(?:v115@|ctk3_)/u.test(candidate.content) ||
           candidate.content === "__________" ||
           candidate.attachments.some(
             (attachment) => attachment.filename === "input.ctk3",
-          );
+          )
+        );
       },
       async handleOracleMessage(candidate) {
         handled.push(candidate.id);
@@ -198,54 +201,47 @@ test("Sfinder-man guild ownership delegates search and ambient render before loc
     },
   );
 
-  for (const [id, content] of [
-    ["delegated-search", "$pc path --field XXXXXX____ --queue I --lines 1"],
+  const clearraCases = [
+    ["grouped-path", "$pc path --field XXXXXX____ --queue I --lines 1"],
+    ["short-path", ">path --field XXXXXX____ --queue I --lines 1"],
+    ["grouped-cover", "$build cover --base-mask 0 --target-mask 15 --height 1 --queue I"],
+    ["build-evaluate", "$build evaluate cover --queue I"],
+    ["malformed-registered-path", '$path --field "PRIVATE'],
+    ["help", ">help path"],
+  ];
+  for (const [id, content] of clearraCases) {
+    assert.deepEqual(
+      await ingress.acceptDispatch(
+        "MESSAGE_CREATE",
+        message(id, { guild_id: "sfinder-guild", content }),
+      ),
+      { accepted: true },
+      id,
+    );
+  }
+  const delegatedTextCases = [
     ["delegated-unknown-prefix", "$owned-by-sfinder-man"],
+    ["delegated-explicit-compat", "$sfinder path --field XXXXXX____ --queue I --lines 1"],
+    ["delegated-retired-alias", ">percent"],
+    ["delegated-unknown-subcommand", "$pc unsupported"],
+    ["delegated-slash-search", "$recovery boundary"],
+    ["delegated-slash-settings", ">channel-settings language-set ko"],
+  ];
+  const delegatedAmbientCases = [
     ["delegated-render", "v115@vhAAgH"],
     ["delegated-ctk3", "ctk3_FAKE"],
     ["delegated-grid", "__________"],
-  ]) {
+  ];
+  for (const [id, content] of [...delegatedTextCases, ...delegatedAmbientCases]) {
     assert.deepEqual(
       await ingress.acceptDispatch(
         "MESSAGE_CREATE",
         message(id, { guild_id: "sfinder-guild", content }),
       ),
       { accepted: false, reason: "delegated", owner: "sfinder-man" },
+      id,
     );
   }
-  assert.deepEqual(handled, []);
-  assert.deepEqual(outcomes, [
-    ["delegated-search", {
-      handled: false,
-      status: "delegated",
-      owner: "sfinder-man",
-      reason: "guild-owner",
-    }],
-    ["delegated-unknown-prefix", {
-      handled: false,
-      status: "delegated",
-      owner: "sfinder-man",
-      reason: "guild-owner",
-    }],
-    ["delegated-render", {
-      handled: false,
-      status: "delegated",
-      owner: "sfinder-man",
-      reason: "guild-owner",
-    }],
-    ["delegated-ctk3", {
-      handled: false,
-      status: "delegated",
-      owner: "sfinder-man",
-      reason: "guild-owner",
-    }],
-    ["delegated-grid", {
-      handled: false,
-      status: "delegated",
-      owner: "sfinder-man",
-      reason: "guild-owner",
-    }],
-  ]);
 
   assert.deepEqual(
     await ingress.acceptDispatch(
@@ -261,17 +257,41 @@ test("Sfinder-man guild ownership delegates search and ambient render before loc
   assert.equal(outcomes.at(-1)[0], "delegated-attachment");
   assert.equal(outcomes.at(-1)[1].status, "delegated");
 
+  assert.deepEqual(handled, clearraCases.map(([id]) => id));
+  assert.deepEqual(inspected, [
+    ...clearraCases.map(([id]) => id),
+    ...delegatedAmbientCases.map(([id]) => id),
+    "delegated-attachment",
+  ], "unowned text must not reach local acceptance, document decoding, or work");
+  assert.deepEqual(outcomes.slice(clearraCases.length), [
+    ...delegatedTextCases,
+    ...delegatedAmbientCases,
+    ["delegated-attachment"],
+  ].map(([id]) => [id, {
+    handled: false,
+    status: "delegated",
+    owner: "sfinder-man",
+    reason: "guild-owner",
+  }]));
+  const outcomeCount = outcomes.length;
   assert.deepEqual(
     await ingress.acceptDispatch(
       "MESSAGE_CREATE",
-      message("delegated-search", {
+      message("ordinary-chat", { guild_id: "sfinder-guild", content: "normal conversation" }),
+    ),
+    { accepted: false, reason: "unsupported-message" },
+  );
+  assert.deepEqual(
+    await ingress.acceptDispatch(
+      "MESSAGE_CREATE",
+      message("grouped-path", {
         guild_id: "sfinder-guild",
         content: "$pc path --field XXXXXX____ --queue I --lines 1",
       }),
     ),
     { accepted: false, reason: "duplicate-message" },
   );
-  assert.equal(outcomes.length, 6);
+  assert.equal(outcomes.length, outcomeCount);
 
   assert.deepEqual(
     await ingress.acceptDispatch(
@@ -283,7 +303,7 @@ test("Sfinder-man guild ownership delegates search and ambient render before loc
     ),
     { accepted: true },
   );
-  assert.deepEqual(handled, ["standalone-render"]);
+  assert.deepEqual(handled, [...clearraCases.map(([id]) => id), "standalone-render"]);
   assert.equal(outcomes.at(-1)[1].status, "succeeded");
 });
 
@@ -315,7 +335,7 @@ test("Oracle ingress owns one privacy-bounded terminal log for text outcomes", a
       "MESSAGE_CREATE",
       message("delegated-log", {
         guild_id: "sfinder-guild",
-        content: "$pc path PRIVATE",
+        content: "$sfinder path PRIVATE",
       }),
     ),
     { accepted: false, reason: "delegated", owner: "sfinder-man" },
@@ -323,7 +343,7 @@ test("Oracle ingress owns one privacy-bounded terminal log for text outcomes", a
   await assert.rejects(
     ingress.acceptDispatch(
       "MESSAGE_CREATE",
-      message("failed-log", { content: "$path PRIVATE" }),
+      message("failed-log", { guild_id: "sfinder-guild", content: "$path PRIVATE" }),
     ),
     /Oracle message handling failed/,
   );
@@ -332,7 +352,7 @@ test("Oracle ingress owns one privacy-bounded terminal log for text outcomes", a
     const record = JSON.parse(line);
     return [record.kind, record.command, record.status, record.durationMs];
   }), [
-    ["text", "pc.path", "delegated", 5],
+    ["text", null, "delegated", 5],
     ["text", "pc.path", "failed", 5],
   ]);
   assert.doesNotMatch(lines.join("\n"), /PRIVATE|sfinder-man|guild-owner/i);
@@ -394,8 +414,16 @@ test("Sfinder-man guild ownership never delegates Clearra self results", async (
 
 test("Sfinder-man ownership keeps Clearra-only render-file and management text local", async () => {
   const handled = [];
+  const authorizationChecks = [];
   const ingress = createIngress(
     {
+      oracleAccessDecision(candidate) {
+        return { allowed: true, management: candidate.content.startsWith(">bot-control") };
+      },
+      async authorizeOracleManagementMessage(candidate) {
+        authorizationChecks.push(candidate.id);
+        return candidate.id === "management";
+      },
       async handleOracleMessage(candidate) {
         handled.push(candidate.id);
       },
@@ -419,7 +447,43 @@ test("Sfinder-man ownership keeps Clearra-only render-file and management text l
       { accepted: true },
     );
   }
+  assert.deepEqual(
+    await ingress.acceptDispatch(
+      "MESSAGE_CREATE",
+      message("unauthorized-management", {
+        guild_id: "sfinder-guild", content: ">bot-control pause",
+      }),
+    ),
+    { accepted: false, reason: "management-not-authorized" },
+  );
   assert.deepEqual(handled, ["render-file", "management"]);
+  assert.deepEqual(authorizationChecks, ["management", "unauthorized-management"]);
+});
+
+test("coexistence does not claim search text when ordinary text ingress is disabled", async () => {
+  let acceptanceCalls = 0;
+  const ingress = createIngress(
+    {
+      acceptsOracleMessage() {
+        acceptanceCalls += 1;
+        return true;
+      },
+    },
+    { oracleSfinderManGuildIds: ["sfinder-guild"] },
+  );
+  ingress.setBotUserId("clearra-bot");
+  assert.deepEqual(
+    await ingress.acceptDispatch(
+      "MESSAGE_CREATE",
+      message("render-only-mode", {
+        guild_id: "sfinder-guild",
+        content: "$pc path --field XXXXXX____ --queue I --lines 1",
+        mentions: [{ id: "clearra-bot" }],
+      }),
+    ),
+    { accepted: false, reason: "delegated", owner: "sfinder-man" },
+  );
+  assert.equal(acceptanceCalls, 0);
 });
 
 test("Oracle ingress admits only complete self-webhook message updates", async () => {

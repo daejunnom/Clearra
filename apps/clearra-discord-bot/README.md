@@ -1065,11 +1065,15 @@ Portal's privileged Message Content Intent.
 
 When Clearra and Sfinder-man intentionally coexist, list those guilds in
 `CLEARRA_ORACLE_SFINDER_MAN_GUILD_IDS`. Clearra decides ownership before queue
-admission, document decoding, attachment download, search, or rendering:
-Sfinder-man owns user text commands and ambient Fumen/CTK3 rendering in those
-guilds. Clearra still owns its private `bot-control` and `render-file` recovery
-commands, slash commands, context-menu recovery, and its own generated-result
-rendering. Delegated work is a neutral terminal outcome rather than a failure.
+admission, document decoding, attachment download, search, or rendering.
+When its text feature is enabled, Clearra handles its registered text commands
+such as `$pc path`, `$path`, and `>build probability`. It leaves unknown or
+Sfinder-specific prefixed commands and ambient Fumen/CTK3 inputs to Sfinder-man.
+Clearra retains its
+private `bot-control` authorization, `render-file` recovery, slash commands,
+context-menu recovery, and its own generated-result rendering. Delegation is
+a neutral outcome. The guild list does not configure the other bot; if it also
+answers a shared prefix and command, configure that overlap on its side.
 
 ## Oracle and remote execution settings
 
