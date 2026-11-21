@@ -4,6 +4,7 @@ import {
   mkdtemp,
   mkdir,
   readFile,
+  unlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -28,8 +29,13 @@ import {
   writeShardedReleaseGateReports,
 } from "./canonical-acceptance-evidence.mjs";
 import { verifyCanonicalReportHash } from "./canonical-release-evidence.mjs";
-import { stampAcceptedPagesBuild } from "./accepted-pages-build.mjs";
+import {
+  PAGES_IDENTITY_FILE,
+  stampAcceptedPagesBuild,
+  verifyAcceptedPagesBuild,
+} from "./accepted-pages-build.mjs";
 import { sealAcceptedWasmBuild } from "./accepted-wasm-build.mjs";
+import { verifyForwardPagesAcceptedBuild } from "./pages-deployment-authority.mjs";
 import { sealAcceptedCtk3Dist } from "../tools/accepted-ctk3-dist.mjs";
 import {
   CLEARRA_ARTIFACT_SCHEMA_VERSION,
@@ -522,6 +528,22 @@ test("canonical acceptance evidence validates accepted inputs and hashes three r
     report.report_sha256,
   );
 
+  const pages = {
+    buildDirectory: fixture.options.pagesDirectory,
+    canonicalEvidencePath: output,
+    ...authority(),
+    acceptedRunId: RUN_ID,
+    acceptedRunAttempt: RUN_ATTEMPT,
+  };
+  assert.equal(
+    await verifyForwardPagesAcceptedBuild(pages),
+    report.accepted_inputs.pages_identity_sha256,
+  );
+  await assert.rejects(
+    verifyForwardPagesAcceptedBuild({ ...pages, acceptedRunAttempt: "999" }),
+    /differs from the bound run attempt/u,
+  );
+
   await writeFile(
     join(fixture.products, `Clearra-GUI-v${VERSION}-windows-x86_64.exe`),
     "tampered",
@@ -545,6 +567,20 @@ test("canonical acceptance evidence validates accepted inputs and hashes three r
   await assert.rejects(
     createCanonicalAcceptanceEvidence(fixture.options),
     /exact successful acceptance attempt/u,
+  );
+
+  // A restamped tree for the same SHA/run/attempt passes the self-consistency
+  // check, but is not the build whose closed set was approved.
+  const substitutedHtml =
+    `<html><script src="${BASE_PATH}/_app/start.js"></script><p>Substituted</p></html>`;
+  await writeFile(join(pages.buildDirectory, "index.html"), substitutedHtml);
+  await writeFile(join(pages.buildDirectory, "404.html"), substitutedHtml);
+  await unlink(join(pages.buildDirectory, PAGES_IDENTITY_FILE));
+  await stampAcceptedPagesBuild(pages.buildDirectory, pages);
+  await verifyAcceptedPagesBuild(pages.buildDirectory, pages);
+  await assert.rejects(
+    verifyForwardPagesAcceptedBuild(pages),
+    /Pages identity differs from canonical acceptance/u,
   );
 });
 

@@ -122,6 +122,7 @@ jobs:
     needs: accepted-source
     outputs:
       pages_artifact_id: ${{ steps.pages-artifact.outputs.artifact_id }}
+      accepted_pages_identity_sha256: ${{ steps.accepted-build.outputs.accepted_pages_identity_sha256 }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -138,22 +139,29 @@ jobs:
           github-token: ${{ github.token }}
           repository: ${{ github.repository }}
           run-id: ${{ needs.accepted-source.outputs.accepted_run_id }}
+      - name: Download canonical acceptance evidence for the same attempt
+        uses: actions/download-artifact@v4
+        with:
+          name: canonical-acceptance-evidence-${{ inputs.accepted_sha }}-run-${{ needs.accepted-source.outputs.accepted_run_id }}-attempt-${{ needs.accepted-source.outputs.accepted_run_attempt }}
+          path: ${{ runner.temp }}/clearra-pages-accepted-evidence
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ needs.accepted-source.outputs.accepted_run_id }}
       - name: Configure Pages
         uses: actions/configure-pages@v5
       - name: Verify exact accepted Pages build
+        id: accepted-build
         env:
+          PAGES_ACCEPTED_BUILD_DIR: apps/clearra-web/build
+          PAGES_CANONICAL_ACCEPTANCE_EVIDENCE_PATH: ${{ runner.temp }}/clearra-pages-accepted-evidence/clearra-canonical-acceptance-evidence.v1.json
           EXPECTED_SHA: ${{ inputs.accepted_sha }}
           ACCEPTED_RUN_ID: ${{ needs.accepted-source.outputs.accepted_run_id }}
           ACCEPTED_RUN_ATTEMPT: ${{ needs.accepted-source.outputs.accepted_run_attempt }}
           EXPECTED_BASE_PATH: /${{ github.event.repository.name }}
         run: |
-          node scripts/release/accepted-pages-build.mjs \
-            --verify apps/clearra-web/build \
-            --source-commit "$EXPECTED_SHA" \
-            --accepted-run-id "$ACCEPTED_RUN_ID" \
-            --accepted-run-attempt "$ACCEPTED_RUN_ATTEMPT" \
-            --base-path "$EXPECTED_BASE_PATH" \
-            --version "$(node scripts/release/validate-release-metadata.mjs)"
+          EXPECTED_VERSION="$(node scripts/release/validate-release-metadata.mjs)"
+          export EXPECTED_VERSION
+          node scripts/release/pages-deployment-authority.mjs verify-accepted-build
       - name: Upload Pages artifact
         id: pages-artifact
         uses: actions/upload-pages-artifact@v3
@@ -247,6 +255,7 @@ jobs:
           PAGES_ARTIFACT_NAME: github-pages
           EXPECTED_ACCEPTED_RUN_ID: ${{ needs.accepted-source.outputs.accepted_run_id }}
           EXPECTED_ACCEPTED_RUN_ATTEMPT: ${{ needs.accepted-source.outputs.accepted_run_attempt }}
+          EXPECTED_ACCEPTED_PAGES_IDENTITY_SHA256: ${{ needs.build.outputs.accepted_pages_identity_sha256 }}
           EXPECTED_BASE_PATH: /${{ github.event.repository.name }}
           PAGE_URL: ${{ steps.deployment.outputs.page_url }}
           PAGES_AUTHORITY_REPORT_PATH: ${{ runner.temp }}/pages-deployment-authority.json

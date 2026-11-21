@@ -7836,12 +7836,17 @@ mod tests {
         let problem = ProblemCompiler::compile_scenario_percent(&query)
             .expect("typed chance fixture")
             .with_pc_chance_probability_v2_evidence();
-        let mut parallel = WasmExactSearchSession::new(&problem).expect("parallel chance session");
         let control = ExecutionControl::default();
-        let parallel_result = parallel
-            .execute_parallel_if_worthwhile(2, &control)
-            .expect("parallel chance")
-            .expect("fixture takes native family workers");
+        let parallel_result = {
+            // Only the completed proof crosses this scope. The parallel
+            // session owns its resource lease until drop, not until completion.
+            let mut parallel =
+                WasmExactSearchSession::new(&problem).expect("parallel chance session");
+            parallel
+                .execute_parallel_if_worthwhile(2, &control)
+                .expect("parallel chance")
+                .expect("fixture takes native family workers")
+        };
         let mut serial = WasmExactSearchSession::new(&problem).expect("serial chance session");
         let serial_result = loop {
             match serial

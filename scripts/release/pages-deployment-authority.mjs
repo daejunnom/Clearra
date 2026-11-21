@@ -1,8 +1,10 @@
 import { createHash } from "node:crypto";
-import { appendFile, lstat, open } from "node:fs/promises";
+import { appendFile, lstat, open, readFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { verifyAcceptedPagesBuild } from "./accepted-pages-build.mjs";
+import { validateCanonicalAcceptanceEvidence } from "./canonical-acceptance-evidence.mjs";
 import {
   canonicalJson,
   canonicalSha256,
@@ -225,6 +227,54 @@ export function validatePagesDeploymentAuthorityReport(report, {
   return report;
 }
 
+export async function verifyForwardPagesAcceptedBuild({
+  buildDirectory,
+  canonicalEvidencePath,
+  repository,
+  sourceCommit,
+  acceptedRunId,
+  acceptedRunAttempt,
+  basePath,
+  version,
+}) {
+  const evidencePath = resolve(requireNonEmptyString(
+    canonicalEvidencePath,
+    "canonical acceptance evidence path",
+  ));
+  const stats = await lstat(evidencePath);
+  if (!stats.isFile() || stats.isSymbolicLink() ||
+      stats.size === 0 || stats.size > MAX_JSON_RESPONSE_BYTES) {
+    throw new Error("canonical acceptance evidence must be a bounded regular file");
+  }
+  const raw = await readFile(evidencePath, "utf8");
+  const evidence = JSON.parse(raw);
+  if (raw !== `${canonicalJson(evidence)}\n`) {
+    throw new Error("canonical acceptance evidence bytes are not canonical JSON");
+  }
+  validateCanonicalAcceptanceEvidence(evidence, {
+    repository,
+    sourceCommit,
+    runId: acceptedRunId,
+    runAttempt: acceptedRunAttempt,
+    basePath,
+    version,
+  });
+  const identity = await verifyAcceptedPagesBuild(buildDirectory, {
+    sourceCommit, acceptedRunId, acceptedRunAttempt, basePath, version,
+  });
+  return requireAcceptedPagesIdentity(
+    identity, evidence.accepted_inputs.pages_identity_sha256,
+  );
+}
+
+function requireAcceptedPagesIdentity(identity, expectedIdentitySha256) {
+  const identitySha256 = canonicalSha256(identity);
+  if (identitySha256 !== expectedIdentitySha256) {
+    throw new Error("Pages identity differs from canonical acceptance");
+  }
+  return identitySha256;
+}
+
 export async function producePagesDeploymentAuthority(input, {
   getGithubJson,
   fetchPublicJson,
@@ -235,6 +285,9 @@ export async function producePagesDeploymentAuthority(input, {
   attempts = 12,
 } = {}) {
   const mode = requireMode(input.mode);
+  const acceptedPagesIdentitySha256 = mode === "forward"
+    ? requireSha256(input.acceptedPagesIdentitySha256, "accepted Pages identity SHA-256")
+    : null;
   if (typeof getGithubJson !== "function" || typeof fetchPublicJson !== "function") {
     throw new Error("Pages deployment producer requires GitHub and public JSON readers");
   }
@@ -408,6 +461,7 @@ export async function producePagesDeploymentAuthority(input, {
           expectedAcceptedRunId: input.acceptedRunId,
           expectedAcceptedRunAttempt: input.acceptedRunAttempt,
         });
+        requireAcceptedPagesIdentity(liveIdentity, acceptedPagesIdentitySha256);
         await validateLiveForwardPayloads({
           files: liveIdentity.files,
           pageUrl,
@@ -836,6 +890,24 @@ async function parseJsonResponse(response, label) {
 
 async function main() {
   const repository = env("GITHUB_REPOSITORY");
+  if (process.argv[2] === "verify-accepted-build" && process.argv.length === 3) {
+    const identitySha256 = await verifyForwardPagesAcceptedBuild({
+      buildDirectory: env("PAGES_ACCEPTED_BUILD_DIR"),
+      canonicalEvidencePath: env("PAGES_CANONICAL_ACCEPTANCE_EVIDENCE_PATH"),
+      repository,
+      sourceCommit: env("EXPECTED_SHA"),
+      acceptedRunId: env("ACCEPTED_RUN_ID"),
+      acceptedRunAttempt: env("ACCEPTED_RUN_ATTEMPT"),
+      basePath: env("EXPECTED_BASE_PATH"),
+      version: env("EXPECTED_VERSION"),
+    });
+    await appendFile(
+      env("GITHUB_OUTPUT"),
+      `accepted_pages_identity_sha256=${identitySha256}\n`,
+      "utf8",
+    );
+    return;
+  }
   const token = env("GH_TOKEN");
   const mode = env("PAGES_DEPLOYMENT_MODE");
   const rollbackCaptureReadback = mode === "restore"
@@ -861,6 +933,7 @@ async function main() {
     basePath: env("EXPECTED_BASE_PATH"),
     acceptedRunId: env("EXPECTED_ACCEPTED_RUN_ID", { optional: true }),
     acceptedRunAttempt: env("EXPECTED_ACCEPTED_RUN_ATTEMPT", { optional: true }),
+    acceptedPagesIdentitySha256: env("EXPECTED_ACCEPTED_PAGES_IDENTITY_SHA256", { optional: true }),
     rollbackCaptureReport,
     rollbackCaptureRunId: env("CAPTURE_RUN_ID", { optional: true }),
     rollbackReportArtifactId: env("CAPTURE_REPORT_ARTIFACT_ID", { optional: true }),

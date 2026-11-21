@@ -234,6 +234,7 @@ function fixture({ mode = "forward", restoreKind = "legacy-v0.7.4" } = {}) {
     basePath: "/Clearra",
     acceptedRunId: mode === "forward" ? "11111" : undefined,
     acceptedRunAttempt: mode === "forward" ? "2" : undefined,
+    acceptedPagesIdentitySha256: mode === "forward" ? canonicalSha256(identity()) : undefined,
     rollbackCaptureReport,
     rollbackCaptureRunId: mode === "restore" ? rollbackCaptureReport.capture_run_id : undefined,
     rollbackReportArtifactId: mode === "restore" ? "44444" : undefined,
@@ -356,6 +357,7 @@ test("seals forward artifact, deployment, identity, and every live payload byte 
   assert.equal(report.deployment_id, SOURCE);
   assert.equal(report.artifact_sha256, ARTIFACT_SHA256);
   assert.equal(report.accepted_run_id, "11111");
+  assert.equal(report.live_identity_sha256, input.acceptedPagesIdentitySha256);
   assert.equal(report.deployment_status, "succeed");
   assert.equal(validatePagesDeploymentAuthorityReport(report, {
     expectedSourceCommit: SOURCE,
@@ -371,6 +373,38 @@ test("seals forward artifact, deployment, identity, and every live payload byte 
     assert.match(report[field], /^[0-9a-f]{64}$/u);
   }
   assert.doesNotMatch(JSON.stringify(report), /token|password|credential/iu);
+});
+
+test("forward live seal rejects a substituted same-attempt identity before reading its payloads", async () => {
+  const { input, dependencies } = fixture();
+  const changedPayload = Buffer.from("substituted index with its own valid hash\n");
+  const changedFiles = forwardFileDescriptors();
+  changedFiles[0] = {
+    path: "index.html",
+    size: changedPayload.byteLength,
+    sha256: sha256(changedPayload),
+  };
+  dependencies.attempts = 1;
+  dependencies.fetchPublicJson = async () => identity(SOURCE, changedFiles);
+  dependencies.fetchPublicBytes = async () => {
+    assert.fail("self-consistent substituted file set must not be read");
+  };
+  await assert.rejects(
+    producePagesDeploymentAuthority(input, dependencies),
+    /identity differs from canonical acceptance/u,
+  );
+});
+
+test("forward live seal requires the accepted identity digest before readback", async () => {
+  const { input, dependencies } = fixture();
+  delete input.acceptedPagesIdentitySha256;
+  dependencies.getGithubJson = async () => {
+    assert.fail("readback without canonical accepted identity must not start");
+  };
+  await assert.rejects(
+    producePagesDeploymentAuthority(input, dependencies),
+    /accepted Pages identity SHA-256/u,
+  );
 });
 
 test("restore authority derives accepted identity and queries the deploy action workflow SHA", async () => {
