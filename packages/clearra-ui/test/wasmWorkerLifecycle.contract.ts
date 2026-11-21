@@ -332,7 +332,8 @@ async function idleMemoryCeilingRotatesOnlyOverLimitWorkers() {
 
 async function oversizedTerminalWorkerReclaimsOnlyUnownedPages() {
   const completed = (
-    pages?: { tiling: boolean; product: boolean }
+    pages?: { tiling: boolean; product: boolean },
+    memoryBytes = 101
   ): ClearraWasmWorkerEvent => ({
     schema_version: 1,
     runtime: 'clearra-wasm',
@@ -341,7 +342,7 @@ async function oversizedTerminalWorkerReclaimsOnlyUnownedPages() {
     response: { command: 'pc', status: 'success', result: null, diagnostics: [] },
     search_report: null,
     webgpu_backend: null,
-    runtime_memory_bytes: 101,
+    runtime_memory_bytes: memoryBytes,
     runtime_retained_pages: pages
   } as unknown as ClearraWasmWorkerEvent);
 
@@ -353,14 +354,15 @@ async function oversizedTerminalWorkerReclaimsOnlyUnownedPages() {
   ]) {
     resetState();
     const worker = new FakeWorker();
+    const replacement = new FakeWorker();
     const controller = new WasmTerminalWorkerController(
-      () => worker as unknown as Worker,
+      () => (worker.terminateCount === 0 ? worker : replacement) as unknown as Worker,
       undefined,
       { idleWorkerMemoryCeilingBytes: 100 }
     );
     assert.equal(controller.run(), true);
     worker.emit(started(301));
-    worker.emit(completed(selection.pages));
+    worker.emit(completed(selection.pages, selection.pages?.tiling ? 100 : 101));
     assert.equal(get(wasmWorkerState).status, 'completed');
     assert.equal(worker.terminateCount, selection.afterCompletion);
     if (selection.pages?.tiling || selection.pages?.product) {
@@ -374,9 +376,80 @@ async function oversizedTerminalWorkerReclaimsOnlyUnownedPages() {
       const request = worker.messages.find(
         (message) => (message as { type?: string }).type === 'load_solution_page'
       ) as { requestId: number };
-      worker.emit({ type: 'solution_page', request_id: request.requestId, offset: 0, total: 1, keys: ['retained'] });
+      worker.emit({
+        type: 'solution_page',
+        request_id: request.requestId,
+        offset: 0,
+        total: 1,
+        keys: ['retained'],
+        runtime_memory_bytes: 101
+      });
       assert.deepEqual(await page, { keys: ['retained'], total: 1 });
+      assert.equal(worker.terminateCount, 0, 'tiling source stays usable while its page belongs to this result');
+      assert.equal(controller.run(), true);
+      assert.equal(worker.terminateCount, 1, 'new search replaces the over-ceiling tiling source');
     }
+    controller.dispose();
+  }
+
+  for (const outcome of ['success', 'failure', 'stale'] as const) {
+    resetState();
+    const workers = [new FakeWorker(), new FakeWorker()];
+    let created = 0;
+    const snapshot = createHostCapabilitySnapshot({ reportedLogicalProcessors: 8 });
+    const foreground = automaticWorkerAuthority(snapshot);
+    const controller = new WasmTerminalWorkerController(
+      () => workers[created++] as unknown as Worker,
+      snapshot,
+      { idleWorkerMemoryCeilingBytes: 100 }
+    );
+    const worker = workers[0];
+    controller.prewarm(1);
+    assert.equal(controller.run(foreground), true);
+    worker.emit(started(301));
+    worker.emit(completed({ tiling: false, product: true }, 100));
+
+    const page = controller.loadNextProductPage();
+    const posted = worker.messages.find(
+      (message) => (message as { type?: string }).type === 'load_product_page'
+    ) as { requestId: number };
+    const reply: ClearraProductPageWorkerEvent = {
+      type: 'product_page',
+      request_id: posted.requestId,
+      payload: {
+        schema_version: 1,
+        runtime: 'clearra-wasm',
+        product_page_kind: 'parity-report',
+        state: 'exhausted'
+      }
+    };
+    if (outcome === 'failure') {
+      worker.emit({
+        type: 'product_page_failed',
+        request_id: posted.requestId,
+        message: 'page attempt failed',
+        runtime_memory_bytes: 101
+      });
+      await assert.rejects(page, /page attempt failed/u);
+    } else {
+      if (outcome === 'stale') {
+        worker.emit({ ...reply, request_id: posted.requestId + 1, runtime_memory_bytes: 101 });
+        worker.emit(reply);
+      } else {
+        worker.emit({ ...reply, runtime_memory_bytes: 101 });
+      }
+      assert.deepEqual(await page, reply.payload);
+    }
+    assert.equal(worker.terminateCount, 0, 'a live page owner is never retired because of memory alone');
+    controller.releaseProductPages();
+    const retire = outcome !== 'stale';
+    assert.equal(worker.terminateCount, Number(retire), outcome);
+    assert.equal(controller.run(foreground), true);
+    const next = workers[Number(retire)].messages.at(-1) as {
+      type: string; workerAuthority: typeof foreground;
+    };
+    assert.equal(next.type, 'run_command_text');
+    assert.deepEqual(next.workerAuthority, foreground, 'memory samples do not change search admission');
     controller.dispose();
   }
 }
@@ -745,8 +818,15 @@ async function clearingTerminalResultReleasesLogPayloads() {
 async function abortingSolutionPageRequestReleasesControllerOwnership() {
   resetState();
   const worker = new FakeWorker();
-  const controller = controllerFor(worker);
+  const controller = new WasmTerminalWorkerController(
+    () => worker as unknown as Worker,
+    undefined,
+    { idleWorkerMemoryCeilingBytes: 100 }
+  );
   controller.prewarm(1);
+  worker.emit({
+    type: 'runtime_prewarm', phase: 'finished', workerCount: 1, runtimeMemoryBytes: 100
+  } as unknown as ClearraWasmWorkerEvent);
   const abort = new AbortController();
   const request = controller.loadSolutionPage(0, 1, abort.signal);
   const reason = new Error('solution page aborted by test');
@@ -757,13 +837,61 @@ async function abortingSolutionPageRequestReleasesControllerOwnership() {
   const message = worker.messages.find(
     (candidate) => (candidate as { type?: string }).type === 'load_solution_page'
   ) as { requestId: number };
+  assert.equal(controller.takeIdleWorker(), null, 'submitted work can still grow the old worker');
+  worker.emit({
+    type: 'solution_page',
+    request_id: message.requestId,
+    offset: 1,
+    total: 1,
+    keys: ['wrong-offset'],
+    runtime_memory_bytes: 101
+  });
+  assert.equal(controller.takeIdleWorker(), null, 'an invalid receipt cannot satisfy the observation lease');
+  assert.equal(worker.terminateCount, 0);
   worker.emit({
     type: 'solution_page',
     request_id: message.requestId,
     offset: 0,
     total: 1,
-    keys: ['late-key']
+    keys: ['late-key'],
+    runtime_memory_bytes: 101
   });
+  assert.equal(controller.takeIdleWorker(), null, 'an authentic late reply can report an oversized worker');
+  assert.equal(worker.terminateCount, 1);
+}
+
+async function abandonedPageObservationDeadlinePreservesCurrentResult() {
+  resetState();
+  const workers = [new FakeWorker(), new FakeWorker()];
+  let created = 0;
+  const controller = new WasmTerminalWorkerController(
+    () => workers[created++] as unknown as Worker,
+    undefined,
+    { idleWorkerMemoryCeilingBytes: 100, productPageStallTimeoutMs: 10 }
+  );
+  assert.equal(controller.run(), true);
+  workers[0].emit(started(801));
+  workers[0].emit({
+    schema_version: 1,
+    runtime: 'clearra-wasm',
+    event: 'final_response',
+    job_id: 801,
+    response: { command: 'pc', status: 'success', result: null, diagnostics: [] },
+    search_report: null,
+    webgpu_backend: null,
+    runtime_memory_bytes: 100,
+    runtime_retained_pages: { tiling: true, product: false }
+  } as unknown as ClearraWasmWorkerEvent);
+  const abort = new AbortController();
+  const pending = controller.loadSolutionPage(0, 1, abort.signal);
+  abort.abort(new Error('abandoned page'));
+  await assert.rejects(pending, /abandoned page/u);
+  await delay(25);
+  assert.equal(workers[0].terminateCount, 0, 'timed out observation does not discard retained pages');
+  assert.equal(get(wasmWorkerState).status, 'completed');
+  assert.equal(controller.run(), true);
+  assert.equal(workers[0].terminateCount, 1, 'new foreground run retires the unobserved owner');
+  assert.equal(created, 2);
   controller.dispose();
 }
 
@@ -1241,6 +1369,7 @@ try {
   await legacyStringFailureRemainsIncomplete();
   await clearingTerminalResultReleasesLogPayloads();
   await abortingSolutionPageRequestReleasesControllerOwnership();
+  await abandonedPageObservationDeadlinePreservesCurrentResult();
   await newRunRejectsOutstandingSolutionPageRequest();
   await outstandingSolutionPageRequestPreventsWorkerTransfer();
   await mismatchedSolutionPageResponseIsRejected();

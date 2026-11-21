@@ -2,7 +2,7 @@
 //! A visible label determines its consumed queue symbols. Determinize only
 //! equal visible labels and then add their guarded suffix weight functions.
 
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
 use clearra_core_domain::{execution_cancellation::ExecutionControl, piece::piece_kind::PieceKind};
 use clearra_replay::{ExactScoringExecutionBatch, HoldDecision, PieceDecision};
@@ -29,11 +29,191 @@ use super::{
 const WIDTH: usize = PieceKind::STANDARD_TETROMINOES.len();
 const FULL_BAG: u8 = (1 << WIDTH) - 1;
 const MAX_QUEUED: u16 = 11;
+const ORDINAL_ADVANCE_MAX: usize = 64;
 // Even a bypass-only caller cannot create an arbitrarily large experiment.
 const MAX_WORK: usize = 65_536;
 type NodeId = usize;
 const ZERO: NodeId = 0;
 type CountResult<T> = Result<T, CountError>;
+
+#[derive(Clone, Copy, Debug)]
+struct OrdinalShape {
+    queue_len: u16,
+    pattern_count: usize,
+}
+
+impl OrdinalShape {
+    fn from_universe(universe: &MaterializedPatternUniverse) -> CountResult<Self> {
+        let Some(UniformCompactPatternSource::Standard7Bag {
+            sequence_len,
+            pattern_count,
+        }) = universe.uniform_compact_source()
+        else {
+            return Err(CountError::Unsupported);
+        };
+        let queue_len = u16::try_from(sequence_len).map_err(|_| CountError::Unsupported)?;
+        if !(1..=MAX_QUEUED).contains(&queue_len)
+            || !universe.complete()
+            || pattern_count != queue_suffixes(queue_len, WIDTH as u16)
+        {
+            return Err(CountError::Unsupported);
+        }
+        Ok(Self {
+            queue_len,
+            pattern_count,
+        })
+    }
+}
+
+/// An ordinal-axis proof for this exact immutable batch allocation. It does
+/// not attest that the graphs are the complete output of a specific query.
+#[derive(Debug)]
+pub(super) struct BoundCompactReplayOrdinals {
+    batches: Arc<Vec<ExactScoringExecutionBatch>>,
+    shape: OrdinalShape,
+}
+
+impl BoundCompactReplayOrdinals {
+    pub(super) fn matches_owner(&self, batches: &Arc<Vec<ExactScoringExecutionBatch>>) -> bool {
+        Arc::ptr_eq(&self.batches, batches)
+    }
+
+    pub(super) fn compile(
+        &self,
+        locations: &[ExactReplayGraphLocation],
+        limits: CountLimits,
+        control: &ExecutionControl,
+    ) -> CountResult<CompactBagReplayCount> {
+        compile_compact_bag_replay_count_in_scope(
+            &self.batches,
+            locations,
+            self.shape,
+            limits,
+            control,
+        )
+    }
+}
+
+/// Compare actual supplied rows at every ordinal with the canonical source.
+/// The proof owns no queue or graph bytes beyond the shared Arc allocation.
+/// Each advance checks at most min(work, ORDINAL_ADVANCE_MAX) explicit rows.
+#[derive(Debug)]
+pub(super) struct CompactReplayOrdinalBinding {
+    batches: Arc<Vec<ExactScoringExecutionBatch>>,
+    shape: OrdinalShape,
+    batch: usize,
+    ordinal: usize,
+    slots: [u8; MAX_QUEUED as usize],
+    failed: bool,
+}
+
+impl CompactReplayOrdinalBinding {
+    pub(super) fn new(
+        batches: Arc<Vec<ExactScoringExecutionBatch>>,
+        universe: &MaterializedPatternUniverse,
+    ) -> CountResult<Self> {
+        let shape = OrdinalShape::from_universe(universe)?;
+        if batches.is_empty() {
+            return Err(CountError::Unsupported);
+        }
+        Ok(Self {
+            batches,
+            shape,
+            batch: 0,
+            ordinal: 0,
+            slots: first_ordinal_slots(),
+            failed: false,
+        })
+    }
+
+    pub(super) fn advance(&mut self, work: usize, control: &ExecutionControl) -> CountResult<bool> {
+        if self.failed {
+            return Err(Error::InvalidEvidence.into());
+        }
+        let outcome = self.advance_inner(work, control);
+        self.failed = outcome.is_err();
+        outcome
+    }
+
+    fn advance_inner(&mut self, work: usize, control: &ExecutionControl) -> CountResult<bool> {
+        if control.is_cancelled() {
+            return Err(Error::Cancelled.into());
+        }
+        for _ in 0..work.min(ORDINAL_ADVANCE_MAX) {
+            if control.is_cancelled() {
+                return Err(Error::Cancelled.into());
+            }
+            let Some(batch) = self.batches.get(self.batch) else {
+                return Ok(true);
+            };
+            if !batch.complete() || batch.patterns().len() != self.shape.pattern_count {
+                return Err(Error::InvalidEvidence.into());
+            }
+            let actual = &batch.patterns()[self.ordinal];
+            let expected = &mut self.slots[..usize::from(self.shape.queue_len)];
+            if actual.len() != expected.len()
+                || actual.iter().zip(expected.iter()).any(|(&piece, &slot)| {
+                    piece != PieceKind::STANDARD_TETROMINOES[usize::from(slot)]
+                })
+            {
+                return Err(Error::InvalidEvidence.into());
+            }
+            self.ordinal += 1;
+            let has_next = next_ordinal_slots(expected);
+            if has_next != (self.ordinal < self.shape.pattern_count) {
+                return Err(Error::InvalidEvidence.into());
+            }
+            if !has_next {
+                self.ordinal = 0;
+                self.batch += 1;
+                self.slots = first_ordinal_slots();
+            }
+        }
+        Ok(self.batch == self.batches.len())
+    }
+
+    pub(super) fn complete(self) -> CountResult<BoundCompactReplayOrdinals> {
+        if self.failed || self.batch != self.batches.len() {
+            return Err(Error::InvalidEvidence.into());
+        }
+        Ok(BoundCompactReplayOrdinals {
+            batches: self.batches,
+            shape: self.shape,
+        })
+    }
+}
+
+fn first_ordinal_slots() -> [u8; MAX_QUEUED as usize] {
+    core::array::from_fn(|index| (index % WIDTH) as u8)
+}
+
+/// Standard7BagSequenceSpace visits available kinds in standard order and
+/// resets the mask at a bag boundary. The immediate lexicographic successor
+/// changes the rightmost possible symbol and takes each later smallest legal
+/// symbol. This is that same order without repeated per-row unranking.
+fn next_ordinal_slots(slots: &mut [u8]) -> bool {
+    for pivot in (0..slots.len()).rev() {
+        let bag_start = pivot / WIDTH * WIDTH;
+        let used = slots[bag_start..pivot]
+            .iter()
+            .fold(0_u8, |mask, &slot| mask | (1 << slot));
+        let greater = (FULL_BAG & !used) & (u8::MAX << (slots[pivot] + 1));
+        if greater == 0 {
+            continue;
+        }
+        slots[pivot] = greater.trailing_zeros() as u8;
+        let mut available = FULL_BAG & !(used | (1 << slots[pivot]));
+        for (index, slot) in slots.iter_mut().enumerate().skip(pivot + 1) {
+            if index % WIDTH == 0 {
+                available = FULL_BAG;
+            }
+            *slot = available.trailing_zeros() as u8;
+            available &= available - 1;
+        }
+        return true;
+    }
+    false
+}
 
 #[derive(Debug, Eq, PartialEq)]
 pub(super) enum CountError {
@@ -504,20 +684,26 @@ pub(super) fn compile_compact_bag_replay_count(
     limits: CountLimits,
     control: &ExecutionControl,
 ) -> CountResult<CompactBagReplayCount> {
-    let Some(UniformCompactPatternSource::Standard7Bag {
-        sequence_len,
-        pattern_count,
-    }) = universe.uniform_compact_source()
-    else {
-        return Err(CountError::Unsupported);
-    };
-    let queue_len = u16::try_from(sequence_len).map_err(|_| CountError::Unsupported)?;
-    if !(1..=MAX_QUEUED).contains(&queue_len) || locations.is_empty() {
+    compile_compact_bag_replay_count_in_scope(
+        batches,
+        locations,
+        OrdinalShape::from_universe(universe)?,
+        limits,
+        control,
+    )
+}
+
+fn compile_compact_bag_replay_count_in_scope(
+    batches: &[ExactScoringExecutionBatch],
+    locations: &[ExactReplayGraphLocation],
+    shape: OrdinalShape,
+    limits: CountLimits,
+    control: &ExecutionControl,
+) -> CountResult<CompactBagReplayCount> {
+    if locations.is_empty() {
         return Err(CountError::Unsupported);
     }
-    if !universe.complete() || pattern_count != queue_suffixes(queue_len, WIDTH as u16) {
-        return Err(CountError::Unsupported);
-    }
+    let queue_len = shape.queue_len;
     let mut budget = Budget {
         work: limits.work.min(MAX_WORK),
         control,
@@ -905,6 +1091,138 @@ mod tests {
             )
             .unwrap_err(),
             CountError::Unsupported
+        );
+    }
+
+    #[test]
+    fn ordinal_successor_agrees_with_independent_unranking_at_bag_boundaries() {
+        let universe = PatternUniverseMaterializer::standard_7_bag(11, 0, 1).unwrap();
+        let to_slots = |ordinal| {
+            let queue = universe.try_sequence_at(ordinal).unwrap();
+            let mut slots = [0; MAX_QUEUED as usize];
+            for (slot, &piece) in slots.iter_mut().zip(queue.iter()) {
+                *slot = piece_slot(piece) as u8;
+            }
+            slots
+        };
+        assert_eq!(first_ordinal_slots(), to_slots(0));
+        // First lex sibling, second-bag refill and its reset after ordinal
+        // 839, action at a later inner boundary, and near the final ordinal.
+        for index in [0, 1, 6, 20, 838, 839, 840, 5039, 5040, 4_233_598] {
+            let mut slots = to_slots(index);
+            assert!(next_ordinal_slots(&mut slots));
+            assert_eq!(slots, to_slots(index + 1), "ordinal {index}");
+        }
+        assert!(!next_ordinal_slots(&mut to_slots(4_233_599)));
+    }
+
+    #[test]
+    fn cooperative_ordinal_binding_mints_proof_only_for_the_exact_owner() {
+        let universe = PatternUniverseMaterializer::standard_7_bag(3, 0, 1).unwrap();
+        let patterns: Vec<_> = (0..universe.pattern_count())
+            .map(|ordinal| universe.try_sequence_at(ordinal).unwrap().into_owned())
+            .collect();
+        let original = Arc::new(vec![batch(
+            vec![fixture_graph(&[(false, RotationState::Zero)])],
+            patterns,
+            false,
+            None,
+        )]);
+        let control = ExecutionControl::default();
+        let mut partial =
+            CompactReplayOrdinalBinding::new(Arc::clone(&original), &universe).unwrap();
+        assert!(!partial.advance(0, &control).unwrap());
+        assert_eq!(partial.ordinal, 0);
+        assert!(!partial.advance(usize::MAX, &control).unwrap());
+        assert_eq!(partial.ordinal, ORDINAL_ADVANCE_MAX);
+        assert_eq!(
+            partial.complete().unwrap_err(),
+            CountError::Replay(Error::InvalidEvidence)
+        );
+
+        let mut binding =
+            CompactReplayOrdinalBinding::new(Arc::clone(&original), &universe).unwrap();
+        for _ in 0..universe.pattern_count() - 1 {
+            assert!(!binding.advance(1, &control).unwrap());
+        }
+        assert!(binding.advance(1, &control).unwrap());
+        let bound = binding.complete().unwrap();
+        assert!(bound.matches_owner(&original));
+        assert!(!bound.matches_owner(&Arc::new((*original).clone())));
+        let index = bound
+            .compile(&locations(1), limits(4096, 1), &control)
+            .unwrap();
+        assert_eq!(index.total(), 5);
+        assert_eq!(index.nonempty_patterns(), 5);
+    }
+
+    #[test]
+    fn ordinal_binding_rejects_permuted_later_batch_and_never_resumes_after_cancellation() {
+        let universe = PatternUniverseMaterializer::standard_7_bag(3, 0, 1).unwrap();
+        let patterns: Vec<_> = (0..universe.pattern_count())
+            .map(|ordinal| universe.try_sequence_at(ordinal).unwrap().into_owned())
+            .collect();
+        let original = batch(
+            vec![fixture_graph(&[(false, RotationState::Zero)])],
+            patterns.clone(),
+            false,
+            None,
+        );
+        let positions = |queue: &[PieceKind]| {
+            queue
+                .iter()
+                .fold(0, |bits, &piece| bits | (1 << piece_slot(piece)))
+        };
+        let mut swapped = patterns;
+        let first = positions(&swapped[0]);
+        let same_inventory = swapped[1..]
+            .iter()
+            .position(|queue| positions(queue) == first)
+            .unwrap()
+            + 1;
+        // Counts, lengths, per-ordinal inventory and every original queue
+        // survive this mutation; the exact ordinal axis does not.
+        swapped.swap(0, same_inventory);
+        let bad = Arc::new(vec![
+            original.clone(),
+            batch(
+                vec![fixture_graph(&[(false, RotationState::Zero)])],
+                swapped,
+                false,
+                None,
+            ),
+        ]);
+        let mut binding = CompactReplayOrdinalBinding::new(bad, &universe).unwrap();
+        let control = ExecutionControl::default();
+        for _ in 0..universe.pattern_count() {
+            assert!(!binding.advance(1, &control).unwrap());
+        }
+        assert_eq!(binding.batch, 1);
+        assert_eq!(
+            binding.advance(1, &control),
+            Err(CountError::Replay(Error::InvalidEvidence))
+        );
+        assert_eq!(
+            binding.complete().unwrap_err(),
+            CountError::Replay(Error::InvalidEvidence)
+        );
+
+        let mut cancelled =
+            CompactReplayOrdinalBinding::new(Arc::new(vec![original]), &universe).unwrap();
+        assert!(!cancelled.advance(1, &control).unwrap());
+        let token = ExecutionCancellationToken::new();
+        token.handle().cancel();
+        assert_eq!(
+            cancelled.advance(1, &ExecutionControl::new(token)),
+            Err(CountError::Replay(Error::Cancelled))
+        );
+        assert_eq!(
+            cancelled.advance(1, &control),
+            Err(CountError::Replay(Error::InvalidEvidence))
+        );
+        assert_eq!(
+            cancelled.complete().unwrap_err(),
+            CountError::Replay(Error::InvalidEvidence)
         );
     }
 }

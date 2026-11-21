@@ -48,6 +48,7 @@ const COOPERATIVE_CANCEL_GRACE_MS = 100;
 const PREPARATION_PROGRESS_STALL_TIMEOUT_MS = 0;
 const SEARCH_PROGRESS_STALL_TIMEOUT_MS = 0;
 const PRODUCT_PAGE_STALL_TIMEOUT_MS = 0;
+const CANCELLED_PAGE_OBSERVATION_TIMEOUT_MS = 5_000;
 
 export type WasmTerminalWorkerControllerOptions = {
   preparationProgressStallTimeoutMs?: number;
@@ -67,6 +68,7 @@ export class WasmTerminalWorkerController {
   private worker: Worker | null = null;
   private workerArtifactGeneration: string | null = null;
   private workerLinearMemoryBytes = 0;
+  private workerHasUnobservedPageWork = false;
   private workerResultPages: { tiling: boolean; product: boolean } | null = null;
   private cancellingWorker: Worker | null = null;
   private prewarmingWorker: Worker | null = null;
@@ -100,6 +102,7 @@ export class WasmTerminalWorkerController {
       reject: (reason: Error) => void;
       offset: number;
       limit: number;
+      observationDeadline: ReturnType<typeof setTimeout> | null;
     }
   >();
   private productPageRequests = new Map<
@@ -336,14 +339,25 @@ export class WasmTerminalWorkerController {
         reject(reason);
       };
       const onAbort = () => {
-        if (!this.solutionPageRequests.delete(requestId)) return;
+        const pending = this.solutionPageRequests.get(requestId);
+        if (!pending || pending.observationDeadline !== null) return;
+        // The UI can cancel its promise, but the worker may still execute
+        // the already-posted page call. Keep only its observation lease.
         settleReject(solutionPageAbortError(signal));
+        pending.observationDeadline = setTimeout(() => {
+          if (this.worker !== worker || !this.solutionPageRequests.delete(requestId)) return;
+          this.workerHasUnobservedPageWork = true;
+          this.retireOversizedWorkerWithoutPages(worker);
+        }, this.productPageStallTimeoutMs || CANCELLED_PAGE_OBSERVATION_TIMEOUT_MS);
+        const timer = pending.observationDeadline as unknown as { unref?: () => void };
+        timer.unref?.();
       };
       this.solutionPageRequests.set(requestId, {
         resolve: settleResolve,
         reject: settleReject,
         offset,
-        limit
+        limit,
+        observationDeadline: null
       });
       signal?.addEventListener('abort', onAbort, { once: true });
       try {
@@ -491,7 +505,8 @@ export class WasmTerminalWorkerController {
       this.disposeOwnedWorker(this.worker);
       return null;
     }
-    if (this.workerLinearMemoryBytes > this.idleWorkerMemoryCeilingBytes) {
+    if (this.workerHasUnobservedPageWork ||
+        this.workerLinearMemoryBytes > this.idleWorkerMemoryCeilingBytes) {
       this.disposeOwnedWorker(this.worker);
       return null;
     }
@@ -499,6 +514,7 @@ export class WasmTerminalWorkerController {
     this.worker = null;
     this.workerArtifactGeneration = null;
     this.workerLinearMemoryBytes = 0;
+    this.workerHasUnobservedPageWork = false;
     this.workerResultPages = null;
     worker.onmessage = null;
     worker.onerror = null;
@@ -538,6 +554,7 @@ export class WasmTerminalWorkerController {
       this.newestStartedJobId = null;
       this.workerArtifactGeneration = currentWasmArtifactGeneration();
       this.workerLinearMemoryBytes = 0;
+      this.workerHasUnobservedPageWork = false;
       this.workerResultPages = null;
       worker.onmessage = (
         message: MessageEvent<
@@ -830,6 +847,7 @@ export class WasmTerminalWorkerController {
     this.worker = null;
     this.workerArtifactGeneration = null;
     this.workerLinearMemoryBytes = 0;
+    this.workerHasUnobservedPageWork = false;
     this.workerResultPages = null;
   }
 
@@ -847,6 +865,7 @@ export class WasmTerminalWorkerController {
     this.worker = null;
     this.workerArtifactGeneration = null;
     this.workerLinearMemoryBytes = 0;
+    this.workerHasUnobservedPageWork = false;
     this.workerResultPages = null;
     try {
       worker.postMessage({ type: 'dispose_runtime' });
@@ -859,6 +878,8 @@ export class WasmTerminalWorkerController {
     if (
       !worker ||
       (isCurrentWasmArtifactGeneration(this.workerArtifactGeneration) &&
+        !this.workerHasUnobservedPageWork &&
+        this.solutionPageRequests.size === 0 && this.productPageRequests.size === 0 &&
         this.workerLinearMemoryBytes <= this.idleWorkerMemoryCeilingBytes)
     ) {
       return;
@@ -866,6 +887,8 @@ export class WasmTerminalWorkerController {
     // A new run invalidates retained pages. Rotate stale generations and
     // over-ceiling idle linear memory here, after the user had a chance to
     // inspect or copy the previous result.
+    this.rejectSolutionPages(new Error('a new search replaced the previous solution pages'));
+    this.rejectProductPages(new Error('a new search replaced the previous product pages'));
     this.disposeOwnedWorker(worker);
   }
 
@@ -878,7 +901,8 @@ export class WasmTerminalWorkerController {
   private retireOversizedWorkerWithoutPages(worker: Worker) {
     if (this.worker !== worker || this.runInFlight || this.cancellingWorker ||
         this.solutionPageRequests.size > 0 || this.productPageRequests.size > 0 ||
-        this.workerLinearMemoryBytes <= this.idleWorkerMemoryCeilingBytes ||
+        (!this.workerHasUnobservedPageWork &&
+          this.workerLinearMemoryBytes <= this.idleWorkerMemoryCeilingBytes) ||
         !this.workerResultPages || this.workerResultPages.tiling || this.workerResultPages.product) {
       return;
     }
@@ -898,22 +922,38 @@ export class WasmTerminalWorkerController {
   private resolveSolutionPage(event: ClearraSolutionPageWorkerEvent) {
     const pending = this.solutionPageRequests.get(event.request_id);
     if (!pending) return;
+    const matchesRequest = event.type === 'solution_page_failed' ||
+      (event.offset === pending.offset && Array.isArray(event.keys) && event.keys.length <= pending.limit);
+    if (pending.observationDeadline !== null) {
+      if (!matchesRequest) return;
+      clearTimeout(pending.observationDeadline);
+      this.solutionPageRequests.delete(event.request_id);
+      const bytes = event.runtime_memory_bytes;
+      if (typeof bytes === 'number' && Number.isSafeInteger(bytes) && bytes >= 0) {
+        this.observeWorkerMemory(Math.max(this.workerLinearMemoryBytes, bytes));
+      } else {
+        this.workerHasUnobservedPageWork = true;
+      }
+      if (this.worker) this.retireOversizedWorkerWithoutPages(this.worker);
+      return;
+    }
     this.solutionPageRequests.delete(event.request_id);
     if (event.type === 'solution_page_failed') {
+      this.observeWorkerMemory(event.runtime_memory_bytes);
       pending.reject(new Error(event.message));
-    } else if (
-      event.offset !== pending.offset ||
-      !Array.isArray(event.keys) ||
-      event.keys.length > pending.limit
-    ) {
+    } else if (!matchesRequest) {
       pending.reject(new Error('solution page response does not match its request'));
     } else {
+      this.observeWorkerMemory(event.runtime_memory_bytes);
       pending.resolve({ keys: event.keys, total: event.total });
     }
   }
 
   private rejectSolutionPages(error: Error) {
-    for (const pending of this.solutionPageRequests.values()) pending.reject(error);
+    for (const pending of this.solutionPageRequests.values()) {
+      if (pending.observationDeadline !== null) clearTimeout(pending.observationDeadline);
+      else pending.reject(error);
+    }
     this.solutionPageRequests.clear();
   }
 
@@ -925,6 +965,9 @@ export class WasmTerminalWorkerController {
       pending.reject(new Error('stale product page generation was discarded'));
       return;
     }
+    // A current request may grow the worker even when page construction fails.
+    // Cancelled/replaced requests have no entry or fail the generation check.
+    this.observeWorkerMemory(event.runtime_memory_bytes);
     if (event.type === 'product_page_failed') {
       pending.reject(new Error(event.message));
     } else {

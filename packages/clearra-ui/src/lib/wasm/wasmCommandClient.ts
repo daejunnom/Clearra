@@ -1244,7 +1244,12 @@ export type ClearraWasmWorkerEvent = ClearraWasmWorkerEventBase &
       }
   );
 
-export type ClearraSolutionPageWorkerEvent =
+type ClearraWasmPageMemoryObservation = {
+  /** Advisory linear-memory sample after this page attempt. */
+  runtime_memory_bytes?: number;
+};
+
+export type ClearraSolutionPageWorkerEvent = ClearraWasmPageMemoryObservation & (
   | {
       type: 'solution_page';
       request_id: number;
@@ -1256,9 +1261,10 @@ export type ClearraSolutionPageWorkerEvent =
       type: 'solution_page_failed';
       request_id: number;
       message: string;
-    };
+    }
+);
 
-export type ClearraProductPageWorkerEvent =
+export type ClearraProductPageWorkerEvent = ClearraWasmPageMemoryObservation & (
   | {
       type: 'product_page';
       request_id: number;
@@ -1268,7 +1274,8 @@ export type ClearraProductPageWorkerEvent =
       type: 'product_page_failed';
       request_id: number;
       message: string;
-    };
+    }
+);
 
 export function buildWasmCommandRequest(
   input: Partial<ClearraWasmCommandRequest>

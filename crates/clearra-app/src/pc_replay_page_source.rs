@@ -115,6 +115,68 @@ fn ensure_peak(
     }
     Ok(())
 }
+
+// The old buffer is part of `retained` and remains live until a separately
+// allocated replacement is admitted at its actual capacity. Keeping it intact
+// lets a failed speculative grow retry at the old exact-one requirement.
+fn replace_manifest_capacity<T>(
+    values: &mut Vec<T>,
+    capacity: usize,
+    retained: u128,
+    maximum: u128,
+) -> ReplayResult<()> {
+    if capacity < values.len() {
+        return Err(OVERFLOW.into());
+    }
+    let admit = |capacity| {
+        ensure_peak(
+            retained
+                .checked_add(bytes::<T>(capacity)?)
+                .ok_or(OVERFLOW)?,
+            maximum,
+            &mut |_| true,
+        )
+    };
+    admit(capacity)?;
+    let mut replacement = Vec::new();
+    replacement
+        .try_reserve_exact(capacity)
+        .map_err(|_| "complete_replay_allocation_failed")?;
+    admit(replacement.capacity())?;
+    replacement.append(values);
+    *values = replacement;
+    Ok(())
+}
+
+fn reserve_manifest_row<T>(
+    values: &mut Vec<T>,
+    maximum_rows: usize,
+    retained: u128,
+    maximum: u128,
+) -> ReplayResult<()> {
+    if values.len() < values.capacity() {
+        return Ok(());
+    }
+    let len = values.len();
+    let minimum = len.checked_add(1).ok_or(OVERFLOW)?;
+    let wanted = len
+        .saturating_add((len / 2).max(4))
+        .min(maximum_rows.max(minimum));
+    // Budget a compact copy as well: a per-geometry row can release its
+    // temporary slack before publishing it into the long-lived manifest.
+    let speculative = len >= 4
+        && wanted > minimum
+        && bytes::<T>(wanted)
+            .ok()
+            .and_then(|bytes| bytes.checked_mul(2))
+            .and_then(|bytes| retained.checked_add(bytes))
+            .is_some_and(|peak| peak <= maximum);
+    if speculative && replace_manifest_capacity(values, wanted, retained, maximum).is_ok() {
+        return Ok(());
+    }
+    replace_manifest_capacity(values, minimum, retained, maximum)
+}
+
 fn engine_guard(
     external: u128,
     engine: u128,
@@ -462,12 +524,15 @@ impl PcReplaySourceBuildSession {
                     .witness_count
                     .checked_add(count as u128)
                     .ok_or("pc replay witness count overflow")?;
-                self.guard_additional(bytes::<PatternManifest>(
-                    self.current_patterns.len().checked_add(1).ok_or(OVERFLOW)?,
-                )?)?;
-                self.current_patterns
-                    .try_reserve_exact(1)
-                    .map_err(|_| "complete_replay_allocation_failed")?;
+                if self.current_patterns.len() == self.current_patterns.capacity() {
+                    let retained = self.checked_whole_live_bytes()?;
+                    reserve_manifest_row(
+                        &mut self.current_patterns,
+                        self.source.materialized_pattern_count,
+                        retained,
+                        self.source.maximum_bytes,
+                    )?;
+                }
                 self.current_patterns.push(PatternManifest {
                     pattern_id: self.next_pattern,
                     witness_count: count,
@@ -542,17 +607,27 @@ impl PcReplaySourceBuildSession {
 
     fn finish_geometry(&mut self) -> ReplayResult<()> {
         if self.current_witness_count != 0 {
-            self.guard_additional(bytes::<GeometryManifest>(
-                self.source
-                    .geometries
-                    .len()
-                    .checked_add(1)
-                    .ok_or(OVERFLOW)?,
-            )?)?;
-            self.source
-                .geometries
-                .try_reserve_exact(1)
-                .map_err(|_| "complete_replay_allocation_failed")?;
+            if self.current_patterns.len() < self.current_patterns.capacity() {
+                let retained = self.checked_whole_live_bytes()?;
+                let len = self.current_patterns.len();
+                // This copy is optional. Keep and charge the original
+                // reservation if a tight budget cannot admit both buffers.
+                let _ = replace_manifest_capacity(
+                    &mut self.current_patterns,
+                    len,
+                    retained,
+                    self.source.maximum_bytes,
+                );
+            }
+            if self.source.geometries.len() == self.source.geometries.capacity() {
+                let retained = self.checked_whole_live_bytes()?;
+                reserve_manifest_row(
+                    &mut self.source.geometries,
+                    self.pending.len(),
+                    retained,
+                    self.source.maximum_bytes,
+                )?;
+            }
             let locations = core::mem::take(&mut self.pending[self.next_geometry].1);
             let location_bytes = bytes::<ExactReplayGraphLocation>(locations.capacity())?;
             self.pending_location_bytes = self
@@ -633,11 +708,15 @@ impl PcReplaySourceBuildSession {
                 None => 0,
             })
     }
+    fn checked_whole_live_bytes(&self) -> ReplayResult<u128> {
+        self.checked_retained_capacity_bytes()
+            .and_then(|n| n.checked_add(self.source.retained_external_bytes()?))
+            .ok_or_else(|| OVERFLOW.into())
+    }
     fn guard_additional(&self, additional: u128) -> ReplayResult<()> {
         ensure_peak(
-            self.checked_retained_capacity_bytes()
-                .and_then(|n| n.checked_add(self.source.retained_external_bytes()?))
-                .and_then(|n| n.checked_add(additional))
+            self.checked_whole_live_bytes()?
+                .checked_add(additional)
                 .ok_or(OVERFLOW)?,
             self.source.maximum_bytes,
             &mut |_| true,
@@ -786,6 +865,55 @@ impl PcReplayPageSource {
 #[cfg(test)]
 mod memory_tests {
     use super::*;
+
+    #[test]
+    fn manifest_growth_reuses_spare_rows_and_preserves_order() {
+        let mut rows = Vec::new();
+        let mut allocations = 0;
+        let maximum_rows = 128;
+        for row in 0..maximum_rows {
+            let old = rows.capacity();
+            reserve_manifest_row(
+                &mut rows,
+                maximum_rows,
+                100 + bytes::<usize>(old).unwrap(),
+                u128::MAX,
+            )
+            .unwrap();
+            allocations += usize::from(rows.capacity() != old);
+            rows.push(row);
+        }
+        assert!(allocations < maximum_rows / 4);
+        assert_eq!(rows, (0..maximum_rows).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn manifest_growth_falls_back_to_one_row_and_charges_overlapping_buffers() {
+        let mut rows = Vec::new();
+        rows.try_reserve_exact(8).unwrap();
+        let old_capacity = rows.capacity();
+        rows.extend(0..old_capacity);
+        let retained = 100 + bytes::<usize>(old_capacity).unwrap();
+        let mut exact = Vec::<usize>::new();
+        exact.try_reserve_exact(old_capacity + 1).unwrap();
+        let exact_peak = retained + bytes::<usize>(exact.capacity()).unwrap();
+        let snapshot = rows.clone();
+        let error =
+            reserve_manifest_row(&mut rows, usize::MAX, retained, exact_peak - 1).unwrap_err();
+        assert!(matches!(
+            error,
+            PcReplayPageError::MemoryLimit { required, maximum }
+            if required == exact_peak && maximum == exact_peak - 1
+        ));
+        assert_eq!(rows.capacity(), old_capacity);
+        assert_eq!(rows, snapshot);
+
+        reserve_manifest_row(&mut rows, usize::MAX, retained, exact_peak).unwrap();
+        assert_eq!(rows.capacity(), exact.capacity());
+        assert_eq!(rows, snapshot);
+        rows.push(old_capacity);
+        assert_eq!(rows.len(), old_capacity + 1);
+    }
 
     fn tiny_replay_source() -> (SearchProblem, CoreExecutionResult) {
         use clearra_core_domain::piece::piece_kind::PieceKind;

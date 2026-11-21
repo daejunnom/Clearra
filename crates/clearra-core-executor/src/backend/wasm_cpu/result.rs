@@ -4443,7 +4443,11 @@ impl WasmExactSearchSession {
             || save_execution_requested
             || path_execution_requested;
         let scoring_batch = if execution_evidence_requested {
-            Some(self.prepare_exact_scoring_execution_batch(path_execution_requested)?)
+            match self.prepare_exact_scoring_execution_batch(path_execution_requested) {
+                Ok(batch) => Some(batch),
+                Err(WasmExactSearchError::Cancelled) => return Ok(ExactSearchAdvance::Cancelled),
+                Err(error) => return Err(error),
+            }
         } else {
             None
         };
@@ -4468,9 +4472,21 @@ impl WasmExactSearchSession {
         &mut self,
         profile_pc_path: bool,
     ) -> Result<ExactScoringExecutionBatch, WasmExactSearchError> {
+        let control = self.execution_control.clone();
+        let check_cancelled = || {
+            if control.is_cancelled() {
+                Err(WasmExactSearchError::Cancelled)
+            } else {
+                Ok(())
+            }
+        };
         let graph_span = profile_pc_path
             .then(|| SearchStageSpan::begin(ExecutorSearchStage::WasmPcPathExecutionGraphs));
         let identity_count = self.buildable_identities.len();
+        if profile_pc_path {
+            control.report_progress("complete-replay-graphs", 0, Some(identity_count as u64));
+        }
+        check_cancelled()?;
         let identity_bytes = (identity_count as u128)
             .checked_mul(core::mem::size_of::<StandardBoard64TilingIdentity>() as u128)
             .ok_or_else(|| self.scoring_memory_projection_overflow())?;
@@ -4502,6 +4518,17 @@ impl WasmExactSearchSession {
             .ok_or_else(|| self.scoring_memory_projection_overflow())?;
         let mut retained_graph_nested_bytes = 0_u128;
         for (index, identity) in identities.into_iter().enumerate() {
+            // A terminal search can own hundreds of thousands of graphs.
+            // Never materialize the whole family after a stop request.
+            check_cancelled()?;
+            if profile_pc_path && index != 0 && index % 256 == 0 {
+                control.report_progress(
+                    "complete-replay-graphs",
+                    index as u64,
+                    Some(identity_count as u64),
+                );
+                check_cancelled()?;
+            }
             let candidate_id = u64::try_from(index + 1).map_err(|_| {
                 WasmExactSearchError::InvalidProblem("wasm_scoring_candidate_id_overflow")
             })?;
@@ -4565,14 +4592,22 @@ impl WasmExactSearchSession {
         let universe = self.problem.piece_source().materialized_universe().ok_or(
             WasmExactSearchError::InvalidProblem("wasm_piece_source_not_materialized"),
         )?;
-        let pattern_outer_bytes = (universe.pattern_count() as u128)
+        let pattern_count = universe.pattern_count();
+        if profile_pc_path {
+            control.report_progress("complete-replay-queues", 0, Some(pattern_count as u64));
+        }
+        check_cancelled()?;
+        let pattern_outer_bytes = (pattern_count as u128)
             .checked_mul(
                 core::mem::size_of::<Vec<clearra_core_domain::piece::piece_kind::PieceKind>>()
                     as u128,
             )
             .ok_or_else(|| self.scoring_memory_projection_overflow())?;
         let mut pattern_nested_bytes = 0_u128;
-        for pattern_index in 0..universe.pattern_count() {
+        for pattern_index in 0..pattern_count {
+            if pattern_index % 1024 == 0 {
+                check_cancelled()?;
+            }
             pattern_nested_bytes = pattern_nested_bytes
                 .checked_add(
                     (universe.sequence_len_at(pattern_index) as u128)
@@ -4593,11 +4628,9 @@ impl WasmExactSearchSession {
                 .ok_or_else(|| self.scoring_memory_projection_overflow())?,
         )?;
         let mut patterns = Vec::new();
-        patterns
-            .try_reserve_exact(universe.pattern_count())
-            .map_err(|_| {
-                WasmExactSearchError::InvalidProblem("wasm_scoring_pattern_storage_unavailable")
-            })?;
+        patterns.try_reserve_exact(pattern_count).map_err(|_| {
+            WasmExactSearchError::InvalidProblem("wasm_scoring_pattern_storage_unavailable")
+        })?;
         let pattern_outer_live_bytes = (patterns.capacity() as u128)
             .checked_mul(
                 core::mem::size_of::<Vec<clearra_core_domain::piece::piece_kind::PieceKind>>()
@@ -4611,7 +4644,17 @@ impl WasmExactSearchSession {
                 .ok_or_else(|| self.scoring_memory_projection_overflow())?,
         )?;
         let mut pattern_nested_live_bytes = 0_u128;
-        for pattern_index in 0..universe.pattern_count() {
+        for pattern_index in 0..pattern_count {
+            if pattern_index % 1024 == 0 {
+                if profile_pc_path && pattern_index != 0 {
+                    control.report_progress(
+                        "complete-replay-queues",
+                        pattern_index as u64,
+                        Some(pattern_count as u64),
+                    );
+                }
+                check_cancelled()?;
+            }
             let sequence_len = universe.sequence_len_at(pattern_index);
             let requested_pattern_bytes = (sequence_len as u128)
                 .checked_mul(
@@ -4656,6 +4699,7 @@ impl WasmExactSearchSession {
         if let Some(span) = pattern_span {
             span.finish(patterns.len() as u64);
         }
+        check_cancelled()?;
         let (kick_table_id, rule_profile_id) = replay_profile_ids(&self.problem);
         let batch = ExactScoringExecutionBatch::new(
             layout,
@@ -6933,6 +6977,50 @@ mod tests {
                 .expect("cancelled preparation step"),
             WasmCandidateProducerAdvance::Cancelled
         ));
+    }
+
+    #[test]
+    fn compact_pc_path_can_cancel_during_terminal_evidence_preparation() {
+        use clearra_core_domain::execution_cancellation::{
+            CancellationHandle, ExecutionProgress, ProgressSink,
+        };
+
+        struct StopAt(&'static str, CancellationHandle);
+        impl ProgressSink for StopAt {
+            fn report(&self, progress: ExecutionProgress) {
+                if progress.stage == self.0 {
+                    self.1.cancel();
+                }
+            }
+        }
+
+        let query = PcScenarioQuery::new(
+            PcScenarioBoard::standard_10(1, 0x3f0),
+            PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::I])),
+            PieceWindow::new(1),
+        )
+        .with_allow_hold(false)
+        .with_exact_pieces(Some(1))
+        .with_count_policy(PcCountPolicy::CountAll)
+        .with_objective(ObjectivePolicy::all())
+        .with_execution_policy(PcExecutionPolicy::default().with_workers(1));
+        let problem = ProblemCompiler::compile_scenario_pc(&query)
+            .unwrap()
+            .with_pc_path_v2_evidence();
+        for stage in ["complete-replay-graphs", "complete-replay-queues"] {
+            let control = ExecutionControl::default();
+            let sink = StopAt(stage, control.cancellation.handle());
+            let control = control.with_progress_sink(std::sync::Arc::new(sink));
+            let mut session = WasmExactSearchSession::new(&problem).unwrap();
+            let mut outcome = ExactSearchAdvance::Pending;
+            for _ in 0..64 {
+                outcome = session.advance(128, &control).unwrap();
+                if !matches!(outcome, ExactSearchAdvance::Pending) {
+                    break;
+                }
+            }
+            assert!(matches!(outcome, ExactSearchAdvance::Cancelled), "{stage}");
+        }
     }
 
     #[test]

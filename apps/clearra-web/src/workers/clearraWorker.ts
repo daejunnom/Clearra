@@ -10,7 +10,11 @@ import {
   type RuntimeWarmupPolicy,
   type WorkerAuthorityReport
 } from '@clearra/ui/wasm-host';
-import type { ClearraWasmWorkerEvent } from '@clearra/ui/wasm';
+import type {
+  ClearraProductPageWorkerEvent,
+  ClearraSolutionPageWorkerEvent,
+  ClearraWasmWorkerEvent
+} from '@clearra/ui/wasm';
 import { isLocalSearchProfileMode } from '../lib/localSearchProfile';
 import { withHostExecutionTiming } from './HostExecutionProfile';
 import { relationPeerReservation, RELATION_PEER_WIRE_CAP } from './ConditionedRelationPeerBudget';
@@ -168,7 +172,7 @@ function loadSolutionPage(requestId: number, offset: number, limit: number) {
   try {
     if (!loadedWasm) throw new Error('WASM runtime is not loaded');
     const keys = loadedWasm.tiling_solution_page(offset, limit);
-    self.postMessage({
+    postPageWorkerEvent({
       type: 'solution_page',
       request_id: requestId,
       offset,
@@ -176,7 +180,7 @@ function loadSolutionPage(requestId: number, offset: number, limit: number) {
       keys
     });
   } catch (error) {
-    self.postMessage({
+    postPageWorkerEvent({
       type: 'solution_page_failed',
       request_id: requestId,
       message: error instanceof Error ? error.message : String(error)
@@ -200,18 +204,24 @@ function loadProductPage(
             request.memberPageNumber ?? '',
             request.maximumWorkSteps ?? 10_000
           );
-    self.postMessage({
+    postPageWorkerEvent({
       type: 'product_page',
       request_id: request.requestId,
       payload
     });
   } catch (error) {
-    self.postMessage({
+    postPageWorkerEvent({
       type: 'product_page_failed',
       request_id: request.requestId,
       message: error instanceof Error ? error.message : String(error)
     });
   }
+}
+
+function postPageWorkerEvent(event: ClearraSolutionPageWorkerEvent | ClearraProductPageWorkerEvent) {
+  // Loading or encoding a page can grow linear memory even when it fails.
+  const bytes = currentRuntimeMemoryBytes();
+  self.postMessage(bytes === undefined ? event : { ...event, runtime_memory_bytes: bytes });
 }
 
 function releaseProductPages() {

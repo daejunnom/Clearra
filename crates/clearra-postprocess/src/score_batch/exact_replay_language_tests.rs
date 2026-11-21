@@ -145,10 +145,21 @@ fn inline_single_graph_matches_owned_locations_under_fixed_queue_and_exact_limit
         )
         .unwrap()
     };
-    let mut owned = session(Arc::clone(&batches), 100);
+    // The owned control accounts for the allocation's actual capacity;
+    // collect/Vec may reserve more than the number of locations.
+    let owned_locations = vec![location];
+    let owned_location_bytes = bytes(&owned_locations).unwrap();
+    let mut owned = ExactReplayLanguageSession::new(
+        Arc::clone(&batches),
+        owned_locations,
+        0,
+        limits(100),
+        &mut |_| Ok(()),
+    )
+    .unwrap();
     let mut single = inline(100);
     assert_eq!(
-        single.checked_retained_bytes().unwrap() + size_of::<ExactReplayGraphLocation>() as u128,
+        single.checked_retained_bytes().unwrap() + owned_location_bytes,
         owned.checked_retained_bytes().unwrap(),
     );
     complete(&mut owned).unwrap();
