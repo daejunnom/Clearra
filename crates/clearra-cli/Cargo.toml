@@ -12,6 +12,7 @@ workspace = true
 [features]
 default = ["online-pc4-tablebase", "wasm-cpu-runtime"]
 wasm-cpu-runtime = ["clearra-app/parallel"]
+stage-profiling = ["clearra-app/wasm-stage-profiling"]
 local-search-ab = ["clearra-app/local-search-ab"]
 webgpu-search = ["clearra-app/webgpu-search"]
 online-pc4-tablebase = ["clearra-app/online-pc4-tablebase"]

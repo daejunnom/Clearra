@@ -4072,6 +4072,12 @@ impl GeometrySearch {
         requested_workers: usize,
         balance_workers: impl FnOnce(u128, usize) -> usize,
     ) -> Result<ParallelGeometryPreparation, WasmExactSearchError> {
+        use crate::performance::{ExecutorSearchStage, SearchStageSpan};
+
+        // This is the initial caller-owned compile and partition step. It is
+        // distinct from the later per-worker Geometry traversal samples.
+        let _stage =
+            SearchStageSpan::begin(ExecutorSearchStage::WasmParallelGeometryCompileAndSplit);
         let needed_compile = self.target_preparation.is_some() || self.compiler.is_some();
         let mut path_counts = None;
         #[cfg(all(feature = "local-search-ab", target_os = "linux"))]

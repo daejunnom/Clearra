@@ -1,5 +1,5 @@
-// Functional Chromium execution of the product Worker. The explicit 4195
-// probe uses the same artifact, but is not a Pages/UI or release readback.
+// Functional Chromium execution of the product Worker. The opt-in 4195
+// paired timing uses instrumented WASM, not Pages/UI or release readback.
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { readFile, realpath } from 'node:fs/promises';
@@ -18,20 +18,19 @@ const SELF = fileURLToPath(import.meta.url);
 const repository = resolve(fileURLToPath(new URL('../..', import.meta.url)));
 const HOST = '127.0.0.1';
 const options = process.argv.slice(2);
-const p7p4Probe = options.length === 1 && options[0] === '--p7p4-probe';
-const PORT = p7p4Probe ? 4195 : 4194;
+const pairedProbe = pairedProbeOptions(options);
+const PORT = pairedProbe ? 4195 : 4194;
 const ORIGIN = 'http://' + HOST + ':' + PORT;
 const ROOT_WORKER = '/workers/clearraWorker.ts';
 const VERIFIER_WORKER = '/workers/clearraVerifierWorker.ts';
 const PLAYWRIGHT_VERSION = '1.56.1';
 const CASE_TIMEOUT_MS = 40_000;
-const P7P4_TIMEOUT_MS = 420_000;
+const PAIRED_TIMEOUT_MS = 65_000;
 const ACCELERATORS_OFF = '--no-legal-board --no-conditioned-reachability';
 const PC_CPU = '--objective unique --count unique --queue-knowledge oracle --backend cpu ' +
   '--rule srs-plus --no-hold --no-tablebase ' + ACCELERATORS_OFF;
 
-assert.ok(!options.length || p7p4Probe, 'only --p7p4-probe is supported');
-const runtimeProfile = p7p4Probe ? 'benchmark-search' : 'local-service';
+const runtimeProfile = pairedProbe ? 'benchmark-search' : 'local-service';
 assert.ok(process.env.CLEARRA_RUNTIME_SUPERVISED === '1' &&
   process.env.CLEARRA_RUNTIME_PROFILE === runtimeProfile,
   'run the reserved ' + PORT + ' listener under clearra-manage runtime run --profile ' + runtimeProfile);
@@ -42,6 +41,37 @@ for (const name of ['CLEARRA_BROWSER_TOOLS_ROOT', 'CLEARRA_REAL_ACCELERATOR_WASM
 const source = process.env.CLEARRA_SOURCE_COMMIT;
 assert.match(source, /^[0-9a-f]{40}$/u);
 assert.equal(process.env.CLEARRA_ENGINE_BUILD_ID, source);
+
+function pairedProbeOptions(args) {
+  if (!args.length) return null;
+  assert.ok(args.length === 5 && args[0] === '--paired-probe' &&
+    args[1] === '--workers' && args[3] === '--command',
+  'expected --paired-probe --workers N --command "clearra pc ..."');
+  assert.match(args[2], /^[1-8]$/u);
+  const workers = Number(args[2]);
+  const command = args[4];
+  // The paired scheduler owns the exact input. Reject accidental large/other
+  // products rather than turning this bounded diagnostic into a generic runner.
+  assert.match(command, /^clearra pc(?: [a-zA-Z0-9-]+)+$/u);
+  const expected = new Map([
+    ['--board-mask', /^0x[0-9a-f]{1,10}$/u], ['--height', '4'], ['--lines', '4'],
+    ['--pieces', '6'], ['--patterns', 'P7'], ['--hold', 'empty'],
+    ['--queue-knowledge', 'oracle'], ['--count', 'unique'], ['--backend', 'cpu'],
+    ['--rule', 'srs-plus'], ['--workers', String(workers)], ['--no-build-dependency-dag', null],
+    ['--no-tablebase', null], ['--no-legal-board', null], ['--no-conditioned-reachability', null]
+  ]);
+  const tokens = command.split(' ').slice(2);
+  for (let index = 0; index < tokens.length; index++) {
+    const option = tokens[index];
+    assert.ok(expected.has(option), 'unexpected or duplicate paired option: ' + option);
+    const constraint = expected.get(option);
+    expected.delete(option);
+    if (constraint instanceof RegExp) assert.match(tokens[++index] ?? '', constraint, option);
+    else if (constraint !== null) assert.equal(tokens[++index], constraint, option);
+  }
+  assert.equal(expected.size, 0, 'missing required paired options');
+  return { command, workers };
+}
 
 const wasmRoot = join(await realpath(repository), '_local/artifacts/v081-browser-peer-smoke/wasm');
 assertNoBuildLinks(wasmRoot);
@@ -135,7 +165,7 @@ assert.equal(owner.purpose, 'experiment', 'the browser smoke must not write into
 const scripts = await build({
   absWorkingDir: repository, bundle: true, write: false, format: 'esm', platform: 'browser',
   target: 'es2022', conditions: ['browser'], mainFields: ['browser', 'module', 'main'],
-  define: { 'import.meta.env.MODE': '"production"' },
+  define: { 'import.meta.env.MODE': JSON.stringify(pairedProbe ? 'local-audit' : 'production') },
   outdir: join(owner.transaction, 'chromium-cpu-worker-in-memory'),
   entryPoints: {
     clearraWorker: 'apps/clearra-web/src/workers/clearraWorker.ts',
@@ -145,16 +175,18 @@ const scripts = await build({
     wasmRuntime: 'apps/clearra-web/src/workers/clearraWasmRuntime.ts',
     productPager: 'packages/clearra-ui/src/lib/workspace/productResultPager.ts',
     replayPager: 'packages/clearra-ui/src/lib/workspace/pcReplayPager.ts',
-    replayPresentation: 'packages/clearra-ui/src/lib/workspace/pcPathReplayPresentation.ts'
+    replayPresentation: 'packages/clearra-ui/src/lib/workspace/pcPathReplayPresentation.ts',
+    ...(pairedProbe ? { localSearchProfile: 'apps/clearra-web/src/lib/localSearchProfile.ts' } : {})
   }
 });
 const compiled = new Map(scripts.outputFiles.map(file => [basename(file.path), file.contents]));
-assert.equal(compiled.size, 8);
+assert.equal(compiled.size, pairedProbe ? 9 : 8);
 for (const [url, entry] of [[ROOT_WORKER, 'clearraWorker.js'],
   [VERIFIER_WORKER, 'clearraVerifierWorker.js'], ['/capabilities.js', 'capabilities.js'],
   ['/worker-client.js', 'workerClient.js'], ['/wasm-runtime.js', 'wasmRuntime.js'],
   ['/product-pager.js', 'productPager.js'],
-  ['/replay-pager.js', 'replayPager.js'], ['/replay-presentation.js', 'replayPresentation.js']]) {
+  ['/replay-pager.js', 'replayPager.js'], ['/replay-presentation.js', 'replayPresentation.js'],
+  ...(pairedProbe ? [['/local-search-profile.js', 'localSearchProfile.js']] : [])]) {
   const bytes = compiled.get(entry);
   assert.ok(bytes, 'missing compiled entry ' + entry);
   files.set(url, { bytes, type: 'text/javascript; charset=utf-8' });
@@ -200,11 +232,11 @@ try {
   page.on('pageerror', error => errors.push(error.message));
   const response = await page.goto(ORIGIN, { timeout: 15_000 });
   assert.equal(response?.status(), 200);
-  if (p7p4Probe) await readbackP7P4Probe(page);
+  if (pairedProbe) await readbackPairedProbe(page, pairedProbe);
   else await readbackChromiumSmoke(page);
   assert.deepEqual(errors, []);
   assert.deepEqual([...unexpected], [], 'the browser requested files outside the exact asset-free allowlist');
-  if (!p7p4Probe) {
+  if (!pairedProbe) {
     console.log('chromium_cpu_worker_smoke=passed source=' + source + ' wasm_sha256=' + manifest.wasm.sha256 +
       ' verifier_loads=' + verifierLoads + ' release_authority=false');
   }
@@ -283,45 +315,39 @@ async function readbackChromiumSmoke(page) {
   }
 }
 
-async function readbackP7P4Probe(page) {
+async function readbackPairedProbe(page, { workers, command }) {
   const browser = await page.evaluate(() => ({
     logical_processors: navigator.hardwareConcurrency,
     cross_origin_isolated: self.crossOriginIsolated,
   }));
   const runnerProcessors = availableParallelism();
-  const workers = Math.max(1, Math.min(8, runnerProcessors - 1, browser.logical_processors - 1));
-  const label = 'empty-4l-p7p4-jstris-180';
-  const command = 'clearra pc --board-mask 0 --height 4 --pieces 10 --lines 4 --patterns P7P4 ' +
-    '--count unique --hold empty --queue-knowledge oracle --rule jstris-180 --backend cpu ' +
-    '--no-build-dependency-dag --no-tablebase ' + ACCELERATORS_OFF + ' --workers ' + workers;
-  console.log('chromium_cpu_p7p4_probe_config=' + JSON.stringify({
+  const availableWorkers = Math.max(1, Math.min(runnerProcessors, browser.logical_processors) - 1);
+  assert.ok(workers <= availableWorkers, 'paired worker count exceeds this browser host capacity');
+  const label = 'existing-field-4l-p7';
+  console.log('chromium_cpu_paired_config=' + JSON.stringify({
     source, wasm_sha256: manifest.wasm.sha256, runner_logical_processors: runnerProcessors,
-    browser, workers_requested: workers, command, samples: 2, timeout_ms: P7P4_TIMEOUT_MS,
-    memory_scope: 'solver-reported peak per sample; managed process-tree peak across the invocation',
+    browser, workers_requested: workers, command, timeout_ms: PAIRED_TIMEOUT_MS,
+    core_stage_scope: workers === 1 ? 'single-root-worker' : 'root-coordinator-only-no-peer-rust-stages',
+    timing_scope: 'fresh Worker post-to-terminal; excludes Chromium launch and JS bundle',
+    memory_scope: 'solver-reported peak and terminal-root WASM linear capacity; not idle-process RSS',
     idle_rss_measured: false, autonomous_peer_drain_measured: false,
     pages_readback: false, release_authority: false,
   }));
-  for (const sample of [1, 2]) {
-    const before = verifierLoads;
-    // Sequential new Workers; don't overlap samples or claim warm rerun behavior.
-    const execution = await page.evaluate(runWorker, {
-      rootWorker: ROOT_WORKER, command, workers, timeoutMs: P7P4_TIMEOUT_MS,
-      label: label + '-' + sample, benchmarkProbe: true,
-    });
-    console.log('chromium_cpu_p7p4_probe_sample=' + JSON.stringify({
-      label, sample, verifier_loads: verifierLoads - before, ...execution,
-    }));
-    assert.equal(execution.event, 'final_response', label);
-    assert.equal(execution.status, 'success', label);
-    assert.deepEqual(execution.runtime_identity, manifest.build.runtime_identity);
-    const report = execution.search;
-    assert.equal(report.backend_selected, 'wasm-cpu', label);
-    assert.equal(report.count_complete, true, label);
-    assert.equal(report.unique_solution_count, 456_459, label);
-    assert.equal(report.normalized_solution_set_hash, 'cts1:2fcbc950acdffa31', label);
-    assert.equal(report.total_possible_pattern_count, '4233600', label);
-    assert.ok(Number.isSafeInteger(report.workers_used) && report.workers_used > 0 &&
-      report.workers_used <= workers, label + ' reported workers outside the host request');
+  const before = verifierLoads;
+  const execution = await page.evaluate(runWorker, {
+    rootWorker: ROOT_WORKER, command, workers, timeoutMs: PAIRED_TIMEOUT_MS, label, benchmarkProbe: true,
+  });
+  console.log('chromium_cpu_paired_sample=' + JSON.stringify({
+    label, browser, wasm_sha256: manifest.wasm.sha256, verifier_loads: verifierLoads - before, ...execution,
+  }));
+  assert.equal(execution.event, 'final_response', label);
+  assert.equal(execution.status, 'success', label);
+  assert.deepEqual(execution.runtime_identity, manifest.build.runtime_identity);
+  assert.equal(execution.search?.backend_selected, 'wasm-cpu', label);
+  if (workers === 1) {
+    assert.equal(execution.search_profile?.schema_version, 1, 'missing instrumented WASM search profile');
+    assert.ok(execution.search_profile.stages.some(stage => stage.invocation_count > 0),
+      'no observed one-worker WASM search stages');
   }
 }
 
@@ -610,10 +636,20 @@ async function runWorker({ rootWorker, command, workers, timeoutMs, label, pageK
   let lastPhase = 'preparing';
   let requestId = 0;
   let postedAt = null;
-  const phaseObserved = new Map();
+  const observations = Object.create(null);
+  const progressFields = [
+    'worker_count', 'ready_workers', 'active_workers', 'geometry_nodes',
+    'candidates_emitted', 'candidates_verified', 'producer_build_nodes', 'build_nodes',
+    'producer_coverage_checks', 'coverage_checks', 'oldest_batch_ms'
+  ];
+  let lastProgress = null;
+  let timedOut = false;
   const lifetime = new AbortController();
   const signal = lifetime.signal;
-  const timeout = setTimeout(() => lifetime.abort(new Error(label + ' timed out in ' + lastPhase)), timeoutMs);
+  const timeout = setTimeout(() => {
+    timedOut = true;
+    lifetime.abort(new Error(label + ' timed out in ' + lastPhase));
+  }, timeoutMs);
   worker.addEventListener('error', error => lifetime.abort(new Error(label + ': ' + error.message)));
   worker.addEventListener('messageerror', () => lifetime.abort(new Error(label + ': invalid worker message')));
   worker.addEventListener('message', ({ data }) => {
@@ -623,8 +659,23 @@ async function runWorker({ rootWorker, command, workers, timeoutMs, label, pageK
       if (telemetry.execution_mode === 'distributed' && telemetry.availability?.candidates_verified) {
         verified = Math.max(verified, telemetry.candidates_verified);
       }
-      if (benchmarkProbe && postedAt !== null && !phaseObserved.has(lastPhase)) {
-        phaseObserved.set(lastPhase, Math.round(performance.now() - postedAt));
+      if (benchmarkProbe && postedAt !== null) {
+        const elapsed = Math.round(performance.now() - postedAt);
+        const phase = observations[lastPhase] ??= {
+          first_ms: elapsed, last_ms: elapsed, updates: 0, peak_active_workers: null
+        };
+        phase.last_ms = elapsed;
+        phase.updates += 1;
+        if (telemetry.availability?.active_workers) {
+          phase.peak_active_workers = Math.max(phase.peak_active_workers ?? 0, telemetry.active_workers);
+        }
+        lastProgress = {
+          elapsed_ms: elapsed, phase: lastPhase, execution_mode: telemetry.execution_mode ?? null,
+          producer_complete: telemetry.producer_complete,
+          ...Object.fromEntries(progressFields.map(field => [
+            field, telemetry.availability?.[field] ? telemetry[field] : null
+          ]))
+        };
       }
     }
   });
@@ -648,6 +699,15 @@ async function runWorker({ rootWorker, command, workers, timeoutMs, label, pageK
     });
   }
 
+  function probeProgress() {
+    return {
+      first_observed_phase_ms: Object.fromEntries(
+        Object.entries(observations).map(([name, phase]) => [name, phase.first_ms])
+      ),
+      phases: observations, last_progress: lastProgress, peer_verified: verified
+    };
+  }
+
   try {
     const terminal = await waitForMessage(
       data => ['final_response', 'failed', 'cancelled', 'terminated'].includes(data.event),
@@ -664,6 +724,23 @@ async function runWorker({ rootWorker, command, workers, timeoutMs, label, pageK
       // serialization of this compact observation back to Node.
       const elapsed = Math.round(performance.now() - postedAt);
       const report = terminal.search_report;
+      const { localSearchProfileText } = await import('/local-search-profile.js');
+      const profile = terminal.search_profile;
+      const host = localSearchProfileText({
+        event: terminal.event,
+        search_profile: {
+          host_execution: profile?.host_execution,
+          verifier_transport: profile?.verifier_transport
+        }
+      });
+      const counters = ['duration_ns', 'invocation_count', 'work_item_count'];
+      const stages = Array.isArray(profile?.stages) && profile.stages.length <= 256
+        ? profile.stages.filter(row => typeof row?.name === 'string' &&
+          /^[a-z][a-z0-9_]*(?:\.[a-z0-9_]+)+$/u.test(row.name) && row.name.length <= 128 &&
+          counters.every(key => Number.isSafeInteger(row[key]) && row[key] >= 0))
+          .map(({ name, duration_ns, invocation_count, work_item_count }) =>
+            ({ name, duration_ns, invocation_count, work_item_count }))
+        : [];
       const search = report && {
         backend_selected: report.backend_selected,
         workers_used: report.workers_used,
@@ -683,10 +760,16 @@ async function runWorker({ rootWorker, command, workers, timeoutMs, label, pageK
         event: terminal.event, status: terminal.response?.status ?? null,
         runtime_identity: terminal.response?.runtime_identity ?? null,
         diagnostics: terminal.response?.diagnostics ?? null,
-        post_to_terminal_ms: elapsed, first_observed_phase_ms: Object.fromEntries(phaseObserved),
+        post_to_terminal_ms: elapsed,
         terminal_root_linear_memory_bytes: terminal.runtime_memory_bytes ?? null,
         terminal_retained_result_pages: terminal.runtime_retained_pages ?? null,
-        peer_verified: verified, search,
+        // Rust stage rows belong to this root Worker. Per-peer transport
+        // intervals overlap and are not equivalent to peer Rust stage times.
+        search_profile: {
+          schema_version: profile?.schema_version === 1 ? 1 : null,
+          stages, ...(host === null ? {} : JSON.parse(host))
+        },
+        ...probeProgress(), search,
       };
     }
     if (!pageKind || terminal.event !== 'final_response' || terminal.response.status !== 'success') {
@@ -753,6 +836,16 @@ async function runWorker({ rootWorker, command, workers, timeoutMs, label, pageK
       throw new Error(label + ' still owns a product page after release');
     }
     return { terminal, verified, productPage, frames, pageUnavailableAfterRelease: true };
+  } catch (error) {
+    if (!benchmarkProbe || !signal.aborted) throw error;
+    // A censored run has no terminal timing/result. Return bounded progress
+    // so Node can log it before the exact-result assertion fails the probe.
+    return {
+      event: timedOut ? 'probe-timeout' : 'probe-worker-error',
+      status: 'incomplete', error: String(error),
+      elapsed_before_abort_ms: postedAt === null ? null : Math.round(performance.now() - postedAt),
+      ...probeProgress(), search: null
+    };
   } finally {
     clearTimeout(timeout);
     worker.terminate();

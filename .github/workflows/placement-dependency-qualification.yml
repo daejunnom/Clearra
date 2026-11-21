@@ -12,7 +12,7 @@ on:
       # request the entire proof and timing suite on one hosted runner.
       - codex/v090-relation-rust-adoption-*
       - codex/v090-relation-rust-host-*
-      - codex/v080-pages-p7p4-browser-*
+      - codex/v080-native-chromium-cpu-*
   workflow_dispatch:
     inputs:
       run_adoption:
@@ -69,7 +69,7 @@ jobs:
             candidate_projection_clear_fact_reuse_ distributed_pc2_replay_ compact_pc2_
             family_root_count_ family_handoff_ prepared_parallel_family_
             parallel_branch_queue_
-            pc_root_distribution root_partition::tests
+            pc_root_distribution
             setup_row_dependencies_ relaxed_ilc_ build_ilc_dependencies_
             build_cooperative_progress_reports_monotonic_geometry_across_mirror_passes
             extended_parallel_cooperative_preparation_
@@ -381,8 +381,7 @@ jobs:
       !github.event.deleted && !github.event.forced &&
       github.event.before == '0000000000000000000000000000000000000000' &&
       github.event.after == github.sha &&
-      (github.ref == format('refs/heads/codex/v090-relation-rust-host-{0}', github.sha) ||
-       github.ref == format('refs/heads/codex/v080-pages-p7p4-browser-{0}', github.sha))
+      github.ref == format('refs/heads/codex/v090-relation-rust-host-{0}', github.sha)
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -433,6 +432,7 @@ jobs:
           test -x "$CLEARRA_REAL_PC24_CLI"
           node --test apps/clearra-discord-bot/test/realCliFullHeightProducts.test.mjs
   web-cpu-readback:
+    name: ${{ startsWith(github.ref, 'refs/heads/codex/v080-native-chromium-cpu-') && 'Native / Chromium CPU timing (diagnostic)' || 'web-cpu-readback' }}
     # An owner-created exact-source ref is the pre-main opt-in. Unlike the
     # usual source CI, it builds WASM, without downloading accelerator data.
     if: >-
@@ -445,7 +445,7 @@ jobs:
       github.event.before == '0000000000000000000000000000000000000000' &&
       github.event.after == github.sha &&
       (github.ref == format('refs/heads/codex/v090-relation-rust-host-{0}', github.sha) ||
-       github.ref == format('refs/heads/codex/v080-pages-p7p4-browser-{0}', github.sha))
+       github.ref == format('refs/heads/codex/v080-native-chromium-cpu-{0}', github.sha))
     # Keep the browser host compatible with the pinned Playwright release.
     # In particular ubuntu-latest can move ahead of its Chromium registry.
     runs-on: ubuntu-24.04
@@ -455,6 +455,7 @@ jobs:
       CLEARRA_SOURCE_COMMIT: ${{ github.sha }}
       CLEARRA_ENGINE_BUILD_ID: ${{ github.sha }}
       CLEARRA_REAL_ACCELERATOR_WASM_DIR: ${{ github.workspace }}/_local/artifacts/v081-browser-peer-smoke/wasm
+      CLEARRA_CPU_TIMING_ONLY: ${{ startsWith(github.ref, 'refs/heads/codex/v080-native-chromium-cpu-') }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -481,10 +482,15 @@ jobs:
         run: |
           & ./scripts/tools/install-managed-cargo-tool.ps1 -Purpose experiment -ToolName wasm-bindgen-cli -Version 0.2.126
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Build the ordinary exact-source product WASM once
+      - name: Build exact-source WASM once for the selected lane
         id: product-wasm
-        run: node scripts/tools/build-clearra-wasm.mjs --destination "$CLEARRA_REAL_ACCELERATOR_WASM_DIR"
+        shell: bash
+        run: |
+          args=(--destination "$CLEARRA_REAL_ACCELERATOR_WASM_DIR")
+          if [[ "$CLEARRA_CPU_TIMING_ONLY" == true ]]; then args+=(--stage-profiling); fi
+          node scripts/tools/build-clearra-wasm.mjs "${args[@]}"
       - name: Compare the actual Web verifier Worker with serial WASM
+        if: env.CLEARRA_CPU_TIMING_ONLY != 'true'
         run: node scripts/tools/run-real-web-verifier-pool-smoke.mjs --without-accelerators
       - name: Install pinned Chromium tooling for the same WASM
         if: ${{ !cancelled() && steps.product-wasm.outcome == 'success' }}
@@ -498,41 +504,32 @@ jobs:
           printf 'CLEARRA_BROWSER_TOOLS_ROOT=%s\nPLAYWRIGHT_BROWSERS_PATH=%s\n' \
             "$browser_tools" "$PLAYWRIGHT_BROWSERS_PATH" >> "$GITHUB_ENV"
       - name: Compare real Chromium product Workers at 4194
-        if: ${{ !cancelled() && steps.product-wasm.outcome == 'success' && steps.browser-tools.outcome == 'success' }}
+        if: ${{ !cancelled() && env.CLEARRA_CPU_TIMING_ONLY != 'true' && steps.product-wasm.outcome == 'success' && steps.browser-tools.outcome == 'success' }}
         shell: bash
         run: |
           "$CLEARRA_MANAGE_BIN" --root "$GITHUB_WORKSPACE" runtime run \
             --producer web-cpu-chromium --profile local-service --timeout 360 -- \
             node scripts/tools/run-real-chromium-cpu-worker-smoke.mjs
-      - name: Observe the exact-source P7P4 product Worker at 4195
+      - name: Build the diagnostic-only native Rust CLI
+        id: native-profile
         if: >-
           !cancelled() &&
-          github.ref == format('refs/heads/codex/v080-pages-p7p4-browser-{0}', github.sha) &&
+          env.CLEARRA_CPU_TIMING_ONLY == 'true' &&
           steps.product-wasm.outcome == 'success' && steps.browser-tools.outcome == 'success'
         shell: bash
         run: |
-          set -o pipefail
-          receipt_root="${XDG_STATE_HOME:-${HOME}/.local/state}/Clearra/receipts/rust-v2"
+          node scripts/tools/invoke-clearra-build.mjs --purpose experiment -- bash -eu <<'SH'
+          cargo build --locked --release -p clearra-cli --no-default-features --features wasm-cpu-runtime,stage-profiling
+          test -x "$CARGO_TARGET_DIR/release/clearra"
+          printf 'CLEARRA_NATIVE_STAGE_CLI=%s\n' "$CARGO_TARGET_DIR/release/clearra" >> "$GITHUB_ENV"
+          SH
+      - name: Measure serial native / Chromium pairs at 4195 (non-release)
+        if: ${{ !cancelled() && steps.native-profile.outcome == 'success' }}
+        shell: bash
+        run: |
           "$CLEARRA_MANAGE_BIN" --root "$GITHUB_WORKSPACE" runtime run \
-            --producer web-cpu-p7p4 --profile benchmark-search --timeout 960 -- \
-            node scripts/tools/run-real-chromium-cpu-worker-smoke.mjs --p7p4-probe 2>&1 |
-          while IFS= read -r line; do
-            printf '%s\n' "$line"
-            case "$line" in
-              clearra_runtime_receipt=*)
-                receipt="${line#clearra_runtime_receipt=}"
-                name="${receipt#"$receipt_root/"}"
-                [[ "$name" =~ ^[0-9]+-[0-9]+-runtime\.json$ ]]
-                [[ -f "$receipt" && "$(realpath -e -- "$receipt")" == "$receipt_root/$name" ]]
-                jq -cer 'select(.schema_id == "clearra.runtime-receipt.v2") | .outcome |
-                  select(.producer == "web-cpu-p7p4") |
-                  "chromium_cpu_p7p4_supervisor=" + ({
-                    reason, duration_ms, peak_memory_bytes, sampled_memory_peak,
-                    memory_pressure_observed, process_tree_stopped
-                  } | tojson)' "$receipt"
-                ;;
-            esac
-          done
+            --producer native-chromium-cpu-stages --profile benchmark-search --timeout 720 -- \
+            node scripts/benchmark/run-native-chromium-cpu-stages.mjs
   p7p4-exact-handoff:
     if: >-
       github.event_name == 'push' &&
