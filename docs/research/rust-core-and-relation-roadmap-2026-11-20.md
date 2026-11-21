@@ -8,6 +8,14 @@
 
 상태: **실행 계획과 소스 감사 문서. 추가 감사에서는 제품 코드 수정·빌드·벤치마크를 하지 않았다.** 병행하는 CEGIS 구현·검증의 진행과 결과는 5.7절의 별도 실행보고에 연결한다. 이 문서의 보강만으로 11절 작업을 완료 처리하지 않는다.
 
+### 2026-11-22의 적용 범위와 현황 해석
+
+이번 수학 검토는 **ILC를 사용하는 고정 타일링**을 대상으로 하며, oracle과 see-7에서 공통 연산과 정확한 배치 관계를 재사용하는 방향을 다룬다. damage·spin 탐색에 의존성 사전 분석을 새로 적용하는 일은 이번 범위에 포함하지 않는다. 구현은 보류하며, 높이 일반화·공급 결합·prefix 열거 제거와 안전한 조기 탈락의 증명은 [고정 타일링 ILC 의존성 증명](fixed-tiling-ilc-dependency-proofs-2026-11-22.md)에 기록한다.
+
+이 문서는 당시의 실행 계획과 감사 이력을 보존한다. **11절의 88개 체크 항목이 체크되지 않았다는 이유로 현재 88개가 모두 미완료라고 추정하지 않는다.** 반대로 수학 증명이나 일부 소스 연결 확인만으로 관련 항목을 완료 처리하지도 않는다. 현재 진행 상태는 해당 구현·호출 경로·검증 증거를 작업별로 다시 확인해 판단한다.
+
+2.1·2.2절, OP02·OP12 및 관련 근거의 좁은 소스 정정은 `f1c57e4eab23734fcc6723c865dc50a1490b4d54`를 읽은 결과다. 이 정정에서 제품·테스트 코드를 변경하거나 빌드·벤치마크를 실행하지 않았으며, 다른 역사적 집계·실행 기록을 새로 측정한 것으로 바꾸지 않는다.
+
 ## 1. 결정과 우선순위
 
 이번 작업의 중심은 **정확한 배치 관계를 만드는 데 필요한 계산 자체를 줄이고, 그 결과를 ILC → 타일링 → 조건·확률 계산까지 재사용하는 것**이다. 도달성 호출 한 번의 상수 비용을 줄이는 것만으로 성공을 판정하지 않는다. 관계를 만들기 위해 기존 BuildUp과 비슷한 수의 배치 순서를 다시 탐색한다면 목표를 달성하지 못한 것이다.
@@ -33,9 +41,9 @@
 
 `core-c/cmake/source_manifest.cmake`는 board, rule, supply, ILC/geometry, APDP, packing, reachability, BuildUp, coverage, memory를 실제 C 빌드에 연결한다. Git 추적 C 소스는 183개, 헤더는 102개로 합계 285개이며 모두 `core-c/` 아래에 있다. 작은 잔여 wrapper 몇 개만 옮기는 작업은 아니다.
 
-동시에 `clearra-core-executor/src/backend/wasm_cpu/`에는 Rust의 geometry/ILC/APDP/BuildUp/reachability/coverage/확률 경로가 있다. `WasmCpuSearchBackend`라는 이름과 달리 native에서도 실행된다. `AppCoreExecutorBackend`에는 `NativeCore`와 `WasmCpu`가 따로 있으며, CLI의 `wasm-cpu-runtime` feature에 따라 선택도 달라진다.
+동시에 `clearra-core-executor/src/backend/wasm_cpu/`에는 Rust의 geometry/ILC/APDP/BuildUp/reachability/coverage/확률 경로가 있다. `WasmCpuSearchBackend`라는 이름과 달리 native에서도 실행된다. `AppCoreExecutorBackend`에는 `NativeCore`와 `WasmCpu`가 따로 있다. `f1c57e4`의 CLI `product_app_context`는 `AppContext::rust_cpu_product()`를 선택하며, C 실행은 명시적인 reference 경로로 남아 있다. [S1]
 
-두 경로의 기능은 아직 동등하지 않다. 예를 들어 `app_services.rs`의 NativeCore는 execution constraints 및 supplied-solution identity filter를 거절하는 분기가 있고, Rust 서비스의 기존 `execute_build_coverage_with_control` 진입점에는 미연결 오류가 있다. 따라서 backend 이름이나 enum 분기만 바꾸어 전환을 완료할 수 없다. 제품 요청별 실제 지원 범위를 먼저 확정한다. [S1]
+초안에서 미연결로 기록한 Rust `execute_build_coverage_with_control` 진입점은 `f1c57e4`에서 `CoreExecutor` → `rust_legacy_cover::execute` → Rust 물리 탐색 및 coverage 환원에 연결되어 있다. 일반 Build 진입점도 같은 bridge를 사용한다. 다만 원래 materialized 공급 ordinal, compact 입력, 지원 placement 수와 단일 partition 등의 계약을 검사하며, NativeCore의 execution constraints 및 supplied-solution identity filter 거절 분기도 남아 있다. 이 연결 해소를 전체 C→Rust 전환이나 모든 제품 요청의 동등성 완료로 보지는 않는다. 제품 요청별 실제 지원 범위와 결과 계약을 확인해야 한다. [S1]
 
 ### 2.2 이미 있는 구조를 새로 만들지 않는다
 
@@ -54,10 +62,10 @@
 | projection·component | `geometry_projection.rs`, `geometry_component.rs`, `geometry_separator.rs` | 기존 기하학적 증명 재사용; 이동 독립성과 혼동하지 않음 |
 | 공급·coverage | `clearra-supply`, `clearra-coverage` 및 기존 확률 경로 | hold·가중치·큐 합집합 의미 유지 |
 
-확인한 중복은 다음과 같다.
+초안에서 지목한 중복 중 `f1c57e4`에서 해소된 범위와 남은 범위는 다음과 같다.
 
-- `PlacementConditionCatalog`는 카탈로그의 모든 삭제 행 상태를 다시 조회하여 정확한 domain을 만들고 cell incidence를 복제한다. 소비자에게 필요한 view를 제공하는 단일 소유자가 후보이다.
-- `normalized_kick_delta`와 `normalized_rotation_center`가 일반 reachability, extended reachability, finesse에 각각 존재한다. 의미가 같은 이 정의부터 공통화할 수 있다.
+- `PlacementConditionCatalog`의 영구 cell-incidence 복제는 제거되었고, `influencing_placements`는 실제 소유 `GeometryCatalog`를 확인한 뒤 `catalog.support`를 사용한다. Exact clear domain은 `GeometryCatalog::exact_clear_domain_mask`를 통해 기존 instantiation offsets의 결과를 이용하며, 표가 없으면 requirement 후보 frame을 기존 raw instantiation으로 확인한다. row별 domain mask 처리·interning과 영향 조회 결과의 임시 `Vec` 생성은 남는다. 이 catalog는 현재 `test` 또는 `local-search-ab` 범위이므로 기본 제품 경로의 상시 비용으로 취급하지 않는다.
+- 일반 reachability, extended reachability, finesse는 `clearra-rules::kicks::normalized_kick_delta`를 함께 사용하며 `normalized_rotation_center`도 그 공통 구현이 소유한다. 다만 `clearra-forward-search/src/reachability.rs`와 `clearra-spin-structure-search/src/entry.rs`에는 같은 정규화 계산의 로컬 정의가 남아 있다. 이는 남은 의미 원천 통합의 감사 대상이며, 이번 의존성 분석을 해당 제품에 새로 적용한다는 뜻은 아니다.
 - C FFI의 `CoreContext = ContractCoreContext`와 실제 C 메모리를 감싼 `NativeCoreContext`가 공존한다. 이름이 아닌 실제 호출 경로와 수명을 기준으로 책임을 정리한다. [S2][S3]
 
 `clearra-exact-cover`의 현재 `solve_first` 중심 solver와 ILC 전체 family compiler는 계약이 다르다. `clearra-geometry`의 정적 placement 열거도 stretched target-frame ILC를 자동 대체하지 않는다. **기존 코어를 우선 검토하되, 의미가 같은 부분만 재사용한다.**
@@ -317,10 +325,10 @@ M_{peak}\approx M_{shared}+W M_{worker}+M_{live\ candidate}
 
 #### OP02 — 형상 좌표와 ordered kick 정규화: O01·O02·O07·G05
 
-- **기존 구현·소비자:** `clearra-piece-registry`, `clearra-rules/src/kicks`; C `reachability/kick_first_success.c::{clearra_reachability_kick_offsets_for_transition,clearra_kick_first_success}`; `W/reachability.rs`, `W/extended_reachability.rs`, `clearra-finesse/src/lib.rs`의 `normalized_kick_delta`·`normalized_rotation_center`. `W/kick_profiles.rs`는 이미 Rust `SrsKicks`·`NoKick`를 사용한다.
+- **기존 구현·소비자:** `clearra-piece-registry`, `clearra-rules/src/kicks`; C `reachability/kick_first_success.c::{clearra_reachability_kick_offsets_for_transition,clearra_kick_first_success}`. `f1c57e4`에서 `W/reachability.rs`, `W/extended_reachability.rs`, `clearra-finesse/src/lib.rs`는 `clearra-rules`의 공통 `normalized_kick_delta`를 사용하고, `normalized_rotation_center`는 그 내부 구현이다. `W/kick_profiles.rs`는 Rust `SrsKicks`·`NoKick`를 사용한다.
 - **입출력·불변식:** `(shape definition, from/to rotation, 순서 있는 kick offsets, 좌표 규약)`을 정규화된 후보 전이로 만든다. delta는 `kick + center(from) - center(to)`이며 앞 후보 실패 조건과 선택된 kick index를 잃지 않는다. 같은 occupied mask도 orientation·spin/finesse evidence까지 같은 것은 아니다.
 - **공유·무효화:** 불변 shape/rule/dimensions/source-entry 계약별 템플릿을 공유한다. builtin profile ID만으로 식별하는 계약을 custom profile까지 넓힐 때에는 실제 내용·버전의 동일성도 보존한다. shape registry·180 허용·좌표 또는 source-entry 규약 변경 시 기존 증명이 유효한지 확인한다.
-- **남은 작업:** 세 Rust 정규화 소비자의 의미 원천을 통합하고 ABI ID 인코딩만 분리한다. 관계 compiler는 이 전이 계약을 재사용한다. 최대 kick offset만으로 독립적인 영향 반경을 새로 추정하지 않는다. [S2][S13]
+- **남은 작업:** 지목했던 세 Rust 소비자의 정규화 공통화는 소스에서 확인된다. forward-search와 spin-structure-search에 남은 로컬 정의의 계약과 소비자를 확인하고, ABI ID 인코딩과 실행 의미의 경계를 검토한다. 관계 compiler는 기존 공통 전이 계약을 재사용한다. 최대 kick offset만으로 독립적인 영향 반경을 새로 추정하지 않는다. 이 확인만으로 O01·O02·O07·G05 전체를 완료 처리하지 않는다. [S2][S13]
 
 #### OP03 — ILC 행 투영 필요조건: I05·I08
 
@@ -388,9 +396,9 @@ M_{peak}\approx M_{shared}+W M_{worker}+M_{live\ candidate}
 #### OP12 — 제품 서비스·ABI cutover: R01~R12·H01~H05
 
 - **기존 경로:** `crates/clearra-app/src/app_services.rs::{execute_search_backend_with_control,execute_build_coverage_with_control}`, `clearra-core-ffi/src/problem/generic_buildup.rs`, CLI routing 및 호스트 adapter.
-- **확인한 격차:** NativeCore는 execution constraints와 supplied colored identity filter를 거절한다. WasmCpu의 legacy build-coverage 서비스는 `wasm_cpu_build_coverage_not_connected`다. 반대로 C generic BuildUp도 Board128/Wide를 unsupported로 판정한다. 따라서 모든 C 범위를 Rust가 새로 구현해야 한다는 추정도 옳지 않다.
+- **확인한 격차:** NativeCore는 execution constraints와 supplied colored identity filter를 거절한다. 초안의 WasmCpu legacy build-coverage 미연결은 `f1c57e4`에서 해소되어 `rust_legacy_cover`가 Rust 물리 결과를 원래 공급 ordinal과 assignment coverage로 환원한다. 이 bridge에는 원래 materialized 공급, compact 입력, 지원 placement 수와 partition 제한이 남는다. C generic BuildUp도 Board128/Wide를 unsupported로 판정하므로 모든 C 범위를 Rust가 새로 구현해야 한다는 추정은 옳지 않다.
 - **분류·전환:** `양쪽 지원 / C만 지원 / Rust만 지원 / 커널은 있으나 서비스 미연결 / 양쪽 미지원`을 요청별로 기록한다. FFI에서 ID 인코딩만 가져오는 의존성과 실제 native 함수 호출도 분리한다. 마지막 consumer가 사라지고 해당 결과·오류·해제 계약이 검증된 기능부터 퇴역시킨다.
-- **남은 작업:** 기능별 identity, coverage, CountAll, terminal evidence, cancellation/resource completeness를 맞추고 기존 Rust 계산을 서비스에 연결한다. backend enum 변경·crate rename·C 파일 수 감소만으로 전환 완료를 선언하지 않는다. [S1][S18]
+- **남은 작업:** 기능별 identity, coverage, CountAll, terminal evidence, cancellation/resource completeness를 맞추고, 이미 연결된 bridge와 실제 미연결 소비자를 구분해 잔여 범위를 확정한다. backend enum 변경·crate rename·C 파일 수 감소만으로 전환 완료를 선언하지 않는다. [S1][S18]
 
 ### 7.4 재사용 동치와 증거의 범위
 
@@ -779,12 +787,12 @@ MS2·MS3·MS4는 병렬 진행 가능하다. MS1의 개선을 모든 연구의 �
 
 ## 16. 근거와 재현 범위
 
-초안 소스 근거와 파일 수 집계는 [초안 기준 커밋](https://github.com/daejunnom/Clearra/tree/caacfae0c9958949858bb846f2bb52eb5fcbb50d)을 대상으로 한다. 7.3~7.4절의 내부 연산 추가 감사는 [추가 감사 기준 커밋](https://github.com/daejunnom/Clearra/tree/45cbf15eec6a6c8821946756807f90703466dff6)을 읽었다. 아래 파일 링크는 현재 저장소에서 여는 상대 링크다. 병행 CEGIS 제품 변경과 실행 결과는 5.7절의 별도 보고서가 담당하며, 이번 문서 감사에서 실행한 빌드·테스트·벤치마크로 취급하지 않는다.
+초안 소스 근거와 파일 수 집계는 [초안 기준 커밋](https://github.com/daejunnom/Clearra/tree/caacfae0c9958949858bb846f2bb52eb5fcbb50d)을 대상으로 한다. 7.3~7.4절의 내부 연산 추가 감사는 [추가 감사 기준 커밋](https://github.com/daejunnom/Clearra/tree/45cbf15eec6a6c8821946756807f90703466dff6)을 읽었다. 2026-11-22의 2.1·2.2절, OP02·OP12 및 관련 근거 정정은 [f1c57e4 기준 커밋](https://github.com/daejunnom/Clearra/tree/f1c57e4eab23734fcc6723c865dc50a1490b4d54)의 호출 경로·소유자를 확인한 것이다. 아래 파일 링크는 현재 저장소에서 여는 상대 링크다. 병행 CEGIS 제품 변경과 실행 결과는 5.7절의 별도 보고서가 담당하며, 이번 문서 감사에서 실행한 빌드·테스트·벤치마크로 취급하지 않는다.
 
 | ID | 확인한 근거 |
 | --- | --- |
-| S1 | [app 서비스](../../crates/clearra-app/src/app_services.rs)의 `AppCoreExecutorBackend`, `execute_search_backend_with_control`, `execute_build_coverage_with_control`; [CLI 선택](../../crates/clearra-cli/src/cli_routing.rs)의 `product_app_context`; [C source manifest](../../core-c/cmake/source_manifest.cmake) |
-| S2 | [GeometryCatalog](../../crates/clearra-core-executor/src/backend/wasm_cpu/catalog.rs), [PlacementConditionCatalog](../../crates/clearra-core-executor/src/backend/wasm_cpu/placement_conditions.rs), [APDP index](../../crates/clearra-core-executor/src/backend/wasm_cpu/geometry_apdp.rs), [family](../../crates/clearra-core-executor/src/backend/wasm_cpu/geometry_family.rs); [일반 reachability](../../crates/clearra-core-executor/src/backend/wasm_cpu/reachability.rs), [extended](../../crates/clearra-core-executor/src/backend/wasm_cpu/extended_reachability.rs), [finesse](../../crates/clearra-finesse/src/lib.rs)의 정규화 함수 |
+| S1 | [app 서비스](../../crates/clearra-app/src/app_services.rs)의 `AppCoreExecutorBackend`, `execute_search_backend_with_control`, `execute_build_coverage_with_control`; [CoreExecutor](../../crates/clearra-core-executor/src/core_executor.rs)의 Rust/reference 분기와 [Rust legacy cover](../../crates/clearra-core-executor/src/service/rust_legacy_cover.rs)의 `execute`, `execute_bridge`, 지원 계약; [CLI 선택](../../crates/clearra-cli/src/cli_routing.rs)의 `product_app_context`; [C source manifest](../../core-c/cmake/source_manifest.cmake) |
+| S2 | [GeometryCatalog](../../crates/clearra-core-executor/src/backend/wasm_cpu/catalog.rs)의 `support`, `exact_clear_domain_mask`와 [PlacementConditionCatalog](../../crates/clearra-core-executor/src/backend/wasm_cpu/placement_conditions.rs)의 `compile`, `influencing_placements`; [APDP index](../../crates/clearra-core-executor/src/backend/wasm_cpu/geometry_apdp.rs), [family](../../crates/clearra-core-executor/src/backend/wasm_cpu/geometry_family.rs); [공통 kick 정규화](../../crates/clearra-rules/src/kicks/kick_table.rs)와 이를 사용하는 [일반 reachability](../../crates/clearra-core-executor/src/backend/wasm_cpu/reachability.rs), [extended](../../crates/clearra-core-executor/src/backend/wasm_cpu/extended_reachability.rs), [finesse](../../crates/clearra-finesse/src/lib.rs); 로컬 정규화가 남은 [forward search](../../crates/clearra-forward-search/src/reachability.rs), [spin structure](../../crates/clearra-spin-structure-search/src/entry.rs) |
 | S3 | [Rust 계약 facade](../../crates/clearra-core-ffi/src/memory/core_context.rs), [native RAII](../../crates/clearra-core-ffi/src/memory/native_core_context.rs), [C allocator](../../core-c/src/memory/clr_allocators.c), [scope](../../core-c/src/memory/clr_scope.c) |
 | S4 | [geometry.rs](../../crates/clearra-core-executor/src/backend/wasm_cpu/geometry.rs)의 `FamilyCompiler::advance`, `GeometryCompletionOracle`; [geometry_domain.rs](../../crates/clearra-core-executor/src/backend/wasm_cpu/geometry_domain.rs)의 `compile`, `compile_minimum`, APDP complete-domain 판단 |
 | S5 | [기존 구현·미완료 P7P4 보고서](static-movement-influence-2026-11-20.md), [이전 graph probability 보고서](graph-only-probability-2026-11-20.md), [manager runtime](../../tools/clearra-manage/src/runtime.rs)의 exit status 처리 |
@@ -795,12 +803,12 @@ MS2·MS3·MS4는 병렬 진행 가능하다. MS1의 개선을 모든 연구의 �
 | S10 | [공통 row frame](../../crates/clearra-core-executor/src/row_frame.rs), [범위를 좁힌 wrapper](../../crates/clearra-core-executor/src/conditioned_local_relation.rs), [공통 projection](../../crates/clearra-core-executor/src/backend/wasm_cpu/geometry_projection.rs) |
 | S11 | 기준 SHA의 `git ls-files` 경로 목록과 원본 줄 수 집계. `tools/vendor/` 제외 자체 Rust 2,264개; 계획용 제품 분류의 제외 규칙은 2.4절에 명시. [대형 cover](../../crates/clearra-coverage/src/cover/exact_minimum_cover.rs), [build probability](../../crates/clearra-core-executor/src/backend/wasm_cpu/build_probability.rs), [result](../../crates/clearra-core-executor/src/backend/wasm_cpu/result.rs), [desktop bridge](../../crates/clearra-gui-host/src/desktop_host/desktop_request_bridge.rs) |
 | S12 | [C target-frame projection](../../core-c/src/packing/target_frame_projection.c), [C exact realization](../../core-c/src/packing/geometry_realization_domain.c), [Rust catalog](../../crates/clearra-core-executor/src/backend/wasm_cpu/catalog.rs), [Rust ILC 필요조건](../../crates/clearra-core-executor/src/backend/wasm_cpu/inverse_projection.rs), [BuildUp 행 연산](../../crates/clearra-core-executor/src/backend/wasm_cpu/buildup.rs). OP01/03/04의 범위·명제 강도·fallback 근거 |
-| S13 | [C first-success](../../core-c/src/reachability/kick_first_success.c), [Rust profile 연결](../../crates/clearra-core-executor/src/backend/wasm_cpu/kick_profiles.rs), [Rust reachability](../../crates/clearra-core-executor/src/backend/wasm_cpu/reachability.rs)의 정규화·`SharedReachabilityTemplates`·cache 권한/무효화; extended/finesse 대응은 S2 |
+| S13 | [C first-success](../../core-c/src/reachability/kick_first_success.c), [Rust profile 연결](../../crates/clearra-core-executor/src/backend/wasm_cpu/kick_profiles.rs), [Rust reachability](../../crates/clearra-core-executor/src/backend/wasm_cpu/reachability.rs)의 공통 정규화 소비·`SharedReachabilityTemplates`·cache 권한/무효화; 정규화 소유자와 extended/finesse 대응은 S2 |
 | S14 | [C grounding](../../core-c/src/buildup/grounded_filter.c), [C realization domain propagation](../../core-c/src/buildup/realization_domain_propagation.c), [C APDP](../../core-c/src/apdp/geometry_apdp.c), [C Hall](../../core-c/src/pruning/geometry_parent_hall_bound.c), [Rust realization feasibility](../../crates/clearra-core-executor/src/backend/wasm_cpu/realization_feasibility.rs), [Rust APDP domain](../../crates/clearra-core-executor/src/backend/wasm_cpu/geometry_domain.rs). OP05/06/11의 필요조건·완전 도메인·prepass 비활성·stale generation 근거 |
 | S15 | [C residual memo](../../core-c/src/packing/geometry_residual_memo.h), [C completion memo](../../core-c/src/buildup/buildup_completion_memo.h), [C physical transition key](../../core-c/src/buildup/buildup_geometry_transition_cache.h), [C workspace 무효화](../../core-c/src/buildup/buildup_workspace.c), [Rust family/completion](../../crates/clearra-core-executor/src/backend/wasm_cpu/geometry.rs), [점수 증거 재생성](../../crates/clearra-core-executor/src/backend/wasm_cpu/result.rs)의 `prepare_exact_scoring_execution_batch` |
 | S16 | [canonical supply automaton](../../crates/clearra-supply/src/execution_automaton/supply_execution_automaton.rs), [hold alias](../../crates/clearra-supply/src/hold_automaton/hold_automaton.rs), [standard-bag coverage](../../crates/clearra-core-executor/src/backend/wasm_cpu/standard_bag_coverage.rs), [product memo key](../../crates/clearra-core-executor/src/backend/wasm_cpu/standard_bag_product_memo.rs). OP10의 일반/특수 공급 범위와 request/epoch 소유권 근거 |
 | S17 | [ExecutionControl](../../crates/clearra-core-domain/src/execution_cancellation.rs), [native scope](../../crates/clearra-core-ffi/src/memory/native_scope.rs), [native context](../../crates/clearra-core-ffi/src/memory/native_core_context.rs). C allocator 및 optional proof 근거는 S3/S14 |
-| S18 | [C generic BuildUp 지원 범위](../../crates/clearra-core-ffi/src/problem/generic_buildup.rs), [서비스의 실제 지원·미연결 분기](../../crates/clearra-app/src/app_services.rs). OP12의 C/Rust 기능 격차 분류 근거 |
+| S18 | [C generic BuildUp 지원 범위](../../crates/clearra-core-ffi/src/problem/generic_buildup.rs), [서비스의 실제 지원 분기](../../crates/clearra-app/src/app_services.rs), [Rust legacy cover bridge와 지원 계약](../../crates/clearra-core-executor/src/service/rust_legacy_cover.rs). OP12의 C/Rust 기능 격차 분류 근거 |
 | E1 | [Google 공식 Rust Style Guide](https://google.github.io/styleguide/rustguide.html), 2026-11-20 열람. 일반 규칙과 `[chrome]` 등 특정 코드베이스 규칙을 구분하여 적용 |
 
 기준 SHA의 추적 C/H 285개는 `src/` 176개, `include/` 25개, `tests/` 83개, `tools/` 1개다. 다운로드·시스템 라이브러리의 native 코드 수는 이 집계에 포함하지 않았다. 파일·줄 수 집계는 성능 측정이 아니다.
