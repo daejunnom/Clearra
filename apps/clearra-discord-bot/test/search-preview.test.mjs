@@ -130,8 +130,8 @@ test("preview decoding cannot reject legacy cells accepted by the search parser"
   ]);
 });
 
-test("cover preview represents both base and target fields in one bounded GIF document", () => {
-  const preview = buildSearchPreviewDocument(findSlashCommand("cover"), [
+test("Build probability preview represents both base and target fields in one bounded GIF document", () => {
+  const preview = buildSearchPreviewDocument(findSlashCommand("build").subcommands.probability, [
     { name: "base", value: "GGGG......" },
     { name: "target", value: "....iiii.." },
     { name: "next", value: "I" },
@@ -146,8 +146,8 @@ test("cover preview represents both base and target fields in one bounded GIF do
   ]);
 });
 
-test("cover preview preserves completed target rows before search-side completion clears", () => {
-  const preview = buildSearchPreviewDocument(findSlashCommand("cover"), [
+test("Build probability preview preserves completed target rows before search-side completion clears", () => {
+  const preview = buildSearchPreviewDocument(findSlashCommand("build").subcommands.probability, [
     { name: "base", value: "grid:__________/__________" },
     { name: "target", value: "grid:##########/##########" },
     { name: "next", value: "IOTSZ" },
@@ -183,7 +183,7 @@ test("preview preserves source comments without manufacturing board labels", () 
   assert.doesNotMatch(preview.source, /Input field|Base field|Target delta/u);
 });
 
-test("cover preview keeps only source-authored comments", () => {
+test("Build probability preview keeps only source-authored comments", () => {
   const base = encodeCtk3({
     width: 10,
     pages: [{
@@ -200,7 +200,7 @@ test("cover preview keeps only source-authored comments", () => {
       comment: "target note",
     }],
   });
-  const preview = buildSearchPreviewDocument(findSlashCommand("cover"), [
+  const preview = buildSearchPreviewDocument(findSlashCommand("build").subcommands.probability, [
     { name: "base", value: base },
     { name: "target", value: target },
     { name: "next", value: "I" },

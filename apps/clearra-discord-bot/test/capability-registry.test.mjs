@@ -4,13 +4,8 @@ import test from "node:test";
 
 import {
   CLI_COMMAND_LOWERING_AUTHORITY,
-  CLI_COMPATIBILITY_LOWERING_AUTHORITY,
-  assertDiscordGenericCompatibilityRoutes,
   assertProductCapabilityRegistry,
-  discordGenericCompatibilityRouteProjection,
-  discordLegacyRouteProjection,
   discordRuntimeProjection,
-  findDiscordGenericCompatibilityRoute,
   findProductCapability,
   lowerCapabilityRouteRequest,
   productCapabilityRegistry,
@@ -35,11 +30,6 @@ import {
   parseClearraTextRequest,
 } from "../src/clearra/text-command.mjs";
 
-const legacyAliasFixture = JSON.parse(readFileSync(new URL(
-  "../../../tests/fixtures/contracts/legacy_alias_equivalence.v1.json",
-  import.meta.url,
-), "utf8"));
-
 test("public registry i18n policy matches every released Discord locale", () => {
   const releasedPolicy = SUPPORTED_DISCORD_LOCALES.join("-");
   const publicCapabilities = productCapabilityRegistry.filter(
@@ -49,14 +39,10 @@ test("public registry i18n policy matches every released Discord locale", () => 
   for (const capability of publicCapabilities) {
     assert.equal(capability.i18nPolicy, releasedPolicy, capability.id);
   }
-  for (const route of discordGenericCompatibilityRouteProjection()) {
-    assert.equal(route.i18nPolicy, releasedPolicy, route.id);
-  }
 });
 
 test("v0.8 capability registry separates problem, algorithm, timeout, form, and result authority", () => {
   assert.equal(assertProductCapabilityRegistry(), true);
-  assert.equal(assertDiscordGenericCompatibilityRoutes(), true);
   assert.ok(productCapabilityRegistry.length > 30);
   for (const capability of productCapabilityRegistry) {
     assert.notEqual(capability.algorithmFamily, capability.timeoutClass);
@@ -84,8 +70,7 @@ test("v0.8 capability registry separates problem, algorithm, timeout, form, and 
     ? Object.values(command.subcommands)
     : command.kind === "search" ? [command] : []);
   for (const command of searchEntries) {
-    const capability = findProductCapability(command.capabilityId) ??
-      findDiscordGenericCompatibilityRoute(command.capabilityId);
+    const capability = findProductCapability(command.capabilityId);
     assert.ok(capability, command.capabilityId);
     const route = capability.canonical
       ? [capability.canonical, ...capability.aliases].find((candidate) =>
@@ -180,346 +165,68 @@ test("runtime projection covers every active and hidden row plus split legacy in
   );
 });
 
-test("score-minimals compatibility routes preserve the canonical typed portfolio authority", () => {
-  const scoreMinimals = findProductCapability("pc.score-minimals");
-  const alias = scoreMinimals.aliases.find(({ slash }) => slash);
-  const projected = lowerCapabilityRouteRequest(scoreMinimals, alias);
-  assert.equal(projected.route.input, "pc-score-v2");
-  assert.deepEqual(projected.route.argvPrefix, ["pc", "score-minimals"]);
-  assert.deepEqual(projected.parameters, {});
-  assert.deepEqual(
-    lowerCapabilityRouteRequest(scoreMinimals, alias, { scoreProfile: "tetrio" }).parameters,
-    { scoreProfile: "tetrio" },
-  );
-
-  const forged = {
-    ...alias,
-    input: "forward-damage-v2",
-    inputSchemaId: "forged-input.v1",
-    modalSchemaId: "forged-modal.v1",
-    argvPrefix: ["damage"],
-  };
-  assert.notDeepEqual(
-    lowerCapabilityRouteRequest(scoreMinimals, forged),
-    projected,
-    "route input/schema/argv drift must remain visible to the registry projection",
-  );
-
-  const authority = legacyAliasFixture.routes.find(
-    ({ id }) => id === "pc.score-minimals/slash/score-minimals",
-  );
-  const live = discordLegacyRouteProjection().find(({ id }) => id === authority.id);
-  const normalizedLive = {
-    ...live,
-    case_id: "pc.score-minimals/score-minimals/",
-    path: live.path ?? live.name.split(" "),
-  };
-  delete normalizedLive.name;
-  assert.deepEqual(normalizedLive, authority);
-  for (const [field, forgedValue] of Object.entries({
-    input: "forward-damage-v2",
-    input_schema_id: "forged-input.v1",
-    modal_schema_id: "forged-modal.v1",
-    argv_prefix: ["damage"],
-    public_result_kind: "damage",
-  })) {
-    assert.throws(
-      () => assert.deepEqual({ ...normalizedLive, [field]: forgedValue }, authority),
-      /Expected values to be strictly deep-equal/u,
-      `forged ingress ${field} must fail the independent JSON authority comparison`,
-    );
-  }
-});
-
-test("every remaining typed slash and text alias executes the frozen parser-equivalence fixture", () => {
-  assert.equal(legacyAliasFixture.schema_id, "clearra.legacy-alias-equivalence.v1");
-  const promotedCapabilities = new Set([
-    "pc.path",
-    "pc.score-finder",
-    "setup.joint",
-    "setup.build",
-    "setup.pc",
-    "spin-structure.search",
-  ]);
-  const typedFixtureRoutes = legacyAliasFixture.routes.filter(
-    ({ capability_id: capabilityId }) =>
-      !["pc.chance", "pc.score"].includes(capabilityId) &&
-      !promotedCapabilities.has(capabilityId),
-  );
-  const typedFixtureCases = legacyAliasFixture.cases.filter(
-    ({ capability_id: capabilityId }) =>
-      !["pc.chance", "pc.score", "build.cover"].includes(capabilityId) &&
-      !promotedCapabilities.has(capabilityId),
-  );
-  const actualRoutes = discordLegacyRouteProjection()
-    .filter(({ capability_id: capabilityId }) =>
-      capabilityId !== "pc.score" && !promotedCapabilities.has(capabilityId)
-    )
-    .map((route) => {
-    const path = route.path ?? route.name.split(" ");
-    return {
-      id: route.id,
-      case_id: [
-        route.capability_id,
-        ...path,
-        ...(path.length === 1 ? [""] : []),
-      ].join("/"),
-      capability_id: route.capability_id,
-      surface: route.surface,
-      path,
-      classification: route.classification,
-      input: route.input,
-      input_schema_id: route.input_schema_id,
-      modal_schema_id: route.modal_schema_id,
-      argv_prefix: route.argv_prefix,
-      public_result_kind: route.public_result_kind,
-      ...(route.preset ? { preset: route.preset } : {}),
-      ...(route.remove_in ? { remove_in: route.remove_in } : {}),
-      ...(route.lifetime ? { lifetime: route.lifetime } : {}),
-    };
-  });
-  assert.deepEqual(actualRoutes, typedFixtureRoutes);
-  assert.equal(actualRoutes.length, 20);
-  assert.equal(typedFixtureCases.length, 8);
-
-  for (const fixtureCase of typedFixtureCases) {
-    const capability = findProductCapability(fixtureCase.capability_id);
-    assert.ok(capability, fixtureCase.id);
-    assert.equal(fixtureCase.problem_contract_id, capability.problemContractId, fixtureCase.id);
-    assert.equal(fixtureCase.result_contract_id, capability.resultContractId, fixtureCase.id);
-
-    const canonical = commandAtPath(fixtureCase.canonical_path);
-    const alias = commandAtPath(fixtureCase.alias_path);
-    assert.equal(canonical.capabilityId, capability.id, fixtureCase.id);
-    assert.equal(alias.capabilityId, capability.id, fixtureCase.id);
-    assert.equal(canonical.input, fixtureCase.canonical_input, fixtureCase.id);
-    assert.equal(alias.input, fixtureCase.alias_input, fixtureCase.id);
-
-    const canonicalArguments = buildSlashCommandArguments(
-      canonical,
-      fixtureCase.canonical_options,
-    );
-    const aliasArguments = buildSlashCommandArguments(alias, fixtureCase.alias_options);
-    assert.deepEqual(canonicalArguments, fixtureCase.canonical_argv, fixtureCase.id);
-    assert.deepEqual(aliasArguments, fixtureCase.alias_argv, fixtureCase.id);
-    assert.equal(
-      fixtureCase.canonical_web_command,
-      ["clearra", ...canonicalArguments].join(" "),
-      fixtureCase.id,
-    );
-    assert.equal(
-      fixtureCase.alias_web_command,
-      ["clearra", ...aliasArguments].join(" "),
-      fixtureCase.id,
-    );
-
-    const canonicalText = parseClearraTextRequest(fixtureCase.canonical_text, "$");
-    const aliasText = parseClearraTextRequest(fixtureCase.alias_text, "$");
-    const canonicalTextArgv = withoutRetiredPcExecutionFlags(
-      fixtureCase.canonical_text_argv,
-    );
-    const aliasTextArgv = withoutRetiredPcExecutionFlags(fixtureCase.alias_text_argv);
-    assert.equal(canonicalText.command.capabilityId, capability.id, fixtureCase.id);
-    assert.equal(aliasText.command.capabilityId, capability.id, fixtureCase.id);
-    assert.deepEqual(canonicalText.arguments_, canonicalTextArgv, fixtureCase.id);
-    assert.deepEqual(aliasText.arguments_, aliasTextArgv, fixtureCase.id);
-    assert.equal(
-      ["clearra", ...canonicalTextArgv].join(" "),
-      ["clearra", ...canonicalText.arguments_].join(" "),
-      fixtureCase.id,
-    );
-    assert.equal(
-      ["clearra", ...aliasTextArgv].join(" "),
-      ["clearra", ...aliasText.arguments_].join(" "),
-      fixtureCase.id,
-    );
-
-    const authorityBySurface = new Map(
-      typedFixtureRoutes
-        .filter(({ case_id }) => case_id === fixtureCase.id)
-        .map((route) => [route.surface, route]),
-    );
-    for (const [surface, liveCommand] of [
-      ["discord-slash", alias],
-      ["discord-text", aliasText.command],
+test("Clearra product aliases use exactly the canonical CLI and result authority", () => {
+  const cases = [
+    ["pc", "path", "path"],
+    ["pc", "chance", "chance"],
+    ["pc", "minimals", "minimals"],
+    ["pc", "score", "score"],
+    ["pc", "score-minimals", "score-minimals"],
+    ["pc", "score-finder", "score-finder"],
+    ["build", "cover", "cover"],
+    ["build", "finesse-score", "finesse", "score"],
+    ["forward", "spin", "spin"],
+    ["forward", "damage", "damage"],
+  ];
+  for (const [root, verb, aliasName, aliasVerb] of cases) {
+    const canonical = findSlashCommand(root).subcommands[verb];
+    const alias = aliasVerb
+      ? findSlashCommand(aliasName).subcommands[aliasVerb]
+      : findSlashCommand(aliasName);
+    for (const field of [
+      "capabilityId", "input", "inputSchemaId", "modalSchemaId", "problemContractId",
+      "argvPrefix", "resultContractId", "resultAuthorityId", "resultAllowlist",
+      "timeoutClass", "loweringAuthority", "telemetryIdentity",
     ]) {
-      const routeAuthority = authorityBySurface.get(surface);
-      assert.ok(routeAuthority, `${fixtureCase.id}:${surface}`);
-      assert.deepEqual(
-        {
-          input: liveCommand.input,
-          input_schema_id: liveCommand.inputSchemaId,
-          modal_schema_id: liveCommand.modalSchemaId,
-          argv_prefix: liveCommand.argvPrefix,
-          public_result_kind: liveCommand.publicResultKind,
-        },
-        {
-          input: routeAuthority.input,
-          input_schema_id: routeAuthority.input_schema_id,
-          modal_schema_id: routeAuthority.modal_schema_id,
-          argv_prefix: routeAuthority.argv_prefix,
-          public_result_kind: routeAuthority.public_result_kind,
-        },
-        `${fixtureCase.id}:${surface}: live parser route escaped JSON authority`,
-      );
+      assert.deepEqual(alias[field], canonical[field], `${aliasName}: ${field}`);
     }
+    assert.deepEqual(alias.registration.options, canonical.registration.options, aliasName);
+  }
 
-    if (fixtureCase.classification !== "equivalence") {
-      assert.equal(fixtureCase.classification, "fixed-preset", fixtureCase.id);
-      const slashRoute = capability.aliases.find((route) =>
-        route.slash &&
-        route.root === fixtureCase.alias_path[0] &&
-        route.subcommand === (fixtureCase.alias_path[1] ?? null)
-      );
-      assert.deepEqual(alias.compatibilityPreset, slashRoute.preset, fixtureCase.id);
-      for (const [field, value] of Object.entries(slashRoute.preset)) {
-        const option = presetOptionName(field);
-        assert.deepEqual(
-          buildSlashCommandArguments(alias, [
-            ...fixtureCase.alias_options,
-            { name: option, value },
-          ]),
-          aliasArguments,
-          `${fixtureCase.id}:${field}`,
-        );
-        assert.deepEqual(
-          parseClearraTextRequest(`${fixtureCase.alias_text} --${option} ${value}`, "$")
-            .arguments_,
-          fixtureCase.alias_text_argv,
-          `${fixtureCase.id}:${field}:text`,
-        );
-      }
-      assert.throws(
-        () => buildSlashCommandArguments(alias, [
-          ...fixtureCase.alias_options,
-          { name: fixtureCase.conflict.option, value: fixtureCase.conflict.value },
-        ]),
-        /Compatibility command .* fixes/u,
-        fixtureCase.id,
-      );
-      assert.throws(
-        () => parseClearraTextRequest(
-          `${fixtureCase.alias_text} --${fixtureCase.conflict.option} ${fixtureCase.conflict.value}`,
-          "$",
-        ),
-        /Compatibility command .* fixes/u,
-        `${fixtureCase.id}:text`,
-      );
+  const initialPc = [
+    { name: "field", value: "XXXXXX____" },
+    { name: "next", value: "I" },
+    { name: "lines", value: 1 },
+  ];
+  for (const verb of ["path", "chance", "minimals", "score", "score-minimals", "score-finder"]) {
+    const exact = buildSlashCommandArguments(findSlashCommand("pc").subcommands[verb], initialPc);
+    assert.deepEqual(buildSlashCommandArguments(findSlashCommand(verb), initialPc), exact);
+    assert.deepEqual(exact.slice(0, 2), ["pc", verb]);
+    for (const prefix of ["$", ">"]) {
+      const canonicalText = parseClearraTextRequest(`${prefix}pc ${verb} XXXXXX____ I 1`, prefix);
+      const aliasText = parseClearraTextRequest(`${prefix}${verb} XXXXXX____ I 1`, prefix);
+      assert.deepEqual(aliasText.arguments_, canonicalText.arguments_, verb);
     }
   }
 });
 
-test("typed PC results and generic chance/percent/score retain independent live route authority", () => {
-  const capability = findProductCapability("pc.chance");
-  const canonical = findSlashCommand("pc").subcommands.chance;
-  const generic = discordGenericCompatibilityRouteProjection();
-  const contracts = new Map(
-    DISCORD_PUBLIC_SEARCH_CONTRACT.map((entry) => [entry.id, entry]),
-  );
-
-  assert.deepEqual(capability.aliases, []);
-  assert.deepEqual(
-    {
-      input: canonical.input,
-      problemContractId: canonical.problemContractId,
-      inputSchemaId: canonical.inputSchemaId,
-      modalSchemaId: canonical.modalSchemaId,
-      resultContractId: canonical.resultContractId,
-      resultAuthorityId: canonical.resultAuthorityId,
-      resultAllowlist: canonical.resultAllowlist,
-      argvPrefix: canonical.argvPrefix,
-      effectClasses: canonical.effectClasses,
-    },
-    {
-      input: "pc-chance-v2",
-      problemContractId: "pc-clear-to-empty.v2",
-      inputSchemaId: "pc-pattern.v2",
-      modalSchemaId: "pc-pattern.v2",
-      resultContractId: "pc-probability.v2",
-      resultAuthorityId: "pc-chance",
-      resultAllowlist: ["pc-probability.v2"],
-      argvPrefix: ["pc", "chance"],
-      effectClasses: ["search_space", "supply_semantics", "probability_semantics"],
-    },
-  );
-  assert.equal(Object.hasOwn(capability.engine, "pcObjective"), false);
-  assert.deepEqual(capability.engine.fixedSemantics, {
-    solutionIdentity: "unique",
-    queueKnowledge: "full-oracle",
-  });
-  assert.deepEqual(
-    generic.map((route) => ({
-      id: route.id,
-      root: route.root,
-      input: route.input,
-      inputSchemaId: route.inputSchemaId,
-      modalSchemaId: route.modalSchemaId,
-      argvPrefix: route.argvPrefix,
-      resultContractId: route.resultContractId,
-      resultAuthorityId: route.resultAuthorityId,
-      resultAllowlist: route.resultAllowlist,
-    })),
-    [
-      {
-        id: "discord.compat.chance",
-        root: "chance",
-        input: "pc",
-        inputSchemaId: "pc-pattern",
-        modalSchemaId: "pc-pattern",
-        argvPrefix: ["sfinder", "chance"],
-        resultContractId: "pc-scenario",
-        resultAuthorityId: "chance",
-        resultAllowlist: ["pc-scenario"],
-      },
-      {
-        id: "discord.compat.percent",
-        root: "percent",
-        input: "pc",
-        inputSchemaId: "pc-pattern",
-        modalSchemaId: "pc-pattern",
-        argvPrefix: ["sfinder", "percent"],
-        resultContractId: "pc-scenario",
-        resultAuthorityId: "percent",
-        resultAllowlist: ["pc-scenario"],
-      },
-      {
-        id: "discord.compat.score",
-        root: "score",
-        input: "pc",
-        inputSchemaId: "pc-pattern",
-        modalSchemaId: "pc-pattern",
-        argvPrefix: ["sfinder", "score"],
-        resultContractId: "pc-scenario",
-        resultAuthorityId: "score",
-        resultAllowlist: ["pc-scenario"],
-      },
-    ],
-  );
-  for (const [name, id] of [
-    ["chance", "discord.compat.chance"],
-    ["percent", "discord.compat.percent"],
-    ["score", "discord.compat.score"],
-  ]) {
-    assert.equal(findSlashCommand(name).capabilityId, id);
-    assert.equal(findTextCommand(name).capabilityId, id);
-    assert.equal(findSlashCommand(name).subcommands, undefined);
+test("retired Sfinder-only routes do not reach registration, help, or text execution", () => {
+  const names = [
+    "sfinder", "percent", "spin-cover", "allspin-sol-finder", "allspin-pres-chance",
+    "pc-setup", "best-setup", "dpc-finder",
+  ];
+  for (const name of names) {
+    assert.equal(findSlashCommand(name), null, name);
+    assert.equal(findTextCommand(name), null, name);
+    assert.equal(classifyClearraTextCommand(`$${name} XXXXXX____ I 1`, "$"), null, name);
+    assert.equal(parseClearraTextMessage(`$${name} XXXXXX____ I 1`, "$"), null, name);
   }
+  assert.equal(findSlashCommand("finesse").subcommands.search, undefined);
+  assert.equal(parseClearraTextMessage("$sfinder path XXXXXX____ I 1", "$"), null);
   assert.equal(
-    Object.keys(findSlashCommand("pc").subcommands).filter((name) => name === "chance")
-      .length,
-    1,
-  );
-  assert.deepEqual(
-    {
-      typed: contracts.get("pc-chance").engineKinds,
-      chance: contracts.get("chance").engineKinds,
-      percent: contracts.get("percent").engineKinds,
-    },
-    {
-      typed: ["pc-probability.v2"],
-      chance: ["pc-scenario"],
-      percent: ["pc-scenario"],
-    },
+    DISCORD_PUBLIC_SEARCH_CONTRACT.some(({ loweringAuthority }) =>
+      loweringAuthority !== CLI_COMMAND_LOWERING_AUTHORITY),
+    false,
   );
 });
 
@@ -604,7 +311,7 @@ test("canonical slash topology uses family-specific subcommands and keeps compat
     ["search", "cover", "guaranteed"],
   );
   assert.equal(findSlashCommand("spin-structure").subcommands.search.input, "spin-structure-v2");
-  assert.ok(findSlashCommand("finesse").subcommands.search);
+  assert.equal(findSlashCommand("finesse").subcommands.search, undefined);
   assert.ok(findSlashCommand("finesse").subcommands.score);
   assert.equal(findSlashCommand("verify"), null);
   assert.equal(findTextCommand("verify"), null);
@@ -649,8 +356,8 @@ test("top-level help lists the complete v0.8 grouped surface and distinguishes l
   const compatibility = formatSlashCommandHelp("path", "en");
   assert.match(canonical, /hold:<disabled\|empty\|IOTSZJL>/u);
   assert.match(canonical, /spin-profile:<profile>/u);
-  assert.match(compatibility, /options:hold=use/u);
-  assert.doesNotMatch(compatibility, /spin-profile:<profile>/u);
+  assert.match(compatibility, /hold:<disabled\|empty\|IOTSZJL>/u);
+  assert.match(compatibility, /spin-profile:<profile>/u);
   assert.doesNotMatch(canonical, /finite path family|canonical candidate/iu);
   assert.doesNotMatch(formatSlashCommandHelp("pc path", "ko"), /path family|canonical candidate/iu);
 });
@@ -783,10 +490,7 @@ test("All-Spin PC capabilities preserve exact-queue and pattern-probability cont
     "--rule", "no-kick",
     "--max-nodes", "17",
   ]);
-  assert.deepEqual(
-    buildSlashCommandArguments(exactAlias, exactOptions),
-    exactArguments,
-  );
+  assert.equal(exactAlias, null);
   assert.equal(exactArguments.includes("--preserve-b2b"), false);
 
   const chanceOptions = exactOptions.map((option) => ({ ...option }));
@@ -796,21 +500,9 @@ test("All-Spin PC capabilities preserve exact-queue and pattern-probability cont
   assert.equal(chanceArguments[chanceArguments.indexOf("--patterns") + 1], "[IOTS]!");
   assert.equal(chanceArguments.includes("--queue"), false);
   assert.equal(chanceArguments.includes("--preserve-b2b"), false);
-  assert.deepEqual(
-    buildSlashCommandArguments(chanceAlias, chanceOptions),
-    chanceArguments,
-  );
-
-  const exactRoutes = exactCapability.aliases.filter(({ root }) => root === "allspin-sol-finder");
-  const chanceRoutes = chanceCapability.aliases.filter(({ root }) => root === "allspin-pres-chance");
-  assert.deepEqual(exactRoutes.map(({ slash, text, deprecateAfter }) => [slash, text, deprecateAfter]), [
-    [true, false, "v0.10.0"],
-    [false, true, null],
-  ]);
-  assert.deepEqual(chanceRoutes.map(({ slash, text, deprecateAfter }) => [slash, text, deprecateAfter]), [
-    [true, false, "v0.10.0"],
-    [false, true, null],
-  ]);
+  assert.equal(chanceAlias, null);
+  assert.deepEqual(exactCapability.aliases, []);
+  assert.deepEqual(chanceCapability.aliases, []);
 
   const contracts = new Map(
     DISCORD_PUBLIC_SEARCH_CONTRACT.map((entry) => [entry.id, entry]),
@@ -819,10 +511,7 @@ test("All-Spin PC capabilities preserve exact-queue and pattern-probability cont
     contracts.get("allspin-sol").resultContractId,
     "pc-b2b-preserving-witness.v1",
   );
-  assert.equal(
-    contracts.get("allspin-sol-finder").resultContractId,
-    "pc-b2b-preserving-witness.v1",
-  );
+  assert.equal(contracts.has("allspin-sol-finder"), false);
   assert.equal(
     contracts.get("allspin-pres-chance").resultContractId,
     "pc-b2b-preservation-probability.v1",
@@ -867,188 +556,24 @@ test("Discord capability IDs are exact members of the product authority", () => 
   assert.equal(findSlashCommand("special-cover"), null);
 });
 
-test("typed Build cover and legacy fieldwise cover retain separate authorities", () => {
+test("bare Build cover lowers through the typed Build cover producer", () => {
   const canonical = findSlashCommand("build").subcommands.cover;
-  const compatibility = findSlashCommand("cover");
-  assert.deepEqual(canonical.argvPrefix, ["build", "cover"]);
-  assert.equal(canonical.input, "build-v2-cover");
-  assert.deepEqual(compatibility.argvPrefix, ["build-probability"]);
-  assert.equal(findTextCommand("cover").argvPrefix[0], "build-probability");
-
-  const base = "__________";
-  const target = "####______";
-  const canonicalArguments = buildSlashCommandArguments(canonical, [
+  const alias = findSlashCommand("cover");
+  const options = [
     { name: "base-mask", value: "0x0" },
     { name: "target-mask", value: "0xf" },
     { name: "queue", value: "I" },
     { name: "height", value: 1 },
     { name: "hold", value: "empty" },
-  ]);
-  const compatibilityArguments = buildSlashCommandArguments(compatibility, [
-    { name: "base", value: base },
-    { name: "target", value: target },
-    { name: "next", value: "I" },
-    { name: "options", value: "hold=use" },
-  ]);
-  assert.deepEqual(canonicalArguments.slice(0, 2), ["build", "cover"]);
-  assert.equal(compatibilityArguments[0], "build-probability");
-  assert.notDeepEqual(canonicalArguments, compatibilityArguments);
-  assert.throws(
-    () => buildSlashCommandArguments(canonical, [
-      { name: "base", value: base },
-      { name: "target", value: target },
-      { name: "next", value: "I" },
-    ]),
-    /unsupported option 'base'/i,
-  );
-  assert.equal(parseClearraTextMessage("$sfinder cover PRIVATE", "$"), null);
-});
-
-test("canonical PC scoring owns typed summary authority while legacy score stays generic", () => {
-  const capability = findProductCapability("pc.score");
-  const scoreMinimalsCapability = findProductCapability("pc.score-minimals");
-  const genericRoute = findDiscordGenericCompatibilityRoute("discord.compat.score");
-  const score = findSlashCommand("pc").subcommands.score;
-  const scoreMinimals = findSlashCommand("pc").subcommands["score-minimals"];
-  const legacy = findSlashCommand("score");
-  assert.deepEqual(
-    {
-      input: score.input,
-      problemContractId: score.problemContractId,
-      inputSchemaId: score.inputSchemaId,
-      modalSchemaId: score.modalSchemaId,
-      resultContractId: score.resultContractId,
-      resultAuthorityId: score.resultAuthorityId,
-      resultAllowlist: score.resultAllowlist,
-      argvPrefix: score.argvPrefix,
-      effectClasses: score.effectClasses,
-    },
-    {
-      input: "pc-score-v2",
-      problemContractId: "pc-clear-to-empty.v2",
-      inputSchemaId: "pc-score.v2",
-      modalSchemaId: "pc-score.v2",
-      resultContractId: "pc-score-summary.v2",
-      resultAuthorityId: "pc-score",
-      resultAllowlist: ["pc-score-summary.v2"],
-      argvPrefix: ["pc", "score"],
-      effectClasses: [
-        "search_space",
-        "reachability_semantics",
-        "score_semantics",
-        "objective_selection",
-      ],
-    },
-  );
-  assert.equal(Object.hasOwn(capability.engine, "pcObjective"), false);
-  assert.deepEqual(capability.aliases, []);
-  assert.deepEqual(
-    {
-      input: scoreMinimals.input,
-      problemContractId: scoreMinimals.problemContractId,
-      inputSchemaId: scoreMinimals.inputSchemaId,
-      modalSchemaId: scoreMinimals.modalSchemaId,
-      resultContractId: scoreMinimals.resultContractId,
-      resultAuthorityId: scoreMinimals.resultAuthorityId,
-      resultAllowlist: scoreMinimals.resultAllowlist,
-      argvPrefix: scoreMinimals.argvPrefix,
-      fixedSemantics: scoreMinimalsCapability.engine.fixedSemantics,
-    },
-    {
-      input: "pc-score-v2",
-      problemContractId: "pc-clear-to-empty.v2",
-      inputSchemaId: "pc-score.v2",
-      modalSchemaId: "pc-score.v2",
-      resultContractId: "pc-score-portfolio.v2",
-      resultAuthorityId: "score-minimals",
-      resultAllowlist: ["pc-score-portfolio.v2"],
-      argvPrefix: ["pc", "score-minimals"],
-      fixedSemantics: {
-        scoreEquality: "score-only",
-        attackRole: "informational-only",
-        discordTieSelection: "smallest-canonical-candidate-id",
-      },
-    },
-  );
-  assert.equal(legacy.capabilityId, "discord.compat.score");
-  assert.equal(genericRoute.telemetryIdentity, "discord.compat.score");
-  assert.equal(
-    genericRoute.loweringAuthority,
-    CLI_COMPATIBILITY_LOWERING_AUTHORITY,
-  );
-  assert.notEqual(genericRoute.telemetryIdentity, capability.telemetryIdentity);
-  assert.notEqual(genericRoute.loweringAuthority, capability.loweringAuthority);
-  assert.equal(Object.hasOwn(genericRoute, "preset"), false);
-  assert.equal(legacy.compatibilityPreset, null);
-  assert.deepEqual(
-    {
-      input: legacy.input,
-      problemContractId: legacy.problemContractId,
-      inputSchemaId: legacy.inputSchemaId,
-      modalSchemaId: legacy.modalSchemaId,
-      resultContractId: legacy.resultContractId,
-      resultAuthorityId: legacy.resultAuthorityId,
-      resultAllowlist: legacy.resultAllowlist,
-      argvPrefix: legacy.argvPrefix,
-      effectClasses: legacy.effectClasses,
-    },
-    {
-      input: "pc",
-      problemContractId: "pc-clear-to-empty",
-      inputSchemaId: "pc-pattern",
-      modalSchemaId: "pc-pattern",
-      resultContractId: "pc-scenario",
-      resultAuthorityId: "score",
-      resultAllowlist: ["pc-scenario"],
-      argvPrefix: ["sfinder", "score"],
-      effectClasses: ["search_space", "supply_semantics", "result_materialization"],
-    },
-  );
-  assert.notDeepEqual(score.resultAllowlist, legacy.resultAllowlist);
-  assert.deepEqual(
-    score.registration.options.map(({ name }) => name),
-    [
-      "next", "field", "lines", "hold", "kicktable", "score-profile",
-      "spin-profile", "initial-b2b",
-    ],
-  );
-
-  const base = [
-    { name: "field", value: "__________\n__________" },
-    { name: "next", value: "IOTSZ" },
-    { name: "lines", value: 2 },
   ];
-  const canonical = buildSlashCommandArguments(score, base);
-  assert.deepEqual(canonical, [
-    "pc", "score",
-    "--lines", "2",
-    "--board-mask", "0x0",
-    "--height", "2",
-    "--pieces", "5",
-    "--queue", "IOTSZ",
-    "--hold", "empty",
-    "--score-profile", "tetrio",
-    "--rule", "srs-plus",
-  ]);
-  assert.equal(canonical.includes("--objective"), false);
-  assert.equal(canonical.includes("--score"), false);
-  const scoreMinimalsArguments = buildSlashCommandArguments(scoreMinimals, base);
-  assert.deepEqual(scoreMinimalsArguments, [
-    "pc", "score-minimals",
-    "--lines", "2",
-    "--board-mask", "0x0",
-    "--height", "2",
-    "--pieces", "5",
-    "--queue", "IOTSZ",
-    "--hold", "empty",
-    "--score-profile", "tetrio",
-    "--rule", "srs-plus",
-  ]);
-  for (const forbidden of ["--objective", "--score", "--solution-probabilities", "--ties", "--tie-snapshot", "--tie-cursor"]) {
-    assert.equal(scoreMinimalsArguments.includes(forbidden), false, forbidden);
-  }
-  assert.equal(buildSlashCommandArguments(legacy, base).includes("--score-profile"), false);
-  assert.doesNotMatch(formatSlashCommandHelp("pc score", "en"), /accuracy_level|profile_specific_exact/iu);
+  assert.deepEqual(buildSlashCommandArguments(alias, options),
+    buildSlashCommandArguments(canonical, options));
+  assert.deepEqual(alias.argvPrefix, ["build", "cover"]);
+  assert.throws(() => buildSlashCommandArguments(alias, [
+    { name: "base", value: "__________" },
+    { name: "target", value: "####______" },
+    { name: "next", value: "I" },
+  ]), /unsupported option 'base'/i);
 });
 
 test("canonical PC routes use native typed observation, B2B, probability, tiling, and failed-queue contracts", () => {
@@ -1258,7 +783,7 @@ test("ordered forward spin never aliases the sfinder structural namespace", () =
   const canonical = findSlashCommand("forward").subcommands.spin;
   assert.deepEqual(canonical.argvPrefix, ["spin-finder"]);
   assert.deepEqual(findSlashCommand("spin").argvPrefix, ["spin-finder"]);
-  assert.deepEqual(findSlashCommand("spin-cover").argvPrefix, ["spin-finder"]);
+  assert.equal(findSlashCommand("spin-cover"), null);
 
   assert.equal(parseClearraTextMessage("$sfinder spin PRIVATE", "$"), null);
   assert.equal(parseClearraTextMessage("$sfinder spincover PRIVATE", "$"), null);
@@ -1302,7 +827,7 @@ test("verify is a hidden text-only diagnostic with no slash or help discovery", 
     assert.equal(classifyClearraTextCommand(`${prefix}verify`, prefix), "verify");
     assert.deepEqual(
       parseClearraTextMessage(`${prefix}verify`, prefix),
-      ["sfinder", "verify", "--format", "text"],
+      ["verify", "--format", "text"],
     );
     assert.equal(classifyClearraTextCommand(`${prefix}verify PRIVATE`, prefix), null);
     assert.equal(parseClearraTextMessage(`${prefix}verify kicks`, prefix), null);
@@ -1330,7 +855,7 @@ test("objective is never a command and remains capability-closed on public input
     formatSlashCommandHelp("objective minimum-cover", "ko"),
     /objective min-cover/u,
   );
-  for (const command of globalCommands.filter(({ name }) => name !== "build")) {
+  for (const command of globalCommands.filter(({ name }) => !["build", "cover"].includes(name))) {
     assert.equal(JSON.stringify(command).includes('"name":"objective"'), false);
   }
   assert.equal(JSON.stringify(findSlashCommand("build")).includes('"name":"objective"'), true);
@@ -1338,52 +863,49 @@ test("objective is never a command and remains capability-closed on public input
   assert.doesNotMatch(formatSlashCommandHelp("objective", "ko"), /검증/u);
 });
 
-test("finesse search keeps its legacy fieldwise preset while score keeps its document form", () => {
-  const compatibility = findSlashCommand("finesse").subcommands.search;
-  const base = "__________";
-  const target = "####______";
-  const alias = buildSlashCommandArguments(compatibility, [
-    { name: "base", value: base },
-    { name: "target", value: target },
-    { name: "next", value: "I" },
-    { name: "options", value: "hold=use knowledge=both" },
-  ]);
-  assert.equal(alias[0], "build-probability");
-  assert.ok(alias.includes("--finesse"));
-  assert.ok(alias.includes("--no-mirror"));
-
+test("finesse score uses one document parser through grouped and short names", () => {
   const score = findSlashCommand("build").subcommands["finesse-score"];
+  const alias = findSlashCommand("finesse").subcommands.score;
   assert.equal(score.input, "finesse-score-v2");
-  assert.deepEqual(
-    score.registration.options.map(({ name }) => name),
-    ["document", "next", "kicktable", "hold", "knowledge", "source-pieces"],
-  );
-  assert.equal(findSlashCommand("finesse").subcommands.score.input, "finesse-score");
+  assert.equal(alias.input, score.input);
+  assert.deepEqual(alias.registration.options, score.registration.options);
+  assert.deepEqual(alias.argvPrefix, ["finesse", "score"]);
+  assert.equal(findSlashCommand("finesse").subcommands.search, undefined);
 });
 
 test("family-specific Modals preserve their own required inputs and fail closed on overflow", () => {
   const pcModal = buildCommandModalResponse(interaction("pc", "path"));
   const buildModal = buildCommandModalResponse(interaction("build", "cover"));
-  const legacyBuildModal = buildCommandModalResponse(interaction("cover", null));
+  const coverAliasModal = buildCommandModalResponse(interaction("cover", null));
   const setupModal = buildCommandModalResponse(interaction("setup", "joint"));
   const forwardModal = buildCommandModalResponse(interaction("forward", "damage"));
   const structureModal = buildCommandModalResponse(interaction("spin-structure", "search"));
   assert.equal(pcModal.data.custom_id, "clearra:search:v4:pc~path");
   assert.equal(buildModal, null);
-  assert.equal(legacyBuildModal.data.custom_id, "clearra:search:v4:cover");
+  assert.equal(coverAliasModal, null);
   assert.equal(setupModal.data.custom_id, "clearra:search:v4:setup~joint");
   assert.equal(forwardModal.data.custom_id, "clearra:search:v4:forward~damage");
   assert.equal(structureModal.data.custom_id, "clearra:search:v4:spin-structure~search");
-  assert.notDeepEqual(componentIds(pcModal), componentIds(legacyBuildModal));
-  assert.notDeepEqual(componentIds(legacyBuildModal), componentIds(setupModal));
+  assert.notDeepEqual(componentIds(pcModal), componentIds(setupModal));
   assert.notDeepEqual(componentIds(forwardModal), componentIds(structureModal));
 
   assert.throws(
-    () => buildCommandModalResponse(interaction("cover", null, [
+    () => buildSlashCommandArguments(findSlashCommand("cover"), [
       { name: "finesse", value: "inputs" },
-    ])),
+    ]),
     /unsupported option 'finesse'/i,
   );
+});
+
+test("short PC replay and score-finder Modals have the same choices as the grouped commands", () => {
+  for (const verb of ["path", "score-finder"]) {
+    const alias = buildCommandModalResponse(interaction(verb, null));
+    const canonical = buildCommandModalResponse(interaction("pc", verb));
+    assert.deepEqual(alias.data.components, canonical.data.components, verb);
+    const kicks = alias.data.components.find(({ component }) =>
+      component.custom_id === "kicktable")?.component;
+    assert.ok(kicks?.options.some(({ value }) => value === "no-kick"), verb);
+  }
 });
 
 function interaction(root, subcommand, options = []) {
@@ -1401,30 +923,6 @@ function interaction(root, subcommand, options = []) {
 
 function componentIds(modal) {
   return modal.data.components.map(({ component }) => component.custom_id);
-}
-
-function commandAtPath(path) {
-  const root = findSlashCommand(path[0]);
-  const command = path.length === 1 ? root : root?.subcommands?.[path[1]];
-  assert.ok(command, `missing slash command: ${path.join(" ")}`);
-  return command;
-}
-
-function presetOptionName(field) {
-  const name = ({
-    finesse: "finesse",
-    mirror: "mirror",
-    scoreProfile: "score-profile",
-    setupPriority: "priority",
-  })[field];
-  assert.ok(name, `unknown compatibility preset field: ${field}`);
-  return name;
-}
-
-function withoutRetiredPcExecutionFlags(arguments_) {
-  return arguments_.filter((token) =>
-    token !== "--no-tablebase" && token !== "--no-build-dependency-dag"
-  );
 }
 
 function argvContract(arguments_) {

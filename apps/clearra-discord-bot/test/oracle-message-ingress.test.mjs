@@ -174,7 +174,7 @@ test("Sfinder-man guild ownership delegates search and ambient render before loc
   const ingress = createIngress(
     {
       acceptsOracleMessage(candidate) {
-        return candidate.content.startsWith("$path") ||
+        return candidate.content.startsWith("$pc path ") ||
           candidate.content.startsWith("v115@") ||
           candidate.content.startsWith("ctk3_") ||
           candidate.content === "__________" ||
@@ -199,7 +199,7 @@ test("Sfinder-man guild ownership delegates search and ambient render before loc
   );
 
   for (const [id, content] of [
-    ["delegated-search", "$path --field __________ --next I"],
+    ["delegated-search", "$pc path --field XXXXXX____ --queue I --lines 1"],
     ["delegated-unknown-prefix", "$owned-by-sfinder-man"],
     ["delegated-render", "v115@vhAAgH"],
     ["delegated-ctk3", "ctk3_FAKE"],
@@ -266,7 +266,7 @@ test("Sfinder-man guild ownership delegates search and ambient render before loc
       "MESSAGE_CREATE",
       message("delegated-search", {
         guild_id: "sfinder-guild",
-        content: "$path --field __________ --next I",
+        content: "$pc path --field XXXXXX____ --queue I --lines 1",
       }),
     ),
     { accepted: false, reason: "duplicate-message" },
@@ -315,7 +315,7 @@ test("Oracle ingress owns one privacy-bounded terminal log for text outcomes", a
       "MESSAGE_CREATE",
       message("delegated-log", {
         guild_id: "sfinder-guild",
-        content: "$path PRIVATE",
+        content: "$pc path PRIVATE",
       }),
     ),
     { accepted: false, reason: "delegated", owner: "sfinder-man" },
@@ -360,7 +360,7 @@ test("Sfinder-man guild ownership never delegates Clearra self results", async (
     {
       acceptsOracleMessage(candidate) {
         return candidate.attachments.some(
-          (attachment) => attachment.filename === "path-result.ctk3",
+          (attachment) => attachment.filename === "pc-result.ctk3",
         );
       },
       async handleOracleMessage(candidate) {
@@ -383,7 +383,7 @@ test("Sfinder-man guild ownership never delegates Clearra self results", async (
         author: { id: "clearra-bot", bot: true },
         webhook_id: "interaction-webhook",
         content: "",
-        attachments: [{ filename: "path-result.ctk3" }],
+        attachments: [{ filename: "pc-result.ctk3" }],
       }),
     ),
     { accepted: true },

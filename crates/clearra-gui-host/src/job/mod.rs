@@ -15,5 +15,6 @@ pub use gui_job_event::GuiJobEvent;
 pub use gui_job_progress::GuiJobProgress;
 pub use gui_job_queue::{GuiJobQueue, GuiJobQueueError, GuiJobQueueErrorCode};
 pub use gui_job_result::GuiJobResult;
+pub(crate) use gui_job_runner::run_desktop_product;
 pub use gui_job_runner::{GuiJobHandle, GuiJobRunner};
 pub use gui_job_status::GuiJobStatus;

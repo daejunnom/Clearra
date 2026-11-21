@@ -37,17 +37,11 @@ const SPIN_STRUCTURE_PROFILES = [
   "all-spin-plus",
 ];
 
-const PC_COMMANDS = [
-  "path",
-  "percent",
-  "chance",
-  "score",
-];
-const SCORED_PC_COMMANDS = ["score-minimals"];
-const TYPED_PC_COMMANDS = ["minimals"];
-const COLORED_COMMANDS = [];
-const SPIN_COMMANDS = ["spin-cover", "spin"];
-const REMAINING_COMMANDS = ["pc-setup", "best-setup", "dpc-finder"];
+const PC_COMMANDS = ["path", "chance", "minimals"];
+const SCORED_PC_COMMANDS = ["score", "score-minimals"];
+const SETUP_COMMANDS = ["joint", "build", "pc"];
+const AUTO_PC_LINES = ["auto", ...Array.from({ length: 24 }, (_, index) => String(index + 1))];
+const INITIAL_HOLD = ["empty", "disabled", "I", "O", "T", "S", "Z", "J", "L"];
 
 test("every modal-backed search route opens its capability-specific v4 Modal while help stays direct", () => {
   for (const route of searchRoutes()) {
@@ -130,55 +124,32 @@ test("full-height PC score forms match the 24-row capability, including Japanese
       const choices = component(modal, "lines").options.map(({ value }) => value);
       assert.equal(choices.length, 25);
       assert.ok(choices.includes("24"));
+      assert.deepEqual(modalFor(subcommand, [], locale).data.components, modal.data.components);
     }
   }
-  assert.match(label(modalFor("score-finder", [], "en"), "field").label, /1–6 rows/u);
 });
 
-test("finesse subcommands use bounded localized guided forms", () => {
-  const search = buildMissingBoardModalResponse(
-    slashInteraction("finesse", [{ type: 1, name: "search", options: [] }]),
-    "ko",
-  );
-  assert.equal(search.data.title, "피네스 탐색 입력");
-  assert.deepEqual(componentNames(search), ["target", "next", "base", "kicktable", "options"]);
-  assert.equal(search.data.components.length, 5);
-  assertStringSelect(
-    component(search, "options"),
-    [
-      "hold=use knowledge=both",
-      "hold=use knowledge=oracle",
-      "hold=use knowledge=visible-7",
-      "hold=avoid knowledge=both",
-      "hold=avoid knowledge=oracle",
-      "hold=avoid knowledge=visible-7",
-    ],
-    "hold=use knowledge=both",
-  );
-
-  const score = buildMissingBoardModalResponse(
-    slashInteraction("finesse", [{ type: 1, name: "score", options: [] }]),
-    "en",
-  );
-  assert.equal(score.data.title, "finesse score form");
-  assert.deepEqual(componentNames(score), ["document", "next", "kicktable", "options", "locale"]);
-  assert.equal(score.data.components.length, 5);
+test("finesse score alias uses the canonical bounded guided form", () => {
+  const score = modalForSubcommand("finesse", "score");
+  assert.deepEqual(score.data.components, modalForSubcommand("build", "finesse-score").data.components);
+  assert.deepEqual(componentNames(score), ["document", "next", "kicktable", "hold", "knowledge"]);
 
   const scoreSubmit = modalInteraction(score.data.custom_id, [
     textLabel("document", "ctk3_example"),
     textLabel("next", "[TI]!"),
     selectLabel("kicktable", ["srs-plus"]),
-    selectLabel("options", ["hold=avoid knowledge=oracle"]),
-    selectLabel("locale", ["en"]),
+    selectLabel("hold", ["disabled"]),
+    selectLabel("knowledge", ["oracle"]),
   ]);
   const scoreCommand = findFieldModalCommand(scoreSubmit);
   assert.equal(scoreCommand.subcommand, "score");
-  assert.equal(readCommandModalLocale(scoreSubmit), "en");
+  assert.equal(readCommandModalLocale(scoreSubmit), null);
   assert.deepEqual(optionsByName(readFieldModalOptions(scoreSubmit, scoreCommand)), {
     document: "ctk3_example",
     next: "[TI]!",
     kicktable: "srs-plus",
-    options: "hold=avoid knowledge=oracle",
+    hold: "disabled",
+    knowledge: "oracle",
   });
 });
 
@@ -314,15 +285,6 @@ test("v4 Modal layouts are localized where capacity allows and never exceed five
       "field",
       "next",
       "lines",
-      "kicktable",
-      "options",
-    ]);
-  }
-  for (const name of TYPED_PC_COMMANDS) {
-    assert.deepEqual(componentNames(modalFor(name)), [
-      "field",
-      "next",
-      "lines",
       "hold",
       "kicktable",
     ]);
@@ -337,13 +299,7 @@ test("v4 Modal layouts are localized where capacity allows and never exceed five
     ]);
   }
 
-  assert.deepEqual(componentNames(modalFor("cover")), [
-    "base",
-    "target",
-    "next",
-    "kicktable",
-    "options",
-  ]);
+  assert.equal(buildMissingBoardModalResponse(slashInteraction("cover")), null);
   assert.equal(
     buildMissingBoardModalResponse(slashInteraction("build", [{
       type: 1,
@@ -353,37 +309,15 @@ test("v4 Modal layouts are localized where capacity allows and never exceed five
     null,
   );
 
-  for (const name of COLORED_COMMANDS) {
-    assert.deepEqual(componentNames(modalFor(name)), [
-      "field",
-      "next",
-      "kicktable",
-      "locale",
-    ]);
-  }
-  for (const name of SPIN_COMMANDS) {
-    assert.deepEqual(componentNames(modalFor(name)), [
-      "field",
-      "next",
-      "kicktable",
-      "options",
-      "locale",
-    ]);
-  }
+  assert.deepEqual(modalFor("spin").data.components, modalForSubcommand("forward", "spin").data.components);
   assert.deepEqual(componentNames(modalFor("score-finder")), [
     "field",
     "next",
     "lines",
+    "hold",
     "kicktable",
-    "options",
   ]);
-  assert.deepEqual(componentNames(modalFor("damage")), [
-    "field",
-    "next",
-    "kicktable",
-    "options",
-    "locale",
-  ]);
+  assert.deepEqual(modalFor("damage").data.components, modalForSubcommand("forward", "damage").data.components);
   assert.deepEqual(componentNames(modalForSubcommand("spin-structure", "search")), [
     "pieces",
     "field",
@@ -391,31 +325,22 @@ test("v4 Modal layouts are localized where capacity allows and never exceed five
     "spin-profile",
     "kicktable",
   ]);
-  for (const name of REMAINING_COMMANDS) {
-    assert.deepEqual(componentNames(modalFor(name)), [
+  for (const subcommand of SETUP_COMMANDS) {
+    assert.deepEqual(componentNames(modalForSubcommand("setup", subcommand)), [
       "remaining",
-      "kicktable",
-      "priority",
-      "max-setup-pieces",
+      "mode",
+      "qb",
       "queue-knowledge",
+      "kicktable",
     ]);
   }
   assert.equal(buildMissingBoardModalResponse(slashInteraction("verify")), null);
 });
 
-test("setup ranking Modals preserve command defaults within Discord's five-component cap", () => {
-  for (const [name, priority] of [
-    ["pc-setup", "all"],
-    ["best-setup", "build"],
-    ["dpc-finder", "pc"],
-  ]) {
-    const modal = modalFor(name);
-    assertStringSelect(component(modal, "priority"), ["all", "build", "pc"], priority);
-    assertStringSelect(
-      component(modal, "max-setup-pieces"),
-      Array.from({ length: 10 }, (_, index) => String(index + 1)),
-      "9",
-    );
+test("canonical setup Modals preserve input defaults within Discord's five-component cap", () => {
+  for (const subcommand of SETUP_COMMANDS) {
+    const modal = modalForSubcommand("setup", subcommand);
+    assertStringSelect(component(modal, "mode"), ["oracle", "qb"], "oracle");
     assertStringSelect(
       component(modal, "queue-knowledge"),
       ["full-queue", "visible-7"],
@@ -426,29 +351,23 @@ test("setup ranking Modals preserve command defaults within Discord's five-compo
     assert.equal(componentNames(modal).includes("locale"), false);
   }
 
-  const korean = modalFor("best-setup", [], "ko");
-  assert.match(label(korean, "priority").label, /셋업 정렬/u);
-  assert.match(label(korean, "max-setup-pieces").description, /1–10개/u);
+  const korean = modalForSubcommand("setup", "build", [], "ko");
   assert.deepEqual(
     component(korean, "queue-knowledge").options.map(({ label: text }) => text),
     ["전체 미래 큐 (기본값)", "공개 7개"],
   );
 
-  const preselected = modalFor("pc-setup", [
+  const preselected = modalForSubcommand("setup", "joint", [
     { name: "kicktable", value: "srs-x" },
-    { name: "priority", value: "build" },
-    { name: "max-setup-pieces", value: 8 },
+    { name: "mode", value: "qb" },
+    { name: "qb", value: "Z" },
     { name: "queue-knowledge", value: "visible-7" },
   ]);
   assertStringSelect(component(preselected, "kicktable"), [
     "srs-plus", "srs", "srs-x", "jstris-180", "no-kick",
   ], "srs-x");
-  assertStringSelect(component(preselected, "priority"), ["all", "build", "pc"], "build");
-  assertStringSelect(
-    component(preselected, "max-setup-pieces"),
-    Array.from({ length: 10 }, (_, index) => String(index + 1)),
-    "8",
-  );
+  assertStringSelect(component(preselected, "mode"), ["oracle", "qb"], "qb");
+  assert.equal(component(preselected, "qb").value, "Z");
   assertStringSelect(
     component(preselected, "queue-knowledge"),
     ["full-queue", "visible-7"],
@@ -457,28 +376,27 @@ test("setup ranking Modals preserve command defaults within Discord's five-compo
 });
 
 test("setup ranking Modal submits explicit defaults and rejects hidden-option loss", () => {
-  const modal = modalFor("best-setup");
+  const modal = modalForSubcommand("setup", "build");
   const interaction = modalInteraction(modal.data.custom_id, [
     textLabel("remaining", "IOTS"),
     selectLabel("kicktable", ["srs-plus"]),
-    selectLabel("priority", ["build"]),
-    selectLabel("max-setup-pieces", ["9"]),
+    selectLabel("mode", ["oracle"]),
+    textLabel("qb", ""),
     selectLabel("queue-knowledge", ["full-queue"]),
   ]);
   const command = findFieldModalCommand(interaction);
   assert.deepEqual(optionsByName(readFieldModalOptions(interaction, command)), {
     remaining: "IOTS",
-    priority: "build",
-    "max-setup-pieces": 9,
+    mode: "oracle",
     "queue-knowledge": "full-queue",
     kicktable: "srs-plus",
   });
 
   for (const name of ["next-cycle-remaining", "setup-length"]) {
     assert.throws(
-      () => buildMissingBoardModalResponse(slashInteraction("pc-setup", [
+      () => modalForSubcommand("setup", "joint", [
         { name, value: name === "setup-length" ? "longer" : "Z" },
-      ])),
+      ]),
       (error) => error?.code === "options.modal_unrepresented" &&
         error?.details?.options === name,
     );
@@ -509,74 +427,26 @@ test("24L Tiling, Minimum, Chance and Failed Queue Modals expose exactly Auto pl
 });
 
 test("PC fields default to four rows and other board searches default to eight", () => {
-  for (const name of PC_COMMANDS) {
+  for (const name of [...PC_COMMANDS, ...SCORED_PC_COMMANDS, "score-finder"]) {
     assert.equal(component(modalFor(name), "field").value, EMPTY_FOUR_ROWS);
   }
 
-  const eightRowFields = [
-    ["cover", "base"],
-    ["cover", "target"],
-    ...COLORED_COMMANDS.map((name) => [name, "field"]),
-    ...SPIN_COMMANDS.map((name) => [name, "field"]),
-    ["damage", "field"],
-  ];
-  for (const [name, input] of eightRowFields) {
-    assert.equal(component(modalFor(name), input).value, EMPTY_EIGHT_ROWS);
+  for (const name of ["spin", "damage"]) {
+    assert.equal(component(modalFor(name), "field").value, EMPTY_EIGHT_ROWS);
   }
   assert.equal(
     component(modalForSubcommand("spin-structure", "search"), "field").value,
     EMPTY_EIGHT_ROWS,
   );
-  assert.equal(component(modalFor("score-finder"), "field").value, EMPTY_FOUR_ROWS);
 });
 
-test("v4 lines, kicktable, hold, spin type, and language use string selects", () => {
+test("v4 lines, kicktable, hold, and spin profile use string selects", () => {
   const path = modalFor("path");
-  assertStringSelect(
-    component(path, "lines"),
-    ["auto", "1", "2", "3", "4", "5", "6"],
-    "auto",
-  );
-  assert.match(component(path, "lines").options[0].label, /rows 1–6/);
-  assertStringSelect(component(path, "kicktable"), BUILTIN_KICKTABLES, "srs-plus");
-  assertStringSelect(
-    component(path, "options"),
-    ["hold=use", "hold=avoid"],
-    "hold=use",
-  );
-
-  const cover = modalFor("cover");
-  assertStringSelect(component(cover, "kicktable"), BUILTIN_KICKTABLES, "srs-plus");
-  assertStringSelect(
-    component(cover, "options"),
-    ["hold=use", "hold=avoid"],
-    "hold=use",
-  );
-
-  const spin = modalFor("spin");
-  assertStringSelect(component(spin, "kicktable"), BUILTIN_KICKTABLES, "srs-plus");
-  assertStringSelect(
-    component(spin, "options"),
-    [
-      "type=TSS",
-      "type=TSD",
-      "type=TST",
-      "type=ANY",
-    ],
-    "type=TSS",
-  );
-
-  const scoreFinder = modalFor("score-finder");
-  assertStringSelect(
-    component(scoreFinder, "lines"),
-    ["1", "2", "3", "4", "5", "6"],
-    "4",
-  );
-  assertStringSelect(
-    component(scoreFinder, "options"),
-    ["initial-b2b=false", "initial-b2b=true"],
-    "initial-b2b=false",
-  );
+  assertStringSelect(component(path, "lines"), AUTO_PC_LINES, "auto");
+  assert.deepEqual(component(path, "kicktable"), component(modalForSubcommand("pc", "path"), "kicktable"));
+  assertStringSelect(component(path, "hold"), INITIAL_HOLD, "empty");
+  assertStringSelect(component(modalFor("spin"), "lines"), SPIN_STRUCTURE_LINES, "any");
+  assertStringSelect(component(modalFor("score-finder"), "lines"), AUTO_PC_LINES, "auto");
 
   const spinStructure = modalForSubcommand("spin-structure", "search");
   assertStringSelect(
@@ -597,26 +467,6 @@ test("v4 lines, kicktable, hold, spin type, and language use string selects", ()
   assert.equal(componentNames(spinStructure).includes("locale"), false);
 
   assert.equal(buildMissingBoardModalResponse(slashInteraction("verify")), null);
-
-  const koreanPath = modalFor("path", [], "ko");
-  assert.deepEqual(
-    component(koreanPath, "kicktable").options.map(({ label: text }) => text),
-    ["SRS+ (기본값)", "SRS", "SRS-X", "Jstris 180"],
-  );
-
-  const koreanSpin = modalFor("spin", [], "ko");
-  assert.deepEqual(
-    component(koreanSpin, "options").options.map(({ label: text }) => text),
-    ["T-spin 싱글", "T-spin 더블", "T-spin 트리플", "모든 T-spin"],
-  );
-
-  const koreanScoreFinder = modalFor("score-finder", [], "ko");
-  assert.deepEqual(
-    component(koreanScoreFinder, "options").options.map(({ label: text }) => text),
-    ["초기 B2B 사용 안 함 (기본값)", "초기 B2B 사용"],
-  );
-  assert.equal(componentNames(koreanScoreFinder).includes("locale"), false);
-  assert.equal(componentNames(modalFor("damage", [], "ko")).includes("locale"), true);
 
   const koreanSpinStructure = modalForSubcommand("spin-structure", "search", [], "ko");
   assert.equal(koreanSpinStructure.data.title, "스핀-구조 탐색 입력");
@@ -652,8 +502,8 @@ test("board forms prefer keyboard # and _ cells without advertising G", () => {
   const koreanBuildField = label(modalFor("spin", [], "ko"), "field");
 
   assert.equal(englishField.component.value, EMPTY_FOUR_ROWS);
-  assert.match(englishField.label, /1–6 rows/);
-  assert.match(koreanField.label, /1–6줄/u);
+  assert.match(englishField.label, /1–24 rows/);
+  assert.match(koreanField.label, /1–24줄/u);
   assert.match(englishBuildField.label, /1–24 rows/);
   assert.match(koreanBuildField.label, /1–24줄/u);
   assert.doesNotMatch(englishField.label, /prefill|default/i);
@@ -667,23 +517,23 @@ test("board forms prefer keyboard # and _ cells without advertising G", () => {
 
   const englishScoreLines = label(modalFor("score-finder", [], "en"), "lines");
   const koreanScoreLines = label(modalFor("score-finder", [], "ko"), "lines");
-  assert.match(englishScoreLines.description, /1 through 6 rows/);
-  assert.match(koreanScoreLines.description, /1–6줄/u);
+  assert.match(englishScoreLines.description, /rows 1–24/);
+  assert.match(koreanScoreLines.description, /1–24줄/u);
   assert.doesNotMatch(englishScoreLines.description, /default/i);
   assert.doesNotMatch(koreanScoreLines.description, /기본/u);
 });
 
 test("v4 Modal language selection is explicit only when the layout has capacity", () => {
-  const coloredModal = modalFor("spin", [], "ko");
-  const coloredSubmit = modalInteraction(coloredModal.data.custom_id, [
-    textLabel("field", EMPTY_EIGHT_ROWS),
+  const tilingModal = modalForSubcommand("pc", "tiling", [], "ko");
+  const tilingSubmit = modalInteraction(tilingModal.data.custom_id, [
+    textLabel("field", EMPTY_FOUR_ROWS),
     textLabel("next", "I"),
-    selectLabel("kicktable", ["srs-plus"]),
-    selectLabel("options", ["type=TSS"]),
+    selectLabel("lines", ["auto"]),
+    selectLabel("hold", ["empty"]),
     selectLabel("locale", ["ko"]),
   ]);
-  assert.equal(readCommandModalLocale(coloredSubmit), "ko");
-  assert.match(coloredModal.data.title, /입력/u);
+  assert.equal(readCommandModalLocale(tilingSubmit), "ko");
+  assert.match(tilingModal.data.title, /입력/u);
 
   const pathModal = modalFor("path", [], "ko");
   assert.equal(componentNames(pathModal).includes("locale"), false);
@@ -692,7 +542,7 @@ test("v4 Modal language selection is explicit only when the layout has capacity"
     textLabel("next", "I"),
     selectLabel("lines", ["auto"]),
     selectLabel("kicktable", ["srs-plus"]),
-    selectLabel("options", ["hold=use"]),
+    selectLabel("hold", ["empty"]),
   ]);
   assert.equal(readCommandModalLocale(pathSubmit), null);
 });
@@ -704,7 +554,7 @@ test("v4 submit reads select values arrays and omits automatic lines", () => {
     textLabel("next", "[iosz]p2"),
     selectLabel("lines", ["auto"]),
     selectLabel("kicktable", ["srs"]),
-    selectLabel("options", ["hold=avoid"]),
+    selectLabel("hold", ["disabled"]),
   ]);
   const command = findFieldModalCommand(interaction);
   assert.equal(command?.name, "path");
@@ -712,18 +562,18 @@ test("v4 submit reads select values arrays and omits automatic lines", () => {
     field: "..........\n....xx....",
     next: "[iosz]p2",
     kicktable: "srs",
-    options: "hold=avoid",
+    hold: "disabled",
   });
 });
 
-test("score-finder Modal submits explicit row and initial-B2B defaults", () => {
+test("score-finder Modal submits named row and hold options", () => {
   const modal = modalFor("score-finder");
   const interaction = modalInteraction(modal.data.custom_id, [
     textLabel("field", EMPTY_EIGHT_ROWS),
     textLabel("next", "SIJSTLZO"),
     selectLabel("lines", ["4"]),
     selectLabel("kicktable", ["srs-plus"]),
-    selectLabel("options", ["initial-b2b=false"]),
+    selectLabel("hold", ["empty"]),
   ]);
   const command = findFieldModalCommand(interaction);
   assert.deepEqual(optionsByName(readFieldModalOptions(interaction, command)), {
@@ -731,7 +581,7 @@ test("score-finder Modal submits explicit row and initial-B2B defaults", () => {
     next: "SIJSTLZO",
     lines: 4,
     kicktable: "srs-plus",
-    options: "initial-b2b=false",
+    hold: "empty",
   });
 });
 
@@ -756,12 +606,12 @@ test("spin-structure Modal submits inventory, terminal lines, profile, and rule"
   });
 });
 
-test("legacy v1 text-input submits remain compatible", () => {
+test("v1 form transport still reads native fields without accepting retired packed inputs", () => {
   const interaction = modalInteraction("clearra:board:v1:path", [
     textLabel("next", "[iosz]p2"),
     textLabel("field", "..........\n....xx...."),
     textLabel("lines", "6"),
-    textLabel("options", "hold=avoid"),
+    textLabel("hold", "disabled"),
   ]);
   const command = findFieldModalCommand(interaction);
   assert.equal(command?.name, "path");
@@ -769,8 +619,13 @@ test("legacy v1 text-input submits remain compatible", () => {
     field: "..........\n....xx....",
     next: "[iosz]p2",
     lines: 6,
-    options: "hold=avoid",
+    hold: "disabled",
   });
+  const retiredOptions = modalInteraction("clearra:board:v1:path", [
+    textLabel("next", "I"),
+    textLabel("options", "hold=avoid"),
+  ]);
+  assert.throws(() => readFieldModalOptions(retiredOptions, command), /unsupported Modal input 'options'/);
 
   const legacyActionRows = modalInteraction("clearra:board:v1:path", [
     { type: 1, components: [{ type: 4, custom_id: "next", value: "I" }] },
@@ -782,30 +637,21 @@ test("legacy v1 text-input submits remain compatible", () => {
   );
 });
 
-test("in-flight v3 setup-ranking Modals retain their two inputs and locale selector", () => {
+test("in-flight Modal IDs for retired setup presets do not resolve to product commands", () => {
   const interaction = modalInteraction("clearra:search:v3:best-setup", [
     textLabel("remaining", "IOTS"),
     selectLabel("kicktable", ["srs-x"]),
     selectLabel("locale", ["ko"]),
   ]);
-  const command = findFieldModalCommand(interaction);
-  assert.equal(command?.name, "best-setup");
-  assert.equal(readCommandModalLocale(interaction), "ko");
-  assert.deepEqual(optionsByName(readFieldModalOptions(interaction, command)), {
-    remaining: "IOTS",
-    kicktable: "srs-x",
-  });
+  assert.equal(findFieldModalCommand(interaction), null);
+  assert.equal(readCommandModalLocale(interaction), null);
 
   const v2 = modalInteraction("clearra:search:v2:pc-setup", [
     textLabel("remaining", "IOT"),
     selectLabel("kicktable", ["srs"]),
   ]);
-  const v2Command = findFieldModalCommand(v2);
+  assert.equal(findFieldModalCommand(v2), null);
   assert.equal(readCommandModalLocale(v2), null);
-  assert.deepEqual(optionsByName(readFieldModalOptions(v2, v2Command)), {
-    remaining: "IOT",
-    kicktable: "srs",
-  });
 });
 
 test("Modal submit rejects duplicate, unknown, malformed, and multi-value inputs", () => {

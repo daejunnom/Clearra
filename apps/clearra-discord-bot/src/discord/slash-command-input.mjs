@@ -314,19 +314,27 @@ export function buildSlashCommandArgumentPlan(command, rawOptions = []) {
     const values = optionValues(rawOptions, allowedOptionNames(command));
     if (!values.has("lines")) {
       const maxRows = discordPcMaxRows(command.input);
-      const field = normalizeSearchField(values.get("field"), { maxRows, maxBits: maxRows * 10 });
-      const next = requiredText(values, "next", NEXT_MAX_LENGTH);
-      const lines = automaticPcLines({
-        occupied: field.occupied,
-        pieceCount: queuePatternPieceCount(next),
-        maxLines: maxRows,
-      });
+      const initialBoard = normalizeNativePcBoard(values.get("field"), maxRows);
+      const next = command.input === "pc-path-v2"
+        ? validatedNext(values, false)
+        : requiredText(values, "next", NEXT_MAX_LENGTH);
+      const lines = automaticPcLinesFromNormalizedBoard(
+        initialBoard,
+        queuePatternPieceCount(next),
+        maxRows,
+      );
       return Object.freeze({
         argumentSets: Object.freeze(lines.map((lineCount) => Object.freeze(
-          buildSlashCommandArguments(command, [
-            ...rawOptions,
-            { name: "lines", value: lineCount },
-          ]),
+          command.input === "pc-path-v2"
+            ? nativePcArguments(command, values, { path: true }, {
+              initialBoard,
+              next,
+              targetLines: lineCount,
+            })
+            : buildSlashCommandArguments(command, [
+              ...rawOptions,
+              { name: "lines", value: lineCount },
+            ]),
         ))),
         automaticPcTargets: true,
       });
@@ -755,20 +763,25 @@ function fieldAndNextArguments(command, values, trailing = [], options = {}) {
   ];
 }
 
-function nativePcArguments(command, values, mode = {}) {
+function normalizeNativePcBoard(source, maxRows) {
+  const field = normalizeSearchField(source, { maxRows, maxBits: maxRows * 10 });
+  return clearCompletedPcRows(field.occupied, field.height);
+}
+
+function nativePcArguments(command, values, mode = {}, plannedInput = null) {
   const typedScoreSummary = mode.score && command.capabilityId === "pc.score";
   const typedScoreMinimals = mode.score && command.capabilityId === "pc.score-minimals";
   const typedScoreProduct = typedScoreSummary || typedScoreMinimals;
   const typedMinimumCover = command.capabilityId === "pc.minimals";
   const typedSave = mode.save === true;
   const maxRows = discordPcMaxRows(command.input);
-  const field = normalizeSearchField(values.get("field"), { maxRows, maxBits: maxRows * 10 });
-  const next = validatedNext(values, false);
-  const lines = optionalInteger(values, "lines", 1, maxRows);
+  const initialBoard = plannedInput?.initialBoard ??
+    normalizeNativePcBoard(values.get("field"), maxRows);
+  const next = plannedInput?.next ?? validatedNext(values, false);
+  const lines = plannedInput?.targetLines ?? optionalInteger(values, "lines", 1, maxRows);
   if (lines === null) {
     throw new Error("Native PC search requires one exact lines value after automatic target planning.");
   }
-  const initialBoard = clearCompletedPcRows(field.occupied, field.height);
   const target = (1n << BigInt(lines * 10)) - 1n;
   if ((initialBoard & ~target) !== 0n) {
     throw new Error("field has occupied cells above the requested PC target.");
@@ -2365,10 +2378,14 @@ export function automaticPcLines({ occupied, pieceCount, maxLines = DISCORD_PC_F
       ? "Automatic PC search supports fields up to six rows high."
       : `Automatic PC search supports fields up to ${maxLines} rows high.`);
   }
+  const initialBoard = clearCompletedPcRows(occupied, inputHeight);
+  return automaticPcLinesFromNormalizedBoard(initialBoard, pieceCount, maxLines);
+}
+
+function automaticPcLinesFromNormalizedBoard(initialBoard, pieceCount, maxLines) {
   if (!Number.isSafeInteger(pieceCount) || pieceCount < 1) {
     throw new Error("Automatic PC search requires a finite next-pattern length.");
   }
-  const initialBoard = clearCompletedPcRows(occupied, inputHeight);
   const height = occupiedHeight(initialBoard);
   const lines = Array.from(
     { length: maxLines },

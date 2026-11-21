@@ -1,7 +1,7 @@
 # Clearrabot
 
-Clearrabot exposes the represented Sfinder-compatible command contracts as
-Discord slash commands. Oracle Gateway is the single Discord-facing runtime: it
+Clearrabot exposes Clearra product commands through Discord. Oracle Gateway
+is the single Discord-facing runtime: it
 owns slash commands, Modals, Message commands, `$`/`>` text commands, standalone
 renders, acknowledgements, and result delivery. Heavy searches are proxied to
 Tokyo `clearra-current-job`; that service never receives the Discord token,
@@ -9,14 +9,25 @@ interaction token, webhook URL, or channel credential.
 
 ## Active Discord surface
 
-The registered slash commands are `/render-file`, `/path`, `/percent`, `/chance`, `/minimals`,
-`/score`, `/score-minimals`, `/saves`, `/best-save`, `/cover`, `/setup`,
-`/congruent`, `/congruent-cover`, `/setup-cover`, `/cover-percent`,
-`/special-cover`, `/spin-cover`, `/spin`, `/spin-structure`, `/score-finder`, `/damage`, `/pc-setup`,
-`/best-setup`, `/dpc-finder`, `/finesse search`, `/finesse score`, and `/help`. `/help` accepts an
-optional command name in `arguments`; without it, the command lists the active
-groups. Search commands use structured primary inputs instead of one raw argv
-string. For example:
+Use `/help` to discover the grouped commands: `/pc`, `/build`, `/setup`,
+`/forward`, `/spin-structure`, `/recovery`, and `/utility`. Supply a
+command name in `arguments` to see its input options.
+
+The short Clearra names below are the same commands as their grouped
+counterparts. They use the same input options, search, and result format.
+
+| Short name | Grouped command |
+| --- | --- |
+| `/path` | `/pc path` |
+| `/chance` | `/pc chance` |
+| `/minimals` | `/pc minimals` |
+| `/score` | `/pc score` |
+| `/score-minimals` | `/pc score-minimals` |
+| `/score-finder` | `/pc score-finder` |
+| `/cover` | `/build cover` |
+| `/finesse score` | `/build finesse-score` |
+| `/spin` | `/forward spin` |
+| `/damage` | `/forward damage` |
 
 The registered Message command is `Apps -> Get original GIF` (localized as
 `앱 -> 원본 GIF 받기`). Right-click or long-press a Clearra preview message and
@@ -25,26 +36,15 @@ ID.
 
 ```text
 /render-file [image:<same-channel Clearra preview message link or message ID>]
-/path next:<pattern> field:<grid, CTK3, or Fumen> [lines:<1..6>] [kicktable:<built-in>] [options:<hold=use>]
-/cover next:<pattern> base:<grid, CTK3, or Fumen> target:<grid, CTK3, or Fumen> [kicktable:<built-in>] [options:<hold=use>]
-/spin-cover next:<pattern> field:<grid, CTK3, or Fumen> [kicktable:<built-in>] [options:<type=TSD>]
-/spin-structure pieces:<unordered inventory> field:<grid, CTK3, or Fumen> [lines:<any|0..4|0+..4+>] [profile:<t-spins|t-spins-plus|all-mini|all-mini-plus|all-spin|all-spin-plus>] [kicktable:<built-in>]
-/score-finder next:<exact queue> field:<grid, CTK3, or Fumen> [lines:<1..6>] [kicktable:<built-in>] [options:<initial_b2b=false>]
-/damage next:<exact queue> field:<grid, CTK3, or Fumen> [kicktable:<built-in>]
-/finesse search target:<target delta> next:<queue or pattern> base:<starting field> [kicktable:<built-in>] [options:<hold and knowledge>]
-/finesse score document:<CTK3 or Fumen with operations> next:<queue or pattern> [kicktable:<built-in>] [options:<hold and knowledge>]
-/pc-setup remaining:<unordered piece inventory> [priority:<all|build|pc>] [max-setup-pieces:<1..10>] [queue-knowledge:<full-queue|visible-7>] [next-cycle-remaining:<exact inventory>] [setup-length:<auto|longer|shorter>] [kicktable:<built-in>]
+/pc path next:<queue or pattern> field:<grid, CTK3, or Fumen> [lines:<1..24>] [hold:<empty|disabled|piece>] [kicktable:<built-in>]
+/build cover base-mask:<hex> target-mask:<hex> height:<1..24> queue:<exact queue> hold:<empty|disabled|piece>
+/build probability next:<pattern> base:<grid, CTK3, or Fumen> target:<grid, CTK3, or Fumen>
+/forward damage next:<exact queue> field:<grid, CTK3, or Fumen> [kicktable:<built-in>]
+/build finesse-score document:<CTK3 or Fumen with operations> next:<queue or pattern>
 ```
 
-`/best-setup` and `/dpc-finder` expose the same seven setup-ranking options.
-Their default priorities are respectively `build` and `pc`; `/pc-setup`
-defaults to `all`. All three default to nine setup pieces, full-queue
-knowledge, automatic setup length, and no next-cycle restriction. `all` ranks
-joint build and conditional-PC coverage, while `build` and `pc` select one
-metric. Automatic length favors longer setups for `all`/`build` and shorter
-setups for `pc`. When supplied, the required next-cycle inventory length maps
-current remaining counts `7,4,1,5,2,6,3` to `4,1,5,2,6,3,7`; at most one piece
-kind may appear twice and no kind may appear three times.
+Sfinder compatibility commands are no longer accepted on Discord. Existing
+Sfinder-compatible CLI commands remain separate from the Discord product.
 
 Board options accept raw CTK3/Fumen, a URL containing one of those values, or a
 plain text grid with exactly 10 columns. Grid rows are written top first; use
@@ -52,13 +52,10 @@ plain text grid with exactly 10 columns. Grid rows are written top first; use
 visually separate occupied space from the low empty marker, and carry no
 tetromino color. Older grid spellings remain parser-compatible but are not part
 of the displayed syntax. Piece letters and fixed queues are case-insensitive.
-PC commands, including `/score-finder`, support every height from one through
-six rows. Build-probability, forward-search, and `/spin-structure` board
-commands support one through 24 input rows; the structure-search height is
-validated separately by its engine. `/cover` keeps independent `base` and
-`target` editors in one Modal. Longer fields scroll inside the text area, so
-the full 24-row range remains available without retaining page state on the
-Gateway.
+PC replay and fixed-queue score finder support targets from 1 through
+24 lines. Check the chosen command's help for its own height and field limits.
+The document-based `/build probability` command has separate base and target
+editors; `/build cover` and its short name use typed mask inputs.
 
 Invoking any search command without all of its required runtime inputs opens a
 stateless command-specific Modal. Besides fields, the forms expose `next`, PC
@@ -112,40 +109,21 @@ Discord does not reliably attach a replied-to message to a slash-command
 interaction, so `/render-file image:` remains the explicit fallback rather than
 pretending a slash command can inherit reply context.
 
-`/path` and the other PC commands accept any explicit `lines` value from 1
-through 6, including 1L/3L/5L as in the GUI's manual dimension input. When it is
-omitted, the Discord boundary considers every height from 1L through 6L and
-runs each valid target in ascending order. A target is valid only when
-the highest occupied cell fits,
-`10 * lines - occupied_blocks` is a positive multiple of four, and `next`
-contains at least that many tetrominoes. The exact target set is therefore
-derived from the occupied-cell count and available queue length; partially
-occupied fields can select either odd or even heights. Results are executed
-serially in one per-instance search slot and delivered as soon as each target
-finishes. This selection mirrors the PC compatibility layer's exact piece
-window; it does not alter search generation or pruning.
+The replay command evaluates one exact target when `lines` is set.
+With automatic target selection, Clearra runs each valid height in ascending
+order under one interaction deadline. A target must contain the occupied
+field after completed input rows are cleared, and its empty cells must fit
+a whole number of tetrominoes from the supplied queue or pattern.
 
-Search results expose solution documents only as CTK3. Generated pieces
-preserve their tetromino colors, while occupancy inherited from the input board
-is encoded as `G`. The active Discord result path does not emit Fumen. The
-legacy raw CLI Fumen form of `clearra sfinder cover` remains available outside
-the slash ingress and keeps its existing exact colored-solution boundary.
-Human-readable CLI and Discord summary probabilities are multiplied by 100 and
-shown with `%`. Structured JSON keeps canonical `0..1` numeric probabilities so
-the GUI and CTK3 result formatter do not multiply an already converted value.
-`kicktable` is available on each rule-aware Discord command and accepts exactly
-`srs-plus`, `srs`, `srs-x`, or `jstris-180`; omission selects `srs-plus` across
-the Discord and Sfinder-compatibility boundaries.
-`options` is a command-specific choice: PC commands and `/cover` select
-`hold=use|avoid`, while spin commands select `type=TSS|TSD|TST|ANY`. These
-choices extend to finesse as `hold=use|avoid` plus
-`knowledge=both|full-queue|visible-7`; omission selects
-`hold=use knowledge=both`. The public `full-queue` value is lowered to the
-engine's private wire value only after Discord validation.
-Finesse reports expose an exact total for a fixed queue or policy-level average
-inputs for patterns without expanding per-queue or per-solution lists. None of
-these choices can replace primary field/`next` inputs or select workers, files,
-custom profiles, or output formats.
+Discord publishes one deterministic replay GIF for a successful `/pc path`
+or `/path`, with 500 ms per frame. Other search commands that return a
+solution document use CTK3; inherited occupancy is gray and new pieces retain
+their colors. Neither replay name exposes alternative pages.
+
+The rule-aware commands list their built-in kick profiles. PC replay supports
+SRS+, SRS, SRS-X, Jstris 180, and no-kick. The default kicking profile is SRS+.
+PC replay accepts an empty hold, disabled hold, or a specific initial piece.
+Use `/help` for the inputs and defaults of each other command.
 
 There is no active `/clearra` catch-all command and no active `/view` command.
 Oracle receives every slash, Modal, Message-command, `$...`, and `>...` event
@@ -171,29 +149,20 @@ rendering. Search-command fields continue to render within their own command,
 not through a separate image command, and are never forwarded to ambient
 standalone detection.
 
-Text commands accept the same plain grid, CTK3, Fumen, and payload-URL field
-values as slash commands. A quoted field can span multiple rows. Discord code
-blocks are also preserved as one field argument, so a field can be pasted
-without quotes; `$cover` and `>cover` accept two independent code blocks for
-`base` and `target`. For example:
+Text commands accept the same fields as their slash counterparts. Quoting a
+grid or pasting it inside a code block keeps a multiline field together.
+For example:
 
 ````text
-$path --field ```text
-__________
-______####
-``` --next I --lines 2
+$pc path --field ```text
+######____
+``` --next I --lines 1
 
->spin-structure ```text
-__________
-____#_____
-``` TIO 1+ all-mini srs-plus
+>spin-structure search --field grid:__________/____#_____ --pieces TIO --lines 1+ --spin-profile all-mini --kicktable srs-plus
 ````
 
-For the `spin-structure` shorthand, positional values are `field`, `pieces`,
-`lines`, `profile`, then `kicktable`. Named forms may use `--pieces` or
-`--inventory`, and `--profile` or `--spin-profile`. Its generated CTK3 pages
-retain a `Spin: Regular` or `Spin: Mini` page comment so the two result
-partitions remain identifiable after download.
+The document-based `$build probability` accepts separate field arguments for
+the base and target.
 
 Two guild-only administrative commands are intentionally omitted from `/help`:
 
@@ -223,12 +192,10 @@ reply. Ordinary help/search/render traffic performs no application-owner or
 permission lookup. Access state is persisted atomically in the separately
 configured `CLEARRA_DISCORD_ACCESS_STORE`.
 
-The compatibility boundary owns worker, output-format, tablebase, and
-dependency-DAG policy. It rejects native file/output paths, custom WGSL, custom
-kick JSON, and Sfinder contracts without a typed Clearra representation. Every
-accepted command reaches Clearra as an argument array through `shell: false`.
-The occupancy projection and two-field `/cover` routing are ingress changes
-only; PC/build engines and pruning are unchanged.
+The Discord boundary owns worker admission and output bounds, but calls the
+canonical CLI for search semantics. It rejects native file/output paths,
+custom WGSL, custom kick JSON, and the Sfinder namespace. It passes an argument
+array without invoking a shell.
 
 ## Active topology
 

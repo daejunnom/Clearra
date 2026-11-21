@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { projectDiscordBuildV2Result } from "../src/discord/build-v2-result.mjs";
-import { discordLegacyRouteProjection } from "../src/discord/capability-registry.mjs";
+import { discordProductAliasProjection } from "../src/discord/capability-registry.mjs";
 import {
   clonePlain,
   deepFreeze,
@@ -89,16 +89,16 @@ test("ordinary Build v2 output is an independently frozen, attack-free snapshot"
   assert.deepEqual(projectDiscordBuildV2Result(projected), projected);
 });
 
-test("Discord legacy registry projections keep independent frozen records and argv arrays", () => {
-  const first = discordLegacyRouteProjection();
-  const second = discordLegacyRouteProjection();
-  const index = first.findIndex((row) => Array.isArray(row.argv_prefix));
+test("Discord product alias projections keep independent frozen records and paths", () => {
+  const first = discordProductAliasProjection();
+  const second = discordProductAliasProjection();
+  const index = first.findIndex(({ capabilityId }) => capabilityId === "pc.path");
   assert.ok(index >= 0);
   assert.notEqual(first, second);
   assert.deepEqual(first, second);
   assert.notEqual(first[index], second[index]);
-  assert.notEqual(first[index].argv_prefix, second[index].argv_prefix);
+  assert.notEqual(first[index].path, second[index].path);
   assert.equal(Object.isFrozen(first), true);
   assert.equal(Object.isFrozen(first[index]), true);
-  assert.equal(Object.isFrozen(first[index].argv_prefix), true);
+  assert.equal(Object.isFrozen(first[index].path), true);
 });

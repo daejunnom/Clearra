@@ -15,7 +15,6 @@ import {
   japaneseDiscordName,
 } from "./japanese-discord-localization.mjs";
 import {
-  activeDiscordGenericCompatibilityRoutes,
   activeDiscordSearchCapabilities,
   findProductCapability,
 } from "./capability-registry.mjs";
@@ -56,9 +55,6 @@ export const NATIVE_BUILTIN_KICKTABLES = Object.freeze([
 ]);
 
 const SEARCH_CAPABILITIES = Object.freeze(activeDiscordSearchCapabilities());
-const GENERIC_COMPATIBILITY_ROUTES = Object.freeze(
-  activeDiscordGenericCompatibilityRoutes(),
-);
 
 const RENDER_FILE_COMMAND = Object.freeze({
   name: "render-file",
@@ -176,34 +172,20 @@ function governedCommand(capabilityId, value) {
   });
 }
 
-function mergeGenericPcCompatibilityRoutes(typedCommands, genericCommands) {
-  const pathIndex = typedCommands.findIndex(({ name }) => name === "path");
-  if (pathIndex < 0) {
-    throw new Error("Generic PC compatibility routes require the legacy path route.");
-  }
-  return [
-    ...typedCommands.slice(0, pathIndex + 1),
-    ...genericCommands,
-    ...typedCommands.slice(pathIndex + 1),
-  ];
-}
-
 const CANONICAL_SEARCH_GROUPS = groupedCommands(
   SEARCH_CAPABILITIES.flatMap((entry) =>
     entry.canonical.slash && entry.canonical.subcommand
       ? [capabilityVariant(entry, entry.canonical)]
       : []
   ),
-  false,
 );
 
-const COMPATIBILITY_SEARCH_GROUPS = groupedCommands(
+const PRODUCT_ALIAS_GROUPS = groupedCommands(
   SEARCH_CAPABILITIES.flatMap((entry) =>
     entry.aliases
       .filter((route) => route.slash && route.subcommand)
       .map((route) => capabilityVariant(entry, route))
   ),
-  true,
 );
 
 const DIRECT_CANONICAL_COMMANDS = Object.freeze(
@@ -212,40 +194,19 @@ const DIRECT_CANONICAL_COMMANDS = Object.freeze(
     .map((entry) => directCapabilityCommand(entry, entry.canonical)),
 );
 
-const SLASH_TYPED_COMPATIBILITY_COMMANDS = SEARCH_CAPABILITIES.flatMap((entry) =>
+const DIRECT_PRODUCT_ALIASES = SEARCH_CAPABILITIES.flatMap((entry) =>
   entry.aliases
     .filter((route) => route.slash && !route.subcommand)
     .map((route) => directCapabilityCommand(entry, route))
 );
-const SLASH_GENERIC_COMPATIBILITY_COMMANDS = GENERIC_COMPATIBILITY_ROUTES
-  .filter((route) => route.slash)
-  .map(genericCompatibilityCommand);
-const DIRECT_COMPATIBILITY_COMMANDS = Object.freeze(mergeGenericPcCompatibilityRoutes(
-  SLASH_TYPED_COMPATIBILITY_COMMANDS,
-  SLASH_GENERIC_COMPATIBILITY_COMMANDS,
-));
-
-const TEXT_TYPED_COMPATIBILITY_COMMANDS = SEARCH_CAPABILITIES.flatMap((entry) =>
+const TEXT_DIRECT_COMMANDS = SEARCH_CAPABILITIES.flatMap((entry) =>
   entry.aliases
     .filter((route) => route.text && !route.subcommand)
     .map((route) => directCapabilityCommand(entry, route))
 );
-const TEXT_GENERIC_COMPATIBILITY_COMMANDS = GENERIC_COMPATIBILITY_ROUTES
-  .filter((route) => route.text)
-  .map(genericCompatibilityCommand);
-const TEXT_DIRECT_COMMANDS = Object.freeze(mergeGenericPcCompatibilityRoutes(
-  TEXT_TYPED_COMPATIBILITY_COMMANDS,
-  TEXT_GENERIC_COMPATIBILITY_COMMANDS,
-));
 
 const TEXT_DIRECT_COMMANDS_BY_NAME = new Map(
   TEXT_DIRECT_COMMANDS.map((entry) => [entry.name, entry]),
-);
-
-export const representedSfinderCommandNames = Object.freeze(
-  TEXT_DIRECT_COMMANDS
-    .filter((entry) => entry.argvPrefix[0] === "sfinder")
-    .map(({ name }) => name),
 );
 
 export const slashCommandCatalog = Object.freeze([
@@ -255,8 +216,8 @@ export const slashCommandCatalog = Object.freeze([
   SERVER_SETTINGS_COMMAND,
   ...CANONICAL_SEARCH_GROUPS,
   ...DIRECT_CANONICAL_COMMANDS,
-  ...COMPATIBILITY_SEARCH_GROUPS,
-  ...DIRECT_COMPATIBILITY_COMMANDS,
+  ...PRODUCT_ALIAS_GROUPS,
+  ...DIRECT_PRODUCT_ALIASES,
 ]);
 
 export const messageCommandCatalog = Object.freeze([
@@ -275,18 +236,9 @@ export function findSlashCommand(name) {
   return COMMANDS_BY_NAME.get(name) ?? null;
 }
 
-// Text ingress has a wider, explicitly curated surface than slash ingress.
-// In particular, hidden verification and aliases shadowed by a canonical root
-// are resolved here without leaking them into command registration or help.
 export function findTextCommand(name) {
   if (typeof name !== "string") return null;
   return COMMANDS_BY_NAME.get(name) ?? TEXT_DIRECT_COMMANDS_BY_NAME.get(name) ?? null;
-}
-
-export function findShadowedTextCommand(name) {
-  if (typeof name !== "string") return null;
-  const direct = TEXT_DIRECT_COMMANDS_BY_NAME.get(name) ?? null;
-  return COMMANDS_BY_NAME.get(name)?.subcommands ? direct : null;
 }
 
 export function findMessageCommand(name) {
@@ -439,10 +391,8 @@ function findHelpCommand(normalized) {
     return findSlashCommand(parts[0])?.subcommands?.[parts[1]] ?? null;
   }
   const compact = normalized.replace(/[ /]+/g, "-");
-  if (["finesse-search", "finesse-score"].includes(compact)) {
-    return findSlashCommand("finesse")?.subcommands?.[
-      compact.slice("finesse-".length)
-    ] ?? null;
+  if (compact === "finesse-score") {
+    return findSlashCommand("finesse")?.subcommands?.score ?? null;
   }
   return findSlashCommand(normalized);
 }
@@ -533,44 +483,6 @@ function capabilityVariant(capability, route) {
   });
 }
 
-function genericCompatibilityCommand(route) {
-  return Object.freeze({
-    name: route.root,
-    rootName: undefined,
-    subcommand: null,
-    kind: "search",
-    group: route.problemFamily,
-    input: route.input,
-    description: route.description,
-    note: null,
-    capabilityId: route.id,
-    problemContractId: route.problemContractId,
-    algorithmFamily: route.algorithmFamily,
-    timeoutClass: route.timeoutClass,
-    effectClasses: route.effectClasses,
-    helpPolicy: route.helpPolicy,
-    i18nPolicy: route.i18nPolicy,
-    resultAllowlist: route.engineKinds,
-    telemetryIdentity: route.telemetryIdentity,
-    loweringAuthority: route.loweringAuthority,
-    compatibilityClassification: route.classification,
-    compatibilityPreset: null,
-    removeIn: route.removeIn,
-    compatibilityLifetime: route.lifetime,
-    inputSchemaId: route.inputSchemaId,
-    modalSchemaId: route.modalSchemaId,
-    resultContractId: route.resultContractId,
-    publicResultKind: route.publicResultKind,
-    resultAuthorityId: route.resultAuthorityId,
-    argvPrefix: route.argvPrefix,
-    registration: Object.freeze({
-      name: route.root,
-      description: route.description,
-      options: registrationOptions(route.input, route.id),
-    }),
-  });
-}
-
 function directCapabilityCommand(capability, route) {
   const variant = capabilityVariant(capability, route);
   const publicResultKind = route.publicResultKind ?? route.root;
@@ -590,7 +502,7 @@ function directCapabilityCommand(capability, route) {
   });
 }
 
-function groupedCommands(variants, compatibility) {
+function groupedCommands(variants) {
   const byRoot = new Map();
   for (const variant of variants) {
     const group = byRoot.get(variant.rootName) ?? [];
@@ -601,7 +513,7 @@ function groupedCommands(variants, compatibility) {
     const subcommands = Object.freeze(Object.fromEntries(
       entries.map((entry) => [entry.subcommand, entry]),
     ));
-    const description = searchGroupDescription(root, compatibility);
+    const description = searchGroupDescription(root);
     return Object.freeze({
       name: root,
       kind: "search",
@@ -623,13 +535,11 @@ function groupedCommands(variants, compatibility) {
   }));
 }
 
-function searchGroupDescription(root, compatibility) {
-  if (compatibility && root === "finesse") {
-    return "Compatibility routes for minimum-input build calculations";
-  }
+function searchGroupDescription(root) {
   return ({
     pc: "Search fixed clear-to-empty perfect-clear objectives",
     build: "Search or evaluate target-build objectives",
+    finesse: "Score the inputs needed for a placement sequence",
     setup: "Rank setup candidates under explicit observation policies",
     forward: "Run ordered-queue forward state searches",
     recovery: "Search two-stage boundary recovery",
@@ -1675,7 +1585,7 @@ function buildV2ScoreOptions(capabilityId) {
 function buildFinesseOption() {
   return choiceOption(
     "finesse",
-    "Finesse evaluation; Inputs turns this into the /finesse search preset",
+    "Evaluate the number of inputs needed to build the target",
     [["Off (default)", "off"], ["Minimum inputs", "inputs"]],
   );
 }
@@ -1695,7 +1605,7 @@ function buildFinesseKnowledgeOption() {
 function buildMirrorOption() {
   return choiceOption(
     "mirror",
-    "Mirror policy; the /finesse search compatibility preset always excludes mirrors",
+    "Include or exclude mirrored target builds",
     [["Automatic (default)", "auto"], ["Include", "include"], ["Exclude", "exclude"]],
   );
 }
@@ -1811,7 +1721,7 @@ function commandListHelp(locale) {
       `경계 리커버리: \`${recovery}\``,
       `구조 탐색: \`${spinStructure}\``,
       `문서 유틸리티: \`${utility}\``,
-      "위의 그룹형 명령어 사용을 권장합니다. `/path` 같은 기존 개별 명령어와 `/finesse search|score`도 계속 사용할 수 있습니다.",
+      "`/path`, `/finesse score` 같은 짧은 이름도 대응하는 그룹형 명령과 같은 입력과 결과를 사용합니다.",
       "고급 objective는 `/help arguments:objective`에서 확인할 수 있습니다.",
       "정확한 문법은 `/help arguments:<명령어> <하위-명령어>`로 확인하세요. 여러 줄 격자는 필드 옵션을 생략하고 입력 창에서 작성하며, 직접 입력은 `grid:윗줄/다음줄` 형식을 사용합니다.",
       `PC 탐색은 명령어에 따라 1–${DISCORD_PC_FIELD_MAX_ROWS}줄 또는 1–${DISCORD_WIDE_FIELD_MAX_ROWS}줄의 목표 높이를 지원하며, 구축·전방 탐색 필드는 1–${DISCORD_WIDE_FIELD_MAX_ROWS}줄을 지원합니다. 정적 CTK3, v115 Fumen, 문서 링크도 지원하며 입력 색상은 모두 채워진 칸으로 처리합니다.`,
@@ -1827,7 +1737,7 @@ function commandListHelp(locale) {
     `Boundary recovery: \`${recovery}\``,
     `Spin structures: \`${spinStructure}\``,
     `Document utilities: \`${utility}\``,
-    "The grouped commands above are recommended. Existing names such as `/path` and `/finesse search|score` remain available.",
+    "Short names such as `/path` and `/finesse score` use the same inputs and results as their grouped commands.",
     "Advanced objective syntax is documented by `/help arguments:objective`.",
     "Use `/help arguments:<command> <subcommand>` for exact syntax. Omit a board option to enter a multiline grid in the guided form; direct grids use `grid:top-row/next-row`.",
     `Depending on the command, PC search supports target heights 1–${DISCORD_PC_FIELD_MAX_ROWS} or 1–${DISCORD_WIDE_FIELD_MAX_ROWS}; build/forward fields support 1 through ${DISCORD_WIDE_FIELD_MAX_ROWS} rows. Static CTK3, v115 Fumen, and document links are also accepted; input colors mean occupied cells.`,
@@ -1915,12 +1825,6 @@ function syntax(entry, locale = "en") {
         return `/${path} pieces:<순서 없는 IOTSZJL 목록> [field:<격자|CTK3|v115 Fumen|URL>] [height:1..24] [lines:<any|1..4|1+..4+>] [spin-profile:<프로필>] [kicktable:<srs-plus|srs>] [fill-bottom:0..23] [fill-top:1..24] [max-placements:<개수>] [minimality:<subset-minimal|minimum-piece-count>] [max-patterns:1..100000]`;
       case "spin-structure-guaranteed-v1":
         return `/${path} pieces:<순서 없는 IOTSZJL 목록> [field:<격자|CTK3|v115 Fumen|URL>] [height:1..24] [lines:<any|1..4|1+..4+>] [spin-profile:<프로필>] [kicktable:<srs-plus|srs>] [fill-bottom:0..23] [fill-top:1..24] [max-placements:<개수>] [minimality:<subset-minimal|minimum-piece-count>] [final-piece:<IOTSZJL>] [max-patterns:1..100000] [dependency-report:<on|off>]`;
-      case "finesse":
-        return "/finesse search target:<목표 칸> next:<큐|패턴> base:<기존 필드> [options:<hold knowledge source-pieces aggregation spin-profile preserve-b2b>] | /finesse score document:<operation 포함 문서> next:<큐|패턴> [options:<hold knowledge source-pieces>]";
-      case "finesse-search":
-        return "/finesse search target:<목표 칸> next:<큐|패턴> base:<기존 필드> [options:<hold knowledge source-pieces aggregation spin-profile preserve-b2b>]";
-      case "finesse-score":
-        return "/finesse score document:<operation 포함 CTK3|v115 Fumen> next:<큐|패턴> [options:<hold knowledge source-pieces>]";
       case "finesse-score-v2":
         return `/${path} document:<operation 포함 CTK3|v115 Fumen> next:<큐|패턴> [kicktable:<내장 프로필>] [hold:<disabled|empty|IOTSZJL>] [knowledge:<both|oracle|visible-7>] [source-pieces:1..128]`;
       case "operation-document-v1":
@@ -2004,12 +1908,6 @@ function syntax(entry, locale = "en") {
       return `/${path} pieces:<unordered IOTSZJL inventory> [field:<grid|document|URL>] [height:1..24] [lines:<any|1..4|1+..4+>] [spin-profile:<profile>] [kicktable:<srs-plus|srs>] [fill-bottom:0..23] [fill-top:1..24] [max-placements:<count>] [minimality:<subset-minimal|minimum-piece-count>] [max-patterns:1..100000]`;
     case "spin-structure-guaranteed-v1":
       return `/${path} pieces:<unordered IOTSZJL inventory> [field:<grid|document|URL>] [height:1..24] [lines:<any|1..4|1+..4+>] [spin-profile:<profile>] [kicktable:<srs-plus|srs>] [fill-bottom:0..23] [fill-top:1..24] [max-placements:<count>] [minimality:<subset-minimal|minimum-piece-count>] [final-piece:<IOTSZJL>] [max-patterns:1..100000] [dependency-report:<on|off>]`;
-    case "finesse":
-      return "/finesse search target:<target> next:<queue|pattern> base:<base> [options:<hold knowledge source-pieces aggregation spin-profile preserve-b2b>] | /finesse score document:<operations> next:<queue|pattern> [options:<hold knowledge source-pieces>]";
-    case "finesse-search":
-      return "/finesse search target:<target cells> next:<queue|pattern> base:<starting field> [options:<hold knowledge source-pieces aggregation spin-profile preserve-b2b>]";
-    case "finesse-score":
-      return "/finesse score document:<CTK3|v115 Fumen with operations> next:<queue|pattern> [options:<hold knowledge source-pieces>]";
     case "finesse-score-v2":
       return `/${path} document:<CTK3|v115 Fumen with operations> next:<queue|pattern> [kicktable:<built-in>] [hold:<disabled|empty|IOTSZJL>] [knowledge:<both|oracle|visible-7>] [source-pieces:1..128]`;
     case "operation-document-v1":
@@ -2106,7 +2004,7 @@ function inputHelp(entry, locale = "en") {
       if (entry.capabilityId === "pc.score") return [
         `\`field\` and \`next\` use the PC contracts; \`lines\` accepts 1–${discordPcMaxRows(entry.input)} and omission evaluates feasible targets serially.`,
         "`score-profile` defaults to `tetrio`; use `spin-profile` and `initial-b2b` when those settings affect the score.",
-        "Built-in score profiles currently provide approximate scores rather than complete game-specific scoring. The direct `/score` alias uses its existing Jstris Ultra preset.",
+        "Built-in score profiles currently provide approximate scores rather than complete game-specific scoring.",
         nativeKickHelp,
       ];
       if (entry.capabilityId === "pc.score-minimals") return [
@@ -2152,7 +2050,7 @@ function inputHelp(entry, locale = "en") {
         `Both fields accept 1–${DISCORD_WIDE_FIELD_MAX_ROWS} top-first grid rows or one static CTK3/v115 Fumen/URL.`,
         "`hold` is disabled, empty, or one occupied IOTSZJL piece. `source-pieces` sets the exact source window; when omitted, the engine derives it from the target piece count and initial hold.",
         "`solution-probabilities=on` includes exact per-solution probabilities. It is unavailable with geometry-only tiling.",
-        "`finesse=inputs` enables minimum-input evaluation; only then may `finesse-knowledge` be set. `mirror` controls reflected solutions. `/finesse search` retains its fixed preset.",
+        "`finesse=inputs` enables minimum-input evaluation; only then may `finesse-knowledge` be set. `mirror` controls reflected solutions.",
         "`result-mode` selects All solutions, Complete replay paths, Minimum solutions, Field average score, Fixed-queue maximum score, Highest-score minimum set, or Failed queues. Non-all modes use the explicit Buildability compatibility row; score ties never use attack and Discord selects the first result in deterministic order.",
         nativeKickHelp,
       ];
@@ -2416,7 +2314,7 @@ function koreanInputHelp(entry) {
       if (entry.capabilityId === "pc.score") return [
         `\`field\`와 \`next\`는 PC 입력 계약을 사용하며 \`lines\`는 1–${discordPcMaxRows(entry.input)}이고 생략 시 가능한 목표를 순서대로 계산합니다.`,
         "`score-profile`의 기본값은 `tetrio`입니다. 점수에 영향을 주는 경우 `spin-profile`과 `initial-b2b`를 설정하세요.",
-        "현재 내장 점수 프로필은 게임별 모든 규칙을 완전히 재현하지 않는 근사 점수를 제공합니다. 직접 `/score` 별칭은 기존 Jstris Ultra 설정을 사용합니다.",
+        "내장 점수 프로필은 근사 점수를 제공하며 게임별 모든 점수 규칙을 재현하지는 않습니다.",
         nativeKickHelp,
       ];
       if (entry.capabilityId === "pc.score-minimals") return [
@@ -2462,7 +2360,7 @@ function koreanInputHelp(entry) {
         `두 필드는 위쪽 줄부터 적은 1–${DISCORD_WIDE_FIELD_MAX_ROWS}줄 격자 또는 정적 CTK3/v115 Fumen/URL 하나를 받습니다.`,
         "`hold`는 비활성, 빈 홀드 또는 IOTSZJL 미노 하나가 들어 있는 홀드입니다. `source-pieces`는 정확한 소스 미노 창이며, 생략하면 엔진이 목표 미노 수와 초기 홀드에서 자동으로 계산합니다.",
         "`solution-probabilities=on`은 해법별 정확한 확률을 포함합니다. 기하학 타일링에서는 사용할 수 없습니다.",
-        "`finesse=inputs`에서만 `finesse-knowledge`를 설정할 수 있습니다. `mirror`는 반전 해법을 제어하며 `/finesse search`는 고정 프리셋을 유지합니다.",
+        "`finesse=inputs`에서만 `finesse-knowledge`를 설정할 수 있습니다. `mirror`는 반전 해법을 제어합니다.",
         "`result-mode`은 전체 해법, 전체 리플레이 경로, 최소 해법, 필드 평균 점수, 고정 큐 최고 점수, 최고 점수 최소 해법 집합, 실패 큐 중 하나를 선택합니다. all 이외 모드는 명시적인 구축 가능성 호환 조합으로 실행하고, 점수 동점에는 공격력을 사용하지 않으며 Discord는 결정적으로 정렬된 첫 결과 하나만 선택합니다.",
         nativeKickHelp,
       ];
@@ -2909,6 +2807,11 @@ function localizeRegistrationOption(option, commandName) {
 }
 
 function koreanRangeOptionDescription(option) {
+  if (option?.name === "lines" && option.type === INTEGER_OPTION &&
+      option.min_value === 1 && Number.isSafeInteger(option.max_value) &&
+      !option.choices) {
+    return `PC 목표 높이 1–${option.max_value}줄이며 생략하면 가능한 목표를 자동으로 판정합니다`;
+  }
   if (option?.name !== "field" || typeof option.description !== "string") {
     return null;
   }
@@ -3534,7 +3437,6 @@ const KOREAN_COMMAND_NOTES = Object.freeze({
   "pc.allspin-pres-chance": "기존 allspin_pres_chance와의 호환은 명령 의도만 보장하며 상위 도구의 판정을 그대로 재현한다는 뜻이 아닙니다. 슬래시 별칭은 v0.10에 제거되고 텍스트 별칭은 장기 유지됩니다.",
   "allspin-sol-finder": "명령 의도 호환만 제공하며 정확한 상위 도구 판정 일치를 보장하지 않습니다. 슬래시 별칭은 v0.10에 제거되고 텍스트 별칭은 장기 유지됩니다.",
   "allspin-pres-chance": "명령 의도 호환만 제공하며 정확한 상위 도구 판정 일치를 보장하지 않습니다. 슬래시 별칭은 v0.10에 제거되고 텍스트 별칭은 장기 유지됩니다.",
-  "forward.spin": "기존 /spin과 /spin-cover는 Clearra 호환 별칭입니다. sfinder spin/spincover의 순서 없는 구조 탐색과는 별개입니다.",
   "build.probability": "결과 모드 호환성 표는 CLI가 소유한 구축 확률 계약에서 강제합니다.",
   "spin-structure": "타입이 지정된 구조 탐색 형제가 실제 제공될 때까지 최상위 명령어 형태를 유지합니다. Discord에서는 최상위 옵션과 하위 명령어를 섞을 수 없습니다.",
   percent: "/chance와 같은 기능입니다.",
@@ -3666,8 +3568,6 @@ const KOREAN_OPTION_DESCRIPTIONS = Object.freeze({
   "build.cover.source-pieces": "정확한 소스 미노 창이며 생략하면 목표와 초기 홀드에서 자동 계산합니다",
   "render-file.image": "현재 채널의 Clearra 미리보기 메시지 링크 또는 ID이며 생략하면 최근 파일을 찾습니다",
   "score-finder.next": "정확한 IOTSZJL 큐이며 생략하면 입력 창에서 작성합니다",
-  "score-finder.field": `1–${DISCORD_PC_FIELD_MAX_ROWS}줄 PC 필드: grid:줄/줄 또는 문서, 여러 줄은 입력 창 사용`,
-  "score-finder.lines": `퍼펙트 클리어 목표 높이는 1–${DISCORD_PC_FIELD_MAX_ROWS}줄이며 기본값은 4줄입니다`,
   "score-finder.options": "초기 B2B 상태이며 기본값은 사용 안 함입니다",
   "damage.next": "정확한 IOTSZJL 큐이며 생략하면 입력 창에서 작성합니다",
   "damage.options": "hold, spin-profile, minimum-damage, initial-combo, initial-b2b, preserve-b2b 설정",

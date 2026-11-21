@@ -18,6 +18,7 @@ import {
 } from '../src/workers/SharedExecutionResourceAuthority.ts';
 import {
   normalizeWasmU32,
+  type ClearraDistributedIssuedRootCounter,
   type ClearraDistributedPlan,
   type ClearraWasmModule
 } from '../src/workers/clearraWasmRuntime.ts';
@@ -251,12 +252,13 @@ assert.deepEqual(
 // The tail policy counts roots already issued, not only the slower roots whose
 // worker results have returned. Compact PC and Tiling expose different fields.
 for (const testCase of [
-  { name: 'PC root with in-flight work', root: true, tiling: false, geometry: 138, coverage: 0, expected: 1, workers: 2 },
-  { name: 'Tiling root before issuance', root: true, tiling: true, geometry: 138, coverage: 0, expected: 5, workers: 2 },
-  { name: 'Tiling root tail', root: true, tiling: true, geometry: 0, coverage: 138, expected: 1, workers: 2 },
-  { name: 'Streaming verifier batching', root: false, tiling: false, geometry: 138, coverage: 0, expected: 18, workers: 3 }
+  { name: 'PC root with in-flight work', root: true, tiling: false, counter: 'geometry', geometry: 138, coverage: 0, expected: 1, workers: 2 },
+  { name: 'Tiling root before issuance', root: true, tiling: true, counter: 'coverage', geometry: 138, coverage: 0, expected: 5, workers: 2 },
+  { name: 'Tiling root tail', root: true, tiling: true, counter: 'coverage', geometry: 0, coverage: 138, expected: 1, workers: 2 },
+  { name: 'Streaming verifier batching', root: false, tiling: false, counter: 'none', geometry: 138, coverage: 0, expected: 18, workers: 3 }
 ]) {
   const sizes: number[] = [];
+  const scheduledCounters: ClearraDistributedIssuedRootCounter[] = [];
   await new DistributedWasmJobRunner({
     ...wasm,
     distributed_progress: () => ({
@@ -265,6 +267,14 @@ for (const testCase of [
       coverageChecks: testCase.coverage,
       candidateFamilyCount: '140'
     }),
+    distributed_scheduling_progress: issued => {
+      scheduledCounters.push(issued);
+      return {
+        candidateFamilyCount: '140',
+        issuedRootCount: issued === 'geometry' ? testCase.geometry
+          : issued === 'coverage' ? testCase.coverage : 0
+      };
+    },
     distributed_produce: (_budget: number, size: number) => {
       sizes.push(size);
       return { status: 'completed' as const };
@@ -284,6 +294,7 @@ for (const testCase of [
     tilingGeometryParallel: testCase.tiling
   }, () => undefined);
   assert.deepEqual(sizes, [testCase.expected], testCase.name);
+  assert.deepEqual(scheduledCounters, [testCase.counter], testCase.name);
 }
 
 // Draining and finalizing are distinct worker tasks: a finalizer wave can

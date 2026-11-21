@@ -282,7 +282,7 @@ test("slash ingress accepts exactly the registered command catalog", () => {
     assert.equal(ingress.accepts(interaction), true);
     assert.equal(isEnabledSlashCommand(interaction), true);
   }
-  for (const name of ["clearra", "view", "disabled"]) {
+  for (const name of ["clearra", "view", "disabled", "sfinder", "percent", "pc-setup"]) {
     const interaction = { type: 2, data: { type: 1, name } };
     assert.equal(ingress.accepts(interaction), false);
     assert.equal(isEnabledSlashCommand(interaction), false);
@@ -303,7 +303,7 @@ test("slash ingress accepts exactly the registered command catalog", () => {
 
   const commandModalSubmit = {
     type: 5,
-    data: { custom_id: "clearra:search:v2:percent", components: [] },
+    data: { custom_id: "clearra:search:v2:chance", components: [] },
   };
   assert.equal(ingress.accepts(commandModalSubmit), true);
   assert.equal(isEnabledSlashCommand(commandModalSubmit), true);
@@ -311,6 +311,8 @@ test("slash ingress accepts exactly the registered command catalog", () => {
   for (const customId of [
     "clearra:board:v2:path",
     "clearra:search:v1:percent",
+    "clearra:search:v2:percent",
+    "clearra:search:v4:pc-setup",
     "clearra:command:v1:percent",
     "clearra:command:v2:path",
     "clearra:search:v5:percent",
@@ -329,12 +331,13 @@ test("slash ingress opens bounded command Modals and answers direct help immedia
   const ingress = new SlashCommandIngress({});
   const expectations = [
     ["path", "clearra:search:v4:path", 5],
-    ["percent", "clearra:search:v4:percent", 5],
-    ["cover", "clearra:search:v4:cover", 5],
+    ["chance", "clearra:search:v4:chance", 5],
     ["spin-structure", "clearra:search:v4:spin-structure~search", 5, [
       { type: 1, name: "search", options: [] },
     ]],
-    ["pc-setup", "clearra:search:v4:pc-setup", 5],
+    ["setup", "clearra:search:v4:setup~joint", 5, [
+      { type: 1, name: "joint", options: [] },
+    ]],
   ];
 
   for (const [name, customId, rowCount, options = []] of expectations) {
@@ -408,8 +411,12 @@ test("slash ingress localizes setup advanced-option Modal loss prevention", () =
     type: 2,
     data: {
       type: 1,
-      name: "pc-setup",
-      options: [{ name: "setup-length", value: "longer" }],
+      name: "setup",
+      options: [{
+        type: 1,
+        name: "joint",
+        options: [{ name: "setup-length", value: "longer" }],
+      }],
     },
   };
   const english = new SlashCommandIngress({}).initialResponse(interaction);
@@ -653,7 +660,7 @@ test("slash ingress localizes Modals from interaction locale behind stored overr
   assert.equal(
     korean.data.components.find(({ component }) => component.custom_id === "lines")
       .component.options[0].label,
-    "자동 — 1–6줄 전체 판정",
+    "자동 — 1–24줄 전체 판정",
   );
 
   await localePreferences.setGuild(interaction.guild_id, "ko");

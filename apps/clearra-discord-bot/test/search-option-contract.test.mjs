@@ -224,15 +224,12 @@ test("canonical score and Build surfaces retain every fieldwise semantic distinc
     "--ties",
   ]) assert.equal(buildV2.includes(forbidden), false, forbidden);
 
-  const legacyCover = slashArguments("/cover", [
-    { name: "base", value: EMPTY_FIELD },
-    { name: "target", value: FOUR_CELL_TARGET },
-    { name: "next", value: "I" },
-    { name: "options", value: "hold=use" },
-  ]);
-  assert.equal(legacyCover[0], "build-probability");
-  assert.equal(legacyCover.slice(0, 2).includes("sfinder"), false);
-  assert.equal(legacyCover.includes("--no-mirror"), true);
+  assert.deepEqual(slashArguments("/cover", [
+    { name: "base-mask", value: "0x0" },
+    { name: "target-mask", value: "0xf" },
+    { name: "height", value: 1 },
+    { name: "queue", value: "I" },
+  ]), buildV2);
 
   const finesse = slashArguments("/build finesse-score", finesseScoreOptions());
   assert.deepEqual(finesse.slice(0, 2), ["finesse", "score"]);
@@ -324,12 +321,6 @@ function loweringSamples() {
   const pcFailed = slashArguments("/pc failed-queue", pcBase([
     { name: "failed-count", value: 17 },
   ]));
-
-  const legacyCover = slashArguments("/cover", [
-    { name: "base", value: EMPTY_FIELD },
-    { name: "target", value: FOUR_CELL_TARGET },
-    { name: "next", value: "I" },
-  ]);
 
   const setup = slashArguments("/setup joint", setupOptions());
   const setupBuild = slashArguments("/setup build", [

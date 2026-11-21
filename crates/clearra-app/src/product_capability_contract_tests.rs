@@ -471,6 +471,14 @@ fn pc_replay_page_source_matches_direct_and_cooperative_for_compact_family() {
         direct_source.first_members(),
         cooperative_source.first_members()
     );
+    let control = ExecutionControl::default();
+    let direct_page = crate::PcReplayPageStore::new(direct_source)
+        .page(1, 1, &control)
+        .expect("direct lazy source serves the first member page");
+    let cooperative_page = crate::PcReplayPageStore::new(Arc::clone(cooperative_source))
+        .page(1, 1, &control)
+        .expect("cooperative lazy source serves the same member page");
+    assert_eq!(direct_page, cooperative_page);
 }
 
 #[test]

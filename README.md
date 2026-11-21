@@ -178,19 +178,17 @@ review or release source.
 
 ## Clearrabot
 
-`apps/clearra-discord-bot` exposes the represented Sfinder-compatible contracts
-as individual slash commands such as `/path`, `/percent`, and `/setup`, plus
-local syntax guidance through `/help`. Search commands receive structured
-`field`, `next`, or `remaining` inputs; `/cover` instead receives separate
-`base`, `target`, and `next` inputs, where `target` contains only cells to add.
-One command-specific `options` string is used only for allow-listed optional
-settings. CTK3 is decoded directly by the npm `ctk3` package and is never
-converted to Fumen. CTK3 and Fumen compute inputs must each be one static
-10-column page; every non-empty input color is projected to the same occupancy
-bit before the typed Rust validation boundary. `/cover` sends its colorless
-base and target-delta masks to the existing build-probability command.
+`apps/clearra-discord-bot` exposes Clearra's typed product commands with
+local syntax guidance through `/help`. A retained alias uses the same
+input and result contract as its canonical command: for example,
+`/path` invokes `pc path`, and `/cover` invokes `build cover`. Search
+inputs are accepted through those command schemas, not through an
+Sfinder compatibility parser. CTK3 is decoded directly by the npm
+`ctk3` package. Ordinary PC compute fields use a static 10-column board;
+Build contracts that need a colored target document preserve that input.
 
-Discord search solution documents are emitted only as CTK3. Generated pieces
+Discord search solution documents are emitted only as CTK3. The PC replay
+command instead shows one canonical 500 ms/frame GIF. Generated pieces
 retain their tetromino colors and cells that were occupied in the input field
 are `G`; the active Discord result path does not emit Fumen. This presentation
 contract does not change PC/build candidate generation or pruning. One Gateway
@@ -206,9 +204,9 @@ their slash equivalents. Standalone CTK3/Fumen documents and strict `#`/`_`
 grids can use the bounded image path, while search-command fields are rendered
 inside their command.
 
-The raw CLI compatibility form remains available as a separate legacy boundary:
-`clearra sfinder cover <solution-fumen> <pattern> [lines]`. It is not the
-Discord `/cover` contract and is not converted into the two-field ingress.
+Explicit local CLI compatibility such as
+`clearra sfinder cover <solution-fumen> <pattern> [lines]` remains a separate
+boundary. Discord does not register or execute that namespace.
 
 The approved Cloud Run shape scales from zero to four instances. Each instance
 has 8 vCPUs and 16 GiB, accepts request concurrency 1, runs one native

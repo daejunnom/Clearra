@@ -8,8 +8,6 @@ import { clonePlain, deepFreeze } from "./plain-result-snapshot.mjs";
 export const PRODUCT_CAPABILITY_REGISTRY_VERSION =
   "clearra.product-capability-registry.v1";
 export const CLI_COMMAND_LOWERING_AUTHORITY = "clearra.cli-command.v1";
-export const CLI_COMPATIBILITY_LOWERING_AUTHORITY =
-  "clearra.cli-command.compatibility.v1";
 
 const CURRENT_CAPABILITY_ROWS = [
   { id: "meta.help", kind: "meta", status: "active", path: ["help"], ingress: { slash: true, text: true }, problemContractId: "help-query.v1", inputSchemaId: "help-query.v1", modalSchemaId: null, resultContractId: "help-document.v1", algorithmFamily: "utility", timeoutClass: "utility_bounded", effectClasses: ["representation_only"], helpPolicy: "public", i18nPolicy: "en-ko-ja", resultAllowlist: [], loweringAuthority: "discord.help-registry-query.v1", engine: null },
@@ -48,7 +46,7 @@ const CURRENT_CAPABILITY_ROWS = [
   { id: "utility.render", kind: "utility", status: "active", path: ["utility", "render"], ingress: { slash: true, text: true }, problemContractId: "field-document-render.v1", inputSchemaId: "field-document.v1", modalSchemaId: "utility-field.v1", resultContractId: "render-artifact.v1", algorithmFamily: "utility", timeoutClass: "utility_bounded", effectClasses: ["representation_only", "artifact_encoding"], helpPolicy: "public", i18nPolicy: "en-ko-ja", resultAllowlist: ["render-artifact.v1"], loweringAuthority: CLI_COMMAND_LOWERING_AUTHORITY, engine: { input: "render-document-v1", argvPrefix: ["utility", "render"] } },
   { id: "utility.to-gray", kind: "utility", status: "active", path: ["utility", "to-gray"], ingress: { slash: true, text: true }, problemContractId: "field-color-normalization.v1", inputSchemaId: "field-document.v1", modalSchemaId: "utility-field.v1", resultContractId: "field-document.v1", algorithmFamily: "utility", timeoutClass: "utility_bounded", effectClasses: ["representation_only", "artifact_encoding"], helpPolicy: "public", i18nPolicy: "en-ko-ja", resultAllowlist: ["field-document.v1"], loweringAuthority: CLI_COMMAND_LOWERING_AUTHORITY, engine: { input: "field-document-v1", argvPrefix: ["utility", "to-gray"] } },
   { id: "utility.mirror", kind: "utility", status: "active", path: ["utility", "mirror"], ingress: { slash: true, text: true }, problemContractId: "field-mirror.v1", inputSchemaId: "field-document.v1", modalSchemaId: "utility-field.v1", resultContractId: "field-document.v1", algorithmFamily: "utility", timeoutClass: "utility_bounded", effectClasses: ["representation_only", "artifact_encoding"], helpPolicy: "public", i18nPolicy: "en-ko-ja", resultAllowlist: ["field-document.v1"], loweringAuthority: CLI_COMMAND_LOWERING_AUTHORITY, engine: { input: "field-document-v1", argvPrefix: ["utility", "mirror"] } },
-  { id: "diagnostic.verify", kind: "search", status: "hidden", path: ["verify"], ingress: { slash: false, text: true }, problemContractId: "verification-report", inputSchemaId: "verify-scope", modalSchemaId: null, resultContractId: "verification-report", algorithmFamily: "verification", timeoutClass: "diagnostic", effectClasses: ["diagnostic"], helpPolicy: "hidden", i18nPolicy: "hidden", resultAllowlist: ["verify", "verify-kicks"], loweringAuthority: CLI_COMMAND_LOWERING_AUTHORITY, engine: { input: "verify", argvPrefix: ["sfinder", "verify"] } },
+  { id: "diagnostic.verify", kind: "search", status: "hidden", path: ["verify"], ingress: { slash: false, text: true }, problemContractId: "verification-report", inputSchemaId: "verify-scope", modalSchemaId: null, resultContractId: "verification-report", algorithmFamily: "verification", timeoutClass: "diagnostic", effectClasses: ["diagnostic"], helpPolicy: "hidden", i18nPolicy: "hidden", resultAllowlist: ["verify", "verify-kicks"], loweringAuthority: CLI_COMMAND_LOWERING_AUTHORITY, engine: { input: "verify", argvPrefix: ["verify"] } },
 ];
 
 const PLANNED_CAPABILITY_ROWS = [
@@ -205,88 +203,20 @@ function scoreOnlyBuildV2Semantics() {
   };
 }
 
-const LEGACY_ROUTE_ROWS = [
-  { id: "pc.path/slash/path", capability_id: "pc.path", surface: "discord-slash", path: ["path"], classification: "equivalence", input: "pc", input_schema_id: "pc-pattern", modal_schema_id: "pc-pattern", argv_prefix: ["sfinder", "path"], public_result_kind: "path", remove_in: "v0.10.0" },
-  { id: "pc.path/text/path", capability_id: "pc.path", surface: "discord-text", name: "path", classification: "equivalence", input: "pc", input_schema_id: "pc-pattern", modal_schema_id: "pc-pattern", argv_prefix: ["sfinder", "path"], public_result_kind: "path", lifetime: "long-term" },
-  { id: "pc.minimals/slash/minimals", capability_id: "pc.minimals", surface: "discord-slash", path: ["minimals"], classification: "equivalence", input: "pc-v2", input_schema_id: "pc-pattern.v2", modal_schema_id: "pc-pattern.v2", argv_prefix: ["pc", "minimals"], public_result_kind: "minimals", remove_in: "v0.10.0" },
-  { id: "pc.minimals/text/minimals", capability_id: "pc.minimals", surface: "discord-text", name: "minimals", classification: "equivalence", input: "pc-v2", input_schema_id: "pc-pattern.v2", modal_schema_id: "pc-pattern.v2", argv_prefix: ["pc", "minimals"], public_result_kind: "minimals", lifetime: "long-term" },
-  { id: "pc.score-minimals/slash/score-minimals", capability_id: "pc.score-minimals", surface: "discord-slash", path: ["score-minimals"], classification: "equivalence", input: "pc-score-v2", input_schema_id: "pc-score.v2", modal_schema_id: "pc-score.v2", argv_prefix: ["pc", "score-minimals"], public_result_kind: "score-minimals", remove_in: "v0.10.0" },
-  { id: "pc.score-minimals/text/score-minimals", capability_id: "pc.score-minimals", surface: "discord-text", name: "score-minimals", classification: "equivalence", input: "pc-score-v2", input_schema_id: "pc-score.v2", modal_schema_id: "pc-score.v2", argv_prefix: ["pc", "score-minimals"], public_result_kind: "score-minimals", lifetime: "long-term" },
-  { id: "pc.score-finder/slash/score-finder", capability_id: "pc.score-finder", surface: "discord-slash", path: ["score-finder"], classification: "equivalence", input: "score-fixed-next", input_schema_id: "pc-fixed-score", modal_schema_id: "pc-fixed-score", argv_prefix: ["sfinder", "score-finder"], public_result_kind: "score-finder", remove_in: "v0.10.0" },
-  { id: "pc.score-finder/text/score-finder", capability_id: "pc.score-finder", surface: "discord-text", name: "score-finder", classification: "equivalence", input: "score-fixed-next", input_schema_id: "pc-fixed-score", modal_schema_id: "pc-fixed-score", argv_prefix: ["sfinder", "score-finder"], public_result_kind: "score-finder", lifetime: "long-term" },
-  { id: "pc.allspin-sol/slash/allspin-sol-finder", capability_id: "pc.allspin-sol", surface: "discord-slash", path: ["allspin-sol-finder"], classification: "equivalence", input: "pc-allspin-exact-v1", input_schema_id: "pc-allspin-exact-queue.v1", modal_schema_id: "pc-allspin-exact-queue.v1", argv_prefix: ["pc", "allspin-sol"], public_result_kind: "allspin-sol-finder", remove_in: "v0.10.0" },
-  { id: "pc.allspin-sol/text/allspin-sol-finder", capability_id: "pc.allspin-sol", surface: "discord-text", name: "allspin-sol-finder", classification: "equivalence", input: "pc-allspin-exact-v1", input_schema_id: "pc-allspin-exact-queue.v1", modal_schema_id: "pc-allspin-exact-queue.v1", argv_prefix: ["pc", "allspin-sol"], public_result_kind: "allspin-sol-finder", lifetime: "long-term" },
-  { id: "pc.allspin-pres-chance/slash/allspin-pres-chance", capability_id: "pc.allspin-pres-chance", surface: "discord-slash", path: ["allspin-pres-chance"], classification: "equivalence", input: "pc-allspin-pattern-v1", input_schema_id: "pc-allspin-pattern.v1", modal_schema_id: "pc-allspin-pattern.v1", argv_prefix: ["pc", "allspin-pres-chance"], public_result_kind: "allspin-pres-chance", remove_in: "v0.10.0" },
-  { id: "pc.allspin-pres-chance/text/allspin-pres-chance", capability_id: "pc.allspin-pres-chance", surface: "discord-text", name: "allspin-pres-chance", classification: "equivalence", input: "pc-allspin-pattern-v1", input_schema_id: "pc-allspin-pattern.v1", modal_schema_id: "pc-allspin-pattern.v1", argv_prefix: ["pc", "allspin-pres-chance"], public_result_kind: "allspin-pres-chance", lifetime: "long-term" },
-  { id: "build.cover/slash/cover", capability_id: "build.cover", surface: "discord-slash", path: ["cover"], classification: "equivalence", input: "cover", input_schema_id: "build-base-target", modal_schema_id: "build-base-target", argv_prefix: ["build-probability"], public_result_kind: "cover", remove_in: "v0.10.0" },
-  { id: "build.cover/text/cover", capability_id: "build.cover", surface: "discord-text", name: "cover", classification: "equivalence", input: "cover", input_schema_id: "build-base-target", modal_schema_id: "build-base-target", argv_prefix: ["build-probability"], public_result_kind: "cover", lifetime: "long-term" },
-  { id: "build.cover/slash/finesse/search", capability_id: "build.cover", surface: "discord-slash", path: ["finesse", "search"], classification: "fixed-preset", input: "finesse-search", input_schema_id: "finesse-base-target", modal_schema_id: "finesse-base-target", argv_prefix: ["build-probability"], public_result_kind: "finesse-search", preset: { finesse: "inputs", mirror: "exclude" }, remove_in: "v0.10.0" },
-  { id: "build.cover/text/finesse/search", capability_id: "build.cover", surface: "discord-text", name: "finesse search", classification: "fixed-preset", input: "finesse-search", input_schema_id: "finesse-base-target", modal_schema_id: "finesse-base-target", argv_prefix: ["build-probability"], public_result_kind: "finesse-search", preset: { finesse: "inputs", mirror: "exclude" }, lifetime: "long-term" },
-  { id: "build.finesse-score/slash/finesse/score", capability_id: "build.finesse-score", surface: "discord-slash", path: ["finesse", "score"], classification: "equivalence", input: "finesse-score", input_schema_id: "finesse-score-document.v2", modal_schema_id: "finesse-score-document.v2", argv_prefix: ["finesse", "score"], public_result_kind: "finesse-score", remove_in: "v0.10.0" },
-  { id: "build.finesse-score/text/finesse/score", capability_id: "build.finesse-score", surface: "discord-text", name: "finesse score", classification: "equivalence", input: "finesse-score", input_schema_id: "finesse-score-document.v2", modal_schema_id: "finesse-score-document.v2", argv_prefix: ["finesse", "score"], public_result_kind: "finesse-score", lifetime: "long-term" },
-  { id: "setup.joint/slash/pc-setup", capability_id: "setup.joint", surface: "discord-slash", path: ["pc-setup"], classification: "fixed-preset", input: "remaining", input_schema_id: "setup-ranking", modal_schema_id: "setup-ranking", argv_prefix: ["setup-finder"], public_result_kind: "pc-setup", preset: { setupPriority: "all" }, remove_in: "v0.10.0" },
-  { id: "setup.joint/text/pc-setup", capability_id: "setup.joint", surface: "discord-text", name: "pc-setup", classification: "fixed-preset", input: "remaining", input_schema_id: "setup-ranking", modal_schema_id: "setup-ranking", argv_prefix: ["setup-finder"], public_result_kind: "pc-setup", preset: { setupPriority: "all" }, lifetime: "long-term" },
-  { id: "setup.build/slash/best-setup", capability_id: "setup.build", surface: "discord-slash", path: ["best-setup"], classification: "fixed-preset", input: "remaining", input_schema_id: "setup-ranking", modal_schema_id: "setup-ranking", argv_prefix: ["setup-finder"], public_result_kind: "best-setup", preset: { setupPriority: "build" }, remove_in: "v0.10.0" },
-  { id: "setup.build/text/best-setup", capability_id: "setup.build", surface: "discord-text", name: "best-setup", classification: "fixed-preset", input: "remaining", input_schema_id: "setup-ranking", modal_schema_id: "setup-ranking", argv_prefix: ["setup-finder"], public_result_kind: "best-setup", preset: { setupPriority: "build" }, lifetime: "long-term" },
-  { id: "setup.pc/slash/dpc-finder", capability_id: "setup.pc", surface: "discord-slash", path: ["dpc-finder"], classification: "fixed-preset", input: "remaining", input_schema_id: "setup-ranking", modal_schema_id: "setup-ranking", argv_prefix: ["setup-finder"], public_result_kind: "dpc-finder", preset: { setupPriority: "pc" }, remove_in: "v0.10.0" },
-  { id: "setup.pc/text/dpc-finder", capability_id: "setup.pc", surface: "discord-text", name: "dpc-finder", classification: "fixed-preset", input: "remaining", input_schema_id: "setup-ranking", modal_schema_id: "setup-ranking", argv_prefix: ["setup-finder"], public_result_kind: "dpc-finder", preset: { setupPriority: "pc" }, lifetime: "long-term" },
-  { id: "forward.spin/slash/spin", capability_id: "forward.spin", surface: "discord-slash", path: ["spin"], classification: "equivalence", input: "spin", input_schema_id: "forward-spin", modal_schema_id: "forward-spin", argv_prefix: ["spin-finder"], public_result_kind: "spin", remove_in: "v0.10.0" },
-  { id: "forward.spin/text/spin", capability_id: "forward.spin", surface: "discord-text", name: "spin", classification: "equivalence", input: "spin", input_schema_id: "forward-spin", modal_schema_id: "forward-spin", argv_prefix: ["spin-finder"], public_result_kind: "spin", lifetime: "long-term" },
-  { id: "forward.spin/slash/spin-cover", capability_id: "forward.spin", surface: "discord-slash", path: ["spin-cover"], classification: "equivalence", input: "spin", input_schema_id: "forward-spin", modal_schema_id: "forward-spin", argv_prefix: ["spin-finder"], public_result_kind: "spin-cover", remove_in: "v0.10.0" },
-  { id: "forward.spin/text/spin-cover", capability_id: "forward.spin", surface: "discord-text", name: "spin-cover", classification: "equivalence", input: "spin", input_schema_id: "forward-spin", modal_schema_id: "forward-spin", argv_prefix: ["spin-finder"], public_result_kind: "spin-cover", lifetime: "long-term" },
-  { id: "forward.damage/slash/damage", capability_id: "forward.damage", surface: "discord-slash", path: ["damage"], classification: "equivalence", input: "fixed-next", input_schema_id: "forward-damage-exact-queue", modal_schema_id: "forward-damage-exact-queue", argv_prefix: ["damage"], public_result_kind: "damage", remove_in: "v0.10.0" },
-  { id: "forward.damage/text/damage", capability_id: "forward.damage", surface: "discord-text", name: "damage", classification: "equivalence", input: "fixed-next", input_schema_id: "forward-damage-exact-queue", modal_schema_id: "forward-damage-exact-queue", argv_prefix: ["damage"], public_result_kind: "damage", lifetime: "long-term" },
-];
-
-const LEGACY_ROUTE_AUTHORITY_OVERRIDES = Object.freeze({
-  "pc.path/slash/path": legacyPcScenarioAuthority(),
-  "pc.path/text/path": legacyPcScenarioAuthority(),
-  "pc.score-finder/slash/score-finder": legacyPcScenarioAuthority(),
-  "pc.score-finder/text/score-finder": legacyPcScenarioAuthority(),
-  "setup.joint/slash/pc-setup": legacySetupFinderAuthority("setup-ranking-joint"),
-  "setup.joint/text/pc-setup": legacySetupFinderAuthority("setup-ranking-joint"),
-  "setup.build/slash/best-setup": legacySetupFinderAuthority("setup-ranking-build"),
-  "setup.build/text/best-setup": legacySetupFinderAuthority("setup-ranking-build"),
-  "setup.pc/slash/dpc-finder": legacySetupFinderAuthority("setup-ranking-pc"),
-  "setup.pc/text/dpc-finder": legacySetupFinderAuthority("setup-ranking-pc"),
-  "build.cover/slash/cover": legacyBuildProbabilityAuthority(),
-  "build.cover/text/cover": legacyBuildProbabilityAuthority(),
-  "build.cover/slash/finesse/search": legacyBuildProbabilityAuthority(),
-  "build.cover/text/finesse/search": legacyBuildProbabilityAuthority(),
-});
-
-function legacyPcScenarioAuthority() {
-  return {
-    problemContractId: "pc-clear-to-empty",
-    resultContractId: "pc-scenario",
-    effectClasses: ["search_space", "supply_semantics", "result_materialization"],
-    engineKinds: ["pc-scenario"],
-  };
-}
-
-function legacySetupFinderAuthority(problemContractId) {
-  return {
-    problemContractId,
-    resultContractId: "setup-ranking",
-    effectClasses: ["search_space", "probability_semantics", "result_materialization"],
-    engineKinds: ["setup"],
-  };
-}
-
-function legacyBuildProbabilityAuthority() {
-  return {
-    problemContractId: "build-base-target",
-    resultContractId: "build-probability",
-    effectClasses: ["search_space", "reachability_semantics", "result_materialization"],
-    engineKinds: ["build-probability"],
-  };
-}
-
-const GENERIC_COMPATIBILITY_ROWS = [
-  { id: "discord.compat.chance", root: "chance", argvPrefix: ["sfinder", "chance"], publicResultKind: "chance", resultAuthorityId: "chance" },
-  { id: "discord.compat.percent", root: "percent", argvPrefix: ["sfinder", "percent"], publicResultKind: "percent", resultAuthorityId: "percent" },
-  { id: "discord.compat.score", root: "score", argvPrefix: ["sfinder", "score"], publicResultKind: "score", resultAuthorityId: "score" },
-];
+// A Clearra alias selects a name only; the canonical capability owns its
+// complete request, result, and runtime contract.
+const PRODUCT_ALIAS_ROOTS = new Map([
+  ["pc.path", "path"],
+  ["pc.chance", "chance"],
+  ["pc.minimals", "minimals"],
+  ["pc.score", "score"],
+  ["pc.score-minimals", "score-minimals"],
+  ["pc.score-finder", "score-finder"],
+  ["build.cover", "cover"],
+  ["build.finesse-score", "finesse score"],
+  ["forward.spin", "spin"],
+  ["forward.damage", "damage"],
+]);
 
 const CAPABILITY_PRESENTATION = Object.freeze({
   "pc.path": ["Find every represented perfect-clear path", "Discord publishes only the first result in deterministic order and exposes no tie or paging surface.", "path", "pc-path-v2"],
@@ -319,7 +249,7 @@ const CAPABILITY_PRESENTATION = Object.freeze({
   "setup.build": ["Rank setup candidates by build coverage", null, "best-setup", "setup-build-v2"],
   "setup.pc": ["Rank setup candidates by perfect-clear coverage", null, "dpc-finder", "setup-pc-v2"],
   "setup.score": ["Score canonical setup-document candidates against an explicit continuation supply", "Discord preserves the ordinary ranked family within its bounded response limit.", "setup-score", "setup-score-v1"],
-  "forward.spin": ["Find ordered forward selected-profile spin completions", "Legacy spin aliases are distinct from unordered structural spin search.", "spin"],
+  "forward.spin": ["Find ordered forward selected-profile spin completions", "This search uses the supplied piece order; use /spin-structure search for unordered pieces.", "spin"],
   "forward.damage": ["Find damage outcomes for one exact ordered queue", null, "damage"],
   "forward.ren": ["Find maximum exact REN witnesses for one ordered queue", null, "ren"],
   "spin-structure.search": ["Find subset-minimal spin structures from unordered pieces", "Discord preserves the ordinary family within its bounded response limit.", "spin-structure", "spin-structure-search-v2"],
@@ -335,9 +265,8 @@ const CAPABILITY_PRESENTATION = Object.freeze({
   "diagnostic.verify": ["Run hidden installation diagnostics", null, "verify"],
 });
 
-// The product runtime projection records the compatibility engine that owns
-// each family. Canonical grouped commands may nevertheless use a newer typed
-// input/lowering grammar; aliases retain the compatibility engine verbatim.
+// When a product has a newer typed ingress, both its grouped name and short
+// alias use this same canonical descriptor.
 const CANONICAL_ROUTE_OVERRIDES = Object.freeze({
   "pc.path": { input: "pc-path-v2", argvPrefix: ["pc", "path"] },
   "pc.score-finder": { input: "pc-score-finder-v2", argvPrefix: ["pc", "score-finder"] },
@@ -352,37 +281,16 @@ const CANONICAL_ROUTE_OVERRIDES = Object.freeze({
   "spin-structure.guaranteed": { input: "spin-structure-guaranteed-v1", argvPrefix: ["spin-structure", "guaranteed"] },
 });
 
-const LEGACY_ROUTES_BY_CAPABILITY = new Map();
-for (const row of LEGACY_ROUTE_ROWS) {
-  const routes = LEGACY_ROUTES_BY_CAPABILITY.get(row.capability_id) ?? [];
-  routes.push(routeFromLegacyRow(row));
-  LEGACY_ROUTES_BY_CAPABILITY.set(row.capability_id, routes);
-}
-
 export const productCapabilityRegistry = deepFreeze([
   ...CURRENT_CAPABILITY_ROWS,
   ...PLANNED_CAPABILITY_ROWS,
 ].map((row) => capabilityFromRow(BUILD_V2_DISCORD_SURFACE_ROWS.get(row.id) ?? row)));
 
-export const discordGenericCompatibilityRoutes = deepFreeze(
-  GENERIC_COMPATIBILITY_ROWS.map(genericCompatibilityRoute),
-);
-
 const PRODUCT_CAPABILITIES_BY_ID = new Map(
   productCapabilityRegistry.map((entry) => [entry.id, entry]),
 );
-const GENERIC_COMPATIBILITY_ROUTES_BY_ID = new Map(
-  discordGenericCompatibilityRoutes.map((entry) => [entry.id, entry]),
-);
-
 export function findProductCapability(id) {
   return typeof id === "string" ? PRODUCT_CAPABILITIES_BY_ID.get(id) ?? null : null;
-}
-
-export function findDiscordGenericCompatibilityRoute(id) {
-  return typeof id === "string"
-    ? GENERIC_COMPATIBILITY_ROUTES_BY_ID.get(id) ?? null
-    : null;
 }
 
 export function activeDiscordSearchCapabilities() {
@@ -400,50 +308,19 @@ export function hiddenTextSearchCapabilities() {
   );
 }
 
-export function activeDiscordGenericCompatibilityRoutes() {
-  return discordGenericCompatibilityRoutes.filter(
-    ({ kind, status }) => kind === "search" && status === "compatibility",
-  );
-}
-
 export function discordRuntimeProjection() {
   return productCapabilityRegistry;
 }
 
-export function discordLegacyRouteProjection() {
-  return deepFreeze(LEGACY_ROUTE_ROWS.map((row) => clonePlain(row)));
-}
-
-export function discordGenericCompatibilityRouteProjection() {
-  return deepFreeze(discordGenericCompatibilityRoutes.map((route) => ({
-    id: route.id,
-    kind: route.kind,
-    status: route.status,
-    helpPolicy: route.helpPolicy,
-    i18nPolicy: route.i18nPolicy,
-    root: route.root,
-    slash: route.slash,
-    text: route.text,
-    classification: route.classification,
-    input: route.input,
-    inputSchemaId: route.inputSchemaId,
-    modalSchemaId: route.modalSchemaId,
-    argvPrefix: [...route.argvPrefix],
-    problemFamily: route.problemFamily,
-    problemContractId: route.problemContractId,
-    algorithmFamily: route.algorithmFamily,
-    timeoutClass: route.timeoutClass,
-    executorTimeoutClass: route.executorTimeoutClass,
-    effectClasses: [...route.effectClasses],
-    resultContractId: route.resultContractId,
-    publicResultKind: route.publicResultKind,
-    resultAuthorityId: route.resultAuthorityId,
-    resultAllowlist: [...route.engineKinds],
-    telemetryIdentity: route.telemetryIdentity,
-    loweringAuthority: route.loweringAuthority,
-    removeIn: route.removeIn,
-    lifetime: route.lifetime,
-  })));
+export function discordProductAliasProjection() {
+  return deepFreeze(productCapabilityRegistry.flatMap((capability) =>
+    capability.aliases.map((route) => ({
+      capabilityId: capability.id,
+      path: [route.root, route.subcommand].filter(Boolean),
+      slash: route.slash,
+      text: route.text,
+    })),
+  ));
 }
 
 export function lowerCapabilityRouteRequest(capability, route, parameters = {}) {
@@ -563,26 +440,6 @@ export function assertProductCapabilityRegistry() {
   return true;
 }
 
-export function assertDiscordGenericCompatibilityRoutes() {
-  const ids = new Set();
-  for (const route of discordGenericCompatibilityRoutes) {
-    if (!route.id || ids.has(route.id)) {
-      throw new Error("Discord generic compatibility route IDs must be unique.");
-    }
-    ids.add(route.id);
-    if (
-      route.classification !== "generic-compatibility" ||
-      route.problemContractId !== "pc-clear-to-empty" ||
-      route.resultContractId !== "pc-scenario" ||
-      !sameStrings(route.engineKinds, ["pc-scenario"]) ||
-      route.loweringAuthority !== CLI_COMPATIBILITY_LOWERING_AUTHORITY
-    ) {
-      throw new Error(`Generic route '${route.id}' escaped compatibility authority.`);
-    }
-  }
-  return true;
-}
-
 function capabilityFromRow(row) {
   const [description, note, publicResultKind, resultAuthorityId] =
     CAPABILITY_PRESENTATION[row.id] ?? [
@@ -641,66 +498,19 @@ function capabilityFromRow(row) {
     resultAuthorityId: resultAuthorityId ?? publicResultKind,
     engine: row.engine === null ? null : clonePlain(row.engine),
     canonical,
-    aliases: [...(LEGACY_ROUTES_BY_CAPABILITY.get(row.id) ?? [])],
+    aliases: productAliases(row.id, canonical),
   };
 }
 
-function routeFromLegacyRow(row) {
-  const path = row.path ?? String(row.name).split(" ");
-  const authority = LEGACY_ROUTE_AUTHORITY_OVERRIDES[row.id] ?? {};
-  return {
-    root: path[0],
-    subcommand: path[1] ?? null,
-    slash: row.surface === "discord-slash",
-    text: row.surface === "discord-text",
-    classification: row.classification,
-    input: row.input,
-    inputSchemaId: row.input_schema_id,
-    modalSchemaId: row.modal_schema_id,
-    argvPrefix: [...row.argv_prefix],
-    ...authority,
-    publicResultKind: row.public_result_kind,
-    resultAuthorityId: row.public_result_kind,
-    preset: row.preset ? clonePlain(row.preset) : null,
-    deprecateAfter: row.remove_in ?? null,
-    lifetime: row.lifetime ?? null,
-  };
-}
-
-function genericCompatibilityRoute(row) {
-  return {
-    id: row.id,
-    kind: "search",
-    status: "compatibility",
-    helpPolicy: "public",
-    i18nPolicy: "en-ko-ja",
-    root: row.root,
-    slash: true,
-    text: true,
-    classification: "generic-compatibility",
-    input: "pc",
-    inputSchemaId: "pc-pattern",
-    modalSchemaId: "pc-pattern",
-    argvPrefix: [...row.argvPrefix],
-    problemFamily: "pc",
-    problemContractId: "pc-clear-to-empty",
-    algorithmFamily: "pc_inverse_lock_clear",
-    timeoutClass: "pc_reverse",
-    executorTimeoutClass: "pc_reverse",
-    effectClasses: ["search_space", "supply_semantics", "result_materialization"],
-    resultContractId: "pc-scenario",
-    publicResultKind: row.publicResultKind,
-    resultAuthorityId: row.resultAuthorityId,
-    engineKinds: ["pc-scenario"],
-    resultAllowlist: ["pc-scenario"],
-    telemetryIdentity: row.id,
-    loweringAuthority: CLI_COMPATIBILITY_LOWERING_AUTHORITY,
-    removeIn: "v0.10.0",
-    lifetime: "long-term",
-    description: row.root === "score"
-      ? "Score perfect-clear paths through the generic compatibility engine"
-      : `Calculate generic perfect-clear ${row.root}`,
-  };
+function productAliases(capabilityId, canonical) {
+  const name = PRODUCT_ALIAS_ROOTS.get(capabilityId);
+  if (name === undefined) return [];
+  const [root, subcommand = null] = name.split(" ");
+  const alias = { ...canonical, root, subcommand, classification: "equivalence" };
+  return [
+    { ...alias, slash: true, text: false, deprecateAfter: "v0.10.0" },
+    { ...alias, slash: false, text: true, lifetime: "long-term" },
+  ];
 }
 
 function sameStrings(left, right) {
@@ -710,4 +520,3 @@ function sameStrings(left, right) {
 }
 
 assertProductCapabilityRegistry();
-assertDiscordGenericCompatibilityRoutes();

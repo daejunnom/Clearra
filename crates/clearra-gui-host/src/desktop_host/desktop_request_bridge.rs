@@ -4438,7 +4438,8 @@ mod product_pages {
     }
 }
 mod run_request {
-    use clearra_app::ProductPageStore;
+    use clearra_app::{AppRequest, ProductPageStore};
+    use clearra_core_domain::execution_cancellation::ExecutionControl;
 
     use super::{
         active_request_parser::desktop_request_builds_app_request,
@@ -4451,9 +4452,22 @@ mod run_request {
             request_json: &str,
         ) -> Result<String, DesktopTauriCommandError> {
             self.ensure_no_running_job()?;
-            self.product_page_store = None;
             let request = desktop_request_builds_app_request(request_json)?;
-            let response = self.app_context.run(request);
+            self.run_app_request(request)
+        }
+
+        /// Execute the same typed request the native host already prepared.
+        pub fn run_app_request(
+            &mut self,
+            request: AppRequest,
+        ) -> Result<String, DesktopTauriCommandError> {
+            self.ensure_no_running_job()?;
+            self.product_page_store = None;
+            let response = crate::job::run_desktop_product(
+                &self.app_context,
+                request,
+                &ExecutionControl::default(),
+            );
             let product_page_source_owner = response.public_page_source_owner();
             // This legacy synchronous GUI boundary must not turn every solution into a
             // CTK3/Fumen document. Explicit CLI/export routes retain that responsibility.
@@ -4476,6 +4490,7 @@ mod run_request {
 }
 mod start_job {
     use crate::GuiJobRunner;
+    use clearra_app::AppRequest;
 
     use super::{
         active_request_parser::desktop_request_builds_app_request,
@@ -4499,9 +4514,19 @@ mod start_job {
 
         pub fn start_job(&mut self, request_json: &str) -> Result<u64, DesktopTauriCommandError> {
             self.ensure_no_running_job()?;
+            let request = desktop_request_builds_app_request(request_json)?;
+            self.start_app_job(request)
+        }
+
+        /// Queue the same typed request used for native asset preparation,
+        /// without parsing the GUI wire request a second time.
+        pub fn start_app_job(
+            &mut self,
+            request: AppRequest,
+        ) -> Result<u64, DesktopTauriCommandError> {
+            self.ensure_no_running_job()?;
             self.reap_finished_job_before_start()?;
             self.product_page_store = None;
-            let request = desktop_request_builds_app_request(request_json)?;
             let queued = self
                 .queue
                 .enqueue(request)
@@ -6431,22 +6456,20 @@ mod tests {
     #[cfg(feature = "wasm-cpu-runtime")]
     #[test]
     fn desktop_actual_pc_path_returns_the_complete_ordinary_replay_family() {
+        let request = super::cli_request_parser::desktop_request_builds_app_request(
+            &json!({
+                "app_request_model": "clearra-cli/CommandRequest",
+                "command": "cli",
+                "language": "en",
+                "arguments": ["clearra", "pc", "path", "--board-mask", "0x3f0",
+                    "--height", "1", "--pieces", "1", "--lines", "1", "--queue", "I",
+                    "--backend", "cpu", "--workers", "1"],
+            })
+            .to_string(),
+        )
+        .expect("canonical Desktop pc.path argv");
         let response = DesktopTauriCommandBridge::default()
-            .run_request(
-                r#"{
-                    "app_request_model": "clearra-app/AppRequest",
-                    "command": "pc-scenario",
-                    "lines": 1,
-                    "visible_height": 1,
-                    "board_mask": "0x3f0",
-                    "piece_window": 1,
-                    "queue": "I",
-                    "hold_enabled": true,
-                    "hold_piece": "empty",
-                    "count_policy": "all",
-                    "score_mode": "path"
-                }"#,
-            )
+            .run_app_request(request)
             .expect("desktop actual pc.path request");
         let response: Value = serde_json::from_str(&response).expect("desktop response JSON");
         assert_eq!(response["status"], "success");

@@ -3,10 +3,7 @@ import {
   messageCommandCatalog,
   slashCommandCatalog,
 } from "./discord/slash-command-catalog.mjs";
-import {
-  discordGenericCompatibilityRoutes,
-  productCapabilityRegistry,
-} from "./discord/capability-registry.mjs";
+import { productCapabilityRegistry } from "./discord/capability-registry.mjs";
 
 const SCOPES = new Set(["gateway", "interaction", "job"]);
 const KINDS = new Set(["slash", "text", "render", "search"]);
@@ -54,15 +51,8 @@ function collectCapabilityTelemetryIdentities() {
     for (const route of routes) {
       if (!route.slash && !route.text) continue;
       const command = [route.root, route.subcommand].filter(Boolean).join(".");
-      if (capability.status === "hidden") {
-        identities.set(`sfinder.${command}`, capability.telemetryIdentity);
-      } else {
-        identities.set(command, capability.telemetryIdentity);
-      }
+      identities.set(command, capability.telemetryIdentity);
     }
-  }
-  for (const route of discordGenericCompatibilityRoutes) {
-    identities.set(route.root, route.telemetryIdentity);
   }
   return identities;
 }
@@ -133,14 +123,5 @@ export function canonicalOperationalCommand(value) {
     if (DISCORD_COMMAND_PATHS.has(canonical)) return canonical;
   }
   if (DISCORD_COMMAND_PATHS.has(candidate)) return candidate;
-  // Compatibility routes retain an internal sfinder prefix. Public telemetry
-  // uses the same identity as the equivalent slash command so one operation is
-  // never split into transport-specific rows.
-  if (candidate.startsWith("sfinder.")) {
-    const publicCommand = candidate.slice("sfinder.".length);
-    if (DISCORD_ROOT_COMMANDS.has(publicCommand)) {
-      return CAPABILITY_TELEMETRY_BY_COMMAND.get(publicCommand) ?? publicCommand;
-    }
-  }
   return canonicalClearraOperationalCommand(candidate);
 }

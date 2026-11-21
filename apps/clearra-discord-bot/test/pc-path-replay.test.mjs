@@ -221,7 +221,7 @@ test("direct executor canonical boundary reaches Discord PC replay without re-pr
   const outgoing = await bot.buildResultMessage(
     canonicalResult,
     false,
-    { locale: "ko", resultKind: "path" },
+    { locale: "ko", resultKind: "pc-path-v2" },
   );
 
   assert.equal(renderedOptions.delayMs, PC_PATH_REPLAY_FRAME_DELAY_MS);
@@ -265,7 +265,9 @@ test("HTTP executor canonical boundary renders one Build target replay at 500ms"
       headers: { "content-type": "application/json" },
     }),
   });
-  const canonicalResult = await executor.execute(["build-probability"]);
+  const canonicalResult = await executor.execute([
+    "build-probability", "--result-mode", "complete-replay-paths",
+  ]);
   const canonicalPayload = JSON.parse(canonicalResult.stdout);
   assert.equal(canonicalPayload.summary.payload_kind, "canonical-build-path-witness");
   assert.equal(Object.hasOwn(canonicalPayload.summary, "witnesses"), false);
@@ -280,7 +282,7 @@ test("HTTP executor canonical boundary renders one Build target replay at 500ms"
   const outgoing = await bot.buildResultMessage(
     canonicalResult,
     false,
-    { locale: "en", resultKind: "probability" },
+    { locale: "en", resultKind: "build-probability-v1" },
   );
   assert.equal(renderedOptions.delayMs, PC_PATH_REPLAY_FRAME_DELAY_MS);
   assert.match(outgoing.payload.content, /Build replay: 2 frames at 500ms each/u);

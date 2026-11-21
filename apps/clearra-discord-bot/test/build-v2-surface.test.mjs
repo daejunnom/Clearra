@@ -151,8 +151,10 @@ test("Build probability is a separate seven-mode capability without changing eit
 
   assert.deepEqual(build.cover.argvPrefix, ["build", "cover"]);
   assert.equal(build.cover.input, "build-v2-cover");
-  assert.deepEqual(findSlashCommand("cover").argvPrefix, ["build-probability"]);
-  assert.equal(findSlashCommand("cover").input, "cover");
+  const coverAlias = findSlashCommand("cover");
+  assert.deepEqual(coverAlias.argvPrefix, build.cover.argvPrefix);
+  assert.equal(coverAlias.input, build.cover.input);
+  assert.equal(coverAlias.resultAuthorityId, build.cover.resultAuthorityId);
 });
 
 test("all twelve slash forms lower to the frozen Web grammar and capability-closed defaults", () => {

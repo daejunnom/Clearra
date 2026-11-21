@@ -24,22 +24,15 @@ import { DiscordLocalePreferences } from "../src/discord/locale-preferences.mjs"
 import { DISCORD_PUBLIC_SEARCH_CONTRACT } from "../src/discord/public-search-contract.mjs";
 import { decodeViewerDocument } from "../src/viewer/document.mjs";
 
-const LEGACY_PUBLIC_SEARCH_COMMANDS = [
+const TYPED_SEARCH_ALIASES = [
   "path",
   "chance",
-  "percent",
-  "score",
   "minimals",
+  "score",
   "score-minimals",
   "score-finder",
-  "allspin-sol-finder",
-  "allspin-pres-chance",
   "cover",
-  "pc-setup",
-  "best-setup",
-  "dpc-finder",
   "spin",
-  "spin-cover",
   "damage",
 ];
 
@@ -47,8 +40,6 @@ const CANONICAL_SEARCH_ROOTS = ["pc", "recovery", "build", "setup", "forward", "
 const COMPATIBILITY_SEARCH_ROOTS = ["finesse"];
 
 test("slash catalog registers only curated active commands", () => {
-  assert.equal(slashCommandCatalog.length, 28);
-  assert.equal(globalCommands.length, 29);
   assert.equal(globalCommands.filter(({ type }) => type === 3).length, 1);
   assert.deepEqual(
     slashCommandCatalog.map((command) => command.name),
@@ -59,7 +50,7 @@ test("slash catalog registers only curated active commands", () => {
       "server-settings",
       ...CANONICAL_SEARCH_ROOTS,
       ...COMPATIBILITY_SEARCH_ROOTS,
-      ...LEGACY_PUBLIC_SEARCH_COMMANDS,
+      ...TYPED_SEARCH_ALIASES,
     ],
   );
   assert.deepEqual(
@@ -71,7 +62,7 @@ test("slash catalog registers only curated active commands", () => {
       "server-settings",
       ...CANONICAL_SEARCH_ROOTS,
       ...COMPATIBILITY_SEARCH_ROOTS,
-      ...LEGACY_PUBLIC_SEARCH_COMMANDS,
+      ...TYPED_SEARCH_ALIASES,
       "Get original GIF",
     ],
   );
@@ -131,20 +122,20 @@ test("slash catalog registers only curated active commands", () => {
   assert.deepEqual(findVariant("pc", "score").argvPrefix, ["pc", "score"]);
   assert.deepEqual(findVariant("pc", "score").resultAllowlist, ["pc-score-summary.v2"]);
   assert.equal(findVariant("pc", "score").resultAuthorityId, "pc-score");
-  assert.deepEqual(findSlashCommand("score").argvPrefix, ["sfinder", "score"]);
-  assert.deepEqual(findSlashCommand("score").resultAllowlist, ["pc-scenario"]);
-  assert.equal(findSlashCommand("score").resultAuthorityId, "score");
-  for (const name of ["chance", "percent"]) {
-    const generic = findSlashCommand(name);
-    assert.equal(generic.input, "pc");
-    assert.deepEqual(generic.argvPrefix, ["sfinder", name]);
-    assert.deepEqual(generic.resultAllowlist, ["pc-scenario"]);
-    assert.equal(generic.resultAuthorityId, name);
-    assert.equal(generic.compatibilityClassification, "generic-compatibility");
+  for (const [root, name] of [
+    ["pc", "path"], ["pc", "chance"], ["pc", "minimals"], ["pc", "score"],
+    ["pc", "score-minimals"], ["pc", "score-finder"], ["build", "cover"],
+    ["forward", "spin"], ["forward", "damage"],
+  ]) {
+    const canonical = findVariant(root, name);
+    const alias = findSlashCommand(name);
+    assert.deepEqual(alias.argvPrefix, canonical.argvPrefix);
+    assert.deepEqual(alias.resultAllowlist, canonical.resultAllowlist);
+    assert.equal(alias.resultAuthorityId, canonical.resultAuthorityId);
+    assert.deepEqual(alias.registration.options, canonical.registration.options);
   }
   assert.deepEqual(findVariant("pc", "failed-queue").argvPrefix, ["pc", "failed-queue"]);
   assert.deepEqual(findVariant("build", "cover").argvPrefix, ["build", "cover"]);
-  assert.deepEqual(findSlashCommand("cover").argvPrefix, ["build-probability"]);
   assert.deepEqual(findVariant("setup", "joint").argvPrefix, ["setup", "joint"]);
   assert.deepEqual(findVariant("forward", "spin").argvPrefix, ["spin-finder"]);
   assert.deepEqual(
@@ -159,40 +150,17 @@ test("slash catalog registers only curated active commands", () => {
     findVariant("spin-structure", "guaranteed").argvPrefix,
     ["spin-structure", "guaranteed"],
   );
-  assert.deepEqual(findVariant("finesse", "search").argvPrefix, ["build-probability"]);
-  assert.deepEqual(findVariant("finesse", "score").argvPrefix, ["finesse", "score"]);
+  assert.equal(findSlashCommand("finesse").subcommands.search, undefined);
   assert.deepEqual(
-    findSlashCommand("path").registration.options.map(({ name }) => name),
-    ["next", "field", "lines", "kicktable", "options"],
+    findVariant("finesse", "score").argvPrefix,
+    findVariant("build", "finesse-score").argvPrefix,
   );
-  assert.deepEqual(
-    findSlashCommand("path").registration.options.find(({ name }) => name === "lines"),
-    {
-      type: 4,
-      name: "lines",
-      description: "PC target height 1–6; omit to evaluate every height through 6",
-      required: false,
-      min_value: 1,
-      max_value: 6,
-      choices: [1, 2, 3, 4, 5, 6].map((value) => ({
-        name: `${value} line`,
-        value,
-      })),
-    },
-  );
-  assert.deepEqual(
-    findSlashCommand("cover").registration.options.map(({ name }) => name),
-    ["next", "base", "target", "kicktable", "options"],
-  );
-  assert.deepEqual(
-    findSlashCommand("score-finder").registration.options.map(({ name }) => name),
-    ["next", "field", "lines", "kicktable", "options"],
-  );
+  const pathLines = findSlashCommand("path").registration.options.find(({ name }) => name === "lines");
+  assert.equal(pathLines.type, 4);
+  assert.equal(pathLines.required, false);
+  assert.equal(pathLines.min_value, 1);
+  assert.equal(pathLines.max_value, 24);
   assert.equal(findSlashCommand("cat-finder"), null);
-  assert.deepEqual(
-    findSlashCommand("damage").registration.options.map(({ name }) => name),
-    ["next", "field", "kicktable", "options"],
-  );
   assert.deepEqual(
     findVariant("spin-structure", "search").registration.options.map(({ name }) => name),
     [
@@ -228,28 +196,6 @@ test("slash catalog registers only curated active commands", () => {
     findVariant("build", "cover").registration.options
       .some(({ name }) => name === "objective"),
     true,
-  );
-  assert.equal(
-    findSlashCommand("cover").registration.options
-      .some(({ name }) => name === "objective"),
-    false,
-  );
-  assert.equal(
-    prepareClearraArguments(["damage", "--board-mask-v1", "0", "--queue", "I"])[0],
-    "damage",
-  );
-  assert.deepEqual(
-    findSlashCommand("pc-setup").registration.options.map(({ name }) => name),
-    [
-      "remaining",
-      "priority",
-      "max-setup-pieces",
-      "queue-knowledge",
-      "next-cycle-remaining",
-      "setup-length",
-      "kicktable",
-      "options",
-    ],
   );
   assert.equal(globalCommands.some(({ name }) => name === "clearra"), false);
   assert.equal(globalCommands.some(({ name }) => name === "view"), false);
@@ -360,7 +306,8 @@ test("registered command metadata and every help page stay inside Discord limits
     assert.ok(koreanHelp.length <= 2_000, `/${name} Korean help exceeds Discord's message limit`);
   }
   const koreanScoreFinderHelp = formatSlashCommandHelp("score-finder", "ko");
-  assert.match(koreanScoreFinderHelp, /initial-b2b=true\|false/);
+  assert.match(koreanScoreFinderHelp, /initial-b2b/);
+  assert.doesNotMatch(koreanScoreFinderHelp, /initial-b2b=true\|false/);
 });
 
 test("bot locale resolution preserves Discord interaction locale behind stored overrides", async () => {
@@ -469,9 +416,9 @@ test("help explains one command without starting a search", async () => {
   assert.equal(administratorChecks, 0);
   assert.equal(messages.length, 1);
   assert.match(messages[0].payload.content, /Direct syntax: `\/path next:/);
-  assert.match(messages[0].payload.content, /\[options:hold=use\]/);
-  assert.doesNotMatch(messages[0].payload.content, /options:\"/);
-  assert.match(messages[0].payload.content, /all 1–6-row targets/);
+  assert.match(messages[0].payload.content, /hold:</);
+  assert.doesNotMatch(messages[0].payload.content, /options:hold=use/);
+  assert.match(messages[0].payload.content, /lines:1\.\.24/);
   assert.doesNotMatch(messages[0].payload.content, /2L\/4L\/6L/);
 });
 
@@ -695,7 +642,7 @@ test("field Modal submit reuses the slash parser, interaction locale, and serial
       executor: {
         async execute(arguments_, options) {
           calls.push({ arguments_, options });
-          return { exitCode: 0, stdout: "search result", stderr: "" };
+          return { exitCode: 0, stdout: JSON.stringify(validPcPathStructured(true)), stderr: "" };
         },
       },
     },
@@ -774,7 +721,7 @@ test("one feasible automatic slash PC target stays labeled while explicit 1L doe
       executor: {
         async execute(arguments_, options) {
           calls.push({ arguments_, options });
-          return { exitCode: 0, stdout: "search result", stderr: "" };
+          return { exitCode: 0, stdout: JSON.stringify(validPcPathStructured(true)), stderr: "" };
         },
       },
       gifRenderer: resolvedGifRenderer(),
@@ -1041,14 +988,14 @@ test("Oracle starts remote work immediately, then edits a render-first preview w
       async execute(arguments_, options) {
         events.push({ kind: "execute", arguments_, options });
         await execution;
-        return { exitCode: 0, stdout: "remote result", stderr: "" };
+        return { exitCode: 0, stdout: JSON.stringify(validPcPathStructured()), stderr: "" };
       },
     },
     { gifRenderer: resolvedGifRenderer() },
   );
   const incoming = oracleMessage(
     "oracle-command",
-    "$path --field XXXXXX____ --patterns I --lines 1",
+    "$path --field XXXXXX____ --queue I --lines 1 --no-hold",
   );
 
   assert.equal(
@@ -1065,11 +1012,9 @@ test("Oracle starts remote work immediately, then edits a render-first preview w
   assert.equal(preview.files[0].contentType, "image/gif");
   assert.equal(preview.payload.message_reference.message_id, "oracle-command");
   assert.equal(Object.hasOwn(events[0].options, "jobId"), false);
-  assert.deepEqual(events[0].arguments_.slice(0, 4), [
-    "sfinder",
-    "path",
-    "--field-mask-v1",
-    "000000000000003f",
+  assert.deepEqual(events[0].arguments_.slice(0, 12), [
+    "pc", "path", "--lines", "1", "--board-mask", "0x3f",
+    "--height", "1", "--pieces", "1", "--queue", "I",
   ]);
   releaseExecution();
   assert.equal(await handling, true);
@@ -1080,14 +1025,12 @@ test("Oracle starts remote work immediately, then edits a render-first preview w
   const settled = events[2];
   assert.equal(settled.channelId, "oracle-channel");
   assert.equal(settled.messageId, "preview-message");
-  assert.match(settled.outgoing.payload.content, /remote result/);
-  assert.deepEqual(settled.outgoing.payload.attachments, [
-    {
-      id: "preview-attachment",
-      filename: "clearra-input-preview.gif",
-    },
-  ]);
-  assert.deepEqual(settled.outgoing.files, []);
+  assert.match(settled.outgoing.payload.content, /500ms/u);
+  assert.ok(settled.outgoing.payload.attachments.some(
+    (attachment) => attachment.id === "preview-attachment" &&
+      attachment.filename === "clearra-input-preview.gif",
+  ));
+  assert.deepEqual(settled.outgoing.files.map(({name}) => name), ["pc-path-1.gif"]);
 });
 
 test("Oracle text help returns the same help page without starting a search", async () => {
@@ -1190,7 +1133,7 @@ test("one feasible automatic text PC target stays labeled while explicit 1L does
     {
       async execute(arguments_, options) {
         calls.push({ arguments_, options });
-        return { exitCode: 0, stdout: "search result", stderr: "" };
+        return { exitCode: 0, stdout: JSON.stringify(validPcPathStructured(true)), stderr: "" };
       },
     },
     {
@@ -1625,7 +1568,7 @@ test("every registered slash command reaches its fixed engine argv prefix", asyn
   }
 });
 
-test("bot execution keeps typed pc chance separate from generic chance and percent", async () => {
+test("chance alias shares typed PC request and retired percent never executes", async () => {
   const invocations = [];
   const edits = [];
   const bot = new Clearrabot(
@@ -1644,10 +1587,8 @@ test("bot execution keeps typed pc chance separate from generic chance and perce
             exitCode: 0,
             stderr: "",
             stdout: JSON.stringify({
-              kind: arguments_[0] === "pc"
-                ? "pc-probability.v2"
-                : "pc-scenario",
-              summary: {},
+              kind: "pc-probability.v2",
+              summary: { coverage_probability: 1, materialized_pattern_count: 1 },
             }),
           };
         },
@@ -1659,37 +1600,26 @@ test("bot execution keeps typed pc chance separate from generic chance and perce
     { name: "next", value: "I" },
     { name: "lines", value: 1 },
     { name: "kicktable", value: "srs" },
+    { name: "hold", value: "empty" },
   ];
 
   await bot.handleInteraction(slashInteraction("pc", [{
     type: 1,
     name: "chance",
-    options: [...common, { name: "hold", value: "empty" }],
+    options: common,
   }]));
-  for (const name of ["chance", "percent"]) {
-    await bot.handleInteraction(slashInteraction(name, common));
-  }
+  await bot.handleInteraction(slashInteraction("chance", common));
+  assert.equal(await bot.handleInteraction(slashInteraction("percent", common)), false);
 
-  assert.deepEqual(invocations, [
-    [
-      "pc", "chance", "--lines", "1", "--board-mask", "0x3f",
-      "--height", "1", "--pieces", "1", "--queue", "I",
-      "--hold", "empty", "--rule", "srs", "--format", "json",
-      "--include-solution-data",
-    ],
-    [
-      "sfinder", "chance", "--field-mask-v1", "000000000000003f",
-      "--queue", "I", "--lines", "1", "--rule", "srs",
-      "--format", "json", "--include-solution-data",
-    ],
-    [
-      "sfinder", "percent", "--field-mask-v1", "000000000000003f",
-      "--queue", "I", "--lines", "1", "--rule", "srs",
-      "--format", "json", "--include-solution-data",
-    ],
-  ]);
+  const expected = [
+    "pc", "chance", "--lines", "1", "--board-mask", "0x3f",
+    "--height", "1", "--pieces", "1", "--queue", "I",
+    "--hold", "empty", "--rule", "srs", "--format", "json",
+    "--include-solution-data",
+  ];
+  assert.deepEqual(invocations, [expected, expected]);
   assert.equal(invocations[0].includes("--objective"), false);
-  assert.equal(edits.length, 3);
+  assert.deepEqual(edits, [edits[0], edits[0]]);
   assert.equal(edits.every((message) => !/inconsistent result/i.test(message)), true);
 });
 
@@ -1842,7 +1772,7 @@ test("Discord sequence executes the exact trace argv and returns only the bounde
   assert.ok(edits[0].length < 600, `bounded sequence report grew to ${edits[0].length} chars`);
 });
 
-test("bot execution keeps typed pc score separate from the generic score preset", async () => {
+test("score alias preserves all typed PC score arguments and result", async () => {
   const invocations = [];
   const edits = [];
   const bot = new Clearrabot(
@@ -1860,11 +1790,7 @@ test("bot execution keeps typed pc score separate from the generic score preset"
           return {
             exitCode: 0,
             stderr: "",
-            stdout: JSON.stringify(
-              arguments_[0] === "pc"
-                ? validPcScoreStructured()
-                : { kind: "pc-scenario", summary: {} },
-            ),
+            stdout: JSON.stringify(validPcScoreStructured()),
           };
         },
       },
@@ -1875,18 +1801,16 @@ test("bot execution keeps typed pc score separate from the generic score preset"
     { name: "next", value: "I" },
     { name: "lines", value: 1 },
     { name: "kicktable", value: "srs" },
+    { name: "hold", value: "empty" },
+    { name: "score-profile", value: "guideline" },
+    { name: "spin-profile", value: "all-mini-plus" },
+    { name: "initial-b2b", value: 2 },
   ];
 
   await bot.handleInteraction(slashInteraction("pc", [{
     type: 1,
     name: "score",
-    options: [
-      ...common,
-      { name: "hold", value: "empty" },
-      { name: "score-profile", value: "guideline" },
-      { name: "spin-profile", value: "all-mini-plus" },
-      { name: "initial-b2b", value: 2 },
-    ],
+    options: common,
   }]));
   await bot.handleInteraction(slashInteraction("score", common));
 
@@ -1897,7 +1821,7 @@ test("bot execution keeps typed pc score separate from the generic score preset"
     "--spin-profile", "all-mini-plus", "--initial-b2b", "2",
     "--rule", "srs", "--format", "json", "--include-solution-data",
   ]);
-  assert.deepEqual(invocations[1].slice(0, 2), ["sfinder", "score"]);
+  assert.deepEqual(invocations, [invocations[0], invocations[0]]);
   assert.equal(invocations[0].includes("--objective"), false);
   assert.equal(invocations[0].includes("--score"), false);
   assert.match(edits[0], /Solution fields: 1/);
@@ -1929,7 +1853,7 @@ test("pc score rejects cross-contract and semantically incomplete typed results"
     },
   );
   const typed = findSearchRouteByPublicKind("pc-score");
-  const legacy = findSearchRouteByPublicKind("score");
+  const alias = { root: "score", command: findSlashCommand("score") };
   const run = async (route, publicKind) => {
     await bot.runInteractionCommand(
       searchRouteInteraction(route, []),
@@ -1944,8 +1868,9 @@ test("pc score rejects cross-contract and semantically incomplete typed results"
   assert.doesNotMatch(await run(typed, "pc-score"), /inconsistent result/i);
   structured = { kind: "pc-scenario", summary: {} };
   assert.match(await run(typed, "pc-score"), /inconsistent result/i);
+  assert.match(await run(alias, "pc-score"), /inconsistent result/i);
   structured = validPcScoreStructured();
-  assert.match(await run(legacy, "score"), /inconsistent result/i);
+  assert.doesNotMatch(await run(alias, "pc-score"), /inconsistent result/i);
 
   const malformed = [
     (value) => { delete value.contract.command.kind; },
@@ -1976,8 +1901,10 @@ test("compute slash output combines one input GIF without a separate followup", 
   const jobOptions = [];
   const rest = {
     deferInteraction: async () => {},
-    editOriginalInteraction: async (_applicationId, _token, message) =>
-      edits.push(message),
+    editOriginalInteraction: async (_applicationId, _token, message) => {
+      edits.push(message);
+      return { attachments: [{ id: "preview", filename: "clearra-input-preview.gif" }] };
+    },
     createInteractionFollowup: async (_applicationId, _token, message) =>
       followups.push(message),
   };
@@ -1992,10 +1919,11 @@ test("compute slash output combines one input GIF without a separate followup", 
       maxConcurrentSearches: 1,
     },
     {
+      gifRenderer: resolvedGifRenderer(),
       executor: {
         execute: async (_arguments, options) => {
           jobOptions.push(options);
-          return { exitCode: 0, stdout: "search result", stderr: "" };
+          return { exitCode: 0, stdout: JSON.stringify(validPcPathStructured(true)), stderr: "" };
         },
       },
     },
@@ -2006,22 +1934,22 @@ test("compute slash output combines one input GIF without a separate followup", 
     pages: [
       {
         height: 1,
-        cells: ["O", "O", null, null, null, null, null, null, null, null],
+        cells: [...Array(6).fill("G"), ...Array(4).fill(null)],
       },
     ],
   });
   await bot.handleInteraction(slashInteraction("path", [
     { name: "field", value: source },
-    { name: "next", value: "*p2" },
-    { name: "lines", value: 2 },
-    { name: "options", value: "hold=avoid" },
+    { name: "next", value: "I" },
+    { name: "lines", value: 1 },
+    { name: "hold", value: "disabled" },
   ]));
-  assert.equal(edits.length, 1);
   assert.equal(followups.length, 0);
-  assert.equal(edits[0].files.length, 1);
-  assert.equal(edits[0].files[0].name, "clearra-input-preview.gif");
-  assert.equal(edits[0].files[0].contentType, "image/gif");
-  assert.match(edits[0].payload.content, /search result/);
+  const files = edits.flatMap(({ files }) => files);
+  assert.deepEqual(files.map(({ name, contentType }) => [name, contentType]), [
+    ["clearra-input-preview.gif", "image/gif"],
+  ]);
+  assert.doesNotMatch(edits.at(-1).payload.content, /inconsistent result/i);
   assert.equal(jobOptions.length, 1);
   assert.equal(Object.hasOwn(jobOptions[0], "jobId"), false);
 });
@@ -2058,7 +1986,7 @@ test("render-first slash edits the deferred original, then retains its GIF in th
       executor: {
         async execute() {
           await execution;
-          return { exitCode: 0, stdout: "final result", stderr: "" };
+          return { exitCode: 0, stdout: JSON.stringify(validPcPathStructured(true)), stderr: "" };
         },
       },
     },
@@ -2076,7 +2004,7 @@ test("render-first slash edits the deferred original, then retains its GIF in th
   releaseExecution();
   assert.equal(await handling, true);
   assert.equal(edits.length, 2);
-  assert.match(edits[1].payload.content, /final result/);
+  assert.match(edits[1].payload.content, /path search completed/i);
   assert.deepEqual(edits[1].payload.attachments, [{
     id: "preview-id",
     filename: "clearra-input-preview.gif",
@@ -2084,16 +2012,16 @@ test("render-first slash edits the deferred original, then retains its GIF in th
   assert.deepEqual(edits[1].files, []);
 });
 
-test("search solutions are returned as one color-preserving CTK3 attachment", async () => {
+test("typed path returns one replay GIF distinct from the input preview", async () => {
   const edits = [];
   let executedArguments;
   const rest = {
     deferInteraction: async () => {},
-    editOriginalInteraction: async (_applicationId, _token, message) =>
-      edits.push(message),
+    editOriginalInteraction: async (_applicationId, _token, message) => {
+      edits.push(message);
+      return { attachments: [{ id: "preview", filename: "clearra-input-preview.gif" }] };
+    },
   };
-  const key =
-    "ctk1|initial=0000000000000003|placements=T:000000000000003c,I:0000000000003c00";
   const bot = new Clearrabot(
     rest,
     {
@@ -2108,21 +2036,7 @@ test("search solutions are returned as one color-preserving CTK3 attachment", as
           return {
             exitCode: 0,
             stderr: "",
-            stdout: JSON.stringify({
-              schema_version: 2,
-              kind: "pc-scenario",
-              summary: {
-                count_complete: true,
-                coverage_probability: 0.625,
-                normalized_unique_solution_count: 1,
-              },
-              contract: {
-                artifacts: {
-                  schema_version: "clearra.solution-data.v1",
-                  solution_keys: [key],
-                },
-              },
-            }),
+            stdout: JSON.stringify(validPcPathStructured()),
           };
         },
       },
@@ -2130,38 +2044,34 @@ test("search solutions are returned as one color-preserving CTK3 attachment", as
   );
   const source = encodeCtk3({
     width: 10,
-    pages: [{ height: 1, cells: Array(10).fill(null) }],
+    pages: [{ height: 1, cells: [...Array(6).fill("G"), ...Array(4).fill(null)] }],
   });
 
   await bot.handleInteraction(slashInteraction("path", [
     { name: "field", value: source },
-    { name: "next", value: "II" },
-    { name: "lines", value: 2 },
+    { name: "next", value: "I" },
+    { name: "lines", value: 1 },
+    { name: "hold", value: "disabled" },
   ]));
 
   assert.deepEqual(
     executedArguments.slice(-3),
     ["--format", "json", "--include-solution-data"],
   );
-  assert.equal(edits.length, 1);
-  assert.equal(edits[0].files.length, 2);
-  const ctk3File = edits[0].files.find(
-    (file) => file.contentType === CTK3_FILE_MIME_TYPE,
-  );
-  assert.ok(ctk3File);
-  assert.equal(ctk3File.name, "path-result.ctk3");
-  assert.match(edits[0].payload.content, /Coverage probability: 62\.5%/);
-  const document = decodeCtk3(new TextDecoder().decode(ctk3File.bytes));
-  assert.deepEqual(document.pages[0].cells.slice(0, 6), [
-    "G", "G", "T", "T", "T", "T",
+  const files = edits.flatMap(({ files }) => files);
+  assert.deepEqual(files.map(({ name, contentType }) => [name, contentType]), [
+    ["clearra-input-preview.gif", "image/gif"],
+    ["pc-path-1.gif", "image/gif"],
   ]);
-  assert.deepEqual(document.pages[0].cells.slice(10, 14), ["I", "I", "I", "I"]);
+  assert.equal(
+    new TextDecoder().decode(files[1].bytes.subarray(0, 6)),
+    "GIF89a",
+  );
+  assert.match(edits.at(-1).payload.content, /500ms/u);
 });
 
-test("score-finder projects the internal PC scenario kind onto its Discord artifact", async () => {
+test("score-finder alias presents the typed canonical score winner", async () => {
   const messages = [];
-  const key =
-    "ctk1|initial=0000000000000003|placements=T:000000000000003c,I:0000000000003c00";
   const bot = new Clearrabot(
     {
       async editOriginalInteraction(_applicationId, _token, message) {
@@ -2175,17 +2085,7 @@ test("score-finder projects the internal PC scenario kind onto its Discord artif
           return {
             exitCode: 0,
             stderr: "",
-            stdout: JSON.stringify({
-              schema_version: 2,
-              kind: "pc-scenario",
-              summary: { normalized_unique_solution_count: 1 },
-              contract: {
-                artifacts: {
-                  schema_version: "clearra.solution-data.v1",
-                  solution_keys: [key],
-                },
-              },
-            }),
+            stdout: JSON.stringify(validPcScoreFinderStructured()),
           };
         },
       },
@@ -2194,19 +2094,21 @@ test("score-finder projects the internal PC scenario kind onto its Discord artif
 
   await bot.runInteractionCommand(
     slashInteraction("score-finder", []),
-    ["sfinder", "score-finder"],
+    ["pc", "score-finder"],
+    null,
+    "en",
+    "pc-score-finder-v2",
   );
 
   assert.equal(messages.length, 1);
   assert.match(messages[0].payload.content, /Clearra Jstris-score perfect-clear search completed\./);
   assert.doesNotMatch(messages[0].payload.content, /pc-scenario/);
-  assert.equal(messages[0].files[0].name, "score-finder-result.ctk3");
+  assert.match(messages[0].payload.content, /800/u);
+  assert.deepEqual(messages[0].files, []);
 });
 
-test("zero-solution search output omits a stale initial-only CTK3 attachment", async () => {
+test("complete empty typed replay does not attach an initial-only artifact", async () => {
   const messages = [];
-  const initialOnlyKey =
-    "ctk1|initial=000000000000003f|placements=";
   const bot = new Clearrabot(
     {
       async editOriginalInteraction(_applicationId, _token, message) {
@@ -2224,22 +2126,7 @@ test("zero-solution search output omits a stale initial-only CTK3 attachment", a
           return {
             exitCode: 0,
             stderr: "",
-            stdout: JSON.stringify({
-              schema_version: 2,
-              kind: "pc-scenario",
-              summary: {
-                count_complete: true,
-                total_solution_count: 0,
-                unique_solution_count: 0,
-                normalized_unique_solution_count: 0,
-              },
-              contract: {
-                artifacts: {
-                  schema_version: "clearra.solution-data.v1",
-                  solution_keys: [initialOnlyKey],
-                },
-              },
-            }),
+            stdout: JSON.stringify(validPcPathStructured(true)),
           };
         },
       },
@@ -2248,22 +2135,24 @@ test("zero-solution search output omits a stale initial-only CTK3 attachment", a
 
   await bot.runInteractionCommand(
     slashInteraction("path", []),
-    ["sfinder", "path", "--lines", "2"],
+    ["pc", "path", "--lines", "1"],
+    null,
+    "en",
+    "pc-path-v2",
   );
 
   assert.equal(messages.length, 1);
   assert.deepEqual(messages[0].files, []);
   assert.match(messages[0].payload.content, /Clearra path search completed\./);
-  assert.match(messages[0].payload.content, /Solutions: 0/);
+  assert.doesNotMatch(messages[0].payload.content, /500ms|inconsistent result/i);
   assert.doesNotMatch(
     messages[0].payload.content,
     /(?:file|attachment).*(?:omit|skip|creat)|(?:omit|skip|creat).*(?:file|attachment)/i,
   );
 });
 
-test("Korean canonical and compatibility Build routes use the proven cover result name", async () => {
+test("Build Cover alias and grouped command publish the same typed coverage", async () => {
   const messages = [];
-  let executionCount = 0;
   const bot = new Clearrabot(
     {
       async editOriginalInteraction(_applicationId, _token, message) {
@@ -2274,57 +2163,12 @@ test("Korean canonical and compatibility Build routes use the proven cover resul
     {
       executor: {
         async execute() {
-          executionCount += 1;
-          if (executionCount === 1) {
-            const resultContract = "build-coverage-portfolio.v2";
-            return {
-              exitCode: 0,
-              stderr: "",
-              stdout: JSON.stringify({
-                kind: resultContract,
-                contract: { command: { kind: resultContract } },
-                summary: {
-                  capability_id: "build.cover",
-                  result_contract: resultContract,
-                  payload_kind: "portfolio",
-                  input_identity_sha256: "a".repeat(64),
-                  objective: "min-cover",
-                  coverage_probability: 0.5,
-                  source_candidate_count: "1",
-                  reachable_candidate_count: "1",
-                  pattern_count: "1",
-                  candidates: [{
-                    candidate_key: "candidate-a",
-                    covered_pattern_count: "1",
-                  }],
-                  canonical_candidate_keys: ["candidate-a"],
-                  winners: [],
-                  completeness: {
-                    enumeration_complete: true,
-                    reachability_complete: true,
-                    probability_complete: true,
-                    portfolio_complete: true,
-                    exact: true,
-                  },
-                },
-              }),
-            };
-          }
+          const structured = validBuildV2Structured("build.cover", "build-coverage-portfolio.v2");
+          structured.summary.coverage_probability = 0.5;
           return {
             exitCode: 0,
             stderr: "",
-            stdout: JSON.stringify({
-              kind: "build-probability",
-              summary: {
-                coverage_probability: 0.5,
-                failed_coverage_probability: 0.5,
-                covered_pattern_count: 3,
-                failed_pattern_count: 1,
-                materialized_pattern_count: 4,
-                materialized_probability_mass: 1,
-                probability_complete: true,
-              },
-            }),
+            stdout: JSON.stringify(structured),
           };
         },
       },
@@ -2333,17 +2177,17 @@ test("Korean canonical and compatibility Build routes use the proven cover resul
 
   await bot.runInteractionCommand(
     slashInteraction("build", [{ type: 1, name: "cover", options: [] }], undefined, "build-kind-one"),
-    ["build-probability"],
+    ["build", "cover"],
     null,
     "ko",
     "build-cover-v2",
   );
   await bot.runInteractionCommand(
     slashInteraction("cover", [], undefined, "build-kind-two"),
-    ["build-probability"],
+    ["build", "cover"],
     null,
     "ko",
-    "cover",
+    "build-cover-v2",
   );
 
   assert.equal(messages.length, 2);
@@ -2351,12 +2195,7 @@ test("Korean canonical and compatibility Build routes use the proven cover resul
     assert.match(message.payload.content, /Clearra 구축 커버리지 탐색/u);
     assert.match(message.payload.content, /커버 확률: 50%/u);
   }
-  assert.match(messages[1].payload.content, /실패 확률: 50%/u);
-  assert.match(messages[1].payload.content, /성공 패턴: 3/u);
-  assert.match(messages[1].payload.content, /실패 패턴: 1/u);
-  assert.match(messages[1].payload.content, /구체화 패턴: 4/u);
-  assert.match(messages[1].payload.content, /구체화 확률 질량: 100%/u);
-  assert.match(messages[1].payload.content, /확률 완전성: 예/u);
+  assert.equal(messages[0].payload.content, messages[1].payload.content);
 });
 
 test("Discord finesse summaries expose only typed user-level costs", async () => {
@@ -2383,7 +2222,7 @@ test("Discord finesse summaries expose only typed user-level costs", async () =>
                 server: "private-server",
               },
               finesse_report: {
-                mode: "search",
+                mode: "score",
                 metric: "inputs",
                 pattern_knowledge: "both",
                 complete: true,
@@ -2432,10 +2271,10 @@ test("Discord finesse summaries expose only typed user-level costs", async () =>
 
   await bot.runInteractionCommand(
     slashInteraction("finesse", []),
-    ["finesse", "search"],
+    ["finesse", "score"],
   );
   const content = messages[0].payload.content;
-  assert.match(content, /Clearra finesse search completed/);
+  assert.match(content, /Clearra finesse score completed/);
   assert.match(content, /Minimum total: 7 inputs/);
   assert.match(content, /Full-queue average: 8\.25 inputs/);
   assert.match(content, /Visible-7 average: 9\.5 inputs/);
@@ -2446,7 +2285,7 @@ test("Discord finesse summaries expose only typed user-level costs", async () =>
 
   await bot.runInteractionCommand(
     slashInteraction("finesse", [], undefined, "finesse-ko"),
-    ["finesse", "search"],
+    ["finesse", "score"],
     null,
     "ko",
   );
@@ -2474,7 +2313,7 @@ test("Discord pattern finesse reports averages without exposing a representative
               kind: "build-probability",
               summary: { coverage_probability: 1 },
               finesse_report: {
-                mode: "search",
+                mode: "score",
                 metric: "inputs",
                 pattern_knowledge: "oracle",
                 complete: false,
@@ -2507,7 +2346,7 @@ test("Discord pattern finesse reports averages without exposing a representative
 
   await bot.runInteractionCommand(
     slashInteraction("finesse", [], undefined, "finesse-pattern"),
-    ["finesse", "search"],
+    ["finesse", "score"],
   );
   const content = messages[0].payload.content;
   assert.match(content, /Full-queue average: 1\.5 inputs/);
@@ -2591,9 +2430,9 @@ test("spin-structure structured results keep their neutral localized result name
   assert.deepEqual(messages[1].files, []);
 });
 
-test("score-finder keeps its public result kind when the engine reports pc-scenario", async () => {
+test("typed score-finder and damage keep distinct localized public results", async () => {
   const messages = [];
-  const kinds = ["pc-scenario", "damage"];
+  const structured = [validPcScoreFinderStructured(), { kind: "damage", summary: {} }];
   const bot = new Clearrabot(
     {
       async editOriginalInteraction(_applicationId, _token, message) {
@@ -2607,7 +2446,7 @@ test("score-finder keeps its public result kind when the engine reports pc-scena
           return {
             exitCode: 0,
             stderr: "",
-            stdout: JSON.stringify({ kind: kinds.shift(), summary: {} }),
+            stdout: JSON.stringify(structured.shift()),
           };
         },
       },
@@ -2620,6 +2459,7 @@ test("score-finder keeps its public result kind when the engine reports pc-scena
       findSlashCommand(name).argvPrefix,
       null,
       "ko",
+      findSlashCommand(name).resultAuthorityId,
     );
   }
 
@@ -2662,8 +2502,9 @@ test("Discord fails closed on an unrecognized structured result kind", async () 
   assert.doesNotMatch(messages[0].payload.content, /private|worker|engine/i);
 });
 
-test("score-finder fails closed on an unexpected engine result kind", async () => {
+test("score-finder fails closed without attaching replay from another capability", async () => {
   const messages = [];
+  let structured;
   const bot = new Clearrabot(
     {
       async editOriginalInteraction(_applicationId, _token, message) {
@@ -2677,26 +2518,32 @@ test("score-finder fails closed on an unexpected engine result kind", async () =
           return {
             exitCode: 0,
             stderr: "",
-            stdout: JSON.stringify({ kind: "damage", summary: {} }),
+            stdout: JSON.stringify(structured),
           };
         },
       },
     },
   );
 
-  await bot.runInteractionCommand(
-    slashInteraction("score-finder", []),
-    ["sfinder", "score-finder"],
-  );
-
-  assert.match(messages[0].payload.content, /inconsistent result/i);
-  assert.doesNotMatch(messages[0].payload.content, /score-finder|damage/);
+  for (const payload of [{ kind: "damage", summary: {} }, validPcPathStructured()]) {
+    structured = payload;
+    await bot.runInteractionCommand(
+      slashInteraction("score-finder", []),
+      ["pc", "score-finder"],
+      null,
+      "en",
+      "pc-score-finder-v2",
+    );
+    const message = messages.at(-1);
+    assert.match(message.payload.content, /inconsistent result/i);
+    assert.doesNotMatch(message.payload.content, /score-finder|damage|500ms/);
+    assert.deepEqual(message.files, []);
+  }
 });
 
 test("every public search result kind has an exact allowed engine kind and EN/KO label", async () => {
   const labels = {
     path: ["path search", "경로 탐색"],
-    percent: ["perfect-clear probability", "퍼펙트 클리어 확률 계산"],
     chance: ["perfect-clear probability", "퍼펙트 클리어 확률 계산"],
     minimals: ["minimum-cover perfect-clear search", "최소 커버 퍼펙트 클리어 탐색"],
     score: ["scored perfect-clear search", "점수 퍼펙트 클리어 탐색"],
@@ -2707,7 +2554,6 @@ test("every public search result kind has an exact allowed engine kind and EN/KO
     failed_queue: ["failed-queue search", "실패 큐 탐색"],
     cover: ["build-coverage search", "구축 커버리지 탐색"],
     probability: ["build-probability result aggregation", "구축 확률 결과 집계"],
-    spin_cover: ["forward spin search", "정방향 스핀 탐색"],
     spin: ["forward spin search", "정방향 스핀 탐색"],
     score_finder: ["Jstris-score perfect-clear search", "Jstris 점수 퍼펙트 클리어 탐색"],
     damage: ["damage search", "대미지 탐색"],
@@ -2719,10 +2565,8 @@ test("every public search result kind has an exact allowed engine kind and EN/KO
     best_setup: ["build-first setup search", "구축 우선 셋업 탐색"],
     dpc_finder: ["PC-first setup search", "PC 우선 셋업 탐색"],
     setup_score: ["setup score ranking", "셋업 점수 순위 계산"],
-    finesse_search: ["finesse search", "피네스 탐색"],
     finesse_score: ["finesse score", "피네스 계산"],
     allspin_sol: ["B2B-preserving PC witness search", "B2B 보존 PC 증거 탐색"],
-    allspin_sol_finder: ["B2B-preserving PC witness search", "B2B 보존 PC 증거 탐색"],
     allspin_pres_chance: ["B2B-preserving PC probability", "B2B 보존 PC 확률 계산"],
     sequence: ["operation trace validation", "operation trace 유효성 확인"],
     sequence_dependencies: ["operation-order dependency analysis", "operation 순서 의존성 분석"],
@@ -2744,7 +2588,6 @@ test("every public search result kind has an exact allowed engine kind and EN/KO
     evaluate_cover_percent: ["supplied-solution coverage probability", "제공 해법 커버리지 확률"],
     boundary_recovery: ["boundary-recovery search", "경계 리커버리 탐색"],
   };
-  assert.equal(DISCORD_PUBLIC_SEARCH_CONTRACT.length, 56);
   assert.equal(Object.isFrozen(DISCORD_PUBLIC_SEARCH_CONTRACT), true);
   assert.equal(
     DISCORD_PUBLIC_SEARCH_CONTRACT.every((entry) =>
@@ -2791,6 +2634,13 @@ test("every public search result kind has an exact allowed engine kind and EN/KO
               exitCode: 0,
               stderr: "",
               stdout: JSON.stringify(validPcScoreStructured()),
+            };
+          }
+          if (engineKind === "pc-fixed-score-witness.v2") {
+            return {
+              exitCode: 0,
+              stderr: "",
+              stdout: JSON.stringify(validPcScoreFinderStructured()),
             };
           }
           if (engineKind === "pc-score-portfolio.v2") {
@@ -3166,10 +3016,9 @@ test("All-Spin results require the requested contract and expose incomplete stat
     assert.match(messages.at(-1), /B2B-preserving PC probability completed/);
   }
 
-  const exactAlias = findSearchRouteByPublicKind("allspin-sol-finder");
   for (const invalidStdout of ["", "ok", "search result"]) {
     rawStdout = invalidStdout;
-    for (const route of [exact, exactAlias, chance]) {
+    for (const route of [exact, chance]) {
       await bot.runInteractionCommand(
         searchRouteInteraction(route, []),
         executableSearchArguments(route),
@@ -3185,7 +3034,7 @@ test("All-Spin results require the requested contract and expose incomplete stat
   }
   rawStdout = "ok";
   await bot.runOracleMessageCommand(
-    oracleMessage("allspin-text-malformed", "$allspin_sol_finder IIOOO"),
+    oracleMessage("allspin-text-malformed", "$pc allspin-sol --queue IIOOO"),
     exactArguments,
     null,
     "en",
@@ -3196,7 +3045,7 @@ test("All-Spin results require the requested contract and expose incomplete stat
     "Clearra returned an inconsistent result. Please retry the command.",
   );
   await bot.runOracleMessageCommand(
-    oracleMessage("allspin-invalid-argv", "$allspin_sol_finder IIOOO"),
+    oracleMessage("allspin-invalid-argv", "$pc allspin-sol --queue IIOOO"),
     ["pc", "allspin-sol", "--queue", "IIOOO"],
     null,
     "en",
@@ -3222,9 +3071,9 @@ test("public aliases reject every formerly broad alternate engine kind in EN and
     ["tiling", "pc-tiling-family"],
     ["tiling", "pc-scenario"],
     ["tiling", "pc"],
-    ["score", "pc-score-summary.v2"],
-    ["chance", "pc-probability.v2"],
-    ["percent", "pc-probability.v2"],
+    ["pc-path-v2", "pc-scenario"],
+    ["pc-score-finder-v2", "pc-scenario"],
+    ["build-cover-v2", "build-probability"],
     ...DISCORD_PUBLIC_SEARCH_CONTRACT
       .filter(({ engineKinds }) => engineKinds.length === 1 && engineKinds[0] === "pc-scenario")
       .flatMap(({ id }) => [[id, "pc"], [id, "percent"]]),
@@ -3275,8 +3124,9 @@ test("public aliases reject every formerly broad alternate engine kind in EN and
   assert.equal(messages.length, cases.length * 2);
 });
 
-test("structured result kind mismatches return the stable localized consistency error", async () => {
+test("typed replay with mismatched or malformed output fails closed in EN and KO", async () => {
   const messages = [];
+  let stdout;
   const bot = new Clearrabot(
     {
       async editOriginalInteraction(_applicationId, _token, message) {
@@ -3290,29 +3140,36 @@ test("structured result kind mismatches return the stable localized consistency 
           return {
             exitCode: 0,
             stderr: "",
-            stdout: JSON.stringify({ kind: "private-engine-kind", summary: {} }),
+            stdout,
           };
         },
       },
     },
   );
+  const route = findSearchRouteByPublicKind("pc-path-v2");
   for (const [locale, expected] of [
     ["en", "Clearra returned an inconsistent result. Please retry the command."],
     ["ko", "Clearra 결과가 요청한 명령과 일치하지 않습니다. 명령어를 다시 실행해 주세요."],
   ]) {
-    const route = findSearchRouteByPublicKind("path");
-    await bot.runInteractionCommand(
-      searchRouteInteraction(route, []),
-      route.command.argvPrefix,
-      null,
-      locale,
-      route.command.publicResultKind,
-    );
-    assert.equal(messages.at(-1), expected);
+    for (const output of [
+      JSON.stringify({ kind: "private-engine-kind", summary: {} }),
+      "",
+      "not a structured search result",
+    ]) {
+      stdout = output;
+      await bot.runInteractionCommand(
+        searchRouteInteraction(route, []),
+        route.command.argvPrefix,
+        null,
+        locale,
+        route.command.resultAuthorityId,
+      );
+      assert.equal(messages.at(-1), expected);
+    }
   }
 });
 
-test("CoverageSummary distinguishes not-calculated solution counts from calculated zero", async () => {
+test("typed chance distinguishes not-calculated solution counts from calculated zero", async () => {
   const messages = [];
   let calculated;
   const bot = new Clearrabot(
@@ -3329,7 +3186,7 @@ test("CoverageSummary distinguishes not-calculated solution counts from calculat
             exitCode: 0,
             stderr: "",
             stdout: JSON.stringify({
-              kind: "pc-scenario",
+              kind: "pc-probability.v2",
               summary: {
                 solution_count_calculated: calculated,
                 total_solution_count: 0,
@@ -3350,10 +3207,11 @@ test("CoverageSummary distinguishes not-calculated solution counts from calculat
     for (const legacyOrExplicitFalse of [false, undefined]) {
       calculated = legacyOrExplicitFalse;
       await bot.runInteractionCommand(
-        slashInteraction("path", []),
-        findSlashCommand("path").argvPrefix,
+        slashInteraction("chance", []),
+        findSlashCommand("chance").argvPrefix,
         null,
         locale,
+        "pc-chance",
       );
       assert.match(messages.at(-1), new RegExp(notCalculated));
       assert.doesNotMatch(messages.at(-1), /(?:Solutions|Unique solutions|Normalized solutions|해법): 0/u);
@@ -3361,10 +3219,11 @@ test("CoverageSummary distinguishes not-calculated solution counts from calculat
 
     calculated = true;
     await bot.runInteractionCommand(
-      slashInteraction("path", []),
-      findSlashCommand("path").argvPrefix,
+      slashInteraction("chance", []),
+      findSlashCommand("chance").argvPrefix,
       null,
       locale,
+      "pc-chance",
     );
     assert.doesNotMatch(messages.at(-1), /Not calculated|계산하지 않음/u);
     if (locale === "en") {
@@ -3399,7 +3258,7 @@ test("CoverageSummary availability fails closed atomically without Discord artif
             stderr: "",
             stdout: JSON.stringify({
               schema_version: 2,
-              kind: "pc-scenario",
+              kind: "pc-probability.v2",
               summary,
               contract: {
                 artifacts: {
@@ -3451,10 +3310,11 @@ test("CoverageSummary availability fails closed atomically without Discord artif
     for (const [label, candidate] of malformedCases) {
       summary = candidate;
       await bot.runInteractionCommand(
-        slashInteraction("path", []),
-        findSlashCommand("path").argvPrefix,
+        slashInteraction("chance", []),
+        findSlashCommand("chance").argvPrefix,
         null,
         locale,
+        "pc-chance",
       );
       const message = messages.at(-1);
       assert.deepEqual(message.files, [], `${locale}/${label}: stale artifact`);
@@ -3530,11 +3390,11 @@ test("command failures and malformed structured output do not expose engine diag
 
   await bot.runInteractionCommand(
     slashInteraction("path", [], undefined, "diagnostic-one"),
-    ["sfinder", "path"],
+    ["pc", "path"],
   );
   await bot.runInteractionCommand(
     slashInteraction("path", [], undefined, "diagnostic-two"),
-    ["sfinder", "path"],
+    ["pc", "path"],
   );
 
   assert.equal(messages.length, 2);
@@ -3688,17 +3548,19 @@ test("long-running setup interaction publishes one localized progress update bef
       executor: {
         async execute() {
           await search;
-          return { exitCode: 0, stdout: "setup complete", stderr: "" };
+          return { exitCode: 0, stdout: JSON.stringify(validTypedSetupStructured()), stderr: "" };
         },
       },
     },
   );
 
+  const route = findSearchRouteByPublicKind("setup-joint-v2");
   const execution = bot.runInteractionCommand(
-    slashInteraction("pc-setup", [], undefined, "setup-progress"),
-    ["setup-finder", "--remaining", "IOTSZJL"],
+    searchRouteInteraction(route, []),
+    [...route.command.argvPrefix, "--remaining", "IOTSZJL"],
     null,
     "ko",
+    route.command.resultAuthorityId,
   );
   await new Promise((resolve) => setTimeout(resolve, 20));
   assert.equal(edits.length, 1);
@@ -3708,7 +3570,7 @@ test("long-running setup interaction publishes one localized progress update bef
   await execution;
   assert.equal(edits.length, 2);
   assert.doesNotMatch(edits[1], /아직 진행 중/u);
-  assert.match(edits[1], /setup complete/u);
+  assert.match(edits[1], /종합 셋업 탐색/u);
 });
 
 test("setup progress timer stays silent for fast searches", async () => {
@@ -3730,17 +3592,22 @@ test("setup progress timer stays silent for fast searches", async () => {
     {
       executor: {
         async execute() {
-          return { exitCode: 0, stdout: "fast setup", stderr: "" };
+          return { exitCode: 0, stdout: JSON.stringify(validTypedSetupStructured()), stderr: "" };
         },
       },
     },
   );
 
+  const route = findSearchRouteByPublicKind("setup-joint-v2");
   await bot.runInteractionCommand(
-    slashInteraction("best-setup", [], undefined, "setup-fast"),
-    ["setup-finder", "--remaining", "IOTSZJL"],
+    searchRouteInteraction(route, []),
+    [...route.command.argvPrefix, "--remaining", "IOTSZJL"],
+    null,
+    "en",
+    route.command.resultAuthorityId,
   );
-  assert.deepEqual(edits, ["```text\nfast setup\n```"]);
+  assert.equal(edits.length, 1);
+  assert.match(edits[0], /joint setup search completed/iu);
 });
 
 test("long-running setup text search replaces its English progress reply", async () => {
@@ -3772,17 +3639,18 @@ test("long-running setup text search replaces its English progress reply", async
       executor: {
         async execute() {
           await search;
-          return { exitCode: 0, stdout: "text setup complete", stderr: "" };
+          return { exitCode: 0, stdout: JSON.stringify(validTypedSetupStructured()), stderr: "" };
         },
       },
     },
   );
 
   const execution = bot.runOracleMessageCommand(
-    oracleMessage("setup-source", "$pc-setup IOTSZJL"),
-    ["setup-finder", "--remaining", "IOTSZJL"],
+    oracleMessage("setup-source", "$setup joint --remaining IOTSZJL"),
+    ["setup", "joint", "--remaining", "IOTSZJL"],
     null,
     "en",
+    "setup-joint-v2",
   );
   await new Promise((resolve) => setTimeout(resolve, 20));
   assert.equal(created.length, 1);
@@ -3792,7 +3660,7 @@ test("long-running setup text search replaces its English progress reply", async
   await execution;
   assert.equal(edited.length, 1);
   assert.equal(edited[0].messageId, "setup-progress-message");
-  assert.match(edited[0].outgoing.payload.content, /text setup complete/u);
+  assert.match(edited[0].outgoing.payload.content, /joint setup search completed/iu);
 });
 
 test("gateway applies a five-minute reverse deadline and a fourteen-minute Discord delivery cap", async () => {
@@ -3821,10 +3689,10 @@ test("gateway applies a five-minute reverse deadline and a fourteen-minute Disco
   );
 
   for (const [ordinal, arguments_] of [
-    [0, ["pc", "--lines", "4"]],
+    [0, ["pc", "path", "--lines", "4"]],
     [1, ["damage", "--queue", "I"]],
-    [2, ["setup-finder", "--remaining", "IOTSZJL"]],
-    [3, ["finesse", "search"]],
+    [2, ["setup", "joint", "--remaining", "IOTSZJL"]],
+    [3, ["build", "cover"]],
     [4, ["finesse", "score"]],
   ]) {
     await bot.runInteractionCommand(
@@ -3834,8 +3702,10 @@ test("gateway applies a five-minute reverse deadline and a fourteen-minute Disco
           : ordinal === 1
             ? "damage"
             : ordinal === 2
-              ? "pc-setup"
-              : "finesse",
+              ? "setup"
+              : ordinal === 3
+                ? "cover"
+                : "finesse",
         [],
         undefined,
         discordSnowflakeAt(createdAt + ordinal),
@@ -3924,7 +3794,7 @@ function executableSearchArguments(route, options = {}) {
   ];
 }
 
-function validPcPathStructured() {
+function validPcPathStructured(empty = false) {
   const canonical = {
     candidate_id: "1",
     producer_candidate_id: "1",
@@ -3966,7 +3836,50 @@ function validPcPathStructured() {
       problem_id: "problem",
       complete: true,
       canonical_selection: "smallest-canonical-candidate-id",
-      canonical_witness: structuredClone(canonical),
+      canonical_witness: empty ? null : canonical,
+    },
+  };
+}
+
+function validPcScoreFinderStructured() {
+  const kind = "pc-fixed-score-witness.v2";
+  const witnessContract = "pc-score-pattern-winner.v1";
+  return {
+    kind,
+    contract: { command: { kind } },
+    summary: {
+      capability_id: "pc.score-finder",
+      result_contract: kind,
+      payload_kind: "canonical-score-winner",
+      winner_contract: witnessContract,
+      ordering: "candidate-id-ascending",
+      score_equality: "score-only",
+      canonical_selection: "smallest-canonical-candidate-id",
+      complete: true,
+      canonical_winner: {
+        contract: witnessContract,
+        pattern_id: "0",
+        candidate_id: "1",
+        normalized_solution_key: "ctk1|initial=000000000000003f|placements=I:00000000000003c0",
+        score: "800",
+      },
+    },
+  };
+}
+
+function validTypedSetupStructured() {
+  const kind = "setup-joint-ranking.v2";
+  return {
+    kind,
+    contract: { command: { kind } },
+    summary: {
+      capability_id: "setup.joint",
+      result_contract: kind,
+      payload_kind: "setup-ranked-family",
+      candidate_count: "0",
+      candidates: [],
+      ordering: "joint-probability-first",
+      complete: true,
     },
   };
 }
@@ -4309,7 +4222,7 @@ function oracleBot(rest, executor, options = {}) {
 function resolvedGifRenderer() {
   return {
     async render() {
-      return new Uint8Array([0x47, 0x49, 0x46]);
+      return Buffer.from("R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7", "base64");
     },
     stop() {},
   };

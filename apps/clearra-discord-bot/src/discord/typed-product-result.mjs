@@ -128,7 +128,10 @@ function projectPcPath(structured, semantics = "pc") {
   rejectAlternativeMetadata(structured, paged
     ? new Set([...PC_REPLAY_FIRST_PAGE_METADATA].map(key => "summary." + key))
     : undefined);
-  const projected = clonePlain(structured);
+  // The validated Rust family is not a second output owner. Copy the
+  // envelope and the one public witness without cloning the discarded page.
+  const { summary: _validatedFamily, ...envelope } = structured;
+  const projected = clonePlain(envelope);
   projected.summary = {
     capability_id: capabilityId,
     result_contract: resultContract,

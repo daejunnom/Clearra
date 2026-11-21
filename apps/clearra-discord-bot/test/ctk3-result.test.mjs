@@ -692,7 +692,8 @@ test("Fumen operation canonicalization crosses typed score argv and CTK3 report 
     [
       { name: "document", value: fumen },
       { name: "next", value: "I" },
-      { name: "options", value: "hold=avoid knowledge=oracle" },
+      { name: "hold", value: "disabled" },
+      { name: "knowledge", value: "oracle" },
     ],
   );
   assert.deepEqual(arguments_, [

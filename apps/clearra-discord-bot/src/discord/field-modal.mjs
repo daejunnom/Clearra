@@ -1,7 +1,6 @@
 import {
   BUILTIN_KICKTABLES,
   NATIVE_BUILTIN_KICKTABLES,
-  findShadowedTextCommand,
   findSlashCommand,
   localizedSlashCommandName,
   resolveSlashCommandInvocation,
@@ -393,7 +392,7 @@ function commandModalRoute(interaction) {
   const command = subcommand
     ? root?.subcommands?.[subcommand] ?? null
     : root?.subcommands
-      ? findShadowedTextCommand(rootName)
+      ? null
       : root;
   const inputSchema = inputSchemaForVersion(command, version);
   if (!command || !inputSchema) return null;
@@ -925,6 +924,8 @@ function nativeKicktableInput(input) {
   return [
     "build-cover",
     "pc-v2",
+    "pc-path-v2",
+    "pc-score-finder-v2",
     "pc-chance-v2",
     "pc-save-v2",
     "pc-allspin-exact-v1",

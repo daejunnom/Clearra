@@ -82,7 +82,7 @@ export class ClearraDirectExecutor {
           }),
     };
     const maximumSearchTimeoutMs = Math.max(
-      searchTimeoutMsForArguments(["sfinder", "verify"], this.timeoutPolicy),
+      searchTimeoutMsForArguments(["verify"], this.timeoutPolicy),
       searchTimeoutMsForArguments(["pc"], this.timeoutPolicy),
       searchTimeoutMsForArguments(["build-probability"], this.timeoutPolicy),
       searchTimeoutMsForArguments(["setup-finder"], this.timeoutPolicy),

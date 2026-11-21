@@ -34,7 +34,10 @@ use clearra_validation::diagnostic::diagnostic_report::DiagnosticReport;
 
 use crate::{
     app_command::{AppCommand, RunnableAppCommand},
-    app_context::AppContext,
+    app_context::{
+        pc_replay_finalizer::{PcReplayFinalizerHost, TypedPcReplayFinalizer},
+        AppContext,
+    },
     app_error::{AppError, AppErrorCode},
     app_request::{AppExecutionParts, AppOutputPolicy, AppRequest},
     app_response::{
@@ -298,8 +301,7 @@ struct CooperativePcReplayFinalizeExecution {
     response: AppResponse,
     command_kind: AppCommandKind,
     output_policy: AppOutputPolicy,
-    contract: ValidatedProductCapabilityContract,
-    preparation: crate::PcReplaySourceBuildSession,
+    finalizer: TypedPcReplayFinalizer,
     manifest_work_units: u64,
 }
 
@@ -3444,53 +3446,23 @@ impl CooperativeAppExecution {
                             response =
                                 response.with_validation_diagnostics(postprocess.validation_report);
                         }
-                        let preparation = contract
-                            .pc_path_binding()
-                            .ok_or(CoreExecutionError::RuntimeUnavailable {
-                                component: "complete_replay_query_binding_missing",
+                        let finalizer = if postprocess.pc_score_session.is_some()
+                            || postprocess.build_probability_session.is_some()
+                        {
+                            Err(CoreExecutionError::RuntimeUnavailable {
+                                component: "complete_replay_unexpected_live_search_owner",
                             })
-                            .and_then(|(query, _)| {
-                                query.compile_expected().map_err(|component| {
-                                    CoreExecutionError::RuntimeUnavailable { component }
-                                })
-                            })
-                            .and_then(|problem| {
-                                if postprocess.pc_score_session.is_some()
-                                    || postprocess.build_probability_session.is_some()
-                                {
-                                    return Err(CoreExecutionError::RuntimeUnavailable {
-                                        component: "complete_replay_unexpected_live_search_owner",
-                                    });
-                                }
-                                let external_reserve = checked_pc_replay_external_reserve(
-                                    self.context(),
-                                    &response,
-                                    &postprocess.output_policy,
-                                    &contract,
-                                    &problem,
-                                )
-                                .ok_or(
-                                    CoreExecutionError::RuntimeUnavailable {
-                                        component: "complete_replay_app_owner_projection_overflow",
-                                    },
-                                )?;
-                                let result = response
-                                    .render_model()
-                                    .and_then(AppRenderModel::core_result)
-                                    .ok_or(CoreExecutionError::RuntimeUnavailable {
-                                        component: "complete_replay_response_source_missing",
-                                    })?;
-                                self.context()
-                                    .services()
-                                    .core_executor()
-                                    .prepare_pc_replay_page_source(
-                                        &problem,
-                                        result,
-                                        external_reserve,
-                                    )
-                            });
-                        let preparation = match preparation {
-                            Ok(preparation) => preparation,
+                        } else {
+                            TypedPcReplayFinalizer::prepare(
+                                self.context(),
+                                &response,
+                                &postprocess.output_policy,
+                                contract,
+                                PcReplayFinalizerHost::Cooperative,
+                            )
+                        };
+                        let finalizer = match finalizer {
+                            Ok(finalizer) => finalizer,
                             Err(error) => {
                                 return CooperativeAppAdvance::Completed(
                                     self.context().finalize_response_with_product_capability(
@@ -3511,8 +3483,7 @@ impl CooperativeAppExecution {
                                 response,
                                 command_kind: postprocess.command_kind,
                                 output_policy: postprocess.output_policy,
-                                contract,
-                                preparation,
+                                finalizer,
                                 manifest_work_units: 0,
                             },
                         ));
@@ -3907,7 +3878,7 @@ impl CooperativeAppExecution {
                     // The source honors the host's primitive allowance and
                     // independently yields at its monotonic turn quantum.
                     // Do not collapse an 8192-work request into 64 primitives.
-                    let advance = finalize.preparation.advance(work_budget, control);
+                    let advance = finalize.finalizer.advance(work_budget, control);
                     if control.is_cancelled() {
                         return CooperativeAppAdvance::Cancelled;
                     }
@@ -3924,18 +3895,7 @@ impl CooperativeAppExecution {
                         Ok(true) => {
                             let completed = finalize.manifest_work_units.saturating_add(1);
                             control.report_progress("postprocess", completed, Some(completed));
-                            let product = finalize
-                                .preparation
-                                .complete()
-                                .map_err(|error| error.to_string())
-                                .and_then(|source| {
-                                    ProductCapabilityResult::validate_with_pc_replay_source(
-                                        finalize.contract,
-                                        &finalize.response,
-                                        source,
-                                    )
-                                    .map_err(|error| format!("{error}"))
-                                });
+                            let product = finalize.finalizer.seal(&finalize.response);
                             match product {
                                 Ok(product) => CooperativeAppAdvance::Completed(
                                     self.context()

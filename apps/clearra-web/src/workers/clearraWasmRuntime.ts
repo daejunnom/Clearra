@@ -76,6 +76,9 @@ export type ClearraWasmModule = {
     batchCapacity: number
   ) => ClearraDistributedProducerResult;
   distributed_progress: () => ClearraDistributedCoreProgress;
+  distributed_scheduling_progress?: (
+    issued: ClearraDistributedIssuedRootCounter
+  ) => ClearraDistributedSchedulingProgress;
   distributed_merge_partial: (partial: ArrayBuffer) => void;
   distributed_finish: (jobId: number, workersUsed: number) => string;
   distributed_finish_start?: (jobId: number, workersUsed: number) => string | null;
@@ -156,6 +159,13 @@ export type ClearraDistributedProducerResult =
   | { status: 'completed' | 'cancelled' }
   | { status: 'initialization'; initialization: ArrayBuffer }
   | { status: 'batch'; batch: ArrayBuffer };
+
+export type ClearraDistributedIssuedRootCounter = 'geometry' | 'coverage' | 'none';
+
+export type ClearraDistributedSchedulingProgress = {
+  candidateFamilyCount: string | null;
+  issuedRootCount: number;
+};
 
 export type ClearraDistributedCoreProgress = {
   geometryNodes: number;
@@ -1256,6 +1266,20 @@ function wrapRawModule(
         waitingForResults: raw.clearra_wasm_distributed_producer_waiting_for_results?.() === 1
       };
     },
+    distributed_scheduling_progress(issued) {
+      // The dispatch loop needs neither UI telemetry flags nor proof counters.
+      // Read only the existing ABI counters that decide the next packet size.
+      const candidateFamilyCount = raw.clearra_wasm_distributed_progress_available() !== 0 &&
+        raw.clearra_wasm_distributed_progress_candidate_family_count_available() !== 0
+          ? readAvailableCandidateFamilyCount(raw)
+          : null;
+      const issuedRootCount = issued === 'geometry'
+        ? raw.clearra_wasm_distributed_progress_geometry_nodes()
+        : issued === 'coverage'
+          ? raw.clearra_wasm_distributed_progress_coverage_checks()
+          : 0;
+      return { candidateFamilyCount, issuedRootCount: normalizeWasmU32(issuedRootCount) };
+    },
     distributed_progress() {
       const available = raw.clearra_wasm_distributed_progress_available() !== 0;
       const candidateFamilyAvailable =
@@ -1269,7 +1293,7 @@ function wrapRawModule(
           raw.clearra_wasm_distributed_progress_candidate_count()
         ),
         candidateFamilyCount: candidateFamilyAvailable
-          ? readCandidateFamilyCount(raw)
+          ? readAvailableCandidateFamilyCount(raw)
           : null,
         buildNodes: normalizeWasmU32(
           raw.clearra_wasm_distributed_progress_build_nodes()
@@ -1682,8 +1706,7 @@ function createRuntimeHostYield(): () => Promise<void> {
     });
 }
 
-function readCandidateFamilyCount(raw: ClearraRawWasmExports): string | null {
-  if (raw.clearra_wasm_distributed_progress_candidate_family_count_available() === 0) return null;
+function readAvailableCandidateFamilyCount(raw: ClearraRawWasmExports): string {
   let value = 0n;
   for (let word = 3; word >= 0; word -= 1) {
     value =

@@ -63,7 +63,7 @@ test("timeout telemetry requires one canonical class and one bounded millisecond
     assert.equal(writeOperationalLog(logger, {
       scope: "job",
       kind: "search",
-      command: timeoutClass === "diagnostic" ? "sfinder.verify" : "pc",
+      command: timeoutClass === "diagnostic" ? "verify" : "pc",
       status: "succeeded",
       durationMs: 1,
       timeoutClass,
@@ -100,10 +100,11 @@ test("operational command labels must resolve through a canonical product catalo
   assert.equal(canonicalOperationalCommand("cat-finder"), null);
   assert.equal(canonicalOperationalCommand("help"), "meta.help");
   assert.equal(canonicalOperationalCommand("meta.help"), "meta.help");
-  assert.equal(canonicalOperationalCommand("sfinder.score-finder"), "pc.score-finder");
+  assert.equal(canonicalOperationalCommand("sfinder.score-finder"), null);
   assert.equal(canonicalOperationalCommand("pc.score-finder"), "pc.score-finder");
-  assert.equal(canonicalOperationalCommand("sfinder.path"), "pc.path");
-  assert.equal(canonicalOperationalCommand("sfinder.best-save"), "sfinder.best-save");
+  assert.equal(canonicalOperationalCommand("path"), "pc.path");
+  assert.equal(canonicalOperationalCommand("sfinder.path"), null);
+  assert.equal(canonicalOperationalCommand("sfinder.best-save"), null);
   assert.equal(canonicalOperationalCommand("spin-structure"), "spin-structure");
   assert.equal(canonicalOperationalCommand("spin_structure"), "spin-structure");
   assert.equal(
@@ -125,14 +126,14 @@ test("operational command labels must resolve through a canonical product catalo
   );
   assert.equal(
     canonicalOperationalCommand("allspin_sol_finder"),
-    "pc.allspin-sol",
+    null,
   );
   assert.equal(
     canonicalOperationalCommand("allspin_pres_chance"),
-    "pc.allspin-pres-chance",
+    null,
   );
-  assert.equal(canonicalOperationalCommand("verify"), null);
-  assert.equal(canonicalOperationalCommand("sfinder.verify"), "diagnostic.verify");
+  assert.equal(canonicalOperationalCommand("verify"), "diagnostic.verify");
+  assert.equal(canonicalOperationalCommand("sfinder.verify"), null);
   assert.equal(canonicalOperationalCommand("diagnostic.verify"), "diagnostic.verify");
   assert.equal(canonicalOperationalCommand(unknown), null);
   assert.equal(writeOperationalLog(logger, {

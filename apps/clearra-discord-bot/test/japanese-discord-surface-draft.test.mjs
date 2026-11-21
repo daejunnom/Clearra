@@ -170,10 +170,6 @@ test("every current modal draft preserves input IDs and values and fits componen
     }
   }
   assert.ok(modalCount > 20, `expected broad modal coverage, got ${modalCount}`);
-  const finesse = buildJapaneseCommandModalDraft({ type: 2, data: {
-    type: 1, name: "finesse", options: [{ type: 1, name: "search", options: [] }],
-  } });
-  assert.match(finesse.data.title, /検索/u);
 });
 
 test("draft translation failures cannot silently copy new English strings", () => {

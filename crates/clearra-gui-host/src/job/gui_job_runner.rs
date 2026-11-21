@@ -4,12 +4,27 @@ use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 
 use crate::{GuiJob, GuiJobCancelHandle, GuiJobEvent, GuiJobId, GuiJobProgress, GuiJobResult};
-use clearra_app::{AppContext, AppResponse, AppStatus};
+use clearra_app::{AppContext, AppRequest, AppResponse, AppStatus};
 use clearra_core_domain::execution_cancellation::{
     ExecutionControl, ExecutionProgress, ProgressSink,
 };
 
 const GUI_JOB_STACK_BYTES: usize = 16 * 1024 * 1024;
+
+pub(crate) fn run_desktop_product(
+    context: &AppContext,
+    request: AppRequest,
+    control: &ExecutionControl,
+) -> AppResponse {
+    #[cfg(all(feature = "wasm-cpu-runtime", not(target_family = "wasm")))]
+    {
+        context.run_preferring_native_cooperative_continue(request, control)
+    }
+    #[cfg(not(all(feature = "wasm-cpu-runtime", not(target_family = "wasm"))))]
+    {
+        context.run_with_execution_control(request, control)
+    }
+}
 
 #[derive(Debug)]
 pub struct GuiJobRunner;
@@ -39,7 +54,7 @@ impl GuiJobRunner {
                 let progress_sink = Arc::new(GuiProgressSink::new(job_id, sender.clone()));
                 let control = ExecutionControl::new(cancel_token.execution_token().clone())
                     .with_progress_sink(progress_sink);
-                let response = app_context.run_with_execution_control(request, &control);
+                let response = run_desktop_product(&app_context, request, &control);
                 if cancel_token.is_cancelled() {
                     let _ = sender.send(GuiJobEvent::Cancelled { job_id });
                     return GuiJobResult::cancelled(job_id);

@@ -105,8 +105,8 @@ const DISCORD_CONTENT_LIMIT = 2000;
 const RENDER_FILE_HISTORY_PAGE_SIZE = 100;
 const RENDER_FILE_HISTORY_MAX_PAGES = 5;
 const VIEWER_CANDIDATE_PATTERN = /(?:v11(?:0|5)|[Ddm]115)@|ctk3(?:b_|_|@)/i;
-const INTEGRATED_PC_SERIES_RESULT_PATTERN = /^(?:Automatic PC target|자동 PC 목표): [1-6]L(?:\s|$)/;
-const INTEGRATED_PC_SERIES_FILE_PATTERN = /^pc-[1-6]l-result\.ctk3$/i;
+const INTEGRATED_PC_SERIES_RESULT_PATTERN =
+  /^(?:Automatic PC target|자동 PC 목표|自動PC目標): (?:[1-9]|1[0-9]|2[0-4])L(?:\s|$)/u;
 const GENERATED_RESULT_FILE_PATTERN = /^[a-z0-9_-]{1,64}-result\.ctk3$/i;
 const DISCORD_SNOWFLAKE_PATTERN = /^\d{17,20}$/;
 const DISCORD_EPOCH_MS = 1_420_070_400_000n;
@@ -1085,12 +1085,7 @@ export class Clearrabot {
       if (attachments.some((attachment) =>
         GENERATED_RESULT_FILE_PATTERN.test(String(attachment?.filename ?? ""))
       )) return false;
-      if (
-        INTEGRATED_PC_SERIES_RESULT_PATTERN.test(String(message.content ?? "")) ||
-        attachments.some((attachment) =>
-          INTEGRATED_PC_SERIES_FILE_PATTERN.test(String(attachment?.filename ?? ""))
-        )
-      ) {
+      if (INTEGRATED_PC_SERIES_RESULT_PATTERN.test(String(message.content ?? ""))) {
         return false;
       }
       return Boolean(
@@ -1430,10 +1425,18 @@ export class Clearrabot {
   }
 
   async buildResultMessage(result, tilingOnly = false, options = {}) {
-    const message = resultMessage(result, tilingOnly, options);
-    if (result?.exitCode !== 0 || typeof result?.stdout !== "string") return message;
-    const structured = parseStructuredResult(result.stdout);
-    if (![
+    const structured = result.exitCode === 0 && typeof result.stdout === "string"
+      ? parseStructuredResult(result.stdout)
+      : null;
+    const resultKind = structured
+      ? requestedStructuredResultKind(
+          structured,
+          options.resultKind,
+          options.allspinExpectation,
+        )
+      : null;
+    const message = resultMessage(result, tilingOnly, options, structured, resultKind);
+    if (resultKind === null || ![
       "pc-path-family.v2",
       "build-path-family.v1",
     ].includes(structured?.kind)) return message;
@@ -1945,22 +1948,14 @@ function delayedValue(delayMs, value) {
   });
 }
 
-function resultMessage(result, tilingOnly = false, options = {}) {
+function resultMessage(result, tilingOnly, options, parsed, resultKind) {
   const locale = options.locale ?? "en";
-  const allspinIntent = options.allspinExpectation !== undefined ||
-    ALLSPIN_RESULT_CONTRACTS.has(options.resultKind);
+  const requiresStructuredResult = options.allspinExpectation !== undefined ||
+    PUBLIC_RESULT_KEYS.has(options.resultKind);
   if (result.exitCode === 0 && result.stdout) {
-    const parsed = parseStructuredResult(result.stdout);
-    if (allspinIntent && !parsed) {
+    if (requiresStructuredResult && !parsed) {
       return textMessage(t(locale, "error.result_consistency"));
     }
-    const resultKind = parsed
-      ? requestedStructuredResultKind(
-          parsed,
-          options.resultKind,
-          options.allspinExpectation,
-        )
-      : null;
     if (parsed && resultKind === null) {
       return textMessage(t(locale, "error.result_consistency"));
     }
@@ -2005,7 +2000,7 @@ function resultMessage(result, tilingOnly = false, options = {}) {
       );
     }
   }
-  if (result.exitCode === 0 && allspinIntent) {
+  if (result.exitCode === 0 && requiresStructuredResult) {
     return textMessage(t(locale, "error.result_consistency"));
   }
   if (result.exitCode !== 0) {
@@ -2315,9 +2310,6 @@ function publicResultKind(arguments_) {
   const command = String(arguments_?.[1] ?? "")
     .toLowerCase()
     .replaceAll("_", "-");
-  if (namespace === "sfinder" && PUBLIC_RESULT_KINDS.has(command)) {
-    return command;
-  }
   if (namespace === "finesse" && ["search", "score"].includes(command)) {
     return `finesse-${command}`;
   }
@@ -2425,10 +2417,16 @@ function structuredResultSummary(
       partial: complete ? "" : t(locale, "result.partial_suffix"),
     }),
   );
-  if (!["sequence", "sequence-dependencies", "score-minimals", "boundary-recovery"].includes(structured.kind)) {
+  const summary = structured.summary;
+  const score = summary?.canonical_winner?.score;
+  const canonicalScore = summary?.payload_kind === "canonical-score-winner" &&
+    ["pc.score-finder", "build.fixed-queue-maximum-score"].includes(summary.capability_id) &&
+    typeof score === "string" && /^-?(?:0|[1-9][0-9]*)$/u.test(score);
+  if (canonicalScore) {
+    lines.push(t(locale, "summary.highest_score", { score }));
+  } else if (!["sequence", "sequence-dependencies", "score-minimals", "boundary-recovery"].includes(structured.kind)) {
     lines.push(t(locale, "result.ctk3_pages", { count: pageCount }));
   }
-  const summary = structured.summary;
   if (structured.kind === "score-minimals") {
     lines.push(...(discordPcScoreMinimalsSummaryLines(structured, locale) ?? []));
   }

@@ -21,8 +21,8 @@ use crate::{
     product_capability_result::ProductCapabilityResult,
 };
 
-#[path = "pc_replay_direct_finalizer.rs"]
-mod pc_replay_direct_finalizer;
+#[path = "pc_replay_finalizer.rs"]
+pub(crate) mod pc_replay_finalizer;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct AppContext {

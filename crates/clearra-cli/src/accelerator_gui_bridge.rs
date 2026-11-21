@@ -37,9 +37,13 @@ pub fn activate_native_accelerators_for_request(
             clearra_accelerator_runtime::remove(kind, profile)?;
         }
     }
+    activate_selected_accelerators(request);
+    Ok(())
+}
+
+pub(crate) fn activate_selected_accelerators(request: &clearra_app::AppRequest) {
     crate::legal_board_assets::activate_for_request(request);
     crate::conditioned_reachability_assets::activate_for_request(request);
-    Ok(())
 }
 
 pub fn run_native_accelerator_action(

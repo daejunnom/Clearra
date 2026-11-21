@@ -33,29 +33,8 @@ const NATIVE_COMMANDS = new Set([
   "spin-structure",
   "finesse",
   "utility",
+  "verify",
 ]);
-const SFINDER_SEARCH_COMMANDS = new Set([
-  "path",
-  "chance",
-  "percent",
-  "minimals",
-  "score",
-  "score-minimals",
-  "saves",
-  "best-save",
-  "cover",
-  "setup",
-  "congruent",
-  "congruent-cover",
-  "setup-cover",
-  "cover-percent",
-  "special-cover",
-  "spin-cover",
-  "spin",
-  "score-finder",
-]);
-const SFINDER_COMMANDS = new Set([...SFINDER_SEARCH_COMMANDS, "verify"]);
-const ALLOWED_COMMANDS = new Set([...NATIVE_COMMANDS, "sfinder"]);
 const PARALLEL_SEARCH_COMMANDS = new Set([
   "pc",
   "build",
@@ -96,30 +75,6 @@ const STRUCTURE_SEARCH_COMMANDS = new Set([
   "spin-structure",
 ]);
 const SETUP_SEARCH_COMMANDS = new Set(["setup", "setup-finder"]);
-const SFINDER_REVERSE_SEARCH_COMMANDS = new Set([
-  "path",
-  "chance",
-  "percent",
-  "minimals",
-  "score",
-  "score-minimals",
-  "saves",
-  "best-save",
-  "score-finder",
-]);
-const SFINDER_BUILD_SEARCH_COMMANDS = new Set([
-  "cover",
-  "setup",
-  "congruent",
-  "congruent-cover",
-  "setup-cover",
-  "cover-percent",
-  "special-cover",
-]);
-const SFINDER_STRUCTURE_SEARCH_COMMANDS = new Set([
-  "spin-cover",
-  "spin",
-]);
 // The ingress supplies the remaining interaction deadline. Keep a minute for
 // delivery inside Discord's 15-minute token lifetime, without shorter PC caps.
 const DEFAULT_SEARCH_TIMEOUT_MS = 14 * 60_000;
@@ -245,15 +200,7 @@ function inferSearchTimeoutClass(arguments_) {
   ) {
     return "utility_bounded";
   }
-  if (command !== "sfinder") return "default";
-
-  const subcommand = normalizedSearchCommand(arguments_[1]);
-  if (!subcommand) return "default";
-  const canonical = normalizeSfinderCommand(subcommand);
-  if (canonical === "verify") return "diagnostic";
-  if (SFINDER_REVERSE_SEARCH_COMMANDS.has(canonical)) return "pc_reverse";
-  if (SFINDER_BUILD_SEARCH_COMMANDS.has(canonical)) return "build_long";
-  if (SFINDER_STRUCTURE_SEARCH_COMMANDS.has(canonical)) return "structure_long";
+  if (command === "verify") return "diagnostic";
   return "default";
 }
 
@@ -392,11 +339,7 @@ export function canonicalClearraOperationalCommand(value) {
   if (NATIVE_COMMANDS.has(command)) {
     return !pathInput || tokens.length === 1 ? command : null;
   }
-  if (command !== "sfinder" || (pathInput && tokens.length !== 2)) return null;
-  const subcommand = normalizedOperationalPart(tokens[1]);
-  if (!subcommand) return null;
-  const canonical = normalizeSfinderCommand(subcommand);
-  return SFINDER_COMMANDS.has(canonical) ? `sfinder.${canonical}` : null;
+  return null;
 }
 const FILE_OPTIONS = new Set([
   "--fixture",
@@ -515,7 +458,7 @@ export function projectDiscordCanonicalResultPayload(payload) {
 export function parseClearraMessage(content, prefix = "!", execution = {}) {
   // The catalog-aware text ingress owns every executable text alias. Keeping
   // this legacy raw parser fail-closed prevents older imports from restoring
-  // the removed `!clearra ...` or noncatalog `!sfinder ...` escape hatch.
+  // a raw command escape hatch.
   void content;
   void prefix;
   void execution;
@@ -529,14 +472,11 @@ export function prepareClearraArguments(tokens, execution = {}) {
   if (tokens.length > 256) throw new Error("The command has too many arguments.");
   assertDiscordNoTieArguments(tokens);
   const command = tokens[0].toLowerCase();
-  if (!ALLOWED_COMMANDS.has(command)) {
+  if (!NATIVE_COMMANDS.has(command)) {
     throw new Error(
-      "Discord supports curated Clearra PC, build, setup, coverage, forward, and sfinder searches.",
+      "Discord supports only registered Clearra product commands.",
     );
   }
-  const sfinderCommand = command === "sfinder"
-    ? validateSfinderCommand(tokens[1])
-    : null;
   const buildV2Contract = command === "build" ? validateBuildV2Command(tokens) : null;
   if (command === "finesse" && !["search", "score"].includes(tokens[1]?.toLowerCase())) {
     throw new Error("Discord finesse calculations require a search or score subcommand.");
@@ -588,18 +528,17 @@ export function prepareClearraArguments(tokens, execution = {}) {
   const canonicalPcSubcommand = command === "pc" &&
     DISCORD_PC_SUBCOMMANDS.has(normalizedSearchCommand(tokens[1]));
   if (command === "failed-queue" || command === "pc" && !canonicalPcSubcommand) {
-    output.push("--no-tablebase", "--no-build-dependency-dag");
+    // Keep online I/O under the service routing policy. The exact local
+    // search policy (including dependency pruning) is owned by the CLI,
+    // not independently overridden by the Discord transport.
+    output.push("--no-tablebase");
   } else if (
     command === "setup-finder" ||
     command === "setup" && normalizedSearchCommand(tokens[1]) !== "score"
   ) {
     output.push("--no-tablebase");
   }
-  const parallelSearch = (
-    PARALLEL_SEARCH_COMMANDS.has(command) ||
-    (command === "sfinder" && SFINDER_SEARCH_COMMANDS.has(sfinderCommand))
-  );
-  if (parallelSearch) {
+  if (PARALLEL_SEARCH_COMMANDS.has(command)) {
     if (execution.workers !== undefined) {
       const workers = Number(execution.workers);
       if (!Number.isSafeInteger(workers) || workers < 1) {
@@ -781,33 +720,6 @@ function assertClosedBuildV2Execution(tokens, contract) {
       throw new Error("Discord Build v2 requires one registered score profile.");
     }
   }
-}
-
-function validateSfinderCommand(value) {
-  if (typeof value !== "string" || value.length === 0) {
-    throw new Error("Discord sfinder searches require a subcommand.");
-  }
-  const command = normalizeSfinderCommand(value);
-  if (!SFINDER_COMMANDS.has(command)) {
-    throw new Error(`Discord does not expose the sfinder '${command}' contract.`);
-  }
-  return command;
-}
-
-function normalizeSfinderCommand(value) {
-  const normalized = value.trim().toLowerCase().replaceAll("_", "-");
-  return ({
-    bestsave: "best-save",
-    bestsetup: "best-setup",
-    congruentcover: "congruent-cover",
-    coverpercent: "cover-percent",
-    dpcfinder: "dpc-finder",
-    pcsetup: "pc-setup",
-    scoreminimals: "score-minimals",
-    setupcover: "setup-cover",
-    specialcover: "special-cover",
-    spincover: "spin-cover",
-  })[normalized] ?? normalized;
 }
 
 function normalizedOperationalPart(value) {

@@ -245,7 +245,6 @@ test("remote job execution is not capped by the Oracle gateway CPU count", () =>
       "--lines",
       "4",
       "--no-tablebase",
-      "--no-build-dependency-dag",
       "--format",
       "text",
     ],
@@ -357,7 +356,6 @@ test("job service uses every Cloud Run logical processor by default", () => {
       "--lines",
       "1",
       "--no-tablebase",
-      "--no-build-dependency-dag",
       "--auto-workers",
       "5",
       "--format",
@@ -419,7 +417,6 @@ test("explicit 8-worker Cloud Run policy survives startup CPU boost visibility",
       "--queue",
       "IJLOO",
       "--no-tablebase",
-      "--no-build-dependency-dag",
       "--auto-workers",
       "8",
       "--use-all-cpu-threads",
@@ -498,7 +495,6 @@ test("job service partitions its CPU limit across concurrent jobs", () => {
       "--lines",
       "1",
       "--no-tablebase",
-      "--no-build-dependency-dag",
       "--auto-workers",
       "3",
       "--use-all-cpu-threads",
@@ -519,7 +515,7 @@ test("job service partitions its CPU limit across concurrent jobs", () => {
   );
 });
 
-test("job runner sends curated sfinder argv without shell interpretation", async () => {
+test("job runner sends typed Clearra argv without shell interpretation and rejects sfinder", async () => {
   let invocation;
   const runner = new ClearraCommandRunner(
     {
@@ -552,10 +548,11 @@ test("job runner sends curated sfinder argv without shell interpretation", async
 
   const result = await runner.execute({
     arguments: [
-      "sfinder",
+      "pc",
       "chance",
-      "v115@vhAAgH",
+      "--patterns",
       "P7P3",
+      "--lines",
       "4",
       "--workers",
       "99",
@@ -571,10 +568,11 @@ test("job runner sends curated sfinder argv without shell interpretation", async
   assert.equal(invocation.options.shell, false);
   assert.equal(invocation.options.env.CLEARRA_EXPECTED_VCPUS, "6");
   assert.deepEqual(invocation.arguments_, [
-    "sfinder",
+    "pc",
     "chance",
-    "v115@vhAAgH",
+    "--patterns",
     "P7P3",
+    "--lines",
     "4",
     "--auto-workers",
     "6",
@@ -583,6 +581,13 @@ test("job runner sends curated sfinder argv without shell interpretation", async
     "json",
     "--include-solution-data",
   ]);
+  invocation = undefined;
+  await assert.rejects(runner.execute({
+    arguments: ["sfinder", "chance", "v115@vhAAgH", "P7P3", "4"],
+    deadlineUnixMs: Date.now() + 5_000,
+    maxOutputBytes: 1024 * 1024,
+  }));
+  assert.equal(invocation, undefined);
 });
 
 test("Cloud PC chance uses the configured adaptive ceiling, not Node startup visibility", async () => {
@@ -663,7 +668,7 @@ test("SIGKILL is classified as OOM only when the container counter advances", as
       },
     );
     const result = await runner.execute({
-      arguments: ["sfinder", "chance", "v115@vhAAgH", "P7P3", "4"],
+      arguments: ["pc", "chance", "--lines", "4", "--patterns", "P7P3"],
       deadlineUnixMs: Date.now() + 5_000,
       maxOutputBytes: 1024 * 1024,
     });
@@ -711,7 +716,7 @@ test("job cancellation wins while post-close OOM classification is pending", asy
   );
 
   const outcome = runner.execute({
-    arguments: ["sfinder", "chance", "v115@vhAAgH", "P7P3", "4"],
+    arguments: ["pc", "chance", "--lines", "4", "--patterns", "P7P3"],
     deadlineUnixMs: Date.now() + 5_000,
     maxOutputBytes: 4096,
   }, { signal: abort.signal });
@@ -948,7 +953,7 @@ test("job runner clamps every canonical timeout family and preserves legacy infe
   await execute(["setup-finder", "--remaining", "TI"], 99_000, "setup_long");
   await execute(["damage"], 99_000, "forward_long");
   await execute(["spin-structure"], 99_000, "structure_long");
-  await execute(["sfinder", "verify", "pc"], 99_000, "diagnostic");
+  await execute(["verify", "pc"], 99_000, "diagnostic");
   await execute(["damage"], 10_750, "forward_long");
 
   assert.deepEqual(observedTimeouts, [5_000, 6_000, 7_000, 8_000, 9_000, 3_000, 750]);

@@ -2,10 +2,7 @@ import {
   prepareClearraArguments,
   tokenizeCommand,
 } from "./command.mjs";
-import {
-  findShadowedTextCommand,
-  findTextCommand,
-} from "../discord/slash-command-catalog.mjs";
+import { findTextCommand } from "../discord/slash-command-catalog.mjs";
 import { hiddenTextSearchCapabilities } from "../discord/capability-registry.mjs";
 import {
   buildSlashCommandArgumentPlan,
@@ -144,9 +141,8 @@ const ADVANCED_PC_OBJECTIVE_ALIASES = new Map([
 ]);
 
 // Diagnostics deliberately live outside the slash/help catalog. This private
-// projection supplies only the fields required by text parsing and lowering;
-// it cannot be reached through an explicit `sfinder` namespace or Discord
-// application-command registration.
+// projection supplies only the fields required by text parsing and lowering.
+// Hidden entries are not included in Discord application-command registration.
 const HIDDEN_TEXT_COMMANDS = new Map(
   hiddenTextSearchCapabilities().map((capability) => {
     const command = Object.freeze({
@@ -186,11 +182,11 @@ export function parseClearraTextRequest(
 ) {
   const resolution = resolveTextCommand(content, prefix);
   if (!resolution) return null;
-  const { tokens, explicitSfinder, command, argumentStart } = resolution;
-  if (!explicitSfinder && command?.kind === "help") {
+  const { tokens, command, argumentStart } = resolution;
+  if (command?.kind === "help") {
     return helpRequest(command, tokens.slice(1));
   }
-  if (!explicitSfinder && command?.kind === "render-file") {
+  if (command?.kind === "render-file") {
     return nonSearchRequest(command, tokens.slice(1));
   }
   if (!command || command.kind !== "search") return null;
@@ -218,8 +214,8 @@ export function parseClearraTextRequest(
 /**
  * Returns only the allow-listed command identity selected by the text parser.
  * Arguments are never retained. This deliberately shares command resolution
- * with parseClearraTextRequest so aliases and the curated explicit sfinder
- * route cannot drift away from private operational telemetry.
+ * with parseClearraTextRequest so aliases cannot drift away from private
+ * operational telemetry.
  */
 export function classifyClearraTextCommand(content, prefix = "!") {
   let resolution;
@@ -246,83 +242,44 @@ function commandIdentityFromResolution(resolution) {
 }
 
 function resolveTextCommandHead(content, prefix) {
-  if (typeof prefix !== "string" || prefix.length === 0) return null;
-  const trimmed = String(content ?? "").trim();
-  if (!trimmed.startsWith(prefix)) return null;
-  const body = trimmed.slice(prefix.length).trim();
-  if (!body) return null;
-  if (!allowsExactHiddenVerifySpelling(body, trimmed, prefix)) return null;
-
+  const ingress = resolveTextCommandIngress(content, prefix);
+  if (!ingress) return null;
   // Only command-path tokens are read here. Values after that boundary are
   // deliberately ignored, so this fallback cannot retain fields, queues, or
   // other user input in operational telemetry.
-  const tokens = body.split(/\s+/u, 3);
-  if (usesRetiredCatFinderName(tokens)) return null;
-  const first = tokens[0]?.toLowerCase();
-  if (first === "clearra") return null;
-  let namespaceEnd = 0;
-  const explicitSfinder = tokens[namespaceEnd]?.toLowerCase() === "sfinder";
-  if (explicitSfinder) namespaceEnd += 1;
-  const commandName = tokens[namespaceEnd];
-  const normalizedName = normalizeCatalogName(commandName);
-  const candidate = textCommandCandidate(normalizedName, explicitSfinder);
-  if (!allowsExactHiddenTextCommand(candidate, trimmed, prefix)) return null;
-  const root = explicitSfinder && candidate?.argvPrefix?.[0] !== "sfinder"
-    ? null
-    : candidate;
-  const variant = resolveCanonicalTextVariant(root, tokens, namespaceEnd + 1, false);
-  const command = variant.command;
-  return {
-    tokens,
-    first,
-    explicitSfinder,
-    command,
-    argumentStart: namespaceEnd + 1 + variant.width,
-  };
+  const tokens = ingress.body.split(/\s+/u, 3);
+  const root = textCommandCandidate(tokens[0], ingress.trimmed, prefix);
+  return resolveCanonicalTextVariant(root, tokens, 1, false);
 }
 
 function resolveTextCommand(content, prefix) {
+  const ingress = resolveTextCommandIngress(content, prefix);
+  if (!ingress) return null;
+  const tokens = tokenizeTextCommand(ingress.body);
+  const root = textCommandCandidate(tokens[0], ingress.trimmed, prefix);
+  if (!root) return null;
+  const variant = resolveCanonicalTextVariant(root, tokens, 1, true);
+  const argumentStart = 1 + variant.width;
+  return {
+    ...resolveAdvancedPcObjective(variant.command, tokens, argumentStart),
+    argumentStart,
+  };
+}
+
+function resolveTextCommandIngress(content, prefix) {
   if (typeof prefix !== "string" || prefix.length === 0) return null;
   const trimmed = String(content ?? "").trim();
   if (!trimmed.startsWith(prefix)) return null;
   const body = trimmed.slice(prefix.length).trim();
   if (!body) return null;
-  if (!allowsExactHiddenVerifySpelling(body, trimmed, prefix)) return null;
-
-  const tokens = tokenizeTextCommand(body);
-  if (usesRetiredCatFinderName(tokens)) return null;
-  const first = tokens[0]?.toLowerCase();
-  if (first === "clearra") return null;
-  let namespaceEnd = 0;
-  const explicitSfinder = tokens[namespaceEnd]?.toLowerCase() === "sfinder";
-  if (explicitSfinder) namespaceEnd += 1;
-  const commandName = tokens[namespaceEnd];
-  const normalizedName = normalizeCatalogName(commandName);
-  const candidate = textCommandCandidate(normalizedName, explicitSfinder);
-  if (!allowsExactHiddenTextCommand(candidate, trimmed, prefix)) return null;
-  const root = explicitSfinder && candidate?.argvPrefix?.[0] !== "sfinder"
-    ? null
-    : candidate;
-  const baseArgumentStart = namespaceEnd + 1;
-  const variant = resolveCanonicalTextVariant(root, tokens, baseArgumentStart, true);
-  const baseCommand = variant.command;
-  const argumentStart = baseArgumentStart + variant.width;
-  const objectiveResolution = resolveAdvancedPcObjective(
-    baseCommand,
-    tokens,
-    argumentStart,
-    explicitSfinder,
-  );
-  return {
-    tokens: objectiveResolution.tokens,
-    first,
-    explicitSfinder,
-    command: objectiveResolution.command,
-    argumentStart,
-  };
+  const first = normalizeCatalogName(body.split(/\s+/u, 1)[0]);
+  if (first === "clearra" || first === "sfinder" ||
+      first === "cat-finder" || first === "catfinder") return null;
+  if (first === "verify" && !isExactHiddenVerify(trimmed, prefix)) return null;
+  return { body, trimmed };
 }
 
-function resolveAdvancedPcObjective(command, tokens, argumentStart, explicitSfinder) {
+function resolveAdvancedPcObjective(command, tokens, argumentStart) {
   // Preserve the ingress boundary for unknown command names. An otherwise
   // unrecognised prefix must not become executable merely because its tail
   // happens to contain the advanced option spelling.
@@ -358,11 +315,6 @@ function resolveAdvancedPcObjective(command, tokens, argumentStart, explicitSfin
   }
 
   if (objectiveId === null) return { command, tokens };
-  if (explicitSfinder) {
-    throw new Error(
-      "Text option --objective is unavailable under the explicit sfinder namespace.",
-    );
-  }
   if (command?.capabilityId !== "pc.path") {
     throw new Error(
       "Text option --objective is available only on the pc.path base capability.",
@@ -384,27 +336,17 @@ function resolveAdvancedPcObjective(command, tokens, argumentStart, explicitSfin
   };
 }
 
-function textCommandCandidate(normalizedName, explicitSfinder) {
-  if (explicitSfinder) {
-    return findShadowedTextCommand(normalizedName) ?? findTextCommand(normalizedName);
+function textCommandCandidate(name, trimmed, prefix) {
+  const normalizedName = normalizeCatalogName(name);
+  const hidden = HIDDEN_TEXT_COMMANDS.get(normalizedName);
+  if (hidden?.capabilityId === "diagnostic.verify" && !isExactHiddenVerify(trimmed, prefix)) {
+    return null;
   }
-  return HIDDEN_TEXT_COMMANDS.get(normalizedName) ?? findTextCommand(normalizedName);
+  return hidden ?? findTextCommand(normalizedName);
 }
 
-function allowsExactHiddenTextCommand(command, trimmed, prefix) {
-  if (command?.capabilityId !== "diagnostic.verify") return true;
+function isExactHiddenVerify(trimmed, prefix) {
   return ["$", ">"].includes(prefix) && trimmed === `${prefix}verify`;
-}
-
-function allowsExactHiddenVerifySpelling(body, trimmed, prefix) {
-  const [first, second] = body.split(/\s+/u, 3);
-  const directVerify = first?.toLowerCase() === "verify";
-  const explicitSfinderVerify = first?.toLowerCase() === "sfinder" &&
-    second?.toLowerCase() === "verify";
-  if (!directVerify && !explicitSfinderVerify) return true;
-  return !explicitSfinderVerify &&
-    ["$", ">"].includes(prefix) &&
-    trimmed === `${prefix}verify`;
 }
 
 function resolveGroupedTextVariant(command, tokens, subcommandIndex, strict) {
@@ -412,8 +354,6 @@ function resolveGroupedTextVariant(command, tokens, subcommandIndex, strict) {
   const name = normalizeCatalogName(tokens[subcommandIndex]);
   const variant = command.subcommands?.[name] ?? null;
   if (variant) return variant;
-  const shadowed = findShadowedTextCommand(command.name);
-  if (shadowed) return shadowed;
   if (strict) {
     throw new Error(
       `Text command /${command.name} requires one of: ${Object.keys(command.subcommands).join(", ")}.`,
@@ -442,13 +382,6 @@ function resolveCanonicalTextVariant(command, tokens, subcommandIndex, strict) {
     command: variant,
     width: variant?.subcommand ? 1 : 0,
   };
-}
-
-function usesRetiredCatFinderName(tokens) {
-  let cursor = 0;
-  if (tokens[cursor]?.toLowerCase() === "sfinder") cursor += 1;
-  const name = normalizeCatalogName(tokens[cursor]);
-  return name === "cat-finder" || name === "catfinder";
 }
 
 function nonSearchRequest(command, tokens) {
@@ -855,22 +788,8 @@ function optionValue(tokens, index, parsed, name) {
 
 function normalizeCatalogName(value) {
   if (typeof value !== "string") return "";
-  const normalized = value.trim().toLowerCase().replaceAll("_", "-");
-  return TEXT_COMPATIBILITY_NAMES.get(normalized) ?? normalized;
+  return value.trim().toLowerCase().replaceAll("_", "-");
 }
-
-const TEXT_COMPATIBILITY_NAMES = new Map([
-  ["bestsave", "best-save"],
-  ["bestsetup", "best-setup"],
-  ["congruentcover", "congruent-cover"],
-  ["coverpercent", "cover-percent"],
-  ["dpcfinder", "dpc-finder"],
-  ["pcsetup", "pc-setup"],
-  ["scoreminimals", "score-minimals"],
-  ["setupcover", "setup-cover"],
-  ["specialcover", "special-cover"],
-  ["spincover", "spin-cover"],
-]);
 
 function tokenizeTextCommand(source) {
   if (!source.includes("```")) return tokenizeCommand(source);

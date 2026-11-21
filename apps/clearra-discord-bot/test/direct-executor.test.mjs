@@ -213,7 +213,7 @@ test("direct execution preserves every canonical family class and limit", async 
   await executor.execute(["setup-finder"], { deadlineUnixMs: 99_000 });
   await executor.execute(["damage"], { deadlineUnixMs: 99_000 });
   await executor.execute(["spin-structure"], { deadlineUnixMs: 99_000 });
-  await executor.execute(["sfinder", "verify", "pc"], { deadlineUnixMs: 99_000 });
+  await executor.execute(["verify", "pc"], { deadlineUnixMs: 99_000 });
 
   assert.deepEqual(
     jobs.map(({ timeoutClass, deadlineUnixMs }) => [timeoutClass, deadlineUnixMs]),

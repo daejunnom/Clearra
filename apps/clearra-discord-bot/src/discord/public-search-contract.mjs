@@ -1,21 +1,14 @@
 import {
   activeDiscordSearchCapabilities,
-  activeDiscordGenericCompatibilityRoutes,
   hiddenTextSearchCapabilities,
 } from "./capability-registry.mjs";
 
 /**
- * Result projection is generated from typed product capabilities plus the
- * separately governed generic-compatibility routes. Discord owns ingress and
- * bounded presentation; executable semantics lower through the CLI command
- * authority. Route authority IDs keep identical user-facing labels from
- * cross-accepting engine result kinds.
+ * Discord owns ingress and bounded presentation. The typed product capability
+ * owns the executable CLI semantics and the result for both names and aliases.
  */
 export const DISCORD_PUBLIC_SEARCH_CONTRACT = Object.freeze(
-  resultRows(
-    activeDiscordSearchCapabilities(),
-    activeDiscordGenericCompatibilityRoutes(),
-  ),
+  resultRows(activeDiscordSearchCapabilities()),
 );
 
 // Hidden text diagnostics use the same fail-closed result translator without
@@ -24,7 +17,7 @@ export const DISCORD_HIDDEN_TEXT_SEARCH_CONTRACT = Object.freeze(
   resultRows(hiddenTextSearchCapabilities()),
 );
 
-function resultRows(capabilities, genericRoutes = []) {
+function resultRows(capabilities) {
   const rows = new Map();
   for (const capability of capabilities) {
     for (const route of [capability.canonical, ...capability.aliases]) {
@@ -40,20 +33,6 @@ function resultRows(capabilities, genericRoutes = []) {
       }
       rows.set(id, candidate);
     }
-  }
-  for (const route of genericRoutes) {
-    const candidate = row(
-      route.resultAuthorityId,
-      route.publicResultKind,
-      route,
-    );
-    const previous = rows.get(candidate.id);
-    if (previous && !sameContract(previous, candidate)) {
-      throw new Error(
-        `Discord result identity '${candidate.id}' has conflicting route contracts.`,
-      );
-    }
-    rows.set(candidate.id, candidate);
   }
   return [...rows.values()];
 }

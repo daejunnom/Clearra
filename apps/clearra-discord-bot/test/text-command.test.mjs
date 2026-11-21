@@ -23,7 +23,7 @@ test("text command classification shares parser aliases without retaining argume
   const cases = [
     ["$path --field PRIVATE --next PRIVATE", "$", "path"],
     [">score-finder PRIVATE PRIVATE", ">", "score-finder"],
-    ["$sfinder score-finder PRIVATE PRIVATE", "$", "score-finder"],
+    ["$sfinder score-finder PRIVATE PRIVATE", "$", null],
     [">sfinder bestsave PRIVATE", ">", null],
     ["$clearra sfinder path PRIVATE", "$", null],
     ["$clearra path --field PRIVATE", "$", null],
@@ -53,54 +53,42 @@ test("text command classification keeps an exact identity when arguments are mal
   }
 });
 
-test("sfinder compatibility spellings retain only translator-backed identities", () => {
-  const cases = [
-    ["bestsave", "best-save", false],
-    ["bestsetup", "best-setup", false],
-    ["congruentcover", "congruent-cover", false],
-    ["coverpercent", "cover-percent", false],
-    ["dpcfinder", "dpc-finder", false],
-    ["pcsetup", "pc-setup", false],
-    ["scoreminimals", "score-minimals", false],
-    ["setupcover", "setup-cover", false],
-    ["specialcover", "special-cover", false],
-    ["spincover", "spin-cover", false],
+test("retired compatibility spellings do not resolve to executable text commands", () => {
+  const retired = [
+    "bestsave", "bestsetup", "congruentcover", "coverpercent", "dpcfinder",
+    "pcsetup", "scoreminimals", "setupcover", "specialcover", "spincover",
+    "percent", "pc-setup", "best-setup", "dpc-finder", "spin-cover",
+    "allspin-sol-finder", "allspin-pres-chance",
+    "sfinder path", "sfinder chance", "sfinder score", "sfinder score-finder",
+    "sfinder verify", "clearra sfinder path",
   ];
-
-  for (const [compatibilityName, slashName, sfinderAllowed] of cases) {
-    assert.equal(
-      classifyClearraTextCommand(`$sfinder ${compatibilityName} PRIVATE`, "$"),
-      sfinderAllowed ? slashName : null,
-    );
-    assert.equal(
-      classifyClearraTextCommand(`>clearra sfinder ${compatibilityName} PRIVATE`, ">"),
-      null,
-    );
+  for (const prefix of ["$", ">"]) {
+    for (const name of retired) {
+      const content = `${prefix}${name} PRIVATE`;
+      assert.equal(parseClearraTextRequest(content, prefix, remoteExecution), null, content);
+      assert.equal(classifyClearraTextCommand(content, prefix), null, content);
+    }
   }
 });
 
-test("bare path text commands use the registered slash field contract", () => {
+test("bare path text commands use the typed grouped PC contract", () => {
+  const grouped = parseClearraTextRequest(
+    "$pc path --field XXXXXX____ --patterns I --lines 1",
+    "$",
+    remoteExecution,
+  );
+  const direct = parseClearraTextRequest(
+    "$path --field XXXXXX____ --patterns I --lines 1 --workers 99 --format text",
+    "$",
+    remoteExecution,
+  );
+  assert.deepEqual(direct.argumentSets, grouped.argumentSets);
+  assert.equal(direct.command.capabilityId, grouped.command.capabilityId);
+  assert.equal(direct.command.resultContractId, "pc-path-family.v2");
+  assert.deepEqual(direct.arguments_.slice(0, 2), ["pc", "path"]);
   assert.deepEqual(
-    parseClearraTextMessage(
-      "$path --field XXXXXX____ --patterns I --lines 1 --workers 99 --format text",
-      "$",
-      remoteExecution,
-    ),
-    [
-      "sfinder",
-      "path",
-      "--field-mask-v1",
-      "000000000000003f",
-      "--queue",
-      "I",
-      "--lines",
-      "1",
-      "--auto-workers",
-      "8",
-      "--format",
-      "json",
-      "--include-solution-data",
-    ],
+    direct.arguments_.slice(-5),
+    ["--auto-workers", "8", "--format", "json", "--include-solution-data"],
   );
 });
 
@@ -169,7 +157,7 @@ test("advanced text objectives resolve pc.path ingress to honest canonical PC va
   );
 });
 
-test("pc chance text is typed while top-level chance and percent stay generic", () => {
+test("bare chance shares the typed PC chance contract and percent is retired", () => {
   const base = "--field XXXXXX____ --patterns I --lines 1 --kicktable srs";
   for (const prefix of ["$", ">"]) {
     const canonical = parseClearraTextRequest(`${prefix}pc chance ${base}`, prefix);
@@ -179,13 +167,11 @@ test("pc chance text is typed while top-level chance and percent stay generic", 
     assert.equal(canonical.arguments_.includes("--objective"), false);
     assert.equal(canonical.arguments_.includes("--queue-knowledge"), false);
 
-    for (const name of ["chance", "percent"]) {
-      const generic = parseClearraTextRequest(`${prefix}${name} ${base}`, prefix);
-      assert.equal(generic.command.capabilityId, `discord.compat.${name}`);
-      assert.equal(generic.command.resultAuthorityId, name);
-      assert.deepEqual(generic.arguments_.slice(0, 2), ["sfinder", name]);
-      assert.equal(generic.arguments_.includes("--objective"), false);
-    }
+    const alias = parseClearraTextRequest(`${prefix}chance ${base}`, prefix);
+    assert.equal(alias.command.capabilityId, canonical.command.capabilityId);
+    assert.equal(alias.command.resultContractId, canonical.command.resultContractId);
+    assert.deepEqual(alias.argumentSets, canonical.argumentSets);
+    assert.equal(parseClearraTextRequest(`${prefix}percent ${base}`, prefix), null);
 
     assert.throws(
       () => parseClearraTextRequest(`${prefix}pc percent ${base}`, prefix),
@@ -206,7 +192,7 @@ test("pc chance text is typed while top-level chance and percent stay generic", 
   }
 });
 
-test("pc score text is typed while top-level score remains independently generic", () => {
+test("bare score shares the typed PC score contract", () => {
   const base = "--field XXXXXX____ --patterns I --lines 1 --kicktable srs";
   for (const prefix of ["$", ">"] ) {
     const canonical = parseClearraTextRequest(
@@ -232,17 +218,13 @@ test("pc score text is typed while top-level score remains independently generic
       "2",
     );
 
-    const legacy = parseClearraTextRequest(`${prefix}score ${base}`, prefix);
-    assert.equal(legacy.command.capabilityId, "discord.compat.score");
-    assert.equal(legacy.command.telemetryIdentity, "discord.compat.score");
-    assert.equal(
-      legacy.command.loweringAuthority,
-      "clearra.cli-command.compatibility.v1",
+    const alias = parseClearraTextRequest(
+      `${prefix}score ${base} --score-profile guideline --spin-profile all-mini-plus --initial-b2b 2`,
+      prefix,
     );
-    assert.equal(legacy.command.compatibilityPreset, null);
-    assert.equal(legacy.command.resultAuthorityId, "score");
-    assert.deepEqual(legacy.command.resultAllowlist, ["pc-scenario"]);
-    assert.deepEqual(legacy.arguments_.slice(0, 2), ["sfinder", "score"]);
+    assert.equal(alias.command.capabilityId, canonical.command.capabilityId);
+    assert.equal(alias.command.resultContractId, canonical.command.resultContractId);
+    assert.deepEqual(alias.argumentSets, canonical.argumentSets);
 
     for (const option of [
       "--objective all",
@@ -296,9 +278,7 @@ test("advanced text objectives reject duplicate, unknown, non-base, and incompat
     [`>path ${base} --objective minimum_cover`, /Unknown registered PC objective/],
     [`$path ${base} --objective`, /requires one registered objective ID/],
     [`>chance ${base} --objective unique`, /only on the pc\.path base capability/],
-    ["$cover __________ ####______ I --objective all", /only on the pc\.path base capability/],
-    [`$sfinder path ${base} --objective unique`, /unavailable under the explicit sfinder namespace/],
-    [`>sfinder path ${base} --objective all`, /unavailable under the explicit sfinder namespace/],
+    ["$build probability __________ ####______ I --objective all", /only on the pc\.path base capability/],
     [`$path ${base} --objective min-cover --queue-knowledge visible-7`, /unavailable with minimum-cover/],
     [`$path ${base} --objective unique --target ####______`, /does not expose option '--target'/],
   ];
@@ -320,7 +300,7 @@ test("advanced text objectives reject duplicate, unknown, non-base, and incompat
   }
 });
 
-test("dollar and greater-than finesse commands share the grouped slash contracts", () => {
+test("bare finesse score shares its canonical contract and legacy finesse search is retired", () => {
   const document = encodeCtk3({
     width: 10,
     pages: [{
@@ -329,32 +309,25 @@ test("dollar and greater-than finesse commands share the grouped slash contracts
       operation: { piece: "T", rotation: "spawn", x: 4, y: 0 },
     }],
   });
-  const search = parseClearraTextRequest(
-    '$finesse search XXXX______ I __________ srs-plus "hold=avoid knowledge=visible-7"',
-    "$",
-    remoteExecution,
+  assert.throws(
+    () => parseClearraTextRequest("$finesse search PRIVATE", "$", remoteExecution),
+    /requires one of:/i,
   );
-  assert.equal(search.command.subcommand, "search");
-  assert.equal(classifyClearraTextCommand("$finesse search PRIVATE", "$"), "finesse.search");
-  assert.deepEqual(search.arguments_.slice(0, 14), [
-    "build-probability",
-    "--base-mask", "0".repeat(60),
-    "--target-mask", `${"0".repeat(59)}f`,
-    "--height", "8",
-    "--queue", "I",
-    "--no-hold",
-    "--pattern-knowledge", "visible-7",
-    "--finesse", "inputs",
-  ]);
-  assert.equal(search.arguments_.includes("--no-mirror"), true);
-  assert.equal(search.arguments_[search.arguments_.indexOf("--rule") + 1], "srs-plus");
+  assert.equal(classifyClearraTextCommand("$finesse search PRIVATE", "$"), null);
 
   const score = parseClearraTextRequest(
     `>finesse score ${document} T --knowledge oracle`,
     ">",
     remoteExecution,
   );
+  const grouped = parseClearraTextRequest(
+    `>build finesse-score ${document} T --knowledge oracle`,
+    ">",
+    remoteExecution,
+  );
   assert.equal(score.command.subcommand, "score");
+  assert.equal(score.command.capabilityId, grouped.command.capabilityId);
+  assert.deepEqual(score.argumentSets, grouped.argumentSets);
   assert.equal(score.arguments_.includes(document), false);
   assert.deepEqual(score.arguments_.slice(0, 10), [
     "finesse", "score",
@@ -368,31 +341,27 @@ test("dollar and greater-than finesse commands share the grouped slash contracts
 
 test("setup-ranking text commands share the canonical slash settings without finesse collisions", () => {
   const arguments_ = parseClearraTextMessage(
-    "$best-setup IOTS --setup-order build --max-setup-pieces 10 --queue-knowledge visible-7 --next-cycle-remaining Z --setup-length shorter --rule srs-x",
+    "$setup build IOTS --max-setup-pieces 10 --queue-knowledge visible-7 --next-cycle-remaining Z --setup-length shorter --rule srs-x",
     "$",
     remoteExecution,
   );
-  assert.deepEqual(arguments_.slice(0, 16), [
-    "setup-finder",
+  assert.deepEqual(arguments_.slice(0, 4), [
+    "setup", "build",
     "--remaining", "IOTS",
-    "--priority", "build",
-    "--max-setup-pieces", "10",
-    "--queue-knowledge", "visible-7",
-    "--next-cycle-remaining", "Z",
-    "--setup-length", "shorter",
-    "--rule", "srs-x",
-    "--no-tablebase",
   ]);
+  for (const [flag, value] of [
+    ["--max-setup-pieces", "10"], ["--queue-knowledge", "visible-7"],
+    ["--next-cycle-remaining", "Z"], ["--setup-length", "shorter"], ["--rule", "srs-x"],
+  ]) assert.equal(arguments_[arguments_.indexOf(flag) + 1], value, flag);
+  assert.equal(arguments_.includes("--no-tablebase"), true);
   assert.equal(arguments_.includes("--pattern-knowledge"), false);
 
   assert.deepEqual(
-    parseClearraTextMessage(">dpc-finder IOTS --knowledge full-queue", ">", remoteExecution)
-      .slice(0, 7),
+    parseClearraTextMessage(">setup pc IOTS --knowledge full-queue", ">", remoteExecution)
+      .slice(0, 4),
     [
-      "setup-finder",
+      "setup", "pc",
       "--remaining", "IOTS",
-      "--priority", "pc",
-      "--queue-knowledge", "oracle",
     ],
   );
 });
@@ -412,7 +381,7 @@ test("catalog text requests retain the raw field for the parallel preview", () =
   assert.equal(request.argumentSets.length, 1);
   assert.equal(request.arguments_, request.argumentSets[0]);
   assert.equal(request.automaticPcTargets, false);
-  assert.equal(request.arguments_[2], "--field-mask-v1");
+  assert.equal(request.arguments_[request.arguments_.indexOf("--board-mask") + 1], "0x3f");
   assert.equal(request.helpTarget, null);
   assert.ok(Object.isFrozen(request));
   assert.ok(Object.isFrozen(request.argumentSets));
@@ -421,65 +390,28 @@ test("catalog text requests retain the raw field for the parallel preview", () =
   assert.ok(Object.isFrozen(request.rawOptions[0]));
 });
 
-test("explicit sfinder catalog commands use the same slash field normalization", () => {
-  assert.deepEqual(
-    parseClearraTextMessage(
-      "$sfinder path --field XXXXXX____ --patterns I --lines 1",
-      "$",
-      remoteExecution,
-    ),
-    [
-      "sfinder",
-      "path",
-      "--field-mask-v1",
-      "000000000000003f",
-      "--queue",
-      "I",
-      "--lines",
-      "1",
-      "--auto-workers",
-      "8",
-      "--format",
-      "json",
-      "--include-solution-data",
-    ],
-  );
-});
-
 test("score-finder text routes preserve the fixed-queue engine syntax", () => {
-  for (const commandName of ["score-finder", "sfinder score-finder"]) {
+  for (const commandName of ["score-finder", "pc score-finder"]) {
     const request = parseClearraTextRequest(
-      `$${commandName} __________ SIJSTLZO 5 true`,
-      "$",
-      remoteExecution,
+      `$${commandName} XXXXXX____ I 1 --initial-b2b 1`,
+      "$", remoteExecution,
     );
     assert.equal(request.command.name, "score-finder");
-    assert.deepEqual(request.rawOptions, [
-      { name: "field", value: "__________" },
-      { name: "next", value: "SIJSTLZO" },
-      { name: "lines", value: "5" },
-      { name: "options", value: "initial-b2b=true" },
-    ]);
-    assert.deepEqual(request.argumentSets[0].slice(0, 10), [
-      "sfinder",
-      "score-finder",
-      "--field-mask-v1",
-      "0000000000000000",
-      "--queue",
-      "SIJSTLZO",
-      "--lines",
-      "5",
-      "--initial-b2b",
-      "true",
-    ]);
+    assert.deepEqual(
+      Object.fromEntries(request.rawOptions.map(({ name, value }) => [name, value])),
+      { field: "XXXXXX____", next: "I", lines: "1", "initial-b2b": "1" },
+    );
+    assert.deepEqual(request.arguments_.slice(0, 2), ["pc", "score-finder"]);
+    assert.equal(request.arguments_[request.arguments_.indexOf("--queue") + 1], "I");
+    assert.equal(request.arguments_[request.arguments_.indexOf("--initial-b2b") + 1], "1");
   }
 });
 
-test("All-Spin text aliases preserve exact and pattern contracts for both prefixes", () => {
+test("grouped All-Spin text commands preserve exact and pattern contracts for both prefixes", () => {
   const field = "grid:__________/####______";
   const exactCases = [
     ["$", `$pc allspin-sol --field ${field} --queue IOTS --lines 2 --spin-profile all-spin-plus --no-hold`],
-    [">", `>allspin_sol_finder --field ${field} --queue IOTS --lines 2 --spin-profile all-spin-plus --no-hold`],
+    [">", `>pc allspin-sol --field ${field} --queue IOTS --lines 2 --spin-profile all-spin-plus --no-hold`],
   ];
   for (const [prefix, content] of exactCases) {
     const request = parseClearraTextRequest(content, prefix, remoteExecution);
@@ -504,7 +436,7 @@ test("All-Spin text aliases preserve exact and pattern contracts for both prefix
 
   const chanceCases = [
     ["$", `$pc allspin-pres-chance --field ${field} --patterns [IOTS]! --lines 2 --spin-profile all-mini-plus --max-nodes 17`],
-    [">", `>allspin_pres_chance --field ${field} --pattern [IOTS]! --lines 2 --spin-profile all-mini-plus --max-nodes 17`],
+    [">", `>pc allspin-pres-chance --field ${field} --pattern [IOTS]! --lines 2 --spin-profile all-mini-plus --max-nodes 17`],
   ];
   for (const [prefix, content] of chanceCases) {
     const request = parseClearraTextRequest(content, prefix, remoteExecution);
@@ -524,7 +456,7 @@ test("All-Spin text aliases preserve exact and pattern contracts for both prefix
   }
 
   const openingExact = parseClearraTextRequest(
-    "$allspin_sol_finder --field grid:__________/__________ --queue IIOOO --lines 2 --spin-profile all-spin-plus",
+    "$pc allspin-sol --field grid:__________/__________ --queue IIOOO --lines 2 --spin-profile all-spin-plus",
     "$",
     remoteExecution,
   );
@@ -540,7 +472,7 @@ test("All-Spin text aliases preserve exact and pattern contracts for both prefix
   assert.equal(openingExact.arguments_.includes("--pieces"), false);
 
   const openingChance = parseClearraTextRequest(
-    ">allspin_pres_chance --field grid:__________/__________ --pattern [IO]!OOO --lines 2 --spin-profile all-mini-plus --no-hold",
+    ">pc allspin-pres-chance --field grid:__________/__________ --pattern [IO]!OOO --lines 2 --spin-profile all-mini-plus --no-hold",
     ">",
     remoteExecution,
   );
@@ -557,22 +489,22 @@ test("All-Spin text aliases preserve exact and pattern contracts for both prefix
   assert.equal(openingChance.arguments_.includes("--pieces"), false);
 
   assert.equal(
-    classifyClearraTextCommand("$allspin_sol_finder PRIVATE", "$"),
-    "allspin-sol-finder",
+    classifyClearraTextCommand("$pc allspin-sol PRIVATE", "$"),
+    "pc.allspin-sol",
   );
   assert.equal(
-    classifyClearraTextCommand(">allspin_pres_chance PRIVATE", ">"),
-    "allspin-pres-chance",
+    classifyClearraTextCommand(">pc allspin-pres-chance PRIVATE", ">"),
+    "pc.allspin-pres-chance",
   );
   assert.equal(parseClearraTextRequest("$sfinder allspin_sol_finder PRIVATE", "$"), null);
 
   const rejected = [
-    [`$allspin_sol_finder --field ${field} --patterns [IOTS]! --lines 2 --spin-profile all-spin-plus`, /requires --queue or --next/],
-    [`$allspin_pres_chance --field ${field} --queue IOTS --lines 2 --spin-profile all-spin-plus`, /requires --patterns/],
-    [`$allspin_sol_finder --field ${field} --queue IOTS --lines 2`, /spin-profile input is required/],
-    [`$allspin_sol_finder --field ${field} --queue IOTS --lines 2 --spin-profile all-spin --spin-profile all-mini`, /more than once/],
-    [`$allspin_sol_finder --field ${field} --queue IOTS --lines 2 --spin-profile all-spin --preserve-b2b`, /does not expose option '--preserve-b2b'/],
-    [`$allspin_pres_chance --field ${field} --patterns [IOTS]! --lines 2 --spin-profile all-spin --target ####______`, /does not expose option '--target'/],
+    [`$pc allspin-sol --field ${field} --patterns [IOTS]! --lines 2 --spin-profile all-spin-plus`, /requires --queue or --next/],
+    [`$pc allspin-pres-chance --field ${field} --queue IOTS --lines 2 --spin-profile all-spin-plus`, /requires --patterns/],
+    [`$pc allspin-sol --field ${field} --queue IOTS --lines 2`, /spin-profile input is required/],
+    [`$pc allspin-sol --field ${field} --queue IOTS --lines 2 --spin-profile all-spin --spin-profile all-mini`, /more than once/],
+    [`$pc allspin-sol --field ${field} --queue IOTS --lines 2 --spin-profile all-spin --preserve-b2b`, /does not expose option '--preserve-b2b'/],
+    [`$pc allspin-pres-chance --field ${field} --patterns [IOTS]! --lines 2 --spin-profile all-spin --target ####______`, /does not expose option '--target'/],
   ];
   for (const [content, expected] of rejected) {
     assert.throws(
@@ -669,19 +601,22 @@ test("retired cat-finder names are not accepted by either text prefix", () => {
 
 test("damage text command keeps the native 24-row forward-search prefix", () => {
   const field = Array(24).fill("__________").join("\n");
+  const arguments_ = `\`\`\`field\n${field}\n\`\`\` SI`;
   const request = parseClearraTextRequest(
-    `$damage \`\`\`field\n${field}\n\`\`\` SI`,
+    `$damage ${arguments_}`,
     "$",
     remoteExecution,
   );
+  const grouped = parseClearraTextRequest(`$forward damage ${arguments_}`, "$", remoteExecution);
   assert.equal(request.command.name, "damage");
-  assert.deepEqual(request.argumentSets[0].slice(0, 5), [
+  assert.equal(request.command.capabilityId, "forward.damage");
+  assert.deepEqual(request.argumentSets, grouped.argumentSets);
+  assert.deepEqual(request.arguments_.slice(0, 3), [
     "damage",
     "--board-mask-v1",
     "0".repeat(60),
-    "--queue",
-    "SI",
   ]);
+  assert.equal(request.arguments_[request.arguments_.indexOf("--queue") + 1], "SI");
 });
 
 test("REN text command lowers only the exact fixed-queue geometry contract", () => {
@@ -709,35 +644,25 @@ test("REN text command lowers only the exact fixed-queue geometry contract", () 
   assert.equal(request.argumentSets[0].includes("--minimum-damage"), false);
 });
 
-test("greater-than cover text commands reuse the two-field slash contract", () => {
-  const arguments_ = parseClearraTextMessage(
-    ">cover --base __________ --target XXXX______ --patterns I --kicktable srs-plus",
-    ">",
-    { ...remoteExecution, workers: 4, logicalProcessors: 4 },
-  );
-  assert.deepEqual(arguments_.slice(0, 14), [
-    "build-probability",
-    "--base-mask",
-    "0".repeat(60),
-    "--target-mask",
-    `${"0".repeat(59)}f`,
-    "--height",
-    "1",
-    "--queue",
-    "I",
-    "--hold",
-    "empty",
-    "--no-mirror",
-    "--rule",
-    "srs-plus",
-  ]);
-  assert.deepEqual(arguments_.slice(14), [
-    "--auto-workers",
-    "4",
-    "--format",
-    "json",
-    "--include-solution-data",
-  ]);
+test("bare cover uses exactly the typed Build cover contract for both prefixes", () => {
+  const execution = { ...remoteExecution, workers: 4, logicalProcessors: 4 };
+  const options = "--base-mask 0 --target-mask 0xf --height 1 --queue I --no-hold";
+  for (const prefix of ["$", ">"]) {
+    const direct = parseClearraTextRequest(`${prefix}cover ${options}`, prefix, execution);
+    const grouped = parseClearraTextRequest(`${prefix}build cover ${options}`, prefix, execution);
+    assert.equal(direct.command.capabilityId, "build.cover");
+    assert.equal(direct.command.resultContractId, grouped.command.resultContractId);
+    assert.deepEqual(direct.argumentSets, grouped.argumentSets);
+    assert.deepEqual(direct.arguments_.slice(0, 8), [
+      "build", "cover", "--base-mask", "0x0", "--target-mask", "0xf", "--height", "1",
+    ]);
+    assert.deepEqual(direct.arguments_.slice(-5), [
+      "--auto-workers", "4", "--format", "json", "--include-solution-data",
+    ]);
+  }
+  assert.throws(() => parseClearraTextRequest(
+    ">cover --base __________ --target XXXX______ --next I", ">", execution,
+  ));
 });
 
 test("dollar and greater-than path commands accept positional CTK3 and option Fumen inputs", () => {
@@ -761,16 +686,10 @@ test("dollar and greater-than path commands accept positional CTK3 and option Fu
       { name: "next", value: "I" },
       { name: "lines", value: "1" },
     ]);
-    assert.deepEqual(request.argumentSets[0].slice(0, 8), [
-      "sfinder",
-      "path",
-      "--field-mask-v1",
-      "0000000000000003",
-      "--queue",
-      "I",
-      "--lines",
-      "1",
-    ]);
+    assert.deepEqual(request.arguments_.slice(0, 2), ["pc", "path"]);
+    assert.equal(request.arguments_[request.arguments_.indexOf("--board-mask") + 1], "0x3");
+    assert.equal(request.arguments_[request.arguments_.indexOf("--queue") + 1], "I");
+    assert.equal(request.arguments_[request.arguments_.indexOf("--lines") + 1], "1");
 
     const preview = buildSearchPreviewDocument(request.command, request.rawOptions);
     assert.equal(preview.format, "ctk3");
@@ -794,16 +713,10 @@ test("dollar and greater-than commands preserve quoted and fenced multiline grid
     const request = parseClearraTextRequest(content, prefix, remoteExecution);
     assert.equal(request.rawOptions[0].name, "field");
     assert.equal(request.rawOptions[0].value, "__________\n______####");
-    assert.deepEqual(request.argumentSets[0].slice(0, 8), [
-      "sfinder",
-      "path",
-      "--field-mask-v1",
-      "00000000000003c0",
-      "--queue",
-      "I",
-      "--lines",
-      "2",
-    ]);
+    assert.deepEqual(request.arguments_.slice(0, 2), ["pc", "path"]);
+    assert.equal(request.arguments_[request.arguments_.indexOf("--board-mask") + 1], "0x3c0");
+    assert.equal(request.arguments_[request.arguments_.indexOf("--queue") + 1], "I");
+    assert.equal(request.arguments_[request.arguments_.indexOf("--lines") + 1], "2");
   }
 
   assert.throws(
@@ -816,9 +729,9 @@ test("dollar and greater-than commands preserve quoted and fenced multiline grid
   );
 });
 
-test("greater-than cover accepts two positional multiline field code blocks", () => {
+test("grouped Build probability accepts two positional multiline field code blocks", () => {
   const request = parseClearraTextRequest(
-    `>cover \`\`\`text\n__________\n__________\n\`\`\` \`\`\`field\n__________\n####______\n\`\`\` I`,
+    `>build probability \`\`\`text\n__________\n__________\n\`\`\` \`\`\`field\n__________\n####______\n\`\`\` I`,
     ">",
     remoteExecution,
   );
@@ -827,23 +740,20 @@ test("greater-than cover accepts two positional multiline field code blocks", ()
     { name: "target", value: "__________\n####______" },
     { name: "next", value: "I" },
   ]);
-  assert.deepEqual(request.argumentSets[0].slice(0, 12), [
+  assert.deepEqual(request.argumentSets[0].slice(0, 9), [
     "build-probability",
     "--base-mask",
     "0".repeat(60),
     "--target-mask",
     `${"0".repeat(59)}f`,
     "--height",
-    "1",
+    "8",
     "--queue",
     "I",
-    "--hold",
-    "empty",
-    "--no-mirror",
   ]);
 });
 
-test("dollar and greater-than cover commands preserve both positional and option CTK3/Fumen fields in previews", () => {
+test("Build probability preserves both positional and option CTK3/Fumen fields in previews", () => {
   const baseCells = [
     "I", "O", null, null, null, null, null, null, null, null,
   ];
@@ -865,10 +775,10 @@ test("dollar and greater-than cover commands preserve both positional and option
     field: Field.create("____TTTT__"),
   }]);
   const cases = [
-    ["$", `$cover ${ctk3Base} ${fumenTarget} I`, ctk3Base, fumenTarget],
+    ["$", `$build probability ${ctk3Base} ${fumenTarget} I`, ctk3Base, fumenTarget],
     [
       ">",
-      `>cover --base ${fumenBase} --target ${ctk3Target} --next I`,
+      `>build probability --base ${fumenBase} --target ${ctk3Target} --next I`,
       fumenBase,
       ctk3Target,
     ],
@@ -881,19 +791,16 @@ test("dollar and greater-than cover commands preserve both positional and option
       { name: "target", value: target },
       { name: "next", value: "I" },
     ]);
-    assert.deepEqual(request.argumentSets[0].slice(0, 12), [
+    assert.deepEqual(request.argumentSets[0].slice(0, 9), [
       "build-probability",
       "--base-mask",
       `${"0".repeat(59)}3`,
       "--target-mask",
       `${"0".repeat(58)}f0`,
       "--height",
-      "1",
+      "8",
       "--queue",
       "I",
-      "--hold",
-      "empty",
-      "--no-mirror",
     ]);
 
     const preview = buildSearchPreviewDocument(request.command, request.rawOptions);
@@ -905,7 +812,7 @@ test("dollar and greater-than cover commands preserve both positional and option
   }
 });
 
-test("text cover preparation prioritizes the two-field preview over an inline document candidate", async () => {
+test("text Build probability preparation prioritizes the two-field preview over an inline document candidate", async () => {
   const base = encodeCtk3({
     width: 10,
     pages: [{
@@ -938,7 +845,7 @@ test("text cover preparation prioritizes the two-field preview over an inline do
     const prepared = await bot.prepareOracleMessage({
       id: "mixed-cover",
       channel_id: "channel",
-      content: `$cover ${base} ${target} I`,
+      content: `$build probability ${base} ${target} I`,
       author: { id: "user", bot: false },
       attachments: [],
     });
@@ -960,7 +867,6 @@ test("only trimmed exact verify aliases reach the hidden text diagnostic", () =>
     assert.deepEqual(
       parseClearraTextMessage(content, prefix, remoteExecution),
       [
-        "sfinder",
         "verify",
         "--format",
         "json",
@@ -996,7 +902,7 @@ test("only trimmed exact verify aliases reach the hidden text diagnostic", () =>
   }
 });
 
-test("explicit clearra and noncatalog sfinder raw routes are disabled", () => {
+test("explicit command namespaces remain disabled in Discord text", () => {
   for (const content of [
     "$clearra path --field __________ --next I",
     "$clearra pc --lines 2",
@@ -1006,6 +912,7 @@ test("explicit clearra and noncatalog sfinder raw routes are disabled", () => {
     "$sfinder pc-setup IOT",
     "$sfinder cover PRIVATE",
     "$sfinder unknown --field __________",
+    "$SFINDER path PRIVATE",
   ]) {
     assert.equal(parseClearraTextMessage(content, "$", remoteExecution), null);
     assert.equal(classifyClearraTextCommand(content, "$"), null);

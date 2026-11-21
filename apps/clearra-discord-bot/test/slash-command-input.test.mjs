@@ -633,16 +633,18 @@ test("Build replay and score modes bound occupied rows without rejecting empty d
   }
 });
 
-test("finesse search forwards canonical masks, height, queue class, and policies", () => {
-  const command = findSlashCommand("finesse");
+test("Build probability with finesse forwards canonical masks, height, queue class, and policies", () => {
+  const command = findSlashCommand("build");
   const direct = buildSlashCommandArguments(command, [{
     type: 1,
-    name: "search",
+    name: "probability",
     options: [
       { name: "target", value: "XXXX______" },
       { name: "next", value: "i" },
       { name: "base", value: "__________" },
       { name: "kicktable", value: "srs-x" },
+      { name: "finesse", value: "inputs" },
+      { name: "mirror", value: "exclude" },
     ],
   }]);
   assert.deepEqual(direct, [
@@ -652,34 +654,38 @@ test("finesse search forwards canonical masks, height, queue class, and policies
     "--height", "8",
     "--queue", "I",
     "--hold", "empty",
-    "--pattern-knowledge", "both",
     "--finesse", "inputs",
+    "--pattern-knowledge", "both",
     "--no-mirror",
     "--rule", "srs-x",
   ]);
 
-  const pattern = buildSlashCommandArguments(command.subcommands.search, [
+  const pattern = buildSlashCommandArguments(command.subcommands.probability, [
     { name: "target", value: "XXXX______" },
     { name: "next", value: "*!" },
     { name: "base", value: "__________" },
-    { name: "options", value: "hold=avoid knowledge=visible-7" },
+    { name: "hold", value: "disabled" },
+    { name: "finesse", value: "inputs" },
+    { name: "finesse-knowledge", value: "visible-7" },
+    { name: "mirror", value: "exclude" },
   ]);
-  assert.deepEqual(pattern.slice(-8), [
-    "--patterns", "*!", "--no-hold", "--pattern-knowledge", "visible-7",
-    "--finesse", "inputs", "--no-mirror",
+  assert.deepEqual(pattern.slice(7, 10), ["--patterns", "*!", "--no-hold"]);
+  assert.deepEqual(pattern.slice(10), [
+    "--finesse", "inputs", "--pattern-knowledge", "visible-7", "--no-mirror",
   ]);
 });
 
-test("finesse search forwards completed base rows for core-only initial clearing", () => {
+test("Build probability with finesse forwards completed base rows for core-only initial clearing", () => {
   const base = "__________\n##########";
   const target = "####______\n__________";
   const values = [
     { name: "base", value: base },
     { name: "target", value: target },
     { name: "next", value: "I" },
+    { name: "finesse", value: "inputs" },
   ];
   const arguments_ = buildSlashCommandArguments(
-    findSlashCommand("finesse").subcommands.search,
+    findSlashCommand("build").subcommands.probability,
     values,
   );
 
@@ -689,10 +695,6 @@ test("finesse search forwards completed base rows for core-only initial clearing
     "--target-mask", `${"0".repeat(56)}3c00`,
     "--height", "8",
   ]);
-  assert.throws(
-    () => buildSlashCommandArguments(findSlashCommand("cover"), values),
-    /completed row/,
-  );
 });
 
 test("finesse score canonicalizes operation documents without forwarding source text", () => {
@@ -720,7 +722,8 @@ test("finesse score canonicalizes operation documents without forwarding source 
     [
       { name: "document", value: source },
       { name: "next", value: "[TI]!" },
-      { name: "options", value: "hold=use knowledge=full-queue" },
+      { name: "hold", value: "empty" },
+      { name: "knowledge", value: "oracle" },
     ],
   );
   assert.equal(arguments_.includes(source), false);
@@ -811,14 +814,15 @@ test("compact grid:row/row syntax avoids Discord rich-text line parsing", () => 
   );
 });
 
-test("cover, colored, spin, and damage commands accept 24-row text grids", () => {
+test("Build probability, ordered spin, and damage commands accept 24-row text grids", () => {
   const empty24 = textGrid(24);
   const target24 = textGrid(24, "....####..");
   const empty25 = textGrid(25);
   const target25 = textGrid(25, "....####..");
   const cases = [
     {
-      name: "cover",
+      name: "build probability",
+      command: findSlashCommand("build").subcommands.probability,
       valid: [
         { name: "base", value: empty24 },
         { name: "target", value: target24 },
@@ -856,7 +860,7 @@ test("cover, colored, spin, and damage commands accept 24-row text grids", () =>
 
   for (const fixture of cases) {
     const arguments_ = buildSlashCommandArguments(
-      searchCommand(fixture.name),
+      fixture.command ?? searchCommand(fixture.name),
       fixture.valid,
     );
     assert.equal(
@@ -865,18 +869,20 @@ test("cover, colored, spin, and damage commands accept 24-row text grids", () =>
       `/${fixture.name} did not use the 240-bit field projection`,
     );
     if (fixture.name === "damage") {
-      assert.deepEqual(arguments_.slice(0, 5), [
+      assert.deepEqual(arguments_.slice(0, 7), [
         "damage",
         "--board-mask-v1",
         "0".repeat(60),
+        "--height",
+        "8",
         "--queue",
         "SI",
       ]);
-      assert.equal(arguments_.includes("--initial-b2b"), false);
+      assert.equal(arguments_[arguments_.indexOf("--initial-b2b") + 1], "0");
     }
     assert.throws(
       () => buildSlashCommandArguments(
-        searchCommand(fixture.name),
+        fixture.command ?? searchCommand(fixture.name),
         fixture.overflow,
       ),
       /one through twenty-four rows|at most 24 rows|1.*24 rows/i,
@@ -884,39 +890,41 @@ test("cover, colored, spin, and damage commands accept 24-row text grids", () =>
   }
 });
 
-test("score-finder uses the six-row fixed-queue PC field and score inputs", () => {
-  const arguments_ = buildSlashCommandArguments(findSlashCommand("score-finder"), [
+test("score-finder shortcut uses the same fixed-queue PC score request as the grouped command", () => {
+  const alias = findSlashCommand("score-finder");
+  const grouped = findSlashCommand("pc").subcommands["score-finder"];
+  const options = [
     { name: "field", value: textGrid(6) },
     { name: "next", value: "sijstlzo" },
-    { name: "lines", value: 5 },
-    { name: "options", value: "initial_b2b=true" },
-  ]);
+    { name: "lines", value: 2 },
+    { name: "initial-b2b", value: 1 },
+  ];
+  const arguments_ = buildSlashCommandArguments(alias, options);
+  assert.deepEqual(arguments_, buildSlashCommandArguments(grouped, options));
   assert.deepEqual(arguments_, [
-    "sfinder",
-    "score-finder",
-    "--field-mask-v1",
-    "0000000000000000",
-    "--queue",
-    "SIJSTLZO",
-    "--lines",
-    "5",
-    "--initial-b2b",
-    "true",
+    "pc", "score-finder",
+    "--lines", "2",
+    "--board-mask", "0x0",
+    "--height", "2",
+    "--pieces", "5",
+    "--queue", "SIJSTLZO",
+    "--hold", "empty",
+    "--initial-b2b", "1",
+    "--rule", "srs-plus",
   ]);
   assert.throws(
-    () => buildSlashCommandArguments(findSlashCommand("score-finder"), [
-      { name: "field", value: textGrid(7) },
-      { name: "next", value: "SIJSTLZO" },
+    () => buildSlashCommandArguments(alias, [
+      { name: "field", value: textGrid(25) },
+      ...options.slice(1),
     ]),
-    /one through six rows|at most six rows|1.*6 rows/i,
+    /one through twenty-four rows|at most 24 rows|1.*24 rows/i,
   );
   assert.throws(
-    () => buildSlashCommandArguments(findSlashCommand("score-finder"), [
-      { name: "field", value: textGrid(5) },
-      { name: "next", value: "SIJSTLZO" },
-      { name: "options", value: "initial_combo=1" },
+    () => buildSlashCommandArguments(alias, [
+      ...options,
+      { name: "initial-combo", value: 1 },
     ]),
-    /does not support options key 'initial_combo'/,
+    /unsupported option 'initial-combo'/,
   );
 });
 
@@ -1048,6 +1056,36 @@ test("automatic PC targets use field blocks and the exact required piece window"
   );
 });
 
+test("grouped PC replay lowers automatic targets from the same compacted field as an explicit replay", () => {
+  const pc = findSlashCommand("pc");
+  const options = [
+    { name: "field", value: "grid:##########" },
+    { name: "next", value: "P7P4" },
+    { name: "hold", value: "T" },
+    { name: "kicktable", value: "no-kick" },
+    { name: "preserve-b2b", value: "on" },
+    { name: "spin-profile", value: "all-spin" },
+  ];
+  const automatic = buildSlashCommandArgumentPlan(pc, [
+    { name: "path", type: 1, options },
+  ]);
+  assert.equal(automatic.automaticPcTargets, true);
+  assert.deepEqual(
+    buildSlashCommandArgumentPlan(findSlashCommand("path"), options),
+    automatic,
+  );
+  assert.deepEqual(automatic.argumentSets, [2, 4].map((lines) =>
+    buildSlashCommandArguments(pc.subcommands.path, [
+      ...options,
+      { name: "lines", value: lines },
+    ]),
+  ));
+  for (const args of automatic.argumentSets) {
+    assert.deepEqual(args.slice(0, 2), ["pc", "path"]);
+    assert.equal(args[args.indexOf("--board-mask") + 1], "0x0");
+  }
+});
+
 test("native PC slash inputs compact completed rows without shrinking explicit lines", () => {
   const pc = findSlashCommand("pc");
   const field = "grid:########__/##########";
@@ -1105,7 +1143,7 @@ test("PC slash lines can be explicit or expand to serial automatic targets", () 
     { name: "next", value: "iotszjliotszjli" },
     { name: "field", value: field },
   ]);
-  assert.deepEqual(auto.map((arguments_) => arguments_.slice(-2)), [
+  assert.deepEqual(auto.map((arguments_) => arguments_.slice(2, 4)), [
     ["--lines", "2"],
     ["--lines", "4"],
     ["--lines", "6"],
@@ -1117,7 +1155,7 @@ test("PC slash lines can be explicit or expand to serial automatic targets", () 
   ]);
   assert.equal(oneAutomatic.automaticPcTargets, true);
   assert.equal(oneAutomatic.argumentSets.length, 1);
-  assert.deepEqual(oneAutomatic.argumentSets[0].slice(-2), ["--lines", "1"]);
+  assert.deepEqual(oneAutomatic.argumentSets[0].slice(2, 4), ["--lines", "1"]);
 
   for (const lineCount of [1, 3, 5]) {
     const explicit = buildSlashCommandArgumentPlan(findSlashCommand("path"), [
@@ -1128,7 +1166,7 @@ test("PC slash lines can be explicit or expand to serial automatic targets", () 
     assert.equal(explicit.automaticPcTargets, false);
     assert.equal(explicit.argumentSets.length, 1);
     assert.deepEqual(
-      explicit.argumentSets[0].slice(-2),
+      explicit.argumentSets[0].slice(2, 4),
       ["--lines", String(lineCount)],
     );
   }
@@ -1145,7 +1183,7 @@ test("PC slash lines can be explicit or expand to serial automatic targets", () 
       }),
     },
   ]);
-  assert.deepEqual(highField.map((arguments_) => arguments_.slice(-2)), [
+  assert.deepEqual(highField.map((arguments_) => arguments_.slice(2, 4)), [
     ["--lines", "6"],
   ]);
 });
@@ -1165,28 +1203,26 @@ test("structured PC options use CTK3 masks directly without Fumen conversion", (
     { name: "field", value: ctk3 },
     { name: "next", value: "*!" },
     { name: "lines", value: 2 },
-    { name: "options", value: "hold=avoid" },
+    { name: "hold", value: "disabled" },
   ]);
 
   assert.deepEqual(arguments_, [
-    "sfinder",
-    "path",
-    "--field-mask-v1",
-    "000000000000000f",
-    "--patterns",
-    "*!",
-    "--lines",
-    "2",
-    "--hold",
-    "false",
+    "pc", "path",
+    "--lines", "2",
+    "--board-mask", "0xf",
+    "--height", "2",
+    "--pieces", "4",
+    "--patterns", "*!",
+    "--no-hold",
+    "--rule", "srs-plus",
   ]);
   assert.equal(arguments_.some((value) => value === "--fumen"), false);
   assert.equal(arguments_.some((value) => /^v115@/.test(value)), false);
 });
 
-test("kicktable accepts exactly four built-ins and lowers to the sfinder rule option", () => {
+test("kicktable accepts the five supported built-ins and lowers to the typed PC rule option", () => {
   const field = textGrid(4);
-  for (const kicktable of ["srs-plus", "srs", "srs-x", "jstris-180"]) {
+  for (const kicktable of ["srs-plus", "srs", "srs-x", "jstris-180", "no-kick"]) {
     const arguments_ = buildSlashCommandArguments(findSlashCommand("path"), [
       { name: "field", value: field },
       { name: "next", value: "IOTSZ" },
@@ -1212,9 +1248,10 @@ test("kicktable accepts exactly four built-ins and lowers to the sfinder rule op
 test("kicktable is available to every rule-aware Discord input contract", () => {
   const inputs = [
     ["cover", [
-      { name: "base", value: textGrid(8) },
-      { name: "target", value: textGrid(8, "....####..") },
-      { name: "next", value: "I" },
+      { name: "base-mask", value: "0x0" },
+      { name: "target-mask", value: "0xf0" },
+      { name: "height", value: 1 },
+      { name: "queue", value: "I" },
     ]],
     ["spin", [
       { name: "field", value: textGrid(8) },
@@ -1222,7 +1259,8 @@ test("kicktable is available to every rule-aware Discord input contract", () => 
     ]],
     ["score-finder", [
       { name: "field", value: textGrid(6) },
-      { name: "next", value: "TI" },
+      { name: "next", value: "IOTSZ" },
+      { name: "lines", value: 2 },
     ]],
     ["damage", [
       { name: "field", value: textGrid(8) },
@@ -1232,11 +1270,14 @@ test("kicktable is available to every rule-aware Discord input contract", () => 
       { name: "pieces", value: "TTIO" },
       { name: "field", value: textGrid(8) },
     ]],
-    ["pc-setup", [{ name: "remaining", value: "IOTS" }]],
+    ["setup joint", [{ name: "remaining", value: "IOTS" }]],
   ];
 
   for (const [name, options] of inputs) {
-    const arguments_ = buildSlashCommandArguments(searchCommand(name), [
+    const command = name === "setup joint"
+      ? findSlashCommand("setup").subcommands.joint
+      : searchCommand(name);
+    const arguments_ = buildSlashCommandArguments(command, [
       ...options,
       { name: "kicktable", value: "srs-plus" },
     ]);
@@ -1261,7 +1302,7 @@ test("raw Fumen and an encoded Fumen URL use the same colorless field decoder", 
   assert.deepEqual(normalizeSearchField(url), normalizeSearchField(source));
 });
 
-test("CTK3 stays single-page and cover accepts two colorless CTK3/Fumen fields", () => {
+test("CTK3 stays single-page and Build probability accepts colorless CTK3 and Fumen fields", () => {
   const source = encodeCtk3({
     width: 10,
     pages: [
@@ -1284,11 +1325,13 @@ test("CTK3 stays single-page and cover accepts two colorless CTK3/Fumen fields",
     width: 10,
     pages: [{ height: 1, cells: ["I", "I", "I", "I", ...Array(6).fill(null)] }],
   });
-  const arguments_ = buildSlashCommandArguments(findSlashCommand("cover"), [
+  const arguments_ = buildSlashCommandArguments(findSlashCommand("build").subcommands.probability, [
     { name: "base", value: base },
     { name: "target", value: target },
     { name: "next", value: "I" },
-    { name: "options", value: "hold=avoid" },
+    { name: "height", value: 1 },
+    { name: "hold", value: "disabled" },
+    { name: "mirror", value: "exclude" },
   ]);
   assert.deepEqual(arguments_, [
     "build-probability",
@@ -1378,79 +1421,49 @@ test("CTK3 static-field projection rejects operations, garbage, and Board64 over
   assert.throws(() => normalizeSearchField(overflow), /64-bit field range|6-row limit/);
 });
 
-test("cover rejects overlap, empty/non-tetromino targets, and completed base rows", () => {
-  const field = (cells) => encodeCtk3({
-    width: 10,
-    pages: [{ height: Math.ceil(cells.length / 10), cells }],
-  });
-  const empty = field([]);
-  const one = field(["G", ...Array(9).fill(null)]);
-  const four = field(["G", "G", "G", "G", ...Array(6).fill(null)]);
-  const full = field(Array(10).fill("G"));
-  const run = (base, target) => buildSlashCommandArguments(findSlashCommand("cover"), [
-    { name: "base", value: base },
-    { name: "target", value: target },
-    { name: "next", value: "I" },
-  ]);
+test("cover uses the canonical Build cover mask contract and rejects invalid targets", () => {
+  const options = (base, target) => [
+    { name: "base-mask", value: base },
+    { name: "target-mask", value: target },
+    { name: "height", value: 1 },
+    { name: "queue", value: "I" },
+  ];
+  const alias = findSlashCommand("cover");
+  const grouped = findSlashCommand("build").subcommands.cover;
+  assert.deepEqual(
+    buildSlashCommandArguments(alias, options("0x300", "0xf")),
+    buildSlashCommandArguments(grouped, options("0x300", "0xf")),
+  );
+  const run = (base, target) => buildSlashCommandArguments(alias, options(base, target));
 
-  assert.throws(() => run(empty, empty), /at least one occupied cell/);
-  assert.throws(() => run(empty, one), /divisible by four/);
-  assert.throws(() => run(four, four), /must not overlap/);
-  assert.throws(() => run(full, field([
-    ...Array(10).fill(null),
-    "I", "I", "I", "I", ...Array(6).fill(null),
-  ])), /completed row/);
+  assert.throws(() => run("0x0", "0x0"), /at least one target cell/);
+  assert.throws(() => run("0x0", "0x1"), /divisible by four/);
+  assert.throws(() => run("0xf", "0xf"), /must not overlap/);
+  assert.throws(() => run("0x0", "0x3c00"), /fit inside the requested visible height/);
 });
 
-test("legacy CTK3 query URLs keep payload punctuation intact", () => {
-  const source = "ctk3@.:)aB*t&hPEXlYu:YoUl/4cH8Ga[PB0z";
-  const url = `https://example.test/view?ctk=${encodeURIComponent(source)}`;
-  assert.equal(normalizeSearchField(url).format, "occupied-field");
-});
-
-test("optional settings are command-specific and cannot override host policy", () => {
+test("packed sfinder settings and host-policy overrides are not accepted by retained shortcuts", () => {
   const source = fumenEncoder.encode([{ field: Field.create() }]);
   const base = [
     { name: "field", value: source },
     { name: "next", value: "I" },
   ];
-
-  assert.throws(
-    () =>
-      buildSlashCommandArguments(findSlashCommand("path"), [
+  for (const [name, option, value] of [
+    ["path", "options", "clear=4 lines=3"],
+    ["path", "workers", 64],
+    ["spin", "options", "type=TSM"],
+  ]) {
+    assert.throws(
+      () => buildSlashCommandArguments(findSlashCommand(name), [
         ...base,
-        { name: "lines", value: 4 },
-        { name: "options", value: "clear=4" },
+        { name: option, value },
       ]),
-    /does not support options key 'clear'/,
-  );
-  assert.throws(
-    () =>
-      buildSlashCommandArguments(findSlashCommand("path"), [
-        ...base,
-        { name: "options", value: "workers=64" },
-      ]),
-    /does not support options key 'workers'/,
-  );
-  assert.throws(
-    () =>
-      buildSlashCommandArguments(findSlashCommand("path"), [
-        ...base,
-        { name: "options", value: "clear=4 lines=3" },
-      ]),
-    /does not support options key 'clear'/,
-  );
-  assert.throws(
-    () =>
-      buildSlashCommandArguments(findSlashCommand("spin"), [
-        ...base,
-        { name: "options", value: "type=TSM" },
-      ]),
-    /TSM is unavailable/,
-  );
+      new RegExp(`unsupported option '${option}'`),
+    );
+  }
 });
 
-test("fixed queues and remaining inventories fail closed", () => {
+test("fixed queues and remaining inventories keep distinct supply semantics", () => {
   const source = fumenEncoder.encode([{ field: Field.create() }]);
   assert.throws(
     () =>
@@ -1461,31 +1474,31 @@ test("fixed queues and remaining inventories fail closed", () => {
     /exact queue/,
   );
   assert.deepEqual(
-    buildSlashCommandArguments(findSlashCommand("pc-setup"), [
+    buildSlashCommandArguments(findSlashCommand("setup").subcommands.joint, [
       { name: "remaining", value: "tio" },
     ]),
-    ["setup-finder", "--remaining", "TIO", "--priority", "all"],
+    ["setup", "joint", "--remaining", "TIO", "--priority", "all"],
   );
 });
 
-test("setup ranking commands preserve their defaults and expose every canonical setting", () => {
+test("setup ranking subcommands select their own objective and forward named settings", () => {
+  const setup = findSlashCommand("setup");
   for (const [name, priority] of [
-    ["pc-setup", "all"],
-    ["best-setup", "build"],
-    ["dpc-finder", "pc"],
+    ["joint", "all"],
+    ["build", "build"],
+    ["pc", "pc"],
   ]) {
     assert.deepEqual(
-      buildSlashCommandArguments(findSlashCommand(name), [
+      buildSlashCommandArguments(setup.subcommands[name], [
         { name: "remaining", value: "IOTS" },
       ]),
-      ["setup-finder", "--remaining", "IOTS", "--priority", priority],
+      ["setup", name, "--remaining", "IOTS", "--priority", priority],
     );
   }
 
   assert.deepEqual(
-    buildSlashCommandArguments(findSlashCommand("pc-setup"), [
+    buildSlashCommandArguments(setup.subcommands.joint, [
       { name: "remaining", value: "iots" },
-      { name: "priority", value: "all" },
       { name: "max-setup-pieces", value: 10 },
       { name: "queue-knowledge", value: "visible-7" },
       { name: "next-cycle-remaining", value: "z" },
@@ -1493,7 +1506,7 @@ test("setup ranking commands preserve their defaults and expose every canonical 
       { name: "kicktable", value: "srs-x" },
     ]),
     [
-      "setup-finder",
+      "setup", "joint",
       "--remaining", "IOTS",
       "--priority", "all",
       "--max-setup-pieces", "10",
@@ -1503,6 +1516,11 @@ test("setup ranking commands preserve their defaults and expose every canonical 
       "--rule", "srs-x",
     ],
   );
+});
+test("legacy CTK3 query URLs keep payload punctuation intact", () => {
+  const source = "ctk3@.:)aB*t&hPEXlYu:YoUl/4cH8Ga[PB0z";
+  const url = `https://example.test/view?ctk=${encodeURIComponent(source)}`;
+  assert.equal(normalizeSearchField(url).format, "occupied-field");
 });
 
 test("canonical setup QB options preserve exact and pattern supply semantics", () => {
@@ -1537,7 +1555,7 @@ test("canonical setup QB options preserve exact and pattern supply semantics", (
 
 test("setup ranking inventories and enums fail closed before execution", () => {
   const build = (options) =>
-    buildSlashCommandArguments(findSlashCommand("pc-setup"), options);
+    buildSlashCommandArguments(findSlashCommand("setup").subcommands.joint, options);
   for (const remaining of ["IOTSZJLI", "IIIO", "IIOO"]) {
     assert.throws(
       () => build([{ name: "remaining", value: remaining }]),
@@ -1566,7 +1584,7 @@ test("setup ranking inventories and enums fail closed before execution", () => {
     /IOTSZJL/,
   );
   for (const [name, value, message] of [
-    ["priority", "fast", /fixes priority=all/],
+    ["priority", "fast", /unsupported option 'priority'/],
     ["max-setup-pieces", 11, /integer from 1 through 10/],
     ["queue-knowledge", "both", /queue-knowledge must be/],
     ["setup-length", "medium", /setup-length must be/],

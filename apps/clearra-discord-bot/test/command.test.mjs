@@ -16,10 +16,7 @@ import {
   defaultSearchWorkersPerSession,
   loadDiscordBotConfig,
 } from "../src/config.mjs";
-import {
-  findDiscordGenericCompatibilityRoute,
-  findProductCapability,
-} from "../src/discord/capability-registry.mjs";
+import { findProductCapability } from "../src/discord/capability-registry.mjs";
 import { DISCORD_PUBLIC_SEARCH_CONTRACT } from "../src/discord/public-search-contract.mjs";
 import {
   ARTIFACT_SCHEMA_VERSION,
@@ -67,24 +64,23 @@ test("Clearrabot applies direction-specific search and interaction limits", () =
   assert.equal(config.accessStorePath, null);
 });
 
-test("search timeout policy classifies native and sfinder argv consistently", () => {
+test("search timeout policy classifies the native product argv", () => {
   const examples = [
     [["pc", "--lines", "4"], "pc_reverse"],
     [["pc-scenario", "--fixture", "opening"], "pc_reverse"],
     [["failed-queue"], "pc_reverse"],
-    [["sfinder", "score-finder"], "pc_reverse"],
-    [["sfinder", "best_save"], "pc_reverse"],
+    [["pc", "score-finder"], "pc_reverse"],
+    [["pc", "best-save"], "pc_reverse"],
     [["damage"], "forward_long"],
     [["spin-structure"], "structure_long"],
     [["build-probability"], "build_long"],
-    [["sfinder", "spin-cover"], "structure_long"],
-    [["sfinder", "setup"], "build_long"],
+    [["spin-structure", "cover"], "structure_long"],
+    [["build", "setup"], "build_long"],
     [["finesse", "search"], "build_long"],
     [["finesse", "score"], "build_long"],
     [["setup-finder", "--remaining", "TI"], "setup_long"],
     [["setup-finder"], "setup_long"],
-    [["sfinder", "verify", "pc"], "diagnostic"],
-    [["verify", "pc"], "default"],
+    [["verify", "pc"], "diagnostic"],
   ];
   for (const [arguments_, expected] of examples) {
     assert.equal(
@@ -94,68 +90,6 @@ test("search timeout policy classifies native and sfinder argv consistently", ()
     );
   }
   assert.equal(isSetupSearchArguments(["setup-finder"]), true);
-  assert.equal(isSetupSearchArguments(["setup-finder"]), true);
-  assert.equal(isSetupSearchArguments(["sfinder", "setup"]), false);
-});
-
-test("every represented sfinder search keeps its direction-specific deadline", () => {
-  const reverse = [
-    "path",
-    "chance",
-    "percent",
-    "minimals",
-    "score",
-    "score-minimals",
-    "saves",
-    "best-save",
-    "score-finder",
-  ];
-  const build = [
-    "cover",
-    "setup",
-    "congruent",
-    "congruent-cover",
-    "setup-cover",
-    "cover-percent",
-    "special-cover",
-  ];
-  const structure = [
-    "spin-cover",
-    "spin",
-  ];
-
-  for (const command of reverse) {
-    assert.equal(searchTimeoutClass(["sfinder", command]), "pc_reverse", command);
-    assert.equal(
-      searchTimeoutMsForArguments(["sfinder", command]),
-      840_000,
-      command,
-    );
-  }
-  for (const command of build) {
-    assert.equal(searchTimeoutClass(["sfinder", command]), "build_long", command);
-    assert.equal(
-      searchTimeoutMsForArguments(["sfinder", command]),
-      900_000,
-      command,
-    );
-  }
-  for (const command of structure) {
-    assert.equal(searchTimeoutClass(["sfinder", command]), "structure_long", command);
-    assert.equal(
-      searchTimeoutMsForArguments(["sfinder", command]),
-      900_000,
-      command,
-    );
-  }
-  for (const command of ["pc-setup", "best-setup", "dpc-finder"]) {
-    assert.equal(searchTimeoutClass(["setup-finder"]), "setup_long", command);
-    assert.equal(
-      searchTimeoutMsForArguments(["setup-finder"]),
-      900_000,
-      command,
-    );
-  }
 });
 
 test("search timeout policy preserves independent canonical family defaults", () => {
@@ -166,7 +100,7 @@ test("search timeout policy preserves independent canonical family defaults", ()
   assert.equal(searchTimeoutMsForArguments(["spin-structure"]), 900_000);
   assert.equal(searchTimeoutMsForArguments(["finesse", "search"]), 900_000);
   assert.equal(searchTimeoutMsForArguments(["finesse", "score"]), 900_000);
-  assert.equal(searchTimeoutMsForArguments(["sfinder", "verify"]), 840_000);
+  assert.equal(searchTimeoutMsForArguments(["verify"]), 840_000);
 
   const policy = {
     searchTimeoutMs: 11,
@@ -177,8 +111,8 @@ test("search timeout policy preserves independent canonical family defaults", ()
     structureSearchTimeoutMs: 66,
     diagnosticTimeoutMs: 77,
   };
-  assert.equal(searchTimeoutMsForArguments(["sfinder", "verify"], policy), 77);
-  assert.equal(searchTimeoutMsForArguments(["sfinder", "path"], policy), 22);
+  assert.equal(searchTimeoutMsForArguments(["verify"], policy), 77);
+  assert.equal(searchTimeoutMsForArguments(["pc", "path"], policy), 22);
   assert.equal(searchTimeoutMsForArguments(["build-probability"], policy), 33);
   assert.equal(searchTimeoutMsForArguments(["setup-finder"], policy), 44);
   assert.equal(searchTimeoutMsForArguments(["spin-finder"], policy), 55);
@@ -192,9 +126,8 @@ test("search timeout policy preserves independent canonical family defaults", ()
 test("the frozen public Discord contract matches every runtime timeout class", () => {
   assert.ok(DISCORD_PUBLIC_SEARCH_CONTRACT.length > 0);
   for (const { id, capabilityId, timeoutClass } of DISCORD_PUBLIC_SEARCH_CONTRACT) {
-    const capability = findProductCapability(capabilityId) ??
-      findDiscordGenericCompatibilityRoute(capabilityId);
-    const arguments_ = capability.engine?.argvPrefix ?? capability.argvPrefix;
+    const capability = findProductCapability(capabilityId);
+    const arguments_ = capability.engine.argvPrefix;
     assert.equal(searchTimeoutClass(arguments_), timeoutClass, id);
     assert.equal(
       searchTimeoutMsForArguments(arguments_),
@@ -728,7 +661,6 @@ test("Discord commands always use the Clearra exact product path", () => {
       "--lines",
       "4",
       "--no-tablebase",
-      "--no-build-dependency-dag",
       "--format",
       "text",
     ],
@@ -748,7 +680,6 @@ test("Discord commands always use the Clearra exact product path", () => {
       "--lines",
       "2",
       "--no-tablebase",
-      "--no-build-dependency-dag",
       "--format",
       "json",
       "--include-solution-data",
@@ -766,7 +697,6 @@ test("Discord owns an adaptive worker ceiling instead of accepting a user overri
     "--lines",
     "2",
     "--no-tablebase",
-    "--no-build-dependency-dag",
     "--use-all-cpu-threads",
     "--format",
     "text",
@@ -788,7 +718,6 @@ test("Discord owns an adaptive worker ceiling instead of accepting a user overri
       "--lines",
       "4",
       "--no-tablebase",
-      "--no-build-dependency-dag",
       "--auto-workers",
       "3",
       "--format",
@@ -831,7 +760,6 @@ test("Discord owns an adaptive worker ceiling instead of accepting a user overri
       "--lines",
       "2",
       "--no-tablebase",
-      "--no-build-dependency-dag",
       "--auto-workers",
       "3",
       "--format",
@@ -902,13 +830,14 @@ test("Discord applies its Cloud worker authority to every typed PC score product
   }
 });
 
-test("Discord exposes curated sfinder commands through native worker policy", () => {
+test("Discord runs the typed path and native diagnostics without a compatibility command", () => {
   const prepared = prepareClearraArguments(
     [
-      "sfinder",
+      "pc",
       "path",
-      "v115@vhAAgH",
+      "--patterns",
       "P7P3",
+      "--lines",
       "4",
       "--workers",
       "99",
@@ -918,10 +847,11 @@ test("Discord exposes curated sfinder commands through native worker policy", ()
     { workers: 3 },
   );
   assert.deepEqual(prepared, [
-    "sfinder",
+    "pc",
     "path",
-    "v115@vhAAgH",
+    "--patterns",
     "P7P3",
+    "--lines",
     "4",
     "--auto-workers",
     "3",
@@ -930,16 +860,12 @@ test("Discord exposes curated sfinder commands through native worker policy", ()
   ]);
   assert.deepEqual(prepareClearraArguments(prepared, { workers: 3 }), prepared);
   assert.deepEqual(
-    prepareClearraArguments(["sfinder", "verify", "kicks"], { workers: 3 }),
-    ["sfinder", "verify", "kicks", "--format", "text"],
+    prepareClearraArguments(["verify", "kicks"], { workers: 3 }),
+    ["verify", "kicks", "--format", "text"],
   );
   assert.equal(
     parseClearraMessage("!sfinder pc_setup IOTS", "!", { workers: 2 }),
     null,
-  );
-  assert.throws(
-    () => prepareClearraArguments(["sfinder", "pc_setup", "IOTS"]),
-    /does not expose/,
   );
 });
 
@@ -982,8 +908,11 @@ test("spin-structure uses the native parallel policy and a canonical operational
   );
 });
 
-test("Discord rejects unrepresented sfinder contracts", () => {
+test("Discord rejects the sfinder namespace even before execution", () => {
   for (const command of [
+    "path",
+    "chance",
+    "verify",
     "ren",
     "util",
     "parity",
@@ -992,12 +921,11 @@ test("Discord rejects unrepresented sfinder contracts", () => {
   ]) {
     assert.throws(
       () => prepareClearraArguments(["sfinder", command]),
-      /does not expose the sfinder/,
     );
+    assert.equal(canonicalClearraOperationalCommand(["sfinder", command]), null);
   }
   assert.throws(
     () => prepareClearraArguments(["sfinder"]),
-    /require a subcommand/,
   );
 });
 
@@ -1029,7 +957,6 @@ test("tiling-only commands are recognized after Discord argument normalization",
 test("file-backed and unrelated commands are rejected", () => {
   assert.throws(
     () => prepareClearraArguments(["pc-scenario", "--fixture", "field.json"]),
-    /curated Clearra PC, build, setup/,
   );
   assert.throws(
     () => prepareClearraArguments(["pc", "--fixture", "field.json"]),
@@ -1167,7 +1094,7 @@ test("Clearra executor submits canonical family classes and independently bounde
   await executor.execute(["setup-finder", "--remaining", "TI"]);
   await executor.execute(["damage"]);
   await executor.execute(["spin-structure"]);
-  await executor.execute(["sfinder", "verify", "pc"]);
+  await executor.execute(["verify", "pc"]);
 
   assert.deepEqual(
     submitted.map(({ timeoutClass, deadlineUnixMs }) => [timeoutClass, deadlineUnixMs]),

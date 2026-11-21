@@ -206,8 +206,7 @@ pub(crate) fn route_invocation(invocation: ParsedCliInvocation) -> CliOutput {
             .request()
             .with_language(language)
             .with_file_policy(AppFilePolicy::new(verbose_paths));
-        crate::legal_board_assets::activate_for_request(&request);
-        crate::conditioned_reachability_assets::activate_for_request(&request);
+        crate::accelerator_gui_bridge::activate_selected_accelerators(&request);
         let context = product_app_context()
             .with_language(language)
             .with_file_policy(AppFilePolicy::new(verbose_paths));

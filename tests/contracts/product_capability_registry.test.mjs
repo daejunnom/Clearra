@@ -6,11 +6,9 @@ import test from 'node:test';
 
 import {
   PRODUCT_CAPABILITY_REGISTRY_VERSION,
-  discordGenericCompatibilityRouteProjection,
-  discordLegacyRouteProjection,
+  discordProductAliasProjection,
   discordRuntimeProjection,
   findProductCapability,
-  lowerCapabilityRouteRequest,
   productCapabilityRegistry as discordProductCapabilityRegistry,
 } from '../../apps/clearra-discord-bot/src/discord/capability-registry.mjs';
 import {
@@ -25,10 +23,6 @@ const registryUrl = new URL(
 );
 const recoveryCandidateUrl = new URL(
   '../fixtures/contracts/boundary_recovery_candidate.v1.json',
-  import.meta.url,
-);
-const legacyAliasFixtureUrl = new URL(
-  '../fixtures/contracts/legacy_alias_equivalence.v1.json',
   import.meta.url,
 );
 const readmeUrl = new URL('../../README.md', import.meta.url);
@@ -127,10 +121,6 @@ function registry() {
 
 function recoveryCandidate() {
   return JSON.parse(readFileSync(recoveryCandidateUrl, 'utf8'));
-}
-
-function legacyAliasFixture() {
-  return JSON.parse(readFileSync(legacyAliasFixtureUrl, 'utf8'));
 }
 
 function byId(entries, id) {
@@ -468,23 +458,8 @@ test('every current Discord capability and legacy route is a fail-closed fieldwi
   })).sort(byStableId);
   assert.deepEqual(planned, plannedAuthority, 'planned runtime projection drifted fieldwise');
 
-  const routeRows = discordLegacyRouteProjection();
-  assert.deepEqual(
-    routeRows.slice().sort(byStableId),
-    projection.legacy_routes.slice().sort(byStableId),
-    'live legacy ingress escaped product authority',
-  );
-
-  const genericCompatibilityRows = discordGenericCompatibilityRouteProjection();
-  assert.deepEqual(
-    genericCompatibilityRows.slice().sort(byStableId),
-    projection.generic_compatibility_routes.slice().sort(byStableId),
-    'generic compatibility routes drifted from their independent product authority',
-  );
-  assert.deepEqual(
-    genericCompatibilityRows.map(({ id }) => id).sort(),
-    ['discord.compat.chance', 'discord.compat.percent', 'discord.compat.score'],
-  );
+  assert.deepEqual(discordProductAliasProjection(), projection.product_aliases);
+  assert.equal(Object.hasOwn(projection, 'generic_compatibility_routes'), false);
   const typedChance = runtime.find(({ id }) => id === 'pc.chance');
   const typedScore = runtime.find(({ id }) => id === 'pc.score');
   const typedTiling = runtime.find(({ id }) => id === 'pc.tiling');
@@ -503,23 +478,6 @@ test('every current Discord capability and legacy route is a fail-closed fieldwi
   assert.equal(typedTiling.resultContractId, 'pc-tiling-family.v1');
   assert.deepEqual(typedTiling.resultAllowlist, ['pc-tiling-family.v1']);
   assert.deepEqual(typedTiling.engine.argvPrefix, ['pc', 'tiling']);
-  const genericTypedTarget = new Map([
-    ['discord.compat.chance', typedChance],
-    ['discord.compat.percent', typedChance],
-    ['discord.compat.score', typedScore],
-  ]);
-  for (const generic of genericCompatibilityRows) {
-    const typedTarget = genericTypedTarget.get(generic.id);
-    assert.ok(typedTarget, `generic route lacks a typed migration target: ${generic.id}`);
-    assert.equal(generic.classification, 'generic-compatibility');
-    assert.equal(generic.problemContractId, 'pc-clear-to-empty');
-    assert.equal(generic.resultContractId, 'pc-scenario');
-    assert.deepEqual(generic.resultAllowlist, ['pc-scenario']);
-    assert.notEqual(generic.problemContractId, typedTarget.problemContractId);
-    assert.notEqual(generic.resultContractId, typedTarget.resultContractId);
-    assert.notDeepEqual(generic.resultAllowlist, typedTarget.resultAllowlist);
-  }
-
   assert.deepEqual(
     projection.non_capability_routes.map(({ surface, path, name }) => ({ surface, path, name })),
     [
@@ -537,160 +495,6 @@ test('every current Discord capability and legacy route is a fail-closed fieldwi
   assert.equal(currentRuntime.problem_contract_id, productTarget.problem_contract_id);
   assert.equal(currentRuntime.input_schema_id, productTarget.input_schema_id);
   assert.equal(currentRuntime.result_contract_id, productTarget.result_contract_id);
-});
-
-test('legacy route inventory retains lowering identity and immutable fixed presets', () => {
-  const contract = registry();
-  const authority = new Map(contract.runtime_projection.legacy_routes.map((route) => [route.id, route]));
-  for (const capability of discordProductCapabilityRegistry) {
-    for (const route of capability.aliases) {
-      const id = [capability.id, route.slash ? 'slash' : 'text', route.root, route.subcommand]
-        .filter(Boolean)
-        .join('/');
-      const declared = authority.get(id);
-      assert.ok(declared, `missing alias authority: ${id}`);
-      const projection = lowerCapabilityRouteRequest(capability, route);
-      assert.deepEqual(
-        {
-          input: projection.route.input,
-          input_schema_id: projection.route.inputSchemaId,
-          modal_schema_id: projection.route.modalSchemaId,
-          argv_prefix: projection.route.argvPrefix,
-          public_result_kind: projection.route.publicResultKind,
-        },
-        {
-          input: declared.input,
-          input_schema_id: declared.input_schema_id,
-          modal_schema_id: declared.modal_schema_id,
-          argv_prefix: declared.argv_prefix,
-          public_result_kind: declared.public_result_kind,
-        },
-        id,
-      );
-      assert.deepEqual(projection.parameters, route.preset ?? {}, id);
-    }
-  }
-
-  const score = findProductCapability('pc.score');
-  assert.deepEqual(score.aliases, [], 'generic score must not claim typed alias equivalence');
-  const genericScore = discordGenericCompatibilityRouteProjection()
-    .find(({ id }) => id === 'discord.compat.score');
-  assert.ok(genericScore);
-  assert.deepEqual(genericScore.argvPrefix, ['sfinder', 'score']);
-  assert.equal(genericScore.problemContractId, 'pc-clear-to-empty');
-  assert.equal(genericScore.resultContractId, 'pc-scenario');
-  assert.notDeepEqual(
-    {
-      input: score.canonical.input,
-      problemContractId: score.problemContractId,
-      resultContractId: score.resultContractId,
-      argvPrefix: score.canonical.argvPrefix,
-    },
-    {
-      input: genericScore.input,
-      problemContractId: genericScore.problemContractId,
-      resultContractId: genericScore.resultContractId,
-      argvPrefix: genericScore.argvPrefix,
-    },
-    'generic Jstris score must never be raw-equivalent to typed pc score',
-  );
-});
-
-test('legacy parser fixture exhaustively binds slash and text routes to frozen argv', () => {
-  const contract = registry();
-  const fixture = legacyAliasFixture();
-  assert.equal(fixture.schema_id, 'clearra.legacy-alias-equivalence.v1');
-  assert.equal(fixture.registry_schema_id, contract.schema_id);
-  assert.equal(fixture.target_release, contract.target_release);
-  assert.equal(
-    contract.runtime_projection.legacy_alias_equivalence_fixture,
-    'tests/fixtures/contracts/legacy_alias_equivalence.v1.json',
-  );
-
-  const productRoutes = contract.runtime_projection.legacy_routes
-    .filter(({ classification }) => classification !== 'generic-compatibility')
-    .map((route) => ({
-    id: route.id,
-    capability_id: route.capability_id,
-    surface: route.surface,
-    path: route.path ?? route.name.split(' '),
-    classification: route.classification,
-    input: route.input,
-    input_schema_id: route.input_schema_id,
-    modal_schema_id: route.modal_schema_id,
-    argv_prefix: route.argv_prefix,
-    public_result_kind: route.public_result_kind,
-    ...(route.preset ? { preset: route.preset } : {}),
-    ...(route.remove_in ? { remove_in: route.remove_in } : {}),
-    ...(route.lifetime ? { lifetime: route.lifetime } : {}),
-    }));
-  const fixtureRoutes = fixture.routes.map(({ case_id: _caseId, ...route }) => route);
-  assert.deepEqual(fixtureRoutes, productRoutes);
-  assert.equal(fixture.routes.length, 30);
-
-  const cases = new Map(fixture.cases.map((entry) => [entry.id, entry]));
-  assert.equal(cases.size, 15);
-  const currentCapabilities = new Map(
-    contract.runtime_projection.current_capabilities.map((entry) => [entry.id, entry]),
-  );
-  const legacyCaseAuthorityOverrides = contract.runtime_projection.legacy_case_authority_overrides;
-  assert.deepEqual(
-    Object.keys(legacyCaseAuthorityOverrides).sort(),
-    [
-      'build.cover/cover/',
-      'build.cover/finesse/search',
-      'pc.path/path/',
-      'pc.score-finder/score-finder/',
-      'setup.build/best-setup/',
-      'setup.joint/pc-setup/',
-      'setup.pc/dpc-finder/',
-    ],
-    'only frozen legacy v1 cases may override their current v2 capability authority',
-  );
-  for (const fixtureCase of fixture.cases) {
-    const capability = currentCapabilities.get(fixtureCase.capability_id);
-    assert.ok(capability, fixtureCase.id);
-    const authority = legacyCaseAuthorityOverrides[fixtureCase.id] ?? capability;
-    assert.equal(fixtureCase.problem_contract_id, authority.problem_contract_id, fixtureCase.id);
-    assert.equal(fixtureCase.result_contract_id, authority.result_contract_id, fixtureCase.id);
-    assert.ok(fixtureCase.canonical_argv.length > 0, fixtureCase.id);
-    assert.ok(fixtureCase.alias_argv.length > 0, fixtureCase.id);
-    assert.ok(fixtureCase.canonical_text_argv.length > 0, fixtureCase.id);
-    assert.ok(fixtureCase.alias_text_argv.length > 0, fixtureCase.id);
-    assert.equal(
-      fixtureCase.canonical_text_web_command,
-      ['clearra', ...fixtureCase.canonical_text_argv].join(' '),
-      fixtureCase.id,
-    );
-    assert.equal(
-      fixtureCase.alias_text_web_command,
-      ['clearra', ...fixtureCase.alias_text_argv].join(' '),
-      fixtureCase.id,
-    );
-    assert.equal(
-      fixtureCase.canonical_web_command,
-      ['clearra', ...fixtureCase.canonical_argv].join(' '),
-      fixtureCase.id,
-    );
-    assert.equal(
-      fixtureCase.alias_web_command,
-      ['clearra', ...fixtureCase.alias_argv].join(' '),
-      fixtureCase.id,
-    );
-    const routePair = fixture.routes.filter(({ case_id }) => case_id === fixtureCase.id);
-    assert.deepEqual(
-      routePair.map(({ surface }) => surface).sort(),
-      ['discord-slash', 'discord-text'],
-      fixtureCase.id,
-    );
-    if (fixtureCase.classification === 'fixed-preset') {
-      assert.ok(fixtureCase.conflict, `fixed preset lacks conflict vector: ${fixtureCase.id}`);
-      assert.ok(routePair.every(({ preset }) => preset), fixtureCase.id);
-    } else {
-      assert.equal(fixtureCase.classification, 'equivalence', fixtureCase.id);
-      assert.equal(fixtureCase.conflict, undefined, fixtureCase.id);
-    }
-  }
 });
 
 test('implemented Discord runtime capabilities are a complete fieldwise product-authority projection', () => {
@@ -846,7 +650,11 @@ test('implemented Discord runtime capabilities are a complete fieldwise product-
           ],
         );
       } else {
-        assert.deepEqual(runtime.aliases, []);
+        assert.equal(runtime.aliases.length, ['pc.chance', 'pc.score'].includes(id) ? 2 : 0);
+        for (const alias of runtime.aliases) {
+          assert.deepEqual(alias.argvPrefix, runtime.canonical.argvPrefix);
+          assert.equal(alias.resultContractId, runtime.canonical.resultContractId);
+        }
       }
       assert.equal(runtime.canonical.slash, true);
       assert.equal(runtime.canonical.text, true);
@@ -1008,36 +816,6 @@ test('problem families with different inputs or results cannot be declared alias
   assert.notEqual(capability('build.cover').problem_contract_id, capability('build.evaluate.cover').problem_contract_id);
   assert.notEqual(capability('build.finesse-score').input_schema_id, capability('build.cover').input_schema_id);
 
-  const finesseAlias = capability('build.cover').compatibility_aliases
-    .find(({ path }) => path?.join(' ') === 'finesse search');
-  assert.equal(finesseAlias.preset, 'finesse=inputs mirror=exclude');
-  assert.equal(finesseAlias.remove_in, 'v0.10.0');
-});
-
-test('finesse search is implemented as a Build preset while finesse score keeps a distinct contract', () => {
-  const contract = registry();
-  const buildCover = byId(contract.capabilities, 'build.cover');
-  const finesseScore = byId(contract.capabilities, 'build.finesse-score');
-  const finesseScoreImplementation = contract.capability_implementation.find(
-    ({ capability_id: capabilityId }) => capabilityId === 'build.finesse-score',
-  );
-  const requirement = byId(contract.requirements, 'REQ-V080-008');
-  const slashAlias = buildCover.compatibility_aliases.find(
-    ({ surface, path }) => surface === 'discord-slash' && path?.join(' ') === 'finesse search',
-  );
-  const textAlias = buildCover.compatibility_aliases.find(
-    ({ surface, name }) => surface === 'discord-text' && name === 'finesse search',
-  );
-
-  assert.equal(slashAlias.preset, 'finesse=inputs mirror=exclude');
-  assert.equal(textAlias.preset, 'finesse=inputs mirror=exclude');
-  assert.notEqual(finesseScore.problem_contract_id, buildCover.problem_contract_id);
-  assert.notEqual(finesseScore.algorithm_family, buildCover.algorithm_family);
-  assert.notEqual(finesseScore.input_schema_id, buildCover.input_schema_id);
-  assert.notEqual(finesseScore.modal_schema_id, buildCover.modal_schema_id);
-  assert.notEqual(finesseScore.result_contract_id, buildCover.result_contract_id);
-  assert.equal(finesseScoreImplementation?.implementation_status, 'implemented');
-  assert.equal(requirement.implementation_status, 'implemented');
 });
 
 test('family topology and current GUI option exposure requirements are implemented independently of future Build semantics', () => {
@@ -1190,21 +968,14 @@ test('requirement completion claims are evidence-backed', () => {
   assert.equal(byId(contract.requirements, 'REQ-V080-015').implementation_status, 'implemented');
 });
 
-test('[release gate] expired slash aliases are absent at v0.10.0 and later', () => {
-  const contract = registry();
-  const release = parseRelease(contract.target_release);
-  const expired = contract.runtime_projection.legacy_routes.filter((route) =>
-    route.surface === 'discord-slash' &&
-    route.remove_in &&
-    compareRelease(release, parseRelease(route.remove_in)) >= 0
-  );
-  assert.deepEqual(
-    expired,
-    [],
-    `release ${contract.target_release} retains expired slash aliases: ${expired
-      .map(({ id }) => id)
-      .join(', ')}`,
-  );
+test('[release gate] expired product slash aliases are absent at v0.10.0 and later', () => {
+  const release = parseRelease(registry().target_release);
+  const expired = discordRuntimeProjection().flatMap(({ aliases }) =>
+    aliases.filter((route) =>
+      route.slash && route.deprecateAfter &&
+      compareRelease(release, parseRelease(route.deprecateAfter)) >= 0
+    ));
+  assert.deepEqual(expired, []);
 });
 
 test('[release gate] v0.8.0 readiness closes', () => {

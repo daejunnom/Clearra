@@ -169,6 +169,7 @@ export const JAPANESE_DISCORD_MESSAGES = Object.freeze({
   "summary.score_failed_pc_pattern_count": "PC失敗パターン数",
   "summary.score_covered_probability": "PCカバー率",
   "summary.score_overall_score": "総合スコア",
+  "summary.highest_score": "最高スコア: {score}",
   "summary.score_covered_pattern_conditional_average_score": "成功パターンの平均スコア",
   "summary.score_summary_complete": "スコア集計完了",
   "summary.pc_allspin_spin_profile": "スピン判定ルール",

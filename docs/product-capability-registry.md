@@ -93,12 +93,12 @@ new alias.
 
 ## Compatibility and status
 
-Grouped commands begin in v0.8.0. A legacy slash alias may remain through two
-released versions only when it lowers to a fieldwise-identical typed request;
-the registry therefore permits it in v0.8 and v0.9 and schedules removal in
-v0.10.0. `$`/`>` text aliases may remain long-term only while that typed
-equivalence continues to hold. Slash and text are separate inventory rows; a
-slash route can be removed without retiring its exact-compatible text spelling.
+Discord exposes only canonical Clearra product commands and true aliases of
+those commands. Each retained alias inherits the canonical parser input,
+Modal schema, CLI argv prefix, and result contract from its capability.
+Sfinder compatibility and alternate generic routes are not published or
+accepted by the Discord runner. Slash and text may provide different
+interaction formats, but neither may pick a different search policy.
 A same-name or same-result-looking command is not an alias
 when its input or result contract differs. Examples include PC saves versus
 best-save, exact All-Spin witness versus preservation probability, target Build
@@ -250,10 +250,11 @@ earlier audit. The historical implementation-start registry date is retained
 rather than rewritten; its pinned source and command inventory are still
 checked fieldwise against the current registry.
 
-## Current-source reconciliation (2026-08-28)
+## Historical source reconciliation (2026-08-28)
 
-The final current-byte audits reconcile the formerly stale ledger rows and bind
-the completed v0.8 product decisions to executable evidence:
+These findings describe the earlier source before Discord compatibility-route
+retirement. Retained typed aliases now inherit the current registry contract.
+The earlier audits reconcile the formerly stale ledger rows:
 
 - `pc.allspin-sol` and `pc.allspin-pres-chance` are implemented across the
   grouped and compatibility Discord routes, private text aliases, CLI, Web,
@@ -576,15 +577,11 @@ typed planned defaults over every planned entry before comparing it too. The
 current and target contracts remain deliberately separate, so the comparison
 does not mistake a desired v2 schema ID for present runtime semantics.
 
-The same validator exhaustively compares the live alias list with the product
-`legacy_routes` inventory and the cross-language alias fixture. It checks the
-separate ingress, stable target, classification, preset, v0.10 slash removal,
-long-term text lifetime, parser input family, exact slash/text argv, and
-problem/result family. Each live route must also match the independently frozen
-input schema, Modal schema, argv prefix, and public result kind. The
-three independent generic compatibility descriptors are compared separately;
-their six slash/text forms intentionally do not enter `legacy_routes` or the
-typed-equivalence fixture. The
+The current validator compares the live alias list with the frozen
+`runtime_projection.product_aliases`. It checks parser input family,
+schema, CLI argv prefix and result contract against the canonical
+capability. The old CLI compatibility fixture is historical and does
+not authorize a Discord route. The
 catalog's original-GIF slash/text/message routes are explicitly recorded as
 distinct non-capability routes; they are not falsely relabeled as target
 `utility.render`.
@@ -615,7 +612,7 @@ It fails when:
   projection;
 - a fixed preset can be overridden by a caller or is compared as raw
   equivalence;
-- a slash alias survives at v0.10.0 or later;
+- a Discord alias introduces noncanonical parsing, execution or result authority;
 - unsafe upstream commands map to a public capability;
 - a requirement claims completion without evidence.
 
@@ -637,7 +634,7 @@ checks close REQ-V080-018 and REQ-V080-019. Readiness still describes source
 completion, not deployment completion; the external release-attempt journal is
 the authority for post-source production events.
 
-The fieldwise slash/text compatibility proof is reproducible with:
+The historical CLI compatibility differential remains reproducible with:
 
 ```powershell
 cargo test -p clearra-cli-command legacy_alias_fixture_parses_30_surface_pairs_to_identical_public_app_requests

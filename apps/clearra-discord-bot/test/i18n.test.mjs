@@ -242,30 +242,29 @@ test("Discord registration localizes names without redundant values or collision
   const renderFile = globalCommands.find(({ name }) => name === "render-file");
   assert.equal(renderFile?.options[0].name_localizations?.ko, "이미지");
 
-  const spinOptions = globalCommands
+  const spinProfile = globalCommands
     .find(({ name }) => name === "spin")
-    ?.options.find(({ name }) => name === "options");
-  assert.equal(spinOptions?.choices, undefined);
-  assert.match(spinOptions?.description ?? "", /type=TSS/);
+    ?.options.find(({ name }) => name === "spin-profile");
+  const canonicalSpinProfile = globalCommands
+    .find(({ name }) => name === "forward")
+    ?.options.find(({ name }) => name === "spin")
+    ?.options.find(({ name }) => name === "spin-profile");
+  assert.ok(spinProfile?.choices?.length);
+  assert.deepEqual(spinProfile, canonicalSpinProfile);
 
   const scoreFinder = globalCommands.find(({ name }) => name === "score-finder");
   assert.equal(scoreFinder?.name_localizations?.ko, undefined);
   assert.match(scoreFinder?.description_localizations?.ko ?? "", /Jstris.*퍼펙트 클리어/u);
-  assert.equal(
-    scoreFinder?.options.find(({ name }) => name === "options")?.choices,
-    undefined,
-  );
+  assert.equal(scoreFinder?.options.some(({ name }) => name === "options"), false);
   const scoreFinderLines = scoreFinder?.options.find(({ name }) => name === "lines");
-  assert.match(scoreFinderLines?.description ?? "", /1–6/);
-  assert.match(scoreFinderLines?.description_localizations?.ko ?? "", /1–6줄/u);
-  assert.match(scoreFinderLines?.description ?? "", /defaults to 4/i);
-  assert.match(scoreFinderLines?.description_localizations?.ko ?? "", /4줄/u);
+  assert.match(scoreFinderLines?.description ?? "", /1–24/);
+  assert.match(scoreFinderLines?.description_localizations?.ko ?? "", /1–24줄/u);
 
   const pathField = globalCommands
     .find(({ name }) => name === "path")
     ?.options.find(({ name }) => name === "field");
-  assert.match(pathField?.description ?? "", /1–6 rows/);
-  assert.match(pathField?.description_localizations?.ko ?? "", /1–6줄/u);
+  assert.match(pathField?.description ?? "", /1–24 rows/);
+  assert.match(pathField?.description_localizations?.ko ?? "", /1–24줄/u);
 
   const forwardSpinField = globalCommands
     .find(({ name }) => name === "forward")
@@ -275,10 +274,10 @@ test("Discord registration localizes names without redundant values or collision
   assert.match(forwardSpinField?.description_localizations?.ko ?? "", /1–24줄/u);
 
   const cover = globalCommands.find(({ name }) => name === "cover");
-  for (const optionName of ["base", "target"]) {
+  for (const optionName of ["base-mask", "target-mask"]) {
     const option = cover?.options.find(({ name }) => name === optionName);
-    assert.match(option?.description ?? "", /1–24 rows/);
-    assert.match(option?.description_localizations?.ko ?? "", /1–24줄/u);
+    assert.match(option?.description ?? "", /hexadecimal/u);
+    assert.match(option?.description_localizations?.ko ?? "", /16진수/u);
   }
   const damage = globalCommands.find(({ name }) => name === "damage");
   assert.equal(damage?.name_localizations?.ko, "대미지");
@@ -302,8 +301,7 @@ test("Discord registration localizes names without redundant values or collision
       "max-memory-mib",
     ],
   );
-  assert.match(formatSlashCommandHelp("pc allspin-sol", "ko"), /슬래시 별칭은 v0\.10에서 제거/u);
-  assert.match(formatSlashCommandHelp("allspin-pres-chance", "ko"), /v0\.10에서 제거/u);
+  assert.equal(globalCommands.some(({ name }) => name.startsWith("allspin-")), false);
 
   assert.equal(
     globalCommands.some(({ name }) => name === "verify"),
@@ -311,21 +309,23 @@ test("Discord registration localizes names without redundant values or collision
     "the hidden text diagnostic must not receive slash localization metadata",
   );
 
-  const setupRanking = globalCommands.find(({ name }) => name === "pc-setup");
+  const setupRanking = globalCommands.find(({ name }) => name === "setup")
+    ?.options.find(({ name }) => name === "joint");
   assert.deepEqual(setupRanking?.options.map(({ name }) => name), [
     "remaining",
-    "priority",
-    "max-setup-pieces",
+    "mode",
+    "qb",
     "queue-knowledge",
     "next-cycle-remaining",
+    "post-cycle-borrow",
     "setup-length",
+    "max-setup-pieces",
     "kicktable",
-    "options",
   ]);
   assert.deepEqual(
-    setupRanking?.options.find(({ name }) => name === "priority")
+    setupRanking?.options.find(({ name }) => name === "mode")
       ?.choices.map(effectiveKoreanChoiceName),
-    ["구축 × PC 종합", "구축 확률 우선", "PC 확률 우선"],
+    ["Oracle (기본값)", "QB 접두사 / 패턴"],
   );
   assert.deepEqual(
     setupRanking?.options.find(({ name }) => name === "queue-knowledge")
@@ -337,7 +337,6 @@ test("Discord registration localizes names without redundant values or collision
       ?.choices.map(effectiveKoreanChoiceName),
     ["자동", "긴 셋업 우선", "짧은 셋업 우선"],
   );
-  assert.match(formatSlashCommandHelp("best-setup", "ko"), /기본값은 `build`/u);
 });
 
 test("oversized grouped registrations stay localized through bounded autocomplete", () => {

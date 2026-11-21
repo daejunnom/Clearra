@@ -17,7 +17,9 @@ import type {
   AcceleratorWorkerRelation,
   AcceleratorWorkerSynopsis,
   ClearraDistributedCoreProgress,
+  ClearraDistributedIssuedRootCounter,
   ClearraDistributedPlan,
+  ClearraDistributedSchedulingProgress,
   ClearraWasmHostCapabilities,
   ClearraWasmModule
 } from './clearraWasmRuntime';
@@ -316,6 +318,26 @@ export class DistributedWasmJobRunner {
     // streaming producers still perform Geometry locally and therefore keep
     // one requested slot on the coordinator.
     const sourceCoordinatorComputes = plan.rootTaskParallel !== true;
+    // Compact PC roots publish issued roots as geometryNodes, while Tiling
+    // roots publish them as coverageChecks. Streaming uses neither counter.
+    const issuedRootCounter: ClearraDistributedIssuedRootCounter = plan.rootTaskParallel === true
+      ? plan.tilingGeometryParallel ? 'coverage' : 'geometry'
+      : 'none';
+    const schedulingProgress = (
+      issued: ClearraDistributedIssuedRootCounter
+    ): ClearraDistributedSchedulingProgress => {
+      if (this.wasm.distributed_scheduling_progress) {
+        return this.wasm.distributed_scheduling_progress(issued);
+      }
+      // Compatibility with direct hosts and fixtures that still expose only
+      // the full progress projection.
+      const progress = this.wasm.distributed_progress();
+      return {
+        candidateFamilyCount: progress.candidateFamilyCount,
+        issuedRootCount: issued === 'geometry' ? progress.geometryNodes
+          : issued === 'coverage' ? progress.coverageChecks : 0
+      };
+    };
     const verifierCount = plan.verificationRequired
       ? Math.max(1, plan.workerCount - Number(sourceCoordinatorComputes))
       : 0;
@@ -459,16 +481,10 @@ export class DistributedWasmJobRunner {
       emitProgress();
 
       while (!this.cancelled) {
-        const batchProgress = this.wasm.distributed_progress();
-        // Compact PC roots report issued roots in geometryNodes and completed
-        // roots in coverageChecks. Tiling roots use coverageChecks for issued
-        // roots instead; do not apply either convention to streaming producers.
-        const issuedRootCount = plan.rootTaskParallel === true && !plan.tilingGeometryParallel
-          ? batchProgress.geometryNodes
-          : batchProgress.coverageChecks;
+        const batchProgress = schedulingProgress(issuedRootCounter);
         const candidateBatchSize = distributedCandidateBatchSize(
           batchProgress.candidateFamilyCount,
-          issuedRootCount,
+          batchProgress.issuedRootCount,
           effectiveVerifierCount,
           dispatchedBatches,
           plan.rootTaskParallel === true
@@ -492,7 +508,7 @@ export class DistributedWasmJobRunner {
           effectiveVerifierCount = plan.deferredInitialization
             ? boundedVerifierCount(
                 verifierCount,
-                this.wasm.distributed_progress().candidateFamilyCount
+                schedulingProgress('none').candidateFamilyCount
               )
             : verifierCount;
           this.poolOwned = true;
