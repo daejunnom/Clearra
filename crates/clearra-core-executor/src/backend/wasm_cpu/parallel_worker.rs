@@ -1,16 +1,14 @@
 // SRP rationale: the single change reason is executing one compact native branch
 // worker, including its private frontier, memory accounting and mergeable result evidence.
 use std::collections::{BTreeMap, VecDeque};
-#[cfg(test)]
-use std::sync::atomic::AtomicUsize;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use clearra_core_domain::{
     execution_cancellation::ExecutionControl, objective::objective_kind::ObjectiveKind,
     solution::normalized_tiling_solution::StandardBoard64TilingIdentity,
 };
-use clearra_coverage::pattern::pattern_bitset::PatternBitSet;
+use clearra_coverage::{pattern::pattern_bitset::PatternBitSet, row::coverage_row::CoverageRow};
 use clearra_problem::SearchProblem;
 
 use crate::performance::{profile_sample_scale, ExecutorSearchStage, SearchStageSpan};
@@ -122,7 +120,7 @@ pub(super) struct BranchSearchOutcome {
     pub geometry: GeometrySearch,
     pub candidate_count: usize,
     pub candidate_digest: CandidateDigestEvidence,
-    pub failed_queue_rows: Vec<(usize, PatternBitSet)>,
+    pub chance_rows: Vec<(usize, PatternBitSet)>,
     pub truncated_reason: Option<&'static str>,
 }
 
@@ -591,12 +589,79 @@ pub(super) struct ParallelWorkerResult {
 pub(super) struct SharedWorkerRequest {
     pub standard_bag: Option<Arc<SharedStandardBagRequest>>,
     pub reachability: Arc<SharedReachabilityTemplates>,
+    pub probability_row_budget: Option<ParallelProbabilityRowBudget>,
     #[cfg(any(test, feature = "local-search-ab"))]
     pub solution_coverage_capture: Option<SolutionCoverageCapture>,
     #[cfg(feature = "local-search-ab")]
     pub operation_masks: Option<super::buildup::OperationMaskExperiment>,
     #[cfg(all(feature = "local-search-ab", not(target_family = "wasm")))]
     pub strict_prefix: Option<super::symbolic_prefix_parallel::StrictParallelPrefixRequest>,
+}
+
+/// Shared allowance for typed chance proof rows, not a limit on candidate
+/// search or a new per-worker cap. This is only for the newly moved proof:
+/// other products keep their existing row and execution authority.
+pub(super) struct ParallelProbabilityRowBudget {
+    limit: usize,
+    dense_constructor_bytes: usize,
+    charged: AtomicUsize,
+}
+
+impl ParallelProbabilityRowBudget {
+    pub fn new(pattern_count: usize) -> Result<Self, WasmExactSearchError> {
+        let dense_constructor_bytes = PatternBitSet::checked_all_projection(pattern_count)
+            .and_then(|projection| usize::try_from(projection.constructor_peak_bytes).ok())
+            .ok_or(WasmExactSearchError::InvalidProblem(
+                "wasm_parallel_probability_row_projection_overflow",
+            ))?;
+        Ok(Self {
+            limit: usize::try_from(
+                crate::resource::shared_execution_resource_capacity().memory_bytes,
+            )
+            .unwrap_or(usize::MAX),
+            dense_constructor_bytes,
+            charged: AtomicUsize::new(0),
+        })
+    }
+
+    fn charge(&self, payload_bytes: usize) -> Result<(), WasmExactSearchError> {
+        use clearra_core_domain::resource::{
+            ExecutionAvailability, ExecutionAvailabilityReason, ResourceReport,
+        };
+
+        // Reserve the branch vector's growth and the final owned row slots.
+        // Charge the constructor peak for symbolic rows so simultaneous
+        // materializations cannot exceed the same request-wide allowance.
+        let bytes = payload_bytes.checked_add(
+            2 * core::mem::size_of::<(usize, PatternBitSet)>()
+                + core::mem::size_of::<CoverageRow>(),
+        );
+        self.charged
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |previous| {
+                previous
+                    .checked_add(bytes?)
+                    .filter(|&next| next <= self.limit)
+            })
+            .map(|_| ())
+            .map_err(|previous| {
+                let required = bytes
+                    .and_then(|bytes| previous.checked_add(bytes))
+                    .map_or(u128::MAX, |bytes| bytes as u128);
+                let mut report = ResourceReport::execution_incomplete(
+                    ExecutionAvailability::exhausted(
+                        ExecutionAvailabilityReason::MemoryBudgetExceeded,
+                    )
+                    .with_required_memory_bytes(required),
+                );
+                report.mark_truncated_unknown();
+                WasmExactSearchError::resource_admission(report)
+            })
+    }
+}
+
+pub(super) fn retains_ordinal_chance_rows(problem: &SearchProblem) -> bool {
+    let policy = problem.pc_chance_evidence_policy();
+    policy.retains_pc_probability_v2_evidence() || policy.pc_failed_queue_example_limit().is_some()
 }
 
 /// One owner for immutable inputs and the explicitly shared work/coverage
@@ -709,6 +774,7 @@ fn run_branch_worker_inner(
             &mut workspace,
             &mut evaluator,
             &mut aggregate,
+            shared_request.probability_row_budget.as_ref(),
             #[cfg(any(test, feature = "local-search-ab"))]
             shared_request.solution_coverage_capture.as_ref(),
             #[cfg(all(feature = "local-search-ab", target_os = "linux"))]
@@ -761,7 +827,7 @@ fn run_branch_worker_inner(
             .map(PatternBitSet::retained_bytes)
             .sum::<usize>()
             .saturating_add(outcomes.iter().fold(0usize, |bytes, branch| {
-                let rows = &branch.failed_queue_rows;
+                let rows = &branch.chance_rows;
                 let backing = rows
                     .capacity()
                     .saturating_mul(core::mem::size_of::<(usize, PatternBitSet)>());
@@ -868,6 +934,7 @@ fn run_branch(
     workspace: &mut BuildUpWorkspace,
     evaluator: &mut CoverageProductEvaluator,
     aggregate: &mut WorkerAggregate,
+    probability_row_budget: Option<&ParallelProbabilityRowBudget>,
     #[cfg(any(test, feature = "local-search-ab"))] solution_coverage_capture: Option<
         &SolutionCoverageCapture,
     >,
@@ -884,11 +951,8 @@ fn run_branch(
     );
     let mut local_ordinal = 0usize;
     let mut truncated_reason = None;
-    let retain_failed_queue_rows = problem
-        .pc_chance_evidence_policy()
-        .pc_failed_queue_example_limit()
-        .is_some();
-    let mut failed_queue_rows = Vec::new();
+    let retain_chance_rows = retains_ordinal_chance_rows(problem);
+    let mut chance_rows = Vec::new();
     let solution_coverage_required = retains_solution_coverage_evidence(problem);
     #[cfg(any(feature = "search-stage-profiling", feature = "wasm-stage-profiling"))]
     let mut geometry_advance_calls = 0_usize;
@@ -939,8 +1003,7 @@ fn run_branch(
                         "wasm_geometry_candidate_target_out_of_range",
                     ),
                 )?;
-                let exact_candidate_coverage =
-                    solution_coverage_required || retain_failed_queue_rows;
+                let exact_candidate_coverage = solution_coverage_required || retain_chance_rows;
                 #[cfg(any(test, feature = "local-search-ab"))]
                 let exact_candidate_coverage =
                     exact_candidate_coverage || solution_coverage_capture.is_some();
@@ -982,21 +1045,24 @@ fn run_branch(
                     }
                 }
                 if let Some(root) = result.symbolic_coverage_root {
-                    if solution_coverage_required || retain_failed_queue_rows {
+                    if solution_coverage_required || retain_chance_rows {
+                        if let Some(budget) = probability_row_budget {
+                            budget.charge(budget.dense_constructor_bytes)?;
+                        }
                         let materialized = workspace.materialize_standard_bag_root(root)?;
-                        if retain_failed_queue_rows {
+                        if retain_chance_rows {
                             // Concrete and symbolic results are disjoint; a
                             // second row for one candidate is not valid proof.
                             if result.covered_patterns.is_some() {
                                 return Err(WasmExactSearchError::InvalidProblem(
-                                    "wasm_parallel_failed_queue_candidate_row_ambiguous",
+                                    "wasm_parallel_chance_candidate_row_ambiguous",
                                 ));
                             }
                             if solution_coverage_required {
                                 solution_coverage = Some(materialized.clone());
                             }
-                            record_failed_queue_branch_row(
-                                &mut failed_queue_rows,
+                            record_chance_branch_row(
+                                &mut chance_rows,
                                 local_ordinal,
                                 materialized,
                             )?;
@@ -1012,8 +1078,11 @@ fn run_branch(
                     }
                     workspace.merge_standard_bag_coverage(root)?;
                 }
-                if retain_failed_queue_rows {
+                if retain_chance_rows {
                     if let Some(coverage) = result.covered_patterns.take() {
+                        if let Some(budget) = probability_row_budget {
+                            budget.charge(coverage.retained_bytes())?;
+                        }
                         // Account the row and covered ordinals exactly as
                         // WorkerAggregate::observe would, then move the bits.
                         aggregate.coverage_row_count =
@@ -1021,11 +1090,7 @@ fn run_branch(
                         aggregate.pattern_verified_execution_count = aggregate
                             .pattern_verified_execution_count
                             .saturating_add(coverage.count_ones() as usize);
-                        record_failed_queue_branch_row(
-                            &mut failed_queue_rows,
-                            local_ordinal,
-                            coverage,
-                        )?;
+                        record_chance_branch_row(&mut chance_rows, local_ordinal, coverage)?;
                     }
                 }
                 let retain_identity = retains_buildable_identity_evidence(problem);
@@ -1065,20 +1130,20 @@ fn run_branch(
             geometry: search,
             candidate_count: local_ordinal,
             candidate_digest,
-            failed_queue_rows,
+            chance_rows,
             truncated_reason,
         },
         local_ordinal,
     ))
 }
 
-fn record_failed_queue_branch_row(
+fn record_chance_branch_row(
     rows: &mut Vec<(usize, PatternBitSet)>,
     local_ordinal: usize,
     coverage: PatternBitSet,
 ) -> Result<(), WasmExactSearchError> {
     rows.try_reserve(1).map_err(|_| {
-        WasmExactSearchError::InvalidProblem("wasm_parallel_failed_queue_row_storage_unavailable")
+        WasmExactSearchError::InvalidProblem("wasm_parallel_chance_row_storage_unavailable")
     })?;
     rows.push((local_ordinal, coverage));
     Ok(())

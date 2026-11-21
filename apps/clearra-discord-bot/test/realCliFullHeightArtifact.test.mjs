@@ -28,3 +28,11 @@ test('unmarked readback retains the canonical native debug and release paths', (
   const windowsPath = join(repository, 'build', 'cargo', 'default', 'release', 'clearra.exe');
   assert.equal(checkedCliPath({ ...input, path: windowsPath, platform: 'win32', version: undefined }), windowsPath);
 });
+
+test('managed development readback is not enabled by a path or flag alone', () => {
+  const nativePath = join(repository, 'build', 'cargo', 'default', 'debug', 'clearra');
+  assert.throws(() => checkedCliPath({
+    ...input, path: nativePath, version: undefined,
+    environment: { CLEARRA_REAL_PC24_MANAGED_CLI: '1', CARGO_TARGET_DIR: resolve('arbitrary-target') },
+  }));
+});

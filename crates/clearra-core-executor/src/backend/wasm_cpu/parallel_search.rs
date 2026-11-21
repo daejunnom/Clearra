@@ -27,9 +27,10 @@ use super::{
     geometry::{GeometrySearch, ParallelGeometryPlan, ParallelGeometryPreparation, TargetGroup},
     parallel_coverage::SharedCoverage,
     parallel_worker::{
-        run_branch_worker, BranchSearchOutcome, BranchWorkerInputs, ParallelBranchQueue,
-        ParallelBranchTask, ParallelWorkerResult, RepresentativeCandidate, SharedWorkerRequest,
-        WorkerAggregate, WorkerMemoryComponents,
+        retains_ordinal_chance_rows, run_branch_worker, BranchSearchOutcome, BranchWorkerInputs,
+        ParallelBranchQueue, ParallelBranchTask, ParallelProbabilityRowBudget,
+        ParallelWorkerResult, RepresentativeCandidate, SharedWorkerRequest, WorkerAggregate,
+        WorkerMemoryComponents,
     },
     reachability::{ReachabilityMetrics, SharedReachabilityTemplates},
     standard_bag_coverage::SharedStandardBagRequest,
@@ -51,7 +52,7 @@ pub(super) struct ParallelSearchOutcome {
     pub covered_patterns: PatternBitSet,
     pub buildable_identities: Vec<StandardBoard64TilingIdentity>,
     pub solution_coverage: Vec<SolutionCoverage>,
-    pub failed_queue_rows: Vec<CoverageRow>,
+    pub chance_rows: Vec<CoverageRow>,
     pub packing_candidate_count: usize,
     pub packing_candidate_digest: u64,
     pub coverage_row_count: usize,
@@ -479,6 +480,11 @@ fn execute_plan(
             catalog.height(),
             problem.kick_profile().profile_id(),
         )),
+        probability_row_budget: problem
+            .pc_chance_evidence_policy()
+            .retains_pc_probability_v2_evidence()
+            .then(|| ParallelProbabilityRowBudget::new(pattern_count))
+            .transpose()?,
         #[cfg(any(test, feature = "local-search-ab"))]
         solution_coverage_capture,
         #[cfg(feature = "local-search-ab")]
@@ -566,6 +572,21 @@ fn execute_plan(
                 .recv()
                 .map_err(|_| WasmExactSearchError::InvalidProblem("wasm_parallel_worker_lost"))?,
         );
+    }
+    // A peer can observe the queue abort before the originating worker's
+    // result reaches the coordinator. Preserve the actual failure (including
+    // typed memory exhaustion) rather than its secondary queue error.
+    if let Some(error) = results
+        .iter()
+        .filter_map(|result| result.as_ref().err())
+        .find(|error| {
+            !matches!(
+                error,
+                WasmExactSearchError::InvalidProblem("wasm_parallel_branch_queue_aborted")
+            )
+        })
+    {
+        return Err(error.clone());
     }
     let worker_results = results
         .into_iter()
@@ -714,8 +735,8 @@ fn merge_results(
         )?,
         None => (Vec::new(), None),
     };
-    let failed_queue_rows =
-        collect_failed_queue_rows(problem, &mut branch_outcomes, merged.coverage_row_count)?;
+    let chance_rows =
+        collect_chance_rows(problem, &mut branch_outcomes, merged.coverage_row_count)?;
     let searches = branch_outcomes
         .into_iter()
         .map(|branch| branch.geometry)
@@ -735,7 +756,7 @@ fn merge_results(
             .into_iter()
             .map(|(identity, coverage)| SolutionCoverage::new(identity, coverage))
             .collect(),
-        failed_queue_rows,
+        chance_rows,
         packing_candidate_count,
         packing_candidate_digest,
         coverage_row_count: merged.coverage_row_count,
@@ -773,16 +794,12 @@ fn merge_results(
     })
 }
 
-fn collect_failed_queue_rows(
+fn collect_chance_rows(
     problem: &SearchProblem,
     branches: &mut [BranchSearchOutcome],
     expected_rows: usize,
 ) -> Result<Vec<CoverageRow>, WasmExactSearchError> {
-    if problem
-        .pc_chance_evidence_policy()
-        .pc_failed_queue_example_limit()
-        .is_none()
-    {
+    if !retains_ordinal_chance_rows(problem) {
         return Ok(Vec::new());
     }
     let source = problem.piece_source();
@@ -793,18 +810,21 @@ fn collect_failed_queue_rows(
         ))?;
     let mut rows = Vec::new();
     rows.try_reserve_exact(expected_rows).map_err(|_| {
-        WasmExactSearchError::InvalidProblem("wasm_parallel_failed_queue_row_storage_unavailable")
+        WasmExactSearchError::InvalidProblem("wasm_parallel_chance_row_storage_unavailable")
     })?;
     let mut prefix = 0usize;
     for branch in branches {
-        for (ordinal, coverage) in std::mem::take(&mut branch.failed_queue_rows) {
-            let id = (ordinal < branch.candidate_count)
-                .then(|| prefix.checked_add(ordinal)?.checked_add(1))
-                .flatten()
-                .and_then(|id| u64::try_from(id).ok())
-                .ok_or(WasmExactSearchError::InvalidProblem(
-                    "wasm_parallel_failed_queue_candidate_ordinal_invalid",
-                ))?;
+        let mut previous_ordinal = None;
+        for (ordinal, coverage) in std::mem::take(&mut branch.chance_rows) {
+            let id = (ordinal < branch.candidate_count
+                && previous_ordinal.is_none_or(|previous| ordinal > previous))
+            .then(|| prefix.checked_add(ordinal)?.checked_add(1))
+            .flatten()
+            .and_then(|id| u64::try_from(id).ok())
+            .ok_or(WasmExactSearchError::InvalidProblem(
+                "wasm_parallel_chance_candidate_ordinal_invalid",
+            ))?;
+            previous_ordinal = Some(ordinal);
             rows.push(CoverageRow::new_with_piece_source(
                 id,
                 CoverageRowKind::Build,
@@ -815,14 +835,12 @@ fn collect_failed_queue_rows(
             ));
         }
         prefix = prefix.checked_add(branch.candidate_count).ok_or(
-            WasmExactSearchError::InvalidProblem(
-                "wasm_parallel_failed_queue_candidate_count_overflow",
-            ),
+            WasmExactSearchError::InvalidProblem("wasm_parallel_chance_candidate_count_overflow"),
         )?;
     }
     if rows.len() != expected_rows {
         return Err(WasmExactSearchError::InvalidProblem(
-            "wasm_parallel_failed_queue_coverage_cardinality_mismatch",
+            "wasm_parallel_chance_coverage_cardinality_mismatch",
         ));
     }
     Ok(rows)

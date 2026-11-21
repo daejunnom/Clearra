@@ -84,6 +84,48 @@ test("full-height PC replay crosses the production canonical-only boundary befor
     { delayMs: PC_PATH_REPLAY_FRAME_DELAY_MS })), Array(13).fill(50));
 });
 
+test("Discord accepts a complete PC replay with the producer's bounded first page", () => {
+  const raw = exhaustiveResult();
+  Object.assign(raw.summary, {
+    page_contract: "pc-replay-member-page.v2",
+    page_source_available: true,
+    page_source_identity_sha256: "a".repeat(64),
+    geometry_count: "2",
+    geometry_page_number: "1",
+    candidate_id: "1",
+    geometry_witness_count: "1",
+    geometry_pattern_count: "1",
+    member_page_number: "1",
+    member_page_count: "1",
+    witnesses: raw.summary.witnesses.slice(0, 1),
+  });
+  const projected = assertDiscordCanonicalOnlyResult(success(raw));
+  const summary = JSON.parse(projected.stdout).summary;
+  assert.deepEqual(summary.canonical_witness, raw.summary.canonical_witness);
+  assert.equal(summary.payload_kind, "canonical-pc-path-witness");
+  assert.equal(Object.hasOwn(summary, "witness_count"), false);
+  assert.equal(Object.hasOwn(summary, "page_source_identity_sha256"), false);
+  assert.equal(assertDiscordCanonicalOnlyResult(projected).stdout, projected.stdout);
+  assert.ok(buildCanonicalPcPathReplayDocument(JSON.parse(projected.stdout)));
+
+  for (const patch of [
+    { geometry_page_number: "2" },
+    { page_source_available: false },
+    { page_source_identity_sha256: "invalid" },
+    { geometry_count: "3" },
+    { geometry_witness_count: "2" },
+    { member_page_count: "2" },
+  ]) {
+    const invalid = structuredClone(raw);
+    Object.assign(invalid.summary, patch);
+    assert.throws(() => assertDiscordCanonicalOnlyResult(success(invalid)), /first replay page/u);
+  }
+  // Without explicit first-page authority, missing members are not a full family.
+  const omitted = exhaustiveResult();
+  omitted.summary.witnesses.pop();
+  assert.throws(() => assertDiscordCanonicalOnlyResult(success(omitted)), /family evidence/u);
+});
+
 test("pc.path replay rejects a declared clear on a non-full row", () => {
   const corrupted = structuredClone(result());
   corrupted.summary.canonical_witness.steps[0].cleared_row_mask =

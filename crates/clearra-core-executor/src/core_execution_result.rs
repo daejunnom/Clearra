@@ -148,7 +148,7 @@ pub struct CoreExecutionResult {
     normalized_solution_coverages: Vec<NormalizedSolutionCoverage>,
     solution_probabilities: Vec<SolutionProbabilityReport>,
     solution_average_scores: Vec<SolutionAverageScoreReport>,
-    exact_scoring_execution_batches: Vec<ExactScoringExecutionBatch>,
+    exact_scoring_execution_batches: Option<Arc<Vec<ExactScoringExecutionBatch>>>,
     spin_coverage_execution_batches: Vec<SpinCoverageExecutionBatch>,
     full_height_scoring_execution_batch: Option<FullHeightExecutionBatch>,
     postprocess_score_cells: Vec<CorePostProcessScoreCell>,
@@ -245,7 +245,7 @@ impl CoreExecutionResult {
             normalized_solution_coverages: Vec::new(),
             solution_probabilities: Vec::new(),
             solution_average_scores: Vec::new(),
-            exact_scoring_execution_batches: Vec::new(),
+            exact_scoring_execution_batches: None,
             spin_coverage_execution_batches: Vec::new(),
             full_height_scoring_execution_batch: None,
             postprocess_score_cells: Vec::new(),
@@ -430,7 +430,7 @@ impl CoreExecutionResult {
         mut self,
         batch: Option<ExactScoringExecutionBatch>,
     ) -> Self {
-        self.exact_scoring_execution_batches = batch.into_iter().collect();
+        self.exact_scoring_execution_batches = batch.map(|batch| Arc::new(vec![batch]));
         self
     }
 
@@ -467,7 +467,7 @@ impl CoreExecutionResult {
         mut self,
         batches: Vec<ExactScoringExecutionBatch>,
     ) -> Self {
-        self.exact_scoring_execution_batches = batches;
+        self.exact_scoring_execution_batches = (!batches.is_empty()).then(|| Arc::new(batches));
         self
     }
 
@@ -669,7 +669,7 @@ impl CoreExecutionResult {
         self.normalized_solution_coverages = Vec::new();
         self.solution_probabilities = Vec::new();
         self.solution_average_scores = Vec::new();
-        self.exact_scoring_execution_batches = Vec::new();
+        self.exact_scoring_execution_batches = None;
         self.spin_coverage_execution_batches = Vec::new();
         self.full_height_scoring_execution_batch = None;
         self.postprocess_score_cells = Vec::new();
@@ -901,7 +901,7 @@ impl CoreExecutionResult {
         self.postprocess_executions = Vec::new();
         self.postprocess_execution_complete = false;
         self.postprocess_pattern_weights = Vec::new();
-        self.exact_scoring_execution_batches = Vec::new();
+        self.exact_scoring_execution_batches = None;
         self.spin_coverage_execution_batches = Vec::new();
         self.full_height_scoring_execution_batch = None;
         self.postprocess_score_cells = Vec::new();
@@ -1328,10 +1328,6 @@ impl CoreExecutionResult {
                 core::mem::size_of::<CorePostProcessExecution>(),
             ),
             (
-                self.exact_scoring_execution_batches.capacity(),
-                core::mem::size_of::<ExactScoringExecutionBatch>(),
-            ),
-            (
                 self.spin_coverage_execution_batches.capacity(),
                 core::mem::size_of::<SpinCoverageExecutionBatch>(),
             ),
@@ -1345,9 +1341,8 @@ impl CoreExecutionResult {
         for execution in &self.postprocess_executions {
             bytes = bytes.checked_add(execution.checked_nested_retained_bytes()?)?;
         }
-        for batch in &self.exact_scoring_execution_batches {
-            bytes = bytes.checked_add(batch.checked_nested_retained_bytes()?)?;
-        }
+        bytes =
+            bytes.checked_add(self.checked_exact_scoring_execution_batches_retained_bytes()?)?;
         for batch in &self.spin_coverage_execution_batches {
             bytes = bytes.checked_add(batch.checked_nested_retained_bytes()?)?;
         }
@@ -1700,11 +1695,37 @@ impl CoreExecutionResult {
     }
 
     pub fn exact_scoring_execution_batch(&self) -> Option<&ExactScoringExecutionBatch> {
-        self.exact_scoring_execution_batches.first()
+        self.exact_scoring_execution_batches().first()
     }
 
     pub fn exact_scoring_execution_batches(&self) -> &[ExactScoringExecutionBatch] {
-        &self.exact_scoring_execution_batches
+        self.exact_scoring_execution_batch_owner()
+            .map_or(&[], |batches| batches.as_slice())
+    }
+
+    /// Retain the exact immutable batch owner from this result. App's replay
+    /// pager can keep the graph and queue allocations across result stripping.
+    pub fn exact_scoring_execution_batch_owner(
+        &self,
+    ) -> Option<&Arc<Vec<ExactScoringExecutionBatch>>> {
+        self.exact_scoring_execution_batches.as_ref()
+    }
+
+    /// Heap bytes included in this result's memory bound for this owner.
+    /// A second handle receives this overlap credit only if it shares the Arc.
+    pub fn checked_exact_scoring_execution_batches_retained_bytes(&self) -> Option<u128> {
+        let Some(batches) = self.exact_scoring_execution_batch_owner() else {
+            return Some(0);
+        };
+        let header = (2 * core::mem::size_of::<usize>()
+            + core::mem::size_of::<Vec<ExactScoringExecutionBatch>>()) as u128;
+        let outer = (batches.capacity() as u128)
+            .checked_mul(core::mem::size_of::<ExactScoringExecutionBatch>() as u128)?;
+        batches
+            .iter()
+            .try_fold(header.checked_add(outer)?, |sum, batch| {
+                sum.checked_add(batch.checked_nested_retained_bytes()?)
+            })
     }
 
     pub fn spin_coverage_execution_batches(&self) -> &[SpinCoverageExecutionBatch] {
@@ -1748,7 +1769,9 @@ impl CoreExecutionResult {
     pub(crate) fn take_exact_scoring_execution_batches(
         &mut self,
     ) -> Vec<ExactScoringExecutionBatch> {
-        core::mem::take(&mut self.exact_scoring_execution_batches)
+        self.exact_scoring_execution_batches
+            .take()
+            .map_or_else(Vec::new, Arc::unwrap_or_clone)
     }
 
     pub(crate) fn take_spin_coverage_execution_batches(
@@ -2762,7 +2785,7 @@ mod tests {
         let mut pending = public_result();
         pending.postprocess_executions = Vec::with_capacity(7);
         pending.postprocess_pattern_weights = Vec::with_capacity(31);
-        pending.exact_scoring_execution_batches = Vec::with_capacity(5);
+        pending.exact_scoring_execution_batches = Some(Arc::new(Vec::with_capacity(5)));
         pending.spin_coverage_execution_batches = Vec::with_capacity(3);
         pending.postprocess_score_cells = Vec::with_capacity(19);
         pending.postprocess_spin_coverages = Vec::with_capacity(2);
@@ -2778,13 +2801,13 @@ mod tests {
         for capacity in [
             published.postprocess_executions.capacity(),
             published.postprocess_pattern_weights.capacity(),
-            published.exact_scoring_execution_batches.capacity(),
             published.spin_coverage_execution_batches.capacity(),
             published.postprocess_score_cells.capacity(),
             published.postprocess_spin_coverages.capacity(),
         ] {
             assert_eq!(capacity, 0);
         }
+        assert!(published.exact_scoring_execution_batches.is_none());
     }
 
     #[test]
@@ -2895,7 +2918,7 @@ mod tests {
         assert_eq!(guarded.packing_candidate_keys.capacity(), 0);
         assert_eq!(guarded.normalized_solution_keys.capacity(), 0);
         assert_eq!(guarded.normalized_solution_identities.capacity(), 0);
-        assert_eq!(guarded.exact_scoring_execution_batches.capacity(), 0);
+        assert!(guarded.exact_scoring_execution_batches.is_none());
         assert!(guarded.path_steps().is_empty());
         assert_eq!(
             guarded

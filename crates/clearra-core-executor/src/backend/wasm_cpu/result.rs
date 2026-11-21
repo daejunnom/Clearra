@@ -2073,15 +2073,12 @@ impl WasmExactSearchSession {
                 WasmExactSearchError::InvalidProblem("wasm_parallel_coverage_universe_mismatch")
             })?;
         if self.problem.objective().kind() != ObjectiveKind::Tiling {
-            let failed_queue_rows = self
-                .problem
-                .pc_chance_evidence_policy()
-                .pc_failed_queue_example_limit()
-                .is_some();
-            if failed_queue_rows {
-                self.coverage_rows = std::mem::take(&mut outcome.failed_queue_rows);
+            let ordinal_chance_rows =
+                super::parallel_worker::retains_ordinal_chance_rows(&self.problem);
+            if ordinal_chance_rows {
+                self.coverage_rows = std::mem::take(&mut outcome.chance_rows);
             }
-            self.coverage_rows_complete &= canonical_minimum_source_complete || failed_queue_rows;
+            self.coverage_rows_complete &= canonical_minimum_source_complete || ordinal_chance_rows;
         }
         // Native family workers retain complete per-solution rows, not the
         // serial verifier's raw candidate row log. Reuse the same validated
@@ -3351,7 +3348,12 @@ impl WasmExactSearchSession {
                     );
             }
         }
-        let exact_candidate_coverage = solution_coverage_required || failed_queue_rows;
+        let exact_candidate_coverage = solution_coverage_required
+            || failed_queue_rows
+            || self
+                .problem
+                .pc_chance_evidence_policy()
+                .retains_pc_probability_v2_evidence();
         #[cfg(any(test, feature = "local-search-ab"))]
         let exact_candidate_coverage =
             exact_candidate_coverage || self.solution_coverage_capture.is_some();
@@ -7814,6 +7816,74 @@ mod tests {
         } else {
             problem.with_pc_minimum_cover_v2_evidence()
         }
+    }
+
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn native_parallel_typed_chance_preserves_exact_candidate_coverage() {
+        let query = PcScenarioQuery::new(
+            PcScenarioBoard::standard_10(4, 0x3c0f_03c0f),
+            PcQueueInput::pattern_expression(
+                QueuePatternExpression::parse("P7", 5040).expect("P7 pattern"),
+            ),
+            PieceWindow::new(6),
+        )
+        .with_rule(clearra_rules::profile::builtin_rules::srs_plus())
+        .with_exact_pieces(Some(6))
+        .with_allow_hold(true)
+        .with_count_policy(PcCountPolicy::CountUnique)
+        .with_objective(ObjectivePolicy::unique());
+        let problem = ProblemCompiler::compile_scenario_percent(&query)
+            .expect("typed chance fixture")
+            .with_pc_chance_probability_v2_evidence();
+        let mut parallel = WasmExactSearchSession::new(&problem).expect("parallel chance session");
+        let control = ExecutionControl::default();
+        let parallel_result = parallel
+            .execute_parallel_if_worthwhile(2, &control)
+            .expect("parallel chance")
+            .expect("fixture takes native family workers");
+        let mut serial = WasmExactSearchSession::new(&problem).expect("serial chance session");
+        let serial_result = loop {
+            match serial
+                .advance(1024, &control)
+                .expect("serial chance advance")
+            {
+                ExactSearchAdvance::Pending => {}
+                ExactSearchAdvance::Completed(result) => break result,
+                ExactSearchAdvance::Cancelled => panic!("unexpected cancellation"),
+            }
+        };
+
+        let row_words = |result: &CoreExecutionResult| {
+            let proof = result
+                .pc_chance_coverage_evidence()
+                .expect("typed chance evidence");
+            assert!(proof.complete());
+            assert!(proof.problem().matches_search_problem(&problem));
+            assert!(proof.row_count() > 1);
+            let union = proof.coverage_union();
+            assert_eq!(union.count_ones(), 5040);
+            assert_eq!(union.words(), result.coverage_pattern_words());
+            let mut rows = proof
+                .rows()
+                .iter()
+                .map(|row| row.coverage_bits().words().to_vec())
+                .collect::<Vec<_>>();
+            rows.sort_unstable();
+            rows
+        };
+        assert_eq!(row_words(&parallel_result), row_words(&serial_result));
+        assert_eq!(
+            parallel_result.coverage_pattern_words(),
+            serial_result.coverage_pattern_words()
+        );
+        let parallel_rows = parallel_result
+            .pc_chance_coverage_evidence()
+            .unwrap()
+            .rows();
+        assert!(parallel_rows
+            .windows(2)
+            .all(|rows| rows[0].candidate_id() < rows[1].candidate_id()));
     }
 
     #[cfg(feature = "parallel")]

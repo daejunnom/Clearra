@@ -2,7 +2,7 @@
 // manufactured result or performance acceptance. CI supplies an already built
 // binary; this file never builds, downloads assets, or publishes anything.
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { readFile, realpath } from 'node:fs/promises';
 import { availableParallelism } from 'node:os';
@@ -26,10 +26,34 @@ const executable = process.env.CLEARRA_REAL_PC24_CLI;
 const sourceCommit = process.env.CLEARRA_REAL_PC24_SOURCE_COMMIT;
 const packagedVersion = process.env.CLEARRA_REAL_PC24_RELEASE_VERSION;
 const PROCESS_TIMEOUT_MS = 15_000;
+const PROCESS_OUTPUT_BYTES = 1024 * 1024;
 
-function invoke(cliPath, arguments_) {
-  return execFileSync(cliPath, arguments_, { encoding: 'utf8', timeout: PROCESS_TIMEOUT_MS,
-    maxBuffer: 1024 * 1024, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+function processFailure(result) {
+  // Report the bounded typed error rather than Node's generic command failure
+  // or raw stdout/stderr, which may contain host paths or artifact contents.
+  let error;
+  try {
+    const payload = JSON.parse(result.stdout);
+    error = payload.summary?.error ?? payload.error;
+  } catch {}
+  const code = /^[A-Z][A-Z0-9_]{1,63}$/u.test(error?.code ?? '') ? error.code : null;
+  const message = typeof error?.message === 'string' && error.message.length <= 160 &&
+    /^(?:pc chance (?:result|compiled authority) rejected: [a-z0-9._ -]+|wasm_[a-z0-9_]+|the (?:operation could not be completed|requested operation is not supported))$/u
+      .test(error.message)
+    ? error.message : null;
+  const processCode = /^E[A-Z0-9_]{1,63}$/u.test(result.error?.code ?? '')
+    ? result.error.code : null;
+  return [`exit=${result.status ?? result.exitCode ?? 'none'}`,
+    ...(result.signal ? [`signal=${result.signal}`] : []),
+    ...(processCode ? [`process=${processCode}`] : []),
+    ...(code ? [code] : []), ...(message ? [message] : [])].join(' ');
+}
+
+function invoke(cliPath, arguments_, { env = process.env, label = 'native CLI' } = {}) {
+  const result = spawnSync(cliPath, arguments_, { encoding: 'utf8', timeout: PROCESS_TIMEOUT_MS,
+    maxBuffer: PROCESS_OUTPUT_BYTES, windowsHide: true, env, stdio: ['ignore', 'pipe', 'pipe'] });
+  if (result.status !== 0) assert.fail(`${label}: ${processFailure(result)}`);
+  return result.stdout.trim();
 }
 
 function fullHeightKey(key, input) {
@@ -157,23 +181,21 @@ async function verifyCompactChanceRunnerParity(cliPath) {
     '--lines', '4', '--pieces', '6', '--patterns', 'P7', '--hold', 'empty',
     '--queue-knowledge', 'oracle', '--backend', 'cpu', '--rule', 'srs-plus',
     '--no-legal-board', '--no-conditioned-reachability'];
-  const maxOutputBytes = 1024 * 1024;
   const timeout = PROCESS_TIMEOUT_MS;
-  const native = JSON.parse(execFileSync(cliPath, [
+  const native = JSON.parse(invoke(cliPath, [
     '--format', 'json', ...request, '--auto-workers', String(workers), '--use-all-cpu-threads',
   ], {
-    encoding: 'utf8', timeout, maxBuffer: maxOutputBytes, windowsHide: true,
     env: { ...process.env, CLEARRA_EXPECTED_VCPUS: String(workers) },
-    stdio: ['ignore', 'pipe', 'pipe'],
+    label: 'direct compact PC chance',
   }));
   const runner = new ClearraCommandRunner({
     executable: cliPath, processLogicalProcessors: workers, expectedVcpus: workers,
     searchWorkersPerSession: workers, useAllLogicalProcessors: true,
-    searchTimeoutMs: timeout, maxOutputBytes, terminationGraceMs: 1_000,
+    searchTimeoutMs: timeout, maxOutputBytes: PROCESS_OUTPUT_BYTES, terminationGraceMs: 1_000,
   });
   const actual = await runner.execute({ arguments: request, timeoutClass: 'pc_reverse',
-    deadlineUnixMs: Date.now() + timeout, maxOutputBytes });
-  assert.equal(actual.exitCode, 0, actual.stderr || actual.stdout);
+    deadlineUnixMs: Date.now() + timeout, maxOutputBytes: PROCESS_OUTPUT_BYTES });
+  if (actual.exitCode !== 0) assert.fail(`Discord compact PC chance: ${processFailure(actual)}`);
   assert.equal(actual.terminationReason, 'exit');
   const discord = JSON.parse(actual.stdout);
   for (const run of [native, discord]) {
@@ -182,6 +204,7 @@ async function verifyCompactChanceRunnerParity(cliPath) {
     assert.equal(run.runtime_identity?.engine_build_id, sourceCommit);
     assert.equal(run.summary.actual_backend, 'wasm-cpu');
     assert.equal(Number(run.summary.workers_used), workers);
+    assert.equal(run.summary.count_complete, true);
     assert.equal(run.summary.probability_complete, true);
     assert.equal(Number(run.summary.coverage_probability), 1);
     assert.equal(Number(run.summary.total_possible_pattern_count), 5040);
@@ -219,18 +242,19 @@ test('real full-height CLI families survive Discord runner and render all physic
   const completed = [];
   for (const profile of realCliProjectionProfiles) {
     for (const input of planned.get(profile)) {
+      const label = `${profile}/${input.name}/${input.product}/b2b=${input.preserveB2b}`;
       const stdout = invoke(cliPath, prepareClearraArguments(input.arguments, { workers: 1,
-        logicalProcessors: 1, outputFormat: 'json', includeSolutionData: true }));
+        logicalProcessors: 1, outputFormat: 'json', includeSolutionData: true }), { label });
       const raw = JSON.parse(stdout);
       const direct = assertDiscordCanonicalOnlyResult({ exitCode: 0, signal: null, stderr: '', stdout });
       const projected = JSON.parse(direct.stdout);
       verifyProduct(raw, projected, input);
       const actual = await executor.execute(input.arguments);
-      assert.equal(actual.exitCode, 0, actual.stderr);
+      if (actual.exitCode !== 0) assert.fail(`${label}: ${processFailure(actual)}`);
       assert.equal(actual.signal, null);
       assert.equal(actual.terminationReason, 'exit');
       assert.deepEqual(JSON.parse(actual.stdout), projected,
-        `${profile}/${input.name}/${input.product}/b2b=${input.preserveB2b}: actual CLI/Discord product drift`);
+        `${label}: actual CLI/Discord product drift`);
       assert.equal(assertDiscordCanonicalOnlyResult(actual).stdout, actual.stdout);
       completed.push([profile, input.name, input.product, input.kind, input.preserveB2b]);
     }

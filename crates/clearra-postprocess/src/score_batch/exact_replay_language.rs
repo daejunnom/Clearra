@@ -169,13 +169,30 @@ enum Phase {
     Failed,
 }
 
+#[derive(Debug)]
+enum ReplayBatchOwner<B> {
+    Slice(Arc<[B]>),
+    ResultVec(Arc<Vec<B>>),
+}
+
+impl<B> core::ops::Deref for ReplayBatchOwner<B> {
+    type Target = [B];
+
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Self::Slice(batches) => batches,
+            Self::ResultVec(batches) => batches.as_slice(),
+        }
+    }
+}
+
 /// A source-bound cooperative cursor. Its heap projection excludes the immutable
 /// Arc pointee: the App owner must admit that source exactly once beside this
 /// cursor. `guard` always receives the full engine inline+heap+temporary peak.
 /// Cancellation or any rejection poisons the cursor, never a partial count.
 #[derive(Debug)]
 struct ReplayLanguageSession<D: ReplayLanguageDomain> {
-    batches: Arc<[D::Batch]>,
+    batches: ReplayBatchOwner<D::Batch>,
     locations: Vec<ExactReplayGraphLocation>,
     pattern_id: usize,
     limits: Limits,
@@ -517,7 +534,7 @@ impl<D: ReplayLanguageDomain> ReplayLanguageSession<D> {
     }
 
     pub fn new(
-        batches: Arc<[D::Batch]>,
+        batches: ReplayBatchOwner<D::Batch>,
         locations: Vec<ExactReplayGraphLocation>,
         pattern_id: usize,
         limits: Limits,
@@ -1235,7 +1252,11 @@ macro_rules! language_cursor {
             ) -> Result<Self, Error> {
                 Ok(Self {
                     inner: ReplayLanguageSession::new(
-                        batches, locations, pattern_id, limits, guard,
+                        ReplayBatchOwner::Slice(batches),
+                        locations,
+                        pattern_id,
+                        limits,
+                        guard,
                     )?,
                 })
             }
@@ -1278,6 +1299,28 @@ language_cursor!(
     FullHeightExecutionBatch,
     FullHeightCandidateExecution
 );
+
+impl ExactReplayLanguageSession {
+    /// Open a cell on the immutable Core-owned compact graph and queue source.
+    /// The caller accounts for the shared allocation, not this cursor handle.
+    pub fn new_shared_batches(
+        batches: Arc<Vec<ExactScoringExecutionBatch>>,
+        locations: Vec<ExactReplayGraphLocation>,
+        pattern_id: usize,
+        limits: Limits,
+        guard: &mut impl FnMut(u128) -> Result<(), Error>,
+    ) -> Result<Self, Error> {
+        Ok(Self {
+            inner: ReplayLanguageSession::new(
+                ReplayBatchOwner::ResultVec(batches),
+                locations,
+                pattern_id,
+                limits,
+                guard,
+            )?,
+        })
+    }
+}
 
 // ReplayEngine's compatibility projection creates at most 12 events/placement,
 // two operation/order/hold generations, three cell-owner working buffers and

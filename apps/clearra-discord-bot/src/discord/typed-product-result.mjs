@@ -12,6 +12,12 @@ const DISPLAY_FAMILY_LIMIT = 24;
 const SCORE_ONLY_EQUALITY = "score-only-attack-informational";
 const SCORE_ONLY_SUMMARY_EQUALITY = "score-only";
 const CANONICAL_SELECTION = "smallest-canonical-candidate-id";
+const PC_REPLAY_MEMBER_PAGE_SIZE = 100n;
+const PC_REPLAY_FIRST_PAGE_METADATA = new Set([
+  "page_contract", "page_source_available", "page_source_identity_sha256",
+  "geometry_count", "geometry_page_number", "candidate_id", "geometry_witness_count",
+  "geometry_pattern_count", "member_page_number", "member_page_count",
+]);
 
 const SETUP_FAMILIES = new Map([
   ["setup-joint-ranking.v2", "setup.joint"],
@@ -80,9 +86,13 @@ function projectPcPath(structured, semantics = "pc") {
     summary.complete !== true ||
     !canonicalDecimal(summary.witness_count) ||
     !canonicalDecimal(summary.materialized_pattern_count) ||
-    !Array.isArray(summary.witnesses) ||
-    BigInt(summary.witness_count) !== BigInt(summary.witnesses.length)
+    !Array.isArray(summary.witnesses)
   ) throw invalid(capabilityId, "family evidence");
+  const paged = !build && [...PC_REPLAY_FIRST_PAGE_METADATA].some(key => Object.hasOwn(summary, key));
+  if (paged) validatePcFirstReplayPage(summary, capabilityId);
+  else if (BigInt(summary.witness_count) !== BigInt(summary.witnesses.length)) {
+    throw invalid(capabilityId, "family evidence");
+  }
   const targetTerminal = build ? summary.target_terminal_board_mask : null;
   if (
     (build && !canonicalBoardMask(targetTerminal)) ||
@@ -113,7 +123,11 @@ function projectPcPath(structured, semantics = "pc") {
       BigInt(witness.candidate_id) < suppliedCandidateId
     )) throw invalid(capabilityId, "core-owned canonical witness");
   }
-  rejectAlternativeMetadata(structured);
+  // Accept only the producer's first-page proof at ingress. The canonical
+  // Discord result below never carries a page handle or another witness.
+  rejectAlternativeMetadata(structured, paged
+    ? new Set([...PC_REPLAY_FIRST_PAGE_METADATA].map(key => "summary." + key))
+    : undefined);
   const projected = clonePlain(structured);
   projected.summary = {
     capability_id: capabilityId,
@@ -132,6 +146,33 @@ function projectPcPath(structured, semantics = "pc") {
   return deepFreeze(projected);
 }
 
+function validatePcFirstReplayPage(summary, capabilityId) {
+  if (
+    summary.page_contract !== "pc-replay-member-page.v2" ||
+    summary.page_source_available !== true ||
+    typeof summary.page_source_identity_sha256 !== "string" ||
+    !/^[0-9a-f]{64}$/u.test(summary.page_source_identity_sha256) ||
+    summary.geometry_page_number !== "1" || summary.member_page_number !== "1" ||
+    summary.candidate_id !== "1" ||
+    !["geometry_count", "geometry_witness_count", "geometry_pattern_count", "member_page_count"]
+      .every(key => canonicalPositiveDecimalU64(summary[key]))
+  ) throw invalid(capabilityId, "first replay page authority");
+  const total = BigInt(summary.witness_count);
+  const geometryCount = BigInt(summary.geometry_count);
+  const geometryWitnesses = BigInt(summary.geometry_witness_count);
+  const geometryPatterns = BigInt(summary.geometry_pattern_count);
+  const firstPageSize = geometryWitnesses < PC_REPLAY_MEMBER_PAGE_SIZE
+    ? geometryWitnesses : PC_REPLAY_MEMBER_PAGE_SIZE;
+  if (
+    geometryWitnesses + geometryCount - 1n > total ||
+    geometryPatterns > BigInt(summary.materialized_pattern_count) ||
+    geometryPatterns > geometryWitnesses ||
+    BigInt(summary.member_page_count) !==
+      (geometryWitnesses + PC_REPLAY_MEMBER_PAGE_SIZE - 1n) / PC_REPLAY_MEMBER_PAGE_SIZE ||
+    BigInt(summary.witnesses.length) !== firstPageSize ||
+    summary.witnesses.some(witness => witness?.candidate_id !== summary.candidate_id)
+  ) throw invalid(capabilityId, "first replay page coverage");
+}
 /**
  * The command/executor boundary owns canonical-only projection. Its result may
  * cross the local runner and the HTTP job client before it reaches the bot, so

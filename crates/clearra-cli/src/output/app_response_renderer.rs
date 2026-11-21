@@ -1860,7 +1860,7 @@ fn pc_path_fields(payload: &PcPathFamilyPayload) -> Result<Vec<RenderField>, &'s
     {
         return Err("PC path canonical witness was missing or mismatched");
     }
-    Ok(vec![
+    let mut fields = vec![
         RenderField::new("capability_id", "pc.path"),
         RenderField::new("witness_contract", payload.witness_contract()),
         RenderField::new("ordering", payload.ordering()),
@@ -1882,7 +1882,31 @@ fn pc_path_fields(payload: &PcPathFamilyPayload) -> Result<Vec<RenderField>, &'s
             "witnesses",
             RenderFieldValue::array(payload.witnesses().iter().map(pc_path_witness_value)),
         ),
-    ])
+    ];
+    if let Some(page) = payload.page_metadata() {
+        fields.extend([
+            RenderField::new("page_contract", page.page_contract.as_str()),
+            RenderField::new("page_source_available", page.page_source_available),
+            RenderField::new(
+                "page_source_identity_sha256",
+                page.page_source_identity_sha256.as_str(),
+            ),
+            RenderField::new("geometry_count", page.geometry_count.as_str()),
+            RenderField::new("geometry_page_number", page.geometry_page_number.as_str()),
+            RenderField::new("candidate_id", page.candidate_id.as_str()),
+            RenderField::new(
+                "geometry_witness_count",
+                page.geometry_witness_count.as_str(),
+            ),
+            RenderField::new(
+                "geometry_pattern_count",
+                page.geometry_pattern_count.as_str(),
+            ),
+            RenderField::new("member_page_number", page.member_page_number.as_str()),
+            RenderField::new("member_page_count", page.member_page_count.as_str()),
+        ]);
+    }
+    Ok(fields)
 }
 
 fn build_path_fields(payload: &BuildPathFamilyPayload) -> Result<Vec<RenderField>, &'static str> {

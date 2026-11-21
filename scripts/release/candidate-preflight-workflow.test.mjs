@@ -5,7 +5,7 @@ import test from 'node:test';
 const workflow = await readFile(new URL('../../.github/workflows/candidate-preflight.yml', import.meta.url), 'utf8');
 function assertIsolated(source) {
   assert.match(source, /^permissions:\r?\n  contents: read$/mu);
-  assert.doesNotMatch(source, /workflow_run:|workflow_call:|pull_request:|\bsecrets\.|\benvironment:|id-token:|:\s*write\b/u);
+  assert.doesNotMatch(source, /workflow_run:|workflow_call:|pull_request:|^  push:|\bsecrets\.|\benvironment:|id-token:|:\s*write\b/mu);
   assert.doesNotMatch(source, /CLEARRA_ACCEPTED_|accepted-wasm-build\.mjs|canonical-acceptance-evidence\.mjs|\bGH_TOKEN\b|\bGITHUB_TOKEN\b/u);
   assert.doesNotMatch(source, /\bgh\s|\bgcloud\s|\bssh\s|\bscp\s|git\s+(?:push|tag)|actions\/deploy-pages|\/dispatches/u);
   const actions = [...source.matchAll(/^\s*(?:- )?uses: (\S+)/gmu)].map((match) => match[1]);
@@ -25,7 +25,8 @@ for (const [name, mutate] of [
   ['secret use', (source) => `${source}\n# secrets.ORACLE_SSH_PRIVATE_KEY_B64`],
   ['accepted receipt', (source) => `${source}\n# node scripts/release/canonical-acceptance-evidence.mjs seal`],
   ['deployment call', (source) => `${source}\n# gh workflow run release-cli.yml --ref main`],
-  ['workflow chain', (source) => source.replace('  push:', '  workflow_run:')],
+  ['workflow chain', (source) => source.replace('  workflow_dispatch:', '  workflow_run:')],
+  ['automatic push gate', (source) => source.replace('  workflow_dispatch:', '  push:')],
   ['canonical cache writer', (source) => source.replace('actions/cache/restore@v4', 'actions/cache/save@v4')],
   ['automatic cache writer', (source) => source.replace('actions/cache/restore@v4', 'actions/cache@v4')],
 ]) {

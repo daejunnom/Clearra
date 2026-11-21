@@ -9,16 +9,18 @@ import { availableParallelism } from 'node:os';
 import { basename, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { build } from 'esbuild';
-import { assertNoBuildLinks, enterManagedBuildOrRelaunch } from './clearra-build-policy.mjs';
+import { assertManagedBuildTransaction, assertNoBuildLinks, enterManagedBuildOrRelaunch } from './clearra-build-policy.mjs';
 import { createClearraWasmBuildContract, clearraWasmBuildContractsEqual }
   from './clearra-wasm-build-contract.mjs';
+import { readChromiumGateWasmInput } from './chromium-gate-wasm-input.mjs';
 import { acquireManagedTransientDirectory } from './managed-transient-directory.mjs';
 
 const SELF = fileURLToPath(import.meta.url);
 const repository = resolve(fileURLToPath(new URL('../..', import.meta.url)));
 const HOST = '127.0.0.1';
 const options = process.argv.slice(2);
-const pairedProbe = pairedProbeOptions(options);
+const gateStaged = options.length === 1 && options[0] === '--gate-staged';
+const pairedProbe = gateStaged ? null : pairedProbeOptions(options);
 const PORT = pairedProbe ? 4195 : 4194;
 const ORIGIN = 'http://' + HOST + ':' + PORT;
 const ROOT_WORKER = '/workers/clearraWorker.ts';
@@ -31,11 +33,11 @@ const PC_CPU = '--objective unique --count unique --queue-knowledge oracle --bac
   '--rule srs-plus --no-hold --no-tablebase ' + ACCELERATORS_OFF;
 
 const runtimeProfile = pairedProbe ? 'benchmark-search' : 'local-service';
-assert.ok(process.env.CLEARRA_RUNTIME_SUPERVISED === '1' &&
-  process.env.CLEARRA_RUNTIME_PROFILE === runtimeProfile,
+assert.ok(gateStaged || (process.env.CLEARRA_RUNTIME_SUPERVISED === '1' &&
+  process.env.CLEARRA_RUNTIME_PROFILE === runtimeProfile),
   'run the reserved ' + PORT + ' listener under clearra-manage runtime run --profile ' + runtimeProfile);
-for (const name of ['CLEARRA_BROWSER_TOOLS_ROOT', 'CLEARRA_REAL_ACCELERATOR_WASM_DIR',
-  'CLEARRA_SOURCE_COMMIT', 'CLEARRA_ENGINE_BUILD_ID']) {
+for (const name of ['CLEARRA_BROWSER_TOOLS_ROOT', 'CLEARRA_SOURCE_COMMIT', 'CLEARRA_ENGINE_BUILD_ID',
+  ...(gateStaged ? [] : ['CLEARRA_REAL_ACCELERATOR_WASM_DIR'])]) {
   assert.ok(process.env[name], name + ' is required');
 }
 const source = process.env.CLEARRA_SOURCE_COMMIT;
@@ -73,18 +75,26 @@ function pairedProbeOptions(args) {
   return { command, workers };
 }
 
-const wasmRoot = join(await realpath(repository), '_local/artifacts/v081-browser-peer-smoke/wasm');
-assertNoBuildLinks(wasmRoot);
-assertNoBuildLinks(resolve(process.env.CLEARRA_REAL_ACCELERATOR_WASM_DIR));
-assert.equal(await realpath(process.env.CLEARRA_REAL_ACCELERATOR_WASM_DIR), wasmRoot);
+const stagedOwner = gateStaged ? assertManagedBuildTransaction({ sourceRoot: repository }) : null;
+const stagedArtifact = gateStaged
+  ? await readChromiumGateWasmInput({ owner: stagedOwner, repositoryRoot: repository })
+  : null;
+const wasmRoot = stagedArtifact?.source ?? join(await realpath(repository), '_local/artifacts/v081-browser-peer-smoke/wasm');
+if (!stagedArtifact) {
+  assertNoBuildLinks(wasmRoot);
+  assertNoBuildLinks(resolve(process.env.CLEARRA_REAL_ACCELERATOR_WASM_DIR));
+  assert.equal(await realpath(process.env.CLEARRA_REAL_ACCELERATOR_WASM_DIR), wasmRoot);
+}
 const manifestFile = 'clearra_wasm.manifest.json';
 const manifestPath = join(wasmRoot, manifestFile);
 assertNoBuildLinks(manifestPath);
-const manifestBytes = await readFile(manifestPath);
-const manifest = JSON.parse(manifestBytes);
-assert.equal(manifest.schema_version, 1);
-assert.ok(clearraWasmBuildContractsEqual(manifest.build, await createClearraWasmBuildContract(repository)),
-  'the prebuilt WASM must match the complete current-source build contract');
+const manifestBytes = stagedArtifact?.files.get(manifestFile) ?? await readFile(manifestPath);
+const manifest = stagedArtifact?.manifest ?? JSON.parse(manifestBytes);
+if (!stagedArtifact) {
+  assert.equal(manifest.schema_version, 1);
+  assert.ok(clearraWasmBuildContractsEqual(manifest.build, await createClearraWasmBuildContract(repository)),
+    'the prebuilt WASM must match the complete current-source build contract');
+}
 const files = new Map([
   ['/', { type: 'text/html; charset=utf-8',
     bytes: '<!doctype html><meta charset="utf-8"><link rel="icon" href="data:,"><title>Clearra CPU Worker smoke</title>' }],
@@ -97,7 +107,7 @@ for (const [entry, namePattern, type] of [
   assert.match(entry.path, namePattern);
   const path = join(wasmRoot, entry.path);
   assertNoBuildLinks(path);
-  const bytes = await readFile(path);
+  const bytes = stagedArtifact?.files.get(entry.path) ?? await readFile(path);
   assert.equal(bytes.length, entry.bytes);
   assert.equal(createHash('sha256').update(bytes).digest('hex'), entry.sha256);
   // The browser sees exactly the bytes that were checked, never a later file.
@@ -160,8 +170,8 @@ const toolsRoot = await realpath(process.env.CLEARRA_BROWSER_TOOLS_ROOT);
 const require = createRequire(join(toolsRoot, 'package.json'));
 assert.equal(require('playwright/package.json').version, PLAYWRIGHT_VERSION);
 const { chromium } = require('playwright');
-const owner = enterManagedBuildOrRelaunch(repository, [SELF, ...options], 'experiment');
-assert.equal(owner.purpose, 'experiment', 'the browser smoke must not write into a product transaction');
+const owner = stagedOwner ?? enterManagedBuildOrRelaunch(repository, [SELF, ...options], 'experiment');
+if (!gateStaged) assert.equal(owner.purpose, 'experiment', 'standalone smoke requires an experiment transaction');
 const scripts = await build({
   absWorkingDir: repository, bundle: true, write: false, format: 'esm', platform: 'browser',
   target: 'es2022', conditions: ['browser'], mainFields: ['browser', 'module', 'main'],
@@ -238,7 +248,9 @@ try {
   assert.deepEqual([...unexpected], [], 'the browser requested files outside the exact asset-free allowlist');
   if (!pairedProbe) {
     console.log('chromium_cpu_worker_smoke=passed source=' + source + ' wasm_sha256=' + manifest.wasm.sha256 +
-      ' verifier_loads=' + verifierLoads + ' release_authority=false');
+      ' verifier_loads=' + verifierLoads + ' release_authority=false' +
+      (stagedArtifact ? ' artifact_input=' + stagedArtifact.artifactInput + ' build_count=0' +
+        (stagedArtifact.acceptedPayloadSha256 ? ' accepted_payload_sha256=' + stagedArtifact.acceptedPayloadSha256 : '') : ''));
   }
 } finally {
   let browserDrained = !launchStarted;
@@ -255,7 +267,7 @@ try {
       }
     } finally {
       // Incomplete launch/close leaves an unresolved lease for reviewed
-      // recovery. The outer supervisor still owns the entire process tree.
+      // recovery. The outer supervisor or finite CI job still owns the process tree.
       if (browserDrained) await scratch.release();
     }
   }

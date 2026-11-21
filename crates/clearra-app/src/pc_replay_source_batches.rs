@@ -9,7 +9,7 @@ use clearra_replay::FullHeightExecutionBatch;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) enum ReplayBatches {
-    Compact(Arc<[ExactScoringExecutionBatch]>),
+    Compact(Option<Arc<Vec<ExactScoringExecutionBatch>>>),
     FullHeight(Arc<[FullHeightExecutionBatch]>),
 }
 
@@ -17,8 +17,8 @@ pub(super) struct PreparedReplayBatches {
     pub batches: ReplayBatches,
     pub retained_graph_bytes: u128,
     pub graph_count: usize,
-    /// Already counted in the exact source Core. No credit for the compact
-    /// batch clone or for separately retained request/host owners.
+    /// Already counted in the exact source Core. No credit for separately
+    /// retained request/host owners.
     pub shared_input_graph_bytes: u128,
 }
 
@@ -39,108 +39,12 @@ pub(super) enum SelectedReplay {
     },
 }
 
-trait BatchStorage: Clone {
-    fn clone_nested_bytes(&self) -> Option<u128>;
-    fn nested_bytes(&self) -> Option<u128>;
-    fn graph_count(&self) -> usize;
-}
-impl BatchStorage for ExactScoringExecutionBatch {
-    fn clone_nested_bytes(&self) -> Option<u128> {
-        self.checked_clone_nested_bytes()
-    }
-    fn nested_bytes(&self) -> Option<u128> {
-        self.checked_nested_retained_bytes()
-    }
-    fn graph_count(&self) -> usize {
-        self.graphs().len()
-    }
-}
-#[cfg(test)]
-impl BatchStorage for FullHeightExecutionBatch {
-    fn clone_nested_bytes(&self) -> Option<u128> {
-        self.checked_clone_nested_bytes()
-    }
-    fn nested_bytes(&self) -> Option<u128> {
-        self.checked_nested_retained_bytes()
-    }
-    fn graph_count(&self) -> usize {
-        self.execution().graphs().len()
-    }
-}
-
-fn retained<B: BatchStorage>(input: &[B]) -> Option<u128> {
-    input.iter().try_fold(
-        bytes::<B>(input.len())
-            .ok()?
-            .checked_add((2 * core::mem::size_of::<usize>()) as u128)?,
-        |n, b| n.checked_add(b.nested_bytes()?),
-    )
-}
-
-fn copy<B: BatchStorage>(
-    input: &[B],
-    original: u128,
-    maximum: u128,
-    problem_id_bytes: usize,
-) -> ReplayResult<(Arc<[B]>, u128, usize)> {
-    let graphs = input
-        .iter()
-        .try_fold(0_usize, |n, b| n.checked_add(b.graph_count()))
-        .ok_or(OVERFLOW)?;
-    let clone_peak = input
-        .iter()
-        .try_fold(
-            bytes::<B>(input.len())?.checked_mul(2).ok_or(OVERFLOW)?,
-            |n, b| n.checked_add(b.clone_nested_bytes()?),
-        )
-        .ok_or(OVERFLOW)?;
-    let fixed = (core::mem::size_of::<PcReplaySourceBuildSession>()
-        + 2 * core::mem::size_of::<usize>()) as u128;
-    let index = bytes::<(u64, ExactReplayGraphLocation)>(graphs)?
-        .checked_add(bytes::<(u64, Vec<ExactReplayGraphLocation>)>(graphs)?)
-        .and_then(|n| n.checked_add(bytes::<ExactReplayGraphLocation>(graphs).ok()?))
-        .ok_or(OVERFLOW)?;
-    ensure_peak(
-        original
-            .checked_add(clone_peak)
-            .and_then(|n| n.checked_add(fixed))
-            .and_then(|n| n.checked_add(index))
-            .and_then(|n| n.checked_add(problem_id_bytes as u128))
-            .ok_or(OVERFLOW)?,
-        maximum,
-        &mut |_| true,
-    )?;
-    let copied = input.to_vec();
-    let copied_heap = copied
-        .iter()
-        .try_fold(bytes::<B>(copied.capacity())?, |n, b| {
-            n.checked_add(b.nested_bytes()?)
-        })
-        .ok_or(OVERFLOW)?;
-    // Vec -> Arc overlaps only outer backing stores. Nested graphs are moved,
-    // not replicated once again for the shared reader owner.
-    ensure_peak(
-        original
-            .checked_add(copied_heap)
-            .and_then(|n| n.checked_add(bytes::<B>(copied.len()).ok()?))
-            .and_then(|n| n.checked_add(fixed))
-            .ok_or(OVERFLOW)?,
-        maximum,
-        &mut |_| true,
-    )?;
-    let copied: Arc<[B]> = copied.into();
-    let owned = retained(&copied).ok_or(OVERFLOW)?;
-    Ok((copied, owned, graphs))
-}
-
 impl ReplayBatches {
     pub(super) fn prepare_from_result(
         problem: &SearchProblem,
         result: &CoreExecutionResult,
         projection: PcPathProjectionContext,
         patterns: usize,
-        original: u128,
-        maximum: u128,
     ) -> ReplayResult<PreparedReplayBatches> {
         if problem.visible_height() > 6 {
             let evidence = result
@@ -182,17 +86,20 @@ impl ReplayBatches {
                     return Err("pc replay graph source does not match the query".into());
                 }
             }
-            let (copied, bytes, count) = copy(
-                input,
-                original,
-                maximum,
-                problem.problem_id().as_str().len(),
-            )?;
+            let bytes = result
+                .checked_exact_scoring_execution_batches_retained_bytes()
+                .ok_or(OVERFLOW)?;
+            let count = input
+                .iter()
+                .try_fold(0_usize, |count, batch| {
+                    count.checked_add(batch.graphs().len())
+                })
+                .ok_or(OVERFLOW)?;
             Ok(PreparedReplayBatches {
-                batches: Self::Compact(copied),
+                batches: Self::Compact(result.exact_scoring_execution_batch_owner().cloned()),
                 retained_graph_bytes: bytes,
                 graph_count: count,
-                shared_input_graph_bytes: 0,
+                shared_input_graph_bytes: bytes,
             })
         }
     }
@@ -200,7 +107,7 @@ impl ReplayBatches {
     pub(super) fn push_flat_index(&self, output: &mut Vec<(u64, ExactReplayGraphLocation)>) {
         match self {
             Self::Compact(batches) => {
-                for (batch, source) in batches.iter().enumerate() {
+                for (batch, source) in compact_slice(batches).iter().enumerate() {
                     for (graph, value) in source.graphs().iter().enumerate() {
                         output.push((
                             value.candidate_id(),
@@ -225,14 +132,29 @@ impl ReplayBatches {
     #[cfg(test)]
     pub(super) fn checked_retained_bytes(&self) -> Option<u128> {
         match self {
-            Self::Compact(b) => retained(b),
-            Self::FullHeight(b) => retained(b),
+            Self::Compact(None) => Some(0),
+            Self::Compact(Some(b)) => b.iter().try_fold(
+                bytes::<ExactScoringExecutionBatch>(b.capacity())
+                    .ok()?
+                    .checked_add(
+                        (2 * core::mem::size_of::<usize>()
+                            + core::mem::size_of::<Vec<ExactScoringExecutionBatch>>())
+                            as u128,
+                    )?,
+                |sum, batch| sum.checked_add(batch.checked_nested_retained_bytes()?),
+            ),
+            Self::FullHeight(b) => b.iter().try_fold(
+                bytes::<FullHeightExecutionBatch>(b.len())
+                    .ok()?
+                    .checked_add((2 * core::mem::size_of::<usize>()) as u128)?,
+                |sum, batch| sum.checked_add(batch.checked_nested_retained_bytes()?),
+            ),
         }
     }
     pub(super) fn source_hasher(&self, problem: &SearchProblem) -> ReplayResult<Sha256> {
         Ok(match self {
             Self::Compact(b) => {
-                crate::pc_replay_source_digest::pc_replay_source_hasher(problem, b)?
+                crate::pc_replay_source_digest::pc_replay_source_hasher(problem, compact_slice(b))?
             }
             Self::FullHeight(b) => {
                 crate::pc_replay_source_digest::full_height_pc_replay_source_hasher(problem, b)?
@@ -241,7 +163,11 @@ impl ReplayBatches {
     }
     pub(super) fn matches_result(&self, result: &CoreExecutionResult) -> bool {
         match self {
-            Self::Compact(b) => b.as_ref() == result.exact_scoring_execution_batches(),
+            Self::Compact(b) => match (b, result.exact_scoring_execution_batch_owner()) {
+                (Some(page), Some(core)) => Arc::ptr_eq(page, core),
+                (None, None) => true,
+                _ => false,
+            },
             Self::FullHeight(b) => result.pc_full_height_replay_evidence().is_some_and(|e| {
                 // The staged pager's memory reservation credited this exact
                 // allocation. Equal content from a separately retained batch
@@ -259,10 +185,11 @@ impl ReplayBatches {
         guard: &mut impl FnMut(u128) -> Result<(), ExactReplayMaterializationError>,
     ) -> Result<ReplayLanguage, ExactReplayMaterializationError> {
         match self {
-            Self::Compact(b) => {
+            Self::Compact(None) => Err(ExactReplayMaterializationError::InvalidEvidence),
+            Self::Compact(Some(b)) => {
                 let extra = cursor_extra::<ExactReplayLanguageSession>();
                 let limits = cursor_limits(limits, extra)?;
-                ExactReplayLanguageSession::new(
+                ExactReplayLanguageSession::new_shared_batches(
                     Arc::clone(b),
                     locations,
                     pattern,
@@ -285,6 +212,12 @@ impl ReplayBatches {
             }
         }
     }
+}
+
+fn compact_slice(
+    batches: &Option<Arc<Vec<ExactScoringExecutionBatch>>>,
+) -> &[ExactScoringExecutionBatch] {
+    batches.as_ref().map_or(&[], |batches| batches.as_slice())
 }
 
 fn cursor_extra<C>() -> u128 {

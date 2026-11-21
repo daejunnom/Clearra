@@ -3531,6 +3531,13 @@ impl GeometrySearch {
         )
     }
 
+    #[cfg(test)]
+    pub(super) fn compiling_target(&self, local_index: usize) -> Option<&TargetGroup> {
+        // A fresh root has not produced an enumerator yet. Inspect its
+        // compiler input without broadening the runtime target accessor.
+        self.compiler.as_ref()?.targets.get(local_index)
+    }
+
     /// Use the ordinary Geometry compiler's exact first decision and order.
     /// A component product has no corresponding single-row first decision;
     /// callers needing a stable representative ordinal must leave it intact.

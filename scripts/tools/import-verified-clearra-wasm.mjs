@@ -59,6 +59,7 @@ function artifactDescriptor(value, prefix, extension) {
 export async function inspectVerifiedClearraWasmDirectory({
   sourceDirectory,
   repositoryRoot = ROOT,
+  environment = process.env,
 }) {
   const source = await requireDirectory(resolve(sourceDirectory));
   const manifestBytes = await readRegularFile(resolve(source, MANIFEST), CLEARRA_WASM_MANIFEST_BYTES);
@@ -69,7 +70,7 @@ export async function inspectVerifiedClearraWasmDirectory({
   }
   artifactDescriptor(manifest.bindings, 'clearra_wasm', 'js');
   artifactDescriptor(manifest.wasm, 'clearra_wasm_bg', 'wasm');
-  await requireFreshBuild(manifest, repositoryRoot);
+  await requireFreshBuild(manifest, repositoryRoot, environment);
   const files = new Map();
   for (const [descriptor, alias] of [
     [manifest.bindings, 'clearra_wasm.js'],
@@ -87,8 +88,8 @@ export async function inspectVerifiedClearraWasmDirectory({
   return { source, manifest, files };
 }
 
-async function requireFreshBuild(manifest, repositoryRoot) {
-  const expected = await createClearraWasmBuildContract(resolve(repositoryRoot));
+async function requireFreshBuild(manifest, repositoryRoot, environment = process.env) {
+  const expected = await createClearraWasmBuildContract(resolve(repositoryRoot), environment);
   if (!clearraWasmBuildContractsEqual(manifest.build, expected)) {
     throw new Error('Verified WASM source/build contract differs from the current source');
   }

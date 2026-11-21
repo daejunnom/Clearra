@@ -2,7 +2,8 @@ function Invoke-WasmReleaseCommand {
     param(
         [string]$FileName,
         [string[]]$Arguments,
-        [string]$Label
+        [string]$Label,
+        [switch]$ShowOutput
     )
 
     $timer = [System.Diagnostics.Stopwatch]::StartNew()
@@ -10,6 +11,9 @@ function Invoke-WasmReleaseCommand {
     $timer.Stop()
     if ($result.ExitCode -ne 0) {
         throw "$Label failed with exit code $($result.ExitCode) after $($timer.ElapsedMilliseconds)ms`n$($result.Output -join "`n")"
+    }
+    if ($ShowOutput) {
+        Write-Output $result.Output
     }
     Write-Output "wasm_stage=$Label status=passed duration_ms=$($timer.ElapsedMilliseconds)"
 }
@@ -347,6 +351,15 @@ function Invoke-WasmBuildTestGate {
             '--expected-source-commit',
             $expectedSourceCommit
         ) 'clearra-wasm exact worker probe'
+        if ($env:GITHUB_ACTIONS -eq 'true') {
+            # Use the same staged binary that feeds Vite. The Worker readback
+            # consumes the canonical producer receipt in release acceptance
+            # and consumes only same-job unqualified bytes in preflight.
+            Invoke-WasmReleaseCommand $nodeCommand.Source @(
+                (Join-Path $Root 'scripts/tools/run-real-chromium-cpu-worker-smoke.mjs'),
+                '--gate-staged'
+            ) 'clearra-browser exact-source CPU Worker acceptance' -ShowOutput
+        }
         $env:CLEARRA_WEB_PUBLIC_DIR = $webPublicDir
 
         # The direct Vite path must carry the same signed accelerator mirrors as

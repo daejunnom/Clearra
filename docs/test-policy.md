@@ -74,6 +74,16 @@ that exceeds 15 seconds of process wall time. This stops a runaway test; it
 does not add a solver-side cap, change backend/worker selection, or include
 compilation time.
 
+Run `Candidate Preflight` once for an exact candidate; it is development
+feedback, not approval to deploy. The removed branch-push workflows for
+placement, historical Recovery investigations, 24L ingress, selective v0.8.1,
+and SRS+ no longer open separate runs. The candidate keeps bounded Linux
+Desktop/Discord checks under one CLI build owner and browser checks under
+the existing WASM gate. Research scripts and recorded results remain in Git;
+explicit PC4 transport/proof work and native comparison benchmarks are not
+part of a candidate dispatch. Production acceptance, publication and
+rollback retain their own authority.
+
 `Trusted` selects the execution surface; it does not override Windows application
 control. Before any requested full/generated-execution task starts, the entry
 point normalizes `auto` to the requested host runtime and checks its policy.

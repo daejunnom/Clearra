@@ -69,7 +69,7 @@ pub struct PcReplayPageSource {
     first_members: Vec<PcPathWitnessV2>,
     maximum_bytes: u128,
     // Original Core is live during manifest construction. The same physical
-    // full-height graph is charged to batches, not duplicated in this reserve.
+    // compact or full-height graph is charged to batches, not duplicated here.
     // Keeping the remaining reserve for later pages is conservative as before.
     original_source_bytes: u128,
     // Additional App response/context/query owners. Separate from the original
@@ -156,9 +156,6 @@ impl PcReplaySourceBuildSession {
         external_reserve_bytes: u128,
     ) -> ReplayResult<Self> {
         let original_core = result.checked_resource_retained_bytes().ok_or(OVERFLOW)?;
-        let original = original_core
-            .checked_add(external_reserve_bytes)
-            .ok_or(OVERFLOW)?;
         let pattern_count = result
             .usize_field("materialized_pattern_count")
             .ok_or("pc replay materialized pattern count unavailable")?;
@@ -171,14 +168,7 @@ impl PcReplaySourceBuildSession {
             retained_graph_bytes,
             graph_count,
             shared_input_graph_bytes,
-        } = ReplayBatches::prepare_from_result(
-            problem,
-            result,
-            projection,
-            pattern_count,
-            original,
-            maximum_bytes,
-        )?;
+        } = ReplayBatches::prepare_from_result(problem, result, projection, pattern_count)?;
         let original_source_bytes = original_core
             .checked_sub(shared_input_graph_bytes)
             .ok_or(OVERFLOW)?;
@@ -791,15 +781,20 @@ mod memory_tests {
         )
         .unwrap();
         let original = result.checked_resource_retained_bytes().unwrap();
-        assert_eq!(session.source.original_source_bytes, original);
+        let graph = result
+            .checked_exact_scoring_execution_batches_retained_bytes()
+            .unwrap();
+        let original_remainder = original.checked_sub(graph).unwrap();
+        assert_eq!(session.source.original_source_bytes, original_remainder);
+        assert_eq!(session.source.retained_graph_bytes, graph);
         assert_eq!(
             session.source.retained_external_bytes(),
-            original.checked_add(extra)
+            original_remainder.checked_add(extra)
         );
         let required = session
             .checked_retained_capacity_bytes()
             .unwrap()
-            .checked_add(original)
+            .checked_add(original_remainder)
             .unwrap()
             .checked_add(extra)
             .unwrap();
@@ -822,10 +817,58 @@ mod memory_tests {
             store
                 .checked_retained_capacity_bytes()
                 .unwrap()
-                .checked_add(original)
+                .checked_add(original_remainder)
                 .unwrap()
                 .checked_add(extra)
         );
+    }
+
+    #[test]
+    fn compact_replay_reuses_exact_graph_and_queue_owner() {
+        let _resource_guard =
+            crate::execution_resource_test_support::execution_resource_test_guard();
+        let (problem, result) = tiny_replay_source();
+        let original = result.exact_scoring_execution_batch_owner().unwrap();
+        let graph_pointer = original[0].graphs().as_ptr();
+        let pattern_pointer = original[0].patterns().as_ptr();
+        let mut session = PcReplaySourceBuildSession::new(&problem, &result, u128::MAX).unwrap();
+        let ReplayBatches::Compact(Some(shared)) = &session.source.batches else {
+            panic!("expected the Core-owned compact replay evidence");
+        };
+        assert!(Arc::ptr_eq(shared, original));
+        assert!(session.source.matches_result(&result.clone()));
+        let independent = result.clone().with_exact_scoring_execution_batches(
+            result.exact_scoring_execution_batches().to_vec(),
+        );
+        assert_eq!(result, independent);
+        assert!(!session.source.matches_result(&independent));
+        // The paging cursor owns everything it needs after Core retirement.
+        drop(result);
+        let control = ExecutionControl::default();
+        let done = (0..1024).any(|_| session.advance(128, &control).unwrap());
+        assert!(done, "bounded compact replay fixture must complete");
+        let source = session.complete().unwrap();
+        assert!(source.witness_count() > 0);
+        assert!(!source.first_members().is_empty());
+        let mut independent_session =
+            PcReplaySourceBuildSession::new(&problem, &independent, u128::MAX).unwrap();
+        assert!((0..1024).any(|_| independent_session.advance(128, &control).unwrap()));
+        let independent_source = independent_session.complete().unwrap();
+        assert_eq!(
+            source.identity_sha256(),
+            independent_source.identity_sha256()
+        );
+        assert_eq!(source.witness_count(), independent_source.witness_count());
+        assert_eq!(source.first_members(), independent_source.first_members());
+        assert_eq!(
+            source.checked_retained_capacity_bytes(),
+            source.checked_full_capacity_recount()
+        );
+        let ReplayBatches::Compact(Some(shared)) = &source.batches else {
+            panic!("completed pager lost the Core allocation");
+        };
+        assert_eq!(shared[0].graphs().as_ptr(), graph_pointer);
+        assert_eq!(shared[0].patterns().as_ptr(), pattern_pointer);
     }
 
     #[test]

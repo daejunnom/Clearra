@@ -13,6 +13,8 @@ import {
   inspectVerifiedClearraWasmDirectory,
 } from './import-verified-clearra-wasm.mjs';
 import { acquireManagedTransientDirectory } from './managed-transient-directory.mjs';
+import { readChromiumGateWasmInput } from './chromium-gate-wasm-input.mjs';
+import { sealAcceptedWasmBuild } from '../release/accepted-wasm-build.mjs';
 
 const MANIFEST = 'clearra_wasm.manifest.json';
 const hash = (bytes) => createHash('sha256').update(bytes).digest('hex');
@@ -30,7 +32,7 @@ async function fixture(t) {
   return { root, repositoryRoot, sourceDirectory, destinationDirectory };
 }
 
-async function generation(options, index = 1) {
+async function generation(options, index = 1, environment = process.env) {
   const bindings = Buffer.from(`export const fixtureGeneration = ${index};\n`);
   const wasm = Buffer.from([0, 97, 115, 109, 1, 0, 0, 0, index]);
   const descriptor = (bytes, prefix, extension) => ({
@@ -39,7 +41,7 @@ async function generation(options, index = 1) {
   });
   const manifest = {
     schema_version: 1,
-    build: await createClearraWasmBuildContract(options.repositoryRoot),
+    build: await createClearraWasmBuildContract(options.repositoryRoot, environment),
     bindings: descriptor(bindings, 'clearra_wasm', 'js'),
     wasm: descriptor(wasm, 'clearra_wasm_bg', 'wasm'),
   };
@@ -50,6 +52,51 @@ async function generation(options, index = 1) {
   ]) await writeFile(resolve(options.sourceDirectory, name), bytes);
   return manifest;
 }
+
+test('Chromium gate executes the existing current-run bytes and rejects a prior attempt or substituted file', async (t) => {
+  const options = await fixture(t);
+  const owner = { purpose: 'product', cargoTarget: await realpath(options.root) };
+  options.sourceDirectory = resolve(owner.cargoTarget, 'clearra-web-public', 'wasm');
+  await mkdir(options.sourceDirectory, { recursive: true });
+  const source = 'a'.repeat(40);
+  const environment = {
+    GITHUB_ACTIONS: 'true', GITHUB_SHA: source, GITHUB_REF: 'refs/heads/main',
+    GITHUB_REPOSITORY: 'owner/project', GITHUB_EVENT_NAME: 'workflow_dispatch',
+    GITHUB_WORKFLOW_REF: 'owner/project/.github/workflows/release-cli.yml@refs/heads/main',
+    GITHUB_RUN_ID: '123', GITHUB_RUN_ATTEMPT: '2',
+    CLEARRA_SOURCE_COMMIT: source, CLEARRA_ENGINE_BUILD_ID: source,
+    CLEARRA_ACCEPTED_WASM_DIR: resolve(options.root, 'download'),
+    CLEARRA_ACCEPTED_RUN_ID: '123', CLEARRA_ACCEPTED_RUN_ATTEMPT: '2',
+  };
+  const manifest = await generation(options, 1, environment);
+  const receipt = await sealAcceptedWasmBuild(options.sourceDirectory, source, '123', '2', {
+    cargo: 'cargo 1.91.0', cmake: 'cmake version 3.31.0', node: 'v22.18.0',
+    npm: '10.9.3', powershell: '7.5.1', rust: 'rustc 1.91.0',
+    wasm_bindgen: 'wasm-bindgen 0.2.126',
+  });
+  const read = (changes = {}, purpose = 'product') => readChromiumGateWasmInput({
+    owner: { ...owner, purpose }, repositoryRoot: options.repositoryRoot,
+    environment: { ...environment, ...changes },
+  });
+  const artifact = await read();
+  assert.equal(artifact.artifactInput, 'canonical-wasm-producer');
+  assert.equal(artifact.acceptedPayloadSha256, receipt.payload_sha256);
+  assert.equal(hash(artifact.files.get(manifest.wasm.path)), manifest.wasm.sha256);
+  await assert.rejects(read({ GITHUB_RUN_ATTEMPT: '3' }), /'2' !== '3'/u);
+  await assert.rejects(read({ GITHUB_RUN_ATTEMPT: '3', CLEARRA_ACCEPTED_RUN_ATTEMPT: '3' }), /run attempt mismatch/u);
+  await assert.rejects(read({ GITHUB_SHA: 'b'.repeat(40) }), /Wrong Actions checkout source/u);
+  await assert.rejects(read({
+    GITHUB_WORKFLOW_REF: 'owner/project/.github/workflows/candidate-preflight.yml@refs/heads/main',
+  }), /release-cli\.yml/u);
+  await assert.rejects(read({
+    GITHUB_WORKFLOW_REF: 'owner/project/.github/workflows/candidate-preflight.yml@refs/heads/main',
+    CLEARRA_ACCEPTED_WASM_DIR: '', CLEARRA_ACCEPTED_RUN_ID: '', CLEARRA_ACCEPTED_RUN_ATTEMPT: '',
+  }, 'experiment'), /found a canonical receipt/u);
+  await writeFile(resolve(options.sourceDirectory, manifest.wasm.path), Buffer.from([0, 1, 2]));
+  await assert.rejects(read(), /closed regular-file set/u);
+  assert.equal(hash(artifact.files.get(manifest.wasm.path)), manifest.wasm.sha256,
+    'the browser receives captured bytes rather than re-reading the mutated file');
+});
 
 test('imports exactly the five original authoritative files without restamping identity', async (t) => {
   const options = await fixture(t);

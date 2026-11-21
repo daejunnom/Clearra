@@ -1788,7 +1788,7 @@ mod tests {
             .local_geometry_targets()
             .expect("verifier targets")[task.family_index as usize];
         let search = worker.prepare_root_search(task).expect("local target view");
-        let root_target = search.target(0).expect("one target group");
+        let root_target = search.compiling_target(0).expect("one compiler target");
         assert_eq!(root_target.key, target.key);
         assert_eq!(root_target.pattern_index_id, task.family_index);
         assert!(Arc::ptr_eq(

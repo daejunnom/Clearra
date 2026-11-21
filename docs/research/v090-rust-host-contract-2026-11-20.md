@@ -91,7 +91,7 @@ bit의 입력 거절을 분리한다. 7L fixture는 3+4 clear가 필요하고
 전송 여부·deadline·프로세스 성능은 별도 관측이다. 기하가 빈 작은 요청을
 자동으로 1워커로 처리한 사실을 다중 워커 증거로 세지 않는다.
 [`run-real-web-verifier-pool-smoke.mjs`](../../scripts/tools/run-real-web-verifier-pool-smoke.mjs)
-및 [호스트별 기존 CI owner](../../.github/workflows/v081-selective-source-ci.yml)는
+및 [당시 호스트별 CI owner](https://github.com/daejunnom/Clearra/blob/38d6e5474696fe2c1f9ddc38c76638bf0666f0b6/.github/workflows/v081-selective-source-ci.yml)는
 소형 실행 재사용의 출발점이다. 최종 승인에서는 전환한 exact SHA/빌드
 산출물로 실제 네 표면을 확인하고 기존 v0.8.1 성능/자산 또는 v0.10.0 TB
 트랙의 완료로 확대하지 않는다.
