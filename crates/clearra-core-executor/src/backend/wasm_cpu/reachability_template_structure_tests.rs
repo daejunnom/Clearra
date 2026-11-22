@@ -223,6 +223,8 @@ fn verify_template(
     };
     let mut expected_inv_translations = vec![[u16::MAX; 3]; poses];
     let mut expected_inv_rotations = vec![Vec::<InverseRotationEdge>::new(); poses];
+    let filtered = template.globally_pruned_rotation_sources != 0;
+    let mut impossible_rotations = 0;
     if template.translation_targets.len() != poses {
         return Err(Translation);
     }
@@ -267,6 +269,7 @@ fn verify_template(
                         .get(from..to)
                         .ok_or(Rotation)?;
                     let mut packed = 0;
+                    let mut earlier_masks = Vec::new();
                     for (original, &(dx, dy)) in deltas[rotation * 3 + slot].iter().enumerate() {
                         let Some(destination) =
                             valid_destination(to_rotation(rotation, slot), x + dx, y + dy)
@@ -279,11 +282,25 @@ fn verify_template(
                         {
                             return Err(Rotation);
                         }
-                        expected_inv_rotations[usize::from(destination)].push((
-                            source,
-                            slot as u8,
-                            u8::try_from(packed).map_err(|_| InverseRotation)?,
-                        ));
+                        let target_mask = masks[usize::from(destination)].ok_or(Rotation)?;
+                        // Independent E2 qualification from reconstructed raw
+                        // footprints: an edge exists on some occupancy iff
+                        // every earlier candidate has a potential blocker
+                        // outside the collision-free source/destination union.
+                        // The earlier list is never shortened by this test.
+                        let possible = masks[source_index].is_some_and(|source_mask| {
+                            let empty = source_mask | target_mask;
+                            earlier_masks.iter().all(|prior: &u64| prior & !empty != 0)
+                        });
+                        impossible_rotations += usize::from(!possible);
+                        if !filtered || possible {
+                            expected_inv_rotations[usize::from(destination)].push((
+                                source,
+                                slot as u8,
+                                u8::try_from(packed).map_err(|_| InverseRotation)?,
+                            ));
+                        }
+                        earlier_masks.push(target_mask);
                         packed += 1;
                     }
                     if packed != targets.len() {
@@ -300,6 +317,12 @@ fn verify_template(
         || template.reverse_rotation_offsets.first() != Some(&0)
         || template.reverse_rotation_offsets.last().copied()
             != u32::try_from(template.reverse_rotation_sources.len()).ok()
+        || (filtered && template.globally_pruned_rotation_sources != impossible_rotations)
+        || template
+            .rotation_targets
+            .len()
+            .checked_sub(template.reverse_rotation_sources.len())
+            != Some(template.globally_pruned_rotation_sources)
     {
         return Err(InverseRotation);
     }
@@ -403,5 +426,25 @@ fn frontier_certificate_template_rejects_consistent_omissions_and_changed_priori
         .find(|edge| edge.prior_target_count > 0)
         .expect("T has a subsequent kick");
     inverse.prior_target_count -= 1;
+    assert_eq!(check(&template), Err(StructuralFault::InverseRotation));
+
+    // A removed legal inverse edge cannot masquerade as one more E2 removal,
+    // even with consistent offsets and the declared removal count updated.
+    let mut template = compile();
+    let removed = template
+        .reverse_rotation_sources
+        .iter()
+        .position(|edge| {
+            edge.prior_target_count == 0
+                && template.state_masks[usize::from(edge.source)] != u64::MAX
+        })
+        .expect("T has a feasible reverse candidate");
+    template.reverse_rotation_sources.remove(removed);
+    for offset in &mut template.reverse_rotation_offsets {
+        if *offset as usize > removed {
+            *offset -= 1;
+        }
+    }
+    template.globally_pruned_rotation_sources += 1;
     assert_eq!(check(&template), Err(StructuralFault::InverseRotation));
 }

@@ -18,7 +18,6 @@ import {
   activeDiscordSearchCapabilities,
   findProductCapability,
 } from "./capability-registry.mjs";
-import { PC_DEPENDENCY_OPTION } from "./pc-dependency-option.mjs";
 
 // SRP rationale: this module has one behavior-level change reason: defining the
 // complete localized Discord application-command registration metadata contract.
@@ -592,7 +591,6 @@ function registrationOptions(input, capabilityId = null) {
         linesOption(discordPcMaxRows(input)),
         pcHoldOption(),
         kicktableOption(true),
-        onOffOption(PC_DEPENDENCY_OPTION, "Optional placement pre-check for 1–4 PC lines", "off"),
       ]);
     case "pc-save-v2":
       return Object.freeze([
@@ -1770,7 +1768,7 @@ function syntax(entry, locale = "en") {
       case "pc-path-v2":
         return `/${path} next:<큐|패턴> field:<grid:윗줄/다음줄|CTK3|v115 Fumen|URL> [lines:1..${discordPcMaxRows(entry.input)}] [hold:<disabled|empty|IOTSZJL>] [kicktable:<내장 프로필>] [spin-profile:<프로필>] [preserve-b2b:<on|off>]`;
       case "pc-chance-v2":
-        return `/${path} next:<패턴> field:<grid:윗줄/다음줄|CTK3|v115 Fumen|URL> [lines:1..${discordPcMaxRows(entry.input)}] [hold:<disabled|empty|IOTSZJL>] [kicktable:<내장 프로필>] [dependency:<on|off>]`;
+        return `/${path} next:<패턴> field:<grid:윗줄/다음줄|CTK3|v115 Fumen|URL> [lines:1..${discordPcMaxRows(entry.input)}] [hold:<disabled|empty|IOTSZJL>] [kicktable:<내장 프로필>]`;
       case "pc-save-v2":
         return `/${path} next:<고정 가방 경계 패턴> field:<grid:윗줄/다음줄|CTK3|v115 Fumen|URL> [lines:1..${DISCORD_PC_FIELD_MAX_ROWS}] [hold:<disabled|empty|IOTSZJL>] [kicktable:<내장 프로필>]`;
       case "pc-allspin-exact-v1":
@@ -1853,7 +1851,7 @@ function syntax(entry, locale = "en") {
     case "pc-path-v2":
       return `/${path} next:<queue|pattern> field:<grid:top-row/next-row|CTK3|v115 Fumen|URL> [lines:1..${discordPcMaxRows(entry.input)}] [hold:<disabled|empty|IOTSZJL>] [kicktable:<built-in>] [spin-profile:<profile>] [preserve-b2b:<on|off>]`;
     case "pc-chance-v2":
-      return `/${path} next:<pattern> field:<grid:top-row/next-row|CTK3|v115 Fumen|URL> [lines:1..${discordPcMaxRows(entry.input)}] [hold:<disabled|empty|IOTSZJL>] [kicktable:<built-in>] [dependency:<on|off>]`;
+      return `/${path} next:<pattern> field:<grid:top-row/next-row|CTK3|v115 Fumen|URL> [lines:1..${discordPcMaxRows(entry.input)}] [hold:<disabled|empty|IOTSZJL>] [kicktable:<built-in>]`;
     case "pc-save-v2":
       return `/${path} next:<fixed-bag-boundary pattern> field:<grid:top-row/next-row|CTK3|v115 Fumen|URL> [lines:1..${DISCORD_PC_FIELD_MAX_ROWS}] [hold:<disabled|empty|IOTSZJL>] [kicktable:<built-in>]`;
     case "pc-allspin-exact-v1":
@@ -1972,7 +1970,6 @@ function inputHelp(entry, locale = "en") {
         `\`field\` is a top-first 10-column grid of 1–${discordPcMaxRows(entry.input)} rows or one static CTK3/v115 Fumen/URL; \`next\` defines the full-oracle queue-pattern universe.`,
         `\`lines\` accepts every height 1–${discordPcMaxRows(entry.input)}; omitting it evaluates all feasible heights serially. \`hold\` is disabled, empty, or one occupied piece.`,
         "This typed probability route owns unique/full-oracle semantics and exposes no objective, queue-knowledge, spin, B2B-preservation, or per-solution-probability control.",
-        "`dependency:on` adds a placement pre-check without changing results. All evaluated targets must be 1–4 lines, with SRS+ or Jstris 180 and P7 or P7P4. Supply `field` and `next` directly when setting this option. The default is off.",
         nativeKickHelp,
       ];
     case "pc-save-v2":
@@ -2283,7 +2280,6 @@ function koreanInputHelp(entry) {
         `\`field\`에는 위쪽 줄부터 적은 10열 1–${discordPcMaxRows(entry.input)}줄 격자 또는 정적 CTK3/v115 Fumen/URL 하나를 입력하며, \`next\`가 전체 큐를 아는 패턴 확률 공간을 정합니다.`,
         `\`lines\`는 1–${discordPcMaxRows(entry.input)} 전부를 지원하며 생략하면 가능한 높이를 순서대로 판정합니다. \`hold\`는 비활성·빈 홀드·미노 하나 중 하나입니다.`,
         "이 타입 확률 경로는 unique·전체 큐 지식 의미를 자체 소유하며 objective, queue-knowledge, 스핀, B2B 보존, 해법별 확률 옵션을 노출하지 않습니다.",
-        "`dependency:on`은 결과를 바꾸지 않고 배치 사전검사를 추가합니다. 모든 목표가 1–4줄이고, SRS+ 또는 Jstris 180과 P7 또는 P7P4를 사용해야 합니다. 이 옵션은 `field`와 `next`를 직접 입력할 때 설정할 수 있으며 기본값은 off입니다.",
         nativeKickHelp,
       ];
     case "pc-save-v2":

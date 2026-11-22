@@ -33,6 +33,9 @@ pub(in super::super) struct PrefixPoseWork {
     pub reached_pose_lanes: u64,
     pub translation_terms: u64,
     pub ordered_kick_terms: u64,
+    /// Largest once-compiled count of globally impossible reverse candidates.
+    /// This is a template footprint, not a per-query saved-work estimate.
+    pub global_kick_pruned_edges_peak: u64,
     pub ground_terms: u64,
     pub peak_logical_bytes: usize,
 }

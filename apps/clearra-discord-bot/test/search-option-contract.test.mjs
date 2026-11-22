@@ -4,10 +4,7 @@ import test from "node:test";
 
 import { encodeCtk3 } from "ctk3";
 
-import {
-  findSlashCommand,
-  formatSlashCommandHelp,
-} from "../src/discord/slash-command-catalog.mjs";
+import { findSlashCommand } from "../src/discord/slash-command-catalog.mjs";
 import {
   buildSlashCommandArgumentSets,
   buildSlashCommandArguments,
@@ -109,7 +106,7 @@ test("native PC routes preserve objective ownership while chance owns typed uniq
   assertValue(chance, "--rule", "srs-plus");
   assert.deepEqual(
     chanceCommand.registration.options.map(({ name }) => name),
-    ["next", "field", "lines", "hold", "kicktable", "dependency"],
+    ["next", "field", "lines", "hold", "kicktable"],
   );
   for (const name of [
     "queue-knowledge",
@@ -161,7 +158,7 @@ test("native PC routes preserve objective ownership while chance owns typed uniq
   );
 });
 
-test("PC chance pre-check is opt-in and preserves the default exact request", () => {
+test("PC chance accepts the former dependency input for pending interactions", () => {
   const options = (pattern, kicktable) => [
     { name: "field", value: EMPTY_FIELD },
     { name: "next", value: pattern },
@@ -193,7 +190,7 @@ test("PC chance pre-check is opt-in and preserves the default exact request", ()
   }
 });
 
-test("PC chance pre-check keeps every automatic target and requires direct input", () => {
+test("legacy PC dependency input preserves its original scope validation", () => {
   const command = commandAt("/pc chance");
   const toggle = { name: "dependency", value: "on" };
   const supported = [
@@ -214,12 +211,7 @@ test("PC chance pre-check keeps every automatic target and requires direct input
   assert.throws(() => buildCommandModalResponse({
     type: 2,
     data: { type: 1, name: "pc", options: [{ type: 1, name: "chance", options: [supported[1], toggle] }] },
-  }), { code: "options.modal_unrepresented" });
-  for (const locale of ["en", "ko", "ja"]) {
-    const help = formatSlashCommandHelp("pc chance", locale);
-    assert.match(help, /dependency:on/u);
-    assert.match(help, /P7P4/u);
-  }
+  }), /unsupported option 'dependency'/i);
 });
 
 test("canonical score and Build surfaces retain every fieldwise semantic distinction", () => {

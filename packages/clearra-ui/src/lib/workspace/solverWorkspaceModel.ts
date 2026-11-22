@@ -58,6 +58,7 @@ export type SolverWorkspaceRequest = {
   workers: number;
   useAllLogicalProcessors: boolean;
   tablebaseEnabled: boolean;
+  /** Legacy saved-draft field; the Core selects eligible dependency searches. */
   precomputeBuildDependencies: boolean;
   legalBoardEnabled: boolean;
   conditionedReachabilityEnabled: boolean;
@@ -119,11 +120,11 @@ export function normalizeWorkspaceRequest(
   request: SolverWorkspaceRequest
 ): SolverWorkspaceRequest {
   assertGuiScoreMode(request.scoreMode);
-  const precomputeBuildDependencies =
-    request.precomputeBuildDependencies && workspaceDependencyPreanalysisAvailable(request);
   // PC products use the exact CPU path. Retain GPU engines and transport
   // options for explicit non-GUI callers, but never select them implicitly.
-  request = { ...request, backend: 'cpu', gpuDevice: 'auto', precomputeBuildDependencies };
+  // Older saved drafts may contain either dependency-toggle value. Neither
+  // value changes the automatic Core route or appears in command previews.
+  request = { ...request, backend: 'cpu', gpuDevice: 'auto', precomputeBuildDependencies: false };
   if (request.scoreMode === 'tiling') {
     return {
       ...request,
@@ -445,23 +446,6 @@ export function scenarioPieceWindow(request: SolverWorkspaceRequest): number | n
   return emptyCells / 4;
 }
 
-/** Expose the qualified subset, not every pattern a product parser accepts.
- * The GUI uses CPU, and the solver still owns per-candidate eligibility. */
-export function workspaceDependencyPreanalysisAvailable(request: SolverWorkspaceRequest): boolean {
-  if (request.scoreMode !== 'off' ||
-      !Number.isInteger(request.lines) || request.lines < 1 || request.lines > 4 ||
-      (request.rule !== 'srs-plus' && request.rule !== 'jstris-180') ||
-      request.queueKnowledge !== 'oracle' || request.preserveB2B || request.tablebaseEnabled ||
-      request.maxPatterns !== undefined ||
-      request.boardMask !== trimBoardMask(request.boardMask, request.lines)) {
-    return false;
-  }
-  const queue = parseBrowserQueueInput(request.queue);
-  if (queue?.kind !== 'pattern' || !/^P7(?:P[1-7])?$/u.test(queue.source)) return false;
-  const pieces = scenarioPieceWindow(request);
-  return pieces !== null && pieces <= queue.sequenceLength;
-}
-
 export function automaticPcTargetLines(
   boardMask: bigint,
   queue: string,
@@ -648,7 +632,6 @@ export function buildWorkspaceCommandArguments(request: SolverWorkspaceRequest):
     tokens.push('--count', request.scoreMode === 'off' ? 'unique' : 'all');
     tokens.push('--rule', request.rule);
     tokens.push(request.tablebaseEnabled ? '--tablebase' : '--no-tablebase');
-    if (request.precomputeBuildDependencies) tokens.push('--build-dependency-dag');
     if (request.solutionProbabilities) tokens.push('--solution-probabilities');
     tokens.push('--queue-knowledge', request.queueKnowledge);
     if (request.preserveB2B) {

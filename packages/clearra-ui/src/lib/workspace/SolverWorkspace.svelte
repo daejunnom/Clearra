@@ -333,7 +333,6 @@
     {request}
     {language}
     {validationCodes}
-    dependencyDagControlAvailable
     {workerAuthority}
     on:change={(event) => updateRequest(event.detail)}
   />

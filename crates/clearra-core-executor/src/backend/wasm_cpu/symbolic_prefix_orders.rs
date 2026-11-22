@@ -274,6 +274,15 @@ pub(super) struct SymbolicPrefixOrders {
     pieces: [PieceKind; MAX_OPERATIONS],
     operation_count: usize,
     active_prefixes: [u64; MAX_PREFIX_WORDS],
+    // Retain the exact original-cell/frame owner used by the proof. The
+    // policy adapter must not rebind a relation to a lookalike candidate.
+    #[cfg(feature = "placement-dependency-pc")]
+    geometry: CandidateGeometry,
+    // A kind-word subsumption proof does not authorize an action policy.
+    // Conservatively withhold that authority whenever the producer enables
+    // the experimental kind-only transformation, even if it elides no edge.
+    #[cfg(feature = "placement-dependency-pc")]
+    physical_action_complete: bool,
     #[cfg(test)]
     complete_language_only: bool,
 }
@@ -647,6 +656,10 @@ impl SymbolicPrefixOrders {
             pieces,
             operation_count,
             active_prefixes,
+            #[cfg(feature = "placement-dependency-pc")]
+            geometry,
+            #[cfg(feature = "placement-dependency-pc")]
+            physical_action_complete: !options.experiment_subsumption,
             #[cfg(test)]
             complete_language_only: bound,
         })
@@ -704,6 +717,84 @@ impl SymbolicPrefixOrders {
             &self.active_prefixes,
             &mut work.language_transitions,
         )
+    }
+
+    /// Compile the already-proved complete action relation for a policy that
+    /// chooses a lock before the next queue reveal. This consumes the same
+    /// concrete operation IDs as the oracle language; it performs no BuildUp
+    /// or movement search. Line clears change each action's physical cells,
+    /// so keys come from this proof's own original-row projection.
+    #[cfg(feature = "placement-dependency-pc")]
+    pub(super) fn compile_observation_language(
+        &self,
+        language: &mut super::queue_observation_policy::PhysicalActionLanguage,
+        control: &ExecutionControl,
+    ) -> Result<(), WasmExactSearchError> {
+        use super::queue_observation_policy::PhysicalActionEdge;
+
+        if control.is_cancelled() {
+            return Err(WasmExactSearchError::Cancelled);
+        }
+        if !self.physical_action_complete {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "wasm_observation_dependency_action_authority_missing",
+            ));
+        }
+        if self.active_prefixes.iter().all(|&word| word == 0) {
+            return Ok(());
+        }
+        let invalid = || {
+            WasmExactSearchError::InvalidProblem(
+                "wasm_observation_dependency_relation_inconsistent",
+            )
+        };
+        let full = usize::from(self.terminal_prefix());
+        let mut classes = [u32::MAX; MAX_PREFIX_WORDS * 64];
+        let mut edges = Vec::new();
+        edges.try_reserve_exact(self.operation_count).map_err(|_| {
+            WasmExactSearchError::InvalidProblem("wasm_observation_dependency_storage_unavailable")
+        })?;
+        for (word, &active) in self.active_prefixes[..=full / 64].iter().enumerate().rev() {
+            let mut uncompiled = active;
+            while uncompiled != 0 {
+                if control.is_cancelled() {
+                    return Err(WasmExactSearchError::Cancelled);
+                }
+                let lane = (u64::BITS - 1 - uncompiled.leading_zeros()) as usize;
+                uncompiled ^= 1_u64 << lane;
+                let prefix = word * 64 + lane;
+                if prefix > full {
+                    return Err(invalid());
+                }
+                let deleted = self.geometry.symbolic_deleted_rows(prefix as u16);
+                let (_, placements) = self.geometry.symbolic_frame(deleted);
+                edges.clear();
+                // Distinct pending operations cannot acquire the same key:
+                // their original footprints are disjoint, each admitted
+                // lock retains all four cells, and deleting rows maps the
+                // surviving cells injectively into physical coordinates.
+                // Their images therefore remain disjoint four-cell sets.
+                for (operation, piece) in self.live_operations_after(prefix as u16) {
+                    let child = classes[prefix | (1 << operation)];
+                    if child == u32::MAX {
+                        return Err(invalid());
+                    }
+                    edges.push(PhysicalActionEdge::new(
+                        piece,
+                        placements[operation],
+                        child,
+                    )?);
+                }
+                let remaining_depth = self.operation_count - prefix.count_ones() as usize;
+                classes[prefix] =
+                    language.intern_node(remaining_depth as u8, &mut edges, control)?;
+            }
+        }
+        let root = classes[0];
+        if root == u32::MAX {
+            return Err(invalid());
+        }
+        language.insert_root(root)
     }
 
     #[cfg(feature = "placement-dependency-pc")]
@@ -1500,6 +1591,57 @@ mod tests {
         });
         assert_eq!(experiment.harddrop_certificates, 0);
         assert_eq!(experiment.language_transitions, 0);
+    }
+
+    #[cfg(feature = "placement-dependency-pc")]
+    #[test]
+    fn kind_subsumption_authority_cannot_be_consumed_as_physical_actions() {
+        let low_o = 3 | 3 << 10;
+        let high_o = low_o << 20;
+        let required = low_o | high_o;
+        let initial = ((1_u64 << 40) - 1) & !required;
+        let catalog =
+            GeometryCatalog::compile_for_required_cells_on_dimensions(10, 4, initial, required)
+                .unwrap();
+        let rows = [low_o, high_o].map(|cells| catalog.skeleton_id(PieceKind::O, cells).unwrap());
+        let candidate = GeometryCandidate::from_rows(&catalog, 0, &rows).unwrap();
+        let control = ExecutionControl::default();
+        let mut work = SymbolicPrefixWork::default();
+        let orders = SymbolicPrefixOrders::compile_with_options(
+            &catalog,
+            &candidate,
+            KickTableProfileId::SrsPlus,
+            &control,
+            &mut ReachabilityWorkspace::default(),
+            &mut work,
+            0,
+            PrefixCompileOptions {
+                target_reverse: true,
+                upper_bound: false,
+                packed_upper: false,
+                frame_owner: false,
+                catalog_static_guards: None,
+                experiment_subsumption: true,
+            },
+        )
+        .unwrap();
+        // The conservative authority boundary is independent of whether
+        // this small producer happened to remove an edge. Its kind language
+        // remains a valid existential oracle input.
+        let mut kind_language = PieceOrderLanguageCache::default();
+        assert!(orders
+            .compile_product_language(&mut kind_language, &mut work)
+            .unwrap()
+            .is_some());
+        let mut physical_language =
+            super::super::queue_observation_policy::PhysicalActionLanguage::default();
+        assert!(matches!(
+            orders.compile_observation_language(&mut physical_language, &control),
+            Err(WasmExactSearchError::InvalidProblem(
+                "wasm_observation_dependency_action_authority_missing"
+            )),
+        ));
+        assert!(!physical_language.has_roots());
     }
 
     #[test]

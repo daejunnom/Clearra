@@ -19,7 +19,7 @@ Sfinder-man形式のネイティブ互換コマンドは clearra sfinder <comman
 開幕プリセットの実行例: clearra pc --lines 2"#
         }
         CliHelpTopic::Pc => {
-            r#"使い方: clearra pc --lines 2 [--queue IOTSZJL] [--fixed|--observed] [--hold|--no-hold] [--queue-knowledge oracle|visible-7] [--objective all|unique|min-cover|tiling] [--tiling-only] [--solution-probabilities] [--score] [--score-profile tetrio|guideline|jstris-ultra] [--spin-profile t-spins|t-spins-plus|all-spin|all-spin-plus|all-mini|all-mini-plus] [--initial-b2b N] [--preserve-b2b] [--rule srs-plus|srs|srs-x|jstris-180|no-kick] [--kick-profile-json JSON] [--backend auto|cpu|gpu|hybrid] [--workers N|--cpu-threads N|--auto-workers N] [--use-all-cpu-threads] [--cpu-warmup] [--gpu-warmup] [--tablebase|--no-tablebase] [--legal-board|--no-legal-board] [--conditioned-reachability|--no-conditioned-reachability] [--build-dependency-dag|--no-build-dependency-dag] [--no-gpu] [--deterministic] [--max-candidates N] [--max-patterns N] [--max-memory-mib N] [--gpu-device auto|N] [--allow-backend-fallback|--no-backend-fallback]
+            r#"使い方: clearra pc --lines 2 [--queue IOTSZJL] [--fixed|--observed] [--hold|--no-hold] [--queue-knowledge oracle|visible-7] [--objective all|unique|min-cover|tiling] [--tiling-only] [--solution-probabilities] [--score] [--score-profile tetrio|guideline|jstris-ultra] [--spin-profile t-spins|t-spins-plus|all-spin|all-spin-plus|all-mini|all-mini-plus] [--initial-b2b N] [--preserve-b2b] [--rule srs-plus|srs|srs-x|jstris-180|no-kick] [--kick-profile-json JSON] [--backend auto|cpu|gpu|hybrid] [--workers N|--cpu-threads N|--auto-workers N] [--use-all-cpu-threads] [--cpu-warmup] [--gpu-warmup] [--tablebase|--no-tablebase] [--legal-board|--no-legal-board] [--conditioned-reachability|--no-conditioned-reachability] [--no-gpu] [--deterministic] [--max-candidates N] [--max-patterns N] [--max-memory-mib N] [--gpu-device auto|N] [--allow-backend-fallback|--no-backend-fallback]
 B2Bを維持できる解法の有無を調べる専用形式: `clearra pc allspin-sol --help`、`clearra pc allspin-pres-chance --help`
 --auto-workersはCPUの自動並列数に上限を設定します。小規模な検索を強制的に並列実行するものではありません。
 --tiling-onlyは、BuildUpによる構築可能性の検証や確率計算を行わず、正確な幾何学的配置を列挙します。実際には組めない配置が含まれる場合があります。ホールドは使用可能なミノの種類と個数に引き続き影響します。ルール、スコア、B2B、visible-7、tablebase、依存DAG、解法別確率のオプションは利用できません。
@@ -38,7 +38,7 @@ ASCとARSはルールレジストリで確認できますが、出現位置か�
             r#"使い方: clearra percent --queue IOTSZ [--observed|--bag-aligned|--fixed] [--min-len N] [--max-patterns N] [--failed-count N]"#
         }
         CliHelpTopic::FailedQueue => {
-            r#"使い方: clearra failed-queue --lines 4 [--patterns P7P3 | --queue IOTSZJL --fixed|--observed] [--hold|--no-hold] [--queue-knowledge oracle|visible-7] [--rule srs-plus|srs|srs-x|jstris-180] [--backend auto|cpu|gpu|hybrid] [--workers N|--cpu-threads N|--auto-workers N] [--tablebase|--no-tablebase] [--build-dependency-dag|--no-build-dependency-dag] [--failed-count N]
+            r#"使い方: clearra failed-queue --lines 4 [--patterns P7P3 | --queue IOTSZJL --fixed|--observed] [--hold|--no-hold] [--queue-knowledge oracle|visible-7] [--rule srs-plus|srs|srs-x|jstris-180] [--backend auto|cpu|gpu|hybrid] [--workers N|--cpu-threads N|--auto-workers N] [--tablebase|--no-tablebase] [--failed-count N]
 指定した逆向き検索のPC目標に到達できないミノ順を、成功集合の正確な補集合として返します。--failed-countを省略すると失敗するミノ順をすべて具体化します。"#
         }
         CliHelpTopic::Setup => {
@@ -107,8 +107,8 @@ PC専用の幾何学的配置検索を実行し、供給されるミノと正確
 objective all、count allで完全なリプレイ経路を専用検索します。各手順は配置、元のミノ列、ホールドと読み取り位置の遷移、消費ミノ数、ライン消去を保持します。--tablebaseは正確に適格化された完全候補群だけを使用し、オフライン探索を自動開始しません。最適集合の同率候補ではなく、同率集合のメタデータやページ継続カーソルは含みません。"#
         }
         ProductHelpTopic::PcChance => {
-            r#"使い方: clearra pc chance --lines 2 [--patterns PATTERN | --queue IOTSZJL] [--hold|--no-hold] [--rule srs-plus|srs|srs-x|jstris-180|no-kick] [--backend auto|cpu|gpu|hybrid] [--workers N|--auto-workers N] [--max-patterns N] [--build-dependency-dag|--no-build-dependency-dag]
-元のミノ順全体に対する正確なPC成功率を返します。--build-dependency-dagを指定すると、依存関係だけで検証します。対応外の入力や検証を完了できない場合は、通常の探索に切り替えず終了します。既定では無効です。トップレベルのchanceとpercentは従来互換の汎用結果を返します。"#
+            r#"使い方: clearra pc chance --lines 2 [--patterns PATTERN | --queue IOTSZJL] [--hold|--no-hold] [--rule srs-plus|srs|srs-x|jstris-180|no-kick] [--backend auto|cpu|gpu|hybrid] [--workers N|--auto-workers N] [--max-patterns N]
+元のミノ順全体に対する正確なPC成功率を返します。トップレベルのchanceとpercentは従来互換の汎用結果を返します。"#
         }
         ProductHelpTopic::PcScore => {
             r#"使い方: clearra pc score --lines 2 [--patterns PATTERN | --queue IOTSZJL] [--hold|--no-hold] [--score-profile tetrio|guideline|jstris-ultra] [--spin-profile disabled|t-spin-simple|t-spins|t-spins-plus|all-spin|all-spin-plus|all-mini|all-mini-plus] [--initial-b2b N] [--rule srs-plus|srs|srs-x|jstris-180|no-kick] [--workers N|--auto-workers N] [--use-all-cpu-threads] [--cpu-warmup] [--tablebase|--no-tablebase]
@@ -142,13 +142,13 @@ objective all、count allで完全なリプレイ経路を専用検索します�
         ProductHelpTopic::PcAllSpinSolution => {
             r#"使い方: clearra pc allspin-sol --lines 2|4|6 --queue QUEUE --spin-profile t-spins|t-spins-plus|all-spin|all-spin-plus|all-mini|all-mini-plus [--no-hold] [検索オプション]
   または: clearra pc allspin-sol --board-mask HEX --height 1..6 --pieces N [--lines same-as-height] --queue QUEUE --spin-profile PROFILE [--no-hold] [検索オプション]
-検索オプション: [--rule srs-plus|srs|srs-x|jstris-180|no-kick] [--backend auto|cpu|gpu|hybrid] [--gpu-device auto|N] [--workers N|--auto-workers N] [--use-all-cpu-threads] [--cpu-warmup] [--gpu-warmup] [--tablebase|--no-tablebase] [--build-dependency-dag|--no-build-dependency-dag] [--max-patterns N] [--max-nodes N] [--max-frontier-states N] [--max-candidates N] [--max-memory-mib N] [--allow-backend-fallback|--no-backend-fallback]
+検索オプション: [--rule srs-plus|srs|srs-x|jstris-180|no-kick] [--backend auto|cpu|gpu|hybrid] [--gpu-device auto|N] [--workers N|--auto-workers N] [--use-all-cpu-threads] [--cpu-warmup] [--gpu-warmup] [--tablebase|--no-tablebase] [--max-patterns N] [--max-nodes N] [--max-frontier-states N] [--max-candidates N] [--max-memory-mib N] [--allow-backend-fallback|--no-backend-fallback]
 元の固定ミノ順を正確に1件指定して、固定とライン消去を逆にたどるPC検索を行います。B2Bを維持できる手順が存在する場合は、一定の規則で選んだ手順を返します。分母は具体化された元のミノ順1件であり、ホールドや経路の重複は数えません。任意のboard-mask/height/piecesの組は初期盤面を表します。盤面を空にする目標は暗黙に固定され、目標盤面の入力はありません。この組と--linesを併用する場合は--heightと同じ値が必要です。この形式はoracle-fixed専用であり、FILEやローカルパス、visible-7、スコアや目的の選択、シナリオのホールド枠の上書き、呼び出し側による--preserve-b2b指定は拒否されます。Clearraは明示的に選択された6種類のスピン・リプレイ仕様を使用します。sfinderbotのallspin_sol_finderとはコマンドの目的のみ互換で、従来の認識規則との完全一致を保証しません。"#
         }
         ProductHelpTopic::PcAllSpinPreservationChance => {
             r#"使い方: clearra pc allspin-pres-chance --lines 2|4|6 --patterns PATTERN --spin-profile t-spins|t-spins-plus|all-spin|all-spin-plus|all-mini|all-mini-plus [--no-hold] [検索オプション]
   または: clearra pc allspin-pres-chance --board-mask HEX --height 1..6 --pieces N [--lines same-as-height] --patterns PATTERN --spin-profile PROFILE [--no-hold] [検索オプション]
-検索オプション: [--rule srs-plus|srs|srs-x|jstris-180|no-kick] [--backend auto|cpu|gpu|hybrid] [--gpu-device auto|N] [--workers N|--auto-workers N] [--use-all-cpu-threads] [--cpu-warmup] [--gpu-warmup] [--tablebase|--no-tablebase] [--build-dependency-dag|--no-build-dependency-dag] [--max-patterns N] [--max-nodes N] [--max-frontier-states N] [--max-candidates N] [--max-memory-mib N] [--allow-backend-fallback|--no-backend-fallback]
+検索オプション: [--rule srs-plus|srs|srs-x|jstris-180|no-kick] [--backend auto|cpu|gpu|hybrid] [--gpu-device auto|N] [--workers N|--auto-workers N] [--use-all-cpu-threads] [--cpu-warmup] [--gpu-warmup] [--tablebase|--no-tablebase] [--max-patterns N] [--max-nodes N] [--max-frontier-states N] [--max-candidates N] [--max-memory-mib N] [--allow-backend-fallback|--no-backend-fallback]
 具体化された元のミノ順パターンに対し、固定とライン消去を逆にたどるPC検索を行います。B2Bを維持する手順が存在するミノ順の件数、元のミノ順の総数、入力の確率、計算の完全性を返します。各ミノ順は1回だけ数え、ホールドや経路の重複は数えません。任意のboard-mask/height/piecesの組は初期盤面を表します。盤面を空にする目標は暗黙に固定され、目標盤面の入力はありません。この組と--linesを併用する場合は--heightと同じ値が必要です。この形式はoracle-fixed専用であり、FILEやローカルパス、visible-7、スコアや目的の選択、シナリオのホールド枠の上書き、呼び出し側による--preserve-b2b指定は拒否されます。Clearraは明示的に選択された6種類のスピン・リプレイ仕様を使用します。sfinderbotのallspin_pres_chanceとはコマンドの目的のみ互換で、従来の認識規則との完全一致を保証しません。"#
         }
         ProductHelpTopic::BuildV2 => {

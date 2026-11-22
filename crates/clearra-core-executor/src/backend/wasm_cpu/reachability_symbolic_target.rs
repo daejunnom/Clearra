@@ -207,6 +207,9 @@ pub(super) fn compile_prefix_target_lanes_from_planes(
         }
     }
     work.lane_boards += u64::from(lanes.count_ones());
+    work.global_kick_pruned_edges_peak = work
+        .global_kick_pruned_edges_peak
+        .max(template.globally_pruned_rotation_sources as u64);
     let Some(mut relation) = scratch.start(occupied, lanes, state_count, work) else {
         check()?;
         return Ok(None);
@@ -311,6 +314,164 @@ mod tests {
             }
         }
         (occupied, lanes)
+    }
+
+    fn set_global_filter(
+        mut template: ReachabilityTemplate,
+        enabled: bool,
+    ) -> ReachabilityTemplate {
+        let (offsets, sources) = super::super::compile_reverse_rotation_sources(
+            &template.state_masks,
+            &template.rotation_target_offsets,
+            &template.rotation_targets,
+            enabled,
+        );
+        template.globally_pruned_rotation_sources = template.rotation_targets.len() - sources.len();
+        template.reverse_rotation_offsets = offsets;
+        template.reverse_rotation_sources = sources;
+        template
+    }
+
+    #[test]
+    fn global_kick_pruning_preserves_reverse_lanes_above_four_lines_and_reduces_work() {
+        const WIDTH: u8 = 10;
+        let control = ExecutionControl::default();
+        let mut before_terms = 0;
+        let mut after_terms = 0;
+        let mut compared_locks = 0;
+        let mut positive = 0;
+        let mut negative = 0;
+        let mut removed_edges = 0;
+        for height in [5_u8, 6] {
+            let boards = [
+                (0, 0),
+                (1, 0x4002),
+                (7, 0x4802),
+                (19, (0x3ff_u64 & !(3 << 4)) << ((height - 2) * WIDTH)),
+                (47, 0x3f_5022_07e7),
+                (
+                    63,
+                    (0x1ff_u64 << ((height - 1) * WIDTH)) | (0x155_u64 << ((height - 3) * WIDTH)),
+                ),
+            ];
+            let (occupied, lanes) = planes(&boards);
+            for profile in [
+                KickTableProfileId::Srs90,
+                KickTableProfileId::SrsPlus,
+                KickTableProfileId::SrsX,
+                KickTableProfileId::Jstris180,
+                KickTableProfileId::NoKick,
+            ] {
+                for piece in PieceKind::STANDARD_TETROMINOES {
+                    let baseline = set_global_filter(
+                        ReachabilityTemplate::compile(WIDTH, height, piece, profile),
+                        false,
+                    );
+                    let filtered = set_global_filter(
+                        ReachabilityTemplate::compile(WIDTH, height, piece, profile),
+                        true,
+                    );
+                    // Both runs retain precisely the same ordered guard input.
+                    assert_eq!(baseline.state_masks, filtered.state_masks);
+                    assert_eq!(
+                        baseline.rotation_target_offsets,
+                        filtered.rotation_target_offsets
+                    );
+                    assert_eq!(baseline.rotation_targets, filtered.rotation_targets);
+                    assert_eq!(
+                        baseline.rotation_kick_indices,
+                        filtered.rotation_kick_indices
+                    );
+                    removed_edges += filtered.globally_pruned_rotation_sources;
+                    let reference = boards.map(|(lane, board)| {
+                        (
+                            lane,
+                            reachability_reference::reference_spawn_lock_anchors(
+                                WIDTH, height, board, piece, profile,
+                            )
+                            .unwrap(),
+                        )
+                    });
+                    let mut targets = BTreeMap::<u64, Vec<InstantiatedRealization>>::new();
+                    for (index, &mask) in filtered.state_masks.iter().enumerate() {
+                        if mask.count_ones() != 4 {
+                            continue;
+                        }
+                        let state = super::super::state_from_index(WIDTH, filtered.ceiling, index);
+                        targets
+                            .entry(mask)
+                            .or_default()
+                            .push(InstantiatedRealization {
+                                lock_mask: mask,
+                                rotation: state.rotation,
+                                x: state.x,
+                                lock_y: state.y,
+                            });
+                    }
+                    let mut old_scratch = ReverseScratch::default();
+                    let mut new_scratch = ReverseScratch::default();
+                    for locks in targets.values().step_by(11) {
+                        let mut old_work = PrefixPoseWork::default();
+                        let mut new_work = PrefixPoseWork::default();
+                        let old = compile_prefix_target_lanes_from_planes(
+                            &baseline,
+                            &occupied,
+                            lanes,
+                            locks,
+                            &control,
+                            &mut old_work,
+                            &mut old_scratch,
+                        )
+                        .unwrap()
+                        .expect("unfiltered finite target relation");
+                        let new = compile_prefix_target_lanes_from_planes(
+                            &filtered,
+                            &occupied,
+                            lanes,
+                            locks,
+                            &control,
+                            &mut new_work,
+                            &mut new_scratch,
+                        )
+                        .unwrap()
+                        .expect("filtered finite target relation");
+                        assert_eq!(new, old, "{height}L {piece:?} {profile:?} {locks:?}");
+                        assert_eq!(new_work.worklist_pops, old_work.worklist_pops);
+                        assert_eq!(new_work.reached_pose_lanes, old_work.reached_pose_lanes);
+                        assert!(new_work.pose_domains <= old_work.pose_domains);
+                        assert!(new_work.ordered_kick_terms <= old_work.ordered_kick_terms);
+                        assert_eq!(old_work.global_kick_pruned_edges_peak, 0);
+                        assert_eq!(
+                            new_work.global_kick_pruned_edges_peak,
+                            filtered.globally_pruned_rotation_sources as u64
+                        );
+                        before_terms += old_work.ordered_kick_terms;
+                        after_terms += new_work.ordered_kick_terms;
+                        for (lane, anchors) in reference {
+                            let expected = locks.iter().any(|lock| {
+                                let bit =
+                                    lock.lock_y as usize * usize::from(WIDTH) + lock.x as usize;
+                                anchors[lock.rotation.quarter_turns() as usize] & (1_u64 << bit)
+                                    != 0
+                            });
+                            assert_eq!(
+                                new & (1_u64 << lane) != 0,
+                                expected,
+                                "{height}L {piece:?} {profile:?} lane={lane} {locks:?}"
+                            );
+                            compared_locks += 1;
+                            positive += usize::from(expected);
+                            negative += usize::from(!expected);
+                        }
+                    }
+                }
+            }
+        }
+        assert!(compared_locks > 1_000);
+        assert!(positive > 0 && negative > 0);
+        assert!(removed_edges > 0);
+        assert!(after_terms < before_terms);
+        eprintln!("global E2 reverse parity: heights=5,6 profiles=5 pieces=7 locks={compared_locks} positive={positive} negative={negative} template_edges_removed={removed_edges} ordered_terms_before={before_terms} ordered_terms_after={after_terms}");
     }
 
     #[test]

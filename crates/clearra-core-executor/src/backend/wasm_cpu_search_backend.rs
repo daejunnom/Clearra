@@ -1083,6 +1083,7 @@ fn validate_shared_terminal_problem(
 
 fn should_use_webgpu(problem: &SearchProblem) -> bool {
     if problem.backend_policy().precompute_build_dependencies()
+        || (cfg!(feature = "placement-dependency-pc") && problem.pc_placement_dependency_eligible())
         || !problem.backend_policy().runtime_webgpu_available()
     {
         return false;
@@ -1661,6 +1662,51 @@ mod coverage_summary_tests {
         .with_objective(ObjectivePolicy::all().with_score_summary())
         .with_execution_policy(execution_policy);
         ProblemCompiler::compile_scenario_pc(&query).expect("ten-piece auto GPU problem")
+    }
+
+    #[cfg(feature = "placement-dependency-pc")]
+    #[test]
+    fn automatic_dependency_pc_keeps_auto_gpu_capability_on_the_qualified_cpu_path() {
+        let query = PcScenarioQuery::new(
+            PcScenarioBoard::standard_10(4, 0x3c0f_03c0),
+            PcQueueInput::standard_7_bag(),
+            PieceWindow::new(7),
+        )
+        .with_exact_pieces(Some(7))
+        .with_allow_hold(true)
+        .with_count_policy(PcCountPolicy::CountUnique)
+        .with_objective(ObjectivePolicy::unique());
+        let policy = PcExecutionPolicy::mvp_default()
+            .with_requested_backend(RequestedSearchBackend::Auto)
+            .with_runtime_webgpu_available(true);
+        for legacy in [false, true] {
+            let problem =
+                ProblemCompiler::compile_scenario_pc(&query.clone().with_execution_policy(
+                    policy.clone().with_precompute_build_dependencies(legacy),
+                ))
+                .unwrap();
+            assert!(problem.pc_placement_dependency_eligible());
+            assert!(!super::should_use_webgpu(&problem));
+        }
+        let explicit_gpu = ProblemCompiler::compile_scenario_pc(
+            &query.clone().with_execution_policy(
+                policy
+                    .clone()
+                    .with_requested_backend(RequestedSearchBackend::Gpu),
+            ),
+        )
+        .unwrap();
+        assert!(!explicit_gpu.pc_placement_dependency_eligible());
+        assert!(super::should_use_webgpu(&explicit_gpu));
+        let counted = ProblemCompiler::compile_scenario_pc(
+            &query
+                .with_count_policy(PcCountPolicy::CountAll)
+                .with_objective(ObjectivePolicy::all())
+                .with_execution_policy(policy),
+        )
+        .unwrap();
+        assert!(!counted.pc_placement_dependency_eligible());
+        assert!(super::should_use_webgpu(&counted));
     }
 
     fn one_piece_default_auto_score_problem() -> clearra_problem::SearchProblem {

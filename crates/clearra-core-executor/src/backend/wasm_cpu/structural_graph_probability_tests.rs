@@ -2862,3 +2862,144 @@ fn conditional_and_strict_prefix_support_or_preserve_every_empty_hold_queue_ordi
     assert_eq!(successes, 80);
     assert_eq!(hold_only_successes, 64);
 }
+
+#[cfg(feature = "placement-dependency-pc")]
+#[test]
+fn product_dependency_global_pruning_preserves_concrete_frame_and_realization_languages() {
+    use super::reachability::with_global_kick_pruning;
+    use super::symbolic_prefix_orders::{SymbolicPrefixOrders, SymbolicPrefixWork};
+    use PieceKind::{I, J, L, O, S, T, Z};
+
+    // Independent scalar closure of the raw movement oracle's operation
+    // relation. Complete-language pruning may omit physical edges outside
+    // every successful path, so those must not be tested as local negatives.
+    fn complete_edges(physical: &[u16]) -> (Vec<u16>, bool) {
+        let terminal = physical.len() - 1;
+        let mut finish = vec![false; physical.len()];
+        finish[terminal] = true;
+        for prefix in (0..terminal).rev() {
+            let mut allowed = physical[prefix];
+            while allowed != 0 {
+                let operation = allowed.trailing_zeros() as usize;
+                allowed &= allowed - 1;
+                finish[prefix] |= finish[prefix | (1 << operation)];
+            }
+        }
+        let mut reached = vec![false; physical.len()];
+        reached[0] = finish[0];
+        let mut result = vec![0; physical.len()];
+        for prefix in 0..terminal {
+            if !reached[prefix] {
+                continue;
+            }
+            let mut allowed = physical[prefix];
+            while allowed != 0 {
+                let operation = allowed.trailing_zeros() as usize;
+                let bit = 1 << operation;
+                allowed &= allowed - 1;
+                let child = prefix | bit;
+                if finish[child] {
+                    result[prefix] |= bit as u16;
+                    reached[child] = true;
+                }
+            }
+        }
+        (result, finish[0])
+    }
+
+    let repeated_frame = [
+        (O, 0x30_0c00),
+        (O, 0x300c),
+        (O, 0xc030),
+        (O, 0x3_00c0),
+        (O, 0xc_0300),
+        (I, 0x03c0_0000),
+        (I, 0x3c00_0000),
+    ];
+    let opposite_realizations = [(I, 0xf), (I, 0x7800)];
+    // The actual empty-origin 4L identity used by the original P7P4 exact
+    // queue parity test. This test checks all labelled operation edges on
+    // complete paths, not just the IOTZSLJZTI witness or a queue count.
+    let p7p4 = [
+        (I, 0xf),
+        (I, 0xf0),
+        (O, 0xc0300),
+        (T, 0x201c00),
+        (Z, 0xc06000),
+        (Z, 0x1006008000),
+        (S, 0x18030000),
+        (L, 0x1c0100000),
+        (T, 0xe01000000),
+        (J, 0xe020000000),
+    ];
+    let mut checked_complete_edges = 0;
+    let mut checked_prefixes = 0;
+    for (height, placements, profile) in [
+        (
+            2,
+            opposite_realizations.as_slice(),
+            KickTableProfileId::Srs90,
+        ),
+        (3, repeated_frame.as_slice(), KickTableProfileId::Srs90),
+        (4, p7p4.as_slice(), KickTableProfileId::Jstris180),
+        (4, p7p4.as_slice(), KickTableProfileId::SrsPlus),
+    ] {
+        let (catalog, candidate) = fixture(height, placements);
+        let physical = physical_transitions(&catalog, &candidate, profile);
+        let (expected, buildable) = complete_edges(&physical);
+        assert!(buildable, "fixture must contain a complete execution");
+        if placements.len() == 10 {
+            assert_eq!(catalog.initial_board(), 0);
+        }
+        for prune in [false, true] {
+            let (orders, work) = with_global_kick_pruning(prune, || {
+                // The pruning selection belongs to freshly compiled
+                // templates; never reuse a workspace or shared owner across
+                // the two arms of this A/B qualification.
+                let mut workspace = ReachabilityWorkspace::default();
+                let mut work = SymbolicPrefixWork::default();
+                let orders = SymbolicPrefixOrders::compile_product_with_workspace(
+                    &catalog,
+                    &candidate,
+                    profile,
+                    &ExecutionControl::default(),
+                    &mut workspace,
+                    &mut work,
+                    0,
+                )
+                .expect("exact product relation");
+                (orders, work)
+            });
+            let mut reached = vec![false; physical.len()];
+            reached[0] = true;
+            let mut actual = vec![0_u16; physical.len()];
+            for prefix in 0..physical.len() - 1 {
+                if !reached[prefix] {
+                    continue;
+                }
+                for (operation, piece) in orders.live_operations_after(prefix as u16) {
+                    assert_eq!(
+                        piece,
+                        catalog.skeleton(candidate.row_ids()[operation]).piece
+                    );
+                    let bit = 1 << operation;
+                    assert_eq!(prefix & bit, 0, "pending operation only");
+                    actual[prefix] |= bit as u16;
+                    reached[prefix | bit] = true;
+                }
+            }
+            assert_eq!(
+                actual, expected,
+                "height={height}, profile={profile:?}, global_prune={prune}"
+            );
+            assert_eq!(reached[physical.len() - 1], buildable);
+            assert!(work.harddrop_certificates > 0);
+            checked_complete_edges += actual.iter().map(|word| word.count_ones()).sum::<u32>();
+            checked_prefixes += physical.len();
+        }
+    }
+    assert!(checked_complete_edges > 0);
+    eprintln!(
+        "product-vs-raw complete operation relation: compared_prefix_slots={checked_prefixes}, complete_edges={checked_complete_edges}, pruning_arms=2, actual_geometric_fixtures=4"
+    );
+}

@@ -157,6 +157,7 @@ mod tests {
         use clearra_problem::{ProblemCompiler, SearchOutputPolicy};
         use clearra_rules::profile::builtin_rules::srs_plus;
 
+        use super::super::buildup::with_operation_mask_experiment;
         use crate::{backend::with_strict_parallel_prefix_experiment, WasmCpuSearchBackend};
 
         let make_problem = |explicit_cap: bool, probability_policy| {
@@ -192,7 +193,14 @@ mod tests {
         let control = ExecutionControl::default();
         let run = || WasmCpuSearchBackend::execute_with_control(&problem, &control);
 
-        let baseline = run().expect("native parallel baseline");
+        // Explicitly propagate the concrete reference to every pooled worker.
+        // Outside an experiment, qualified requests now use the dependency
+        // producer automatically, so leaving strict scope is not a reference.
+        let (baseline, baseline_report) = with_operation_mask_experiment(false, run);
+        let baseline = baseline.expect("explicit native parallel concrete reference");
+        assert!(baseline_report.executing_workers > 0);
+        assert!(baseline_report.graph_passes > 0);
+        assert_eq!(baseline_report.mask_passes, 0);
         assert_eq!(baseline.bool_field("cpu_parallel_execution"), Some(true));
         assert_eq!(baseline.usize_field("workers_used"), Some(2));
         assert_eq!(baseline.usize_field("packing_candidate_count"), Some(2260));
@@ -226,7 +234,11 @@ mod tests {
         assert_eq!(strict.usize_field("coverage_pattern_count"), Some(5040));
         assert_eq!(strict.usize_field("covered_pattern_count"), Some(5040));
 
-        let warm_reference = run().expect("concrete scope restored");
+        let (warm_reference, warm_report) = with_operation_mask_experiment(false, run);
+        let warm_reference =
+            warm_reference.expect("explicit concrete reference after strict scope");
+        assert!(warm_report.graph_passes > 0);
+        assert_eq!(warm_report.mask_passes, 0);
         assert_eq!(
             warm_reference.solution_coverages(),
             baseline.solution_coverages()
@@ -237,6 +249,20 @@ mod tests {
                 .unwrap()
                 > 0
         );
+
+        #[cfg(feature = "placement-dependency-pc")]
+        {
+            let automatic = run().expect("unscoped product dependency route restored");
+            assert_eq!(automatic.usize_field("total_build_order_nodes"), Some(0));
+            assert_eq!(
+                automatic.solution_coverages(),
+                baseline.solution_coverages()
+            );
+            assert_eq!(
+                automatic.coverage_pattern_words(),
+                baseline.coverage_pattern_words()
+            );
+        }
 
         let (refused, refused_report) = with_strict_parallel_prefix_experiment(|| {
             WasmCpuSearchBackend::execute_with_control(
@@ -281,8 +307,16 @@ mod tests {
             );
             (result, rows)
         };
-        let (reference_capture, reference_rows) = capture_arm();
-        let reference_capture = reference_capture.expect("ordinary no-replay capture");
+        let ((reference_capture, reference_rows), reference_capture_report) =
+            with_operation_mask_experiment(false, capture_arm);
+        let reference_capture = reference_capture.expect("explicit concrete no-replay capture");
+        assert!(reference_capture_report.graph_passes > 0);
+        assert!(
+            reference_capture
+                .usize_field("total_build_order_nodes")
+                .unwrap()
+                > 0
+        );
         let ((strict_capture, strict_rows), capture_report) =
             with_strict_parallel_prefix_experiment(capture_arm);
         let strict_capture = strict_capture.expect("strict no-replay capture");

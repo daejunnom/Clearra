@@ -11,7 +11,6 @@ import {
   clearCompletedRows,
   trimBoardMask,
   updateWorkspaceDraft,
-  workspaceDependencyPreanalysisAvailable,
   workspaceValidationCodes,
   workspaceRequestForDesktop
 } from '../src/lib/workspace/solverWorkspaceModel.ts';
@@ -190,27 +189,26 @@ test('extended workspace guards result and option capabilities separately from t
   }
 });
 
-test('qualified PC dependency preanalysis is a single explicit option shared by Web and Desktop', () => {
+test('legacy PC dependency choices produce the same automatic Web and Desktop request', () => {
   assert.equal(createDefaultWorkspaceRequest().precomputeBuildDependencies, false);
   for (const input of [
     { queue: 'p7, p4' },
+    { queue: 'P7P4', queueKnowledge: 'visible-7' },
     { queue: 'P7', boardMask: 0x3c0f03c0fn, rule: 'jstris-180' },
     { queue: 'P7', lines: 1, boardMask: 0x3fn, holdEnabled: false }
   ]) {
     const ready = { ...createDefaultWorkspaceRequest(), ...input };
-    assert.equal(workspaceDependencyPreanalysisAvailable(ready), true, input.queue);
     const off = buildWorkspaceCommandArguments(ready);
     const on = buildWorkspaceCommandArguments({ ...ready, precomputeBuildDependencies: true });
     assert.equal(off.includes('--build-dependency-dag'), false);
     assert.equal(off.includes('--no-build-dependency-dag'), false);
-    assert.equal(on.filter(arg => arg === '--build-dependency-dag').length, 1);
-    assert.deepEqual(on.filter(arg => arg !== '--build-dependency-dag'), off);
+    assert.deepEqual(on, off);
     assert.equal(on[on.indexOf('--count') + 1], 'unique');
     assert.deepEqual(workspaceRequestForDesktop({ ...ready, precomputeBuildDependencies: true }, 'ko').arguments, on);
   }
 });
 
-test('unqualified PC modes and inputs retain their normal execution without a dependency flag', () => {
+test('other PC modes and inputs ignore legacy dependency drafts at the command boundary', () => {
   const selected = { ...createDefaultWorkspaceRequest(), queue: 'P7P4',
     precomputeBuildDependencies: true };
   for (const change of [
@@ -224,9 +222,6 @@ test('unqualified PC modes and inputs retain their normal execution without a de
   ]) {
     const draft = updateWorkspaceDraft(selected, change);
     assert.equal(draft.precomputeBuildDependencies, true);
-    assert.equal(workspaceDependencyPreanalysisAvailable(draft), false, JSON.stringify({
-      ...change, ...(change.boardMask === undefined ? {} : { boardMask: String(change.boardMask) })
-    }));
     const ordinary = buildWorkspaceCommandArguments({ ...draft, precomputeBuildDependencies: false });
     assert.deepEqual(buildWorkspaceCommandArguments(draft), ordinary);
     assert.deepEqual(workspaceRequestForDesktop(draft, 'en').arguments, ordinary);

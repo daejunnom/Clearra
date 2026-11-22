@@ -7,7 +7,6 @@
 
   import {
     updateWorkspaceDraft,
-    workspaceDependencyPreanalysisAvailable,
     type SolverWorkspaceRequest,
     type WorkspaceValidationCode
   } from './solverWorkspaceModel';
@@ -21,7 +20,6 @@
   export let request: SolverWorkspaceRequest;
   export let language: WorkspaceLanguage;
   export let validationCodes: WorkspaceValidationCode[] = [];
-  export let dependencyDagControlAvailable = false;
   export let workerAuthority: WorkerAuthorityReport;
 
   const dispatch = createEventDispatcher<{ change: SolverWorkspaceRequest }>();
@@ -167,23 +165,6 @@
       </label>
       <WorkerAuthorityStatus authority={workerAuthority} {language} />
     </div>
-    {#if dependencyDagControlAvailable && workspaceDependencyPreanalysisAvailable(request)}
-      <div class="dependency-dag-control">
-        <label class="workspace-switch-label">
-          <input
-            type="checkbox"
-            data-pc-control="dependency-preanalysis"
-            checked={request.precomputeBuildDependencies}
-            on:change={(event) => patch({
-              precomputeBuildDependencies: (event.currentTarget as HTMLInputElement).checked
-            })}
-          />
-          <span class="workspace-switch" aria-hidden="true"></span>
-          <span>{label('pcPrecomputeBuildDependencies')}</span>
-        </label>
-        <small class="workspace-field-help">{label('pcPrecomputeBuildDependenciesHelp')}</small>
-      </div>
-    {/if}
   </section>
 
   {#if validationCodes.length}
@@ -198,15 +179,4 @@
 <style>
   .policy-toggle { grid-template-columns: 1fr; }
   .b2b-preservation-control { display: grid; gap: 5px; }
-  .dependency-dag-control {
-    align-content: start;
-    display: grid;
-    gap: 5px;
-    margin-top: 14px;
-    min-width: 0;
-  }
-  .dependency-dag-control :global(.workspace-field-help) {
-    display: block;
-    overflow-wrap: anywhere;
-  }
 </style>

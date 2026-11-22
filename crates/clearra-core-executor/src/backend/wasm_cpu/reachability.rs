@@ -2175,6 +2175,9 @@ pub(super) struct ReachabilityTemplate {
     rotation_kick_indices: Vec<u8>,
     reverse_rotation_offsets: Vec<u32>,
     reverse_rotation_sources: Vec<ReverseRotationSource>,
+    // Impossible on every occupancy, removed once from the reverse index.
+    // Forward candidates remain intact for first-success guard reads.
+    globally_pruned_rotation_sources: usize,
     // Shared immutable per-target proof, compiled before an occupancy search.
     // None is an unsupported proof, never an unreachable target.
     #[cfg(any(test, feature = "local-search-ab"))]
@@ -2293,10 +2296,13 @@ impl ReachabilityTemplate {
         let reverse_translation_sources = compile_reverse_translation_sources(&translation_targets);
         let sky_seed_words = compile_seed_words(state_count, &sky_seeds);
         let (reverse_rotation_offsets, reverse_rotation_sources) = compile_reverse_rotation_sources(
-            state_count,
+            &state_masks,
             &rotation_target_offsets,
             &rotation_targets,
+            global_kick_pruning_enabled(),
         );
+        let globally_pruned_rotation_sources =
+            rotation_targets.len() - reverse_rotation_sources.len();
         Self {
             width,
             height,
@@ -2313,6 +2319,7 @@ impl ReachabilityTemplate {
             rotation_kick_indices,
             reverse_rotation_offsets,
             reverse_rotation_sources,
+            globally_pruned_rotation_sources,
             #[cfg(any(test, feature = "local-search-ab"))]
             static_dependency_masks: {
                 let mut masks = Vec::new();
@@ -3235,13 +3242,39 @@ fn compile_seed_words(state_count: usize, seeds: &[u16]) -> Vec<u64> {
 }
 
 fn compile_reverse_rotation_sources(
-    state_count: usize,
+    state_masks: &[u64],
     forward_offsets: &[u32],
     forward_targets: &[u16],
+    prune_impossible: bool,
 ) -> (Vec<u32>, Vec<ReverseRotationSource>) {
+    let state_count = state_masks.len();
+    // An earlier candidate contained in the required-free source/destination
+    // union must succeed whenever this candidate could. Such a later edge is
+    // impossible on every board. Keep the original candidate ordinal and
+    // forward prefix: a removed edge may still have a free target that blocks
+    // another edge. This compilation never runs in the query hot loop.
+    let retained = |transition: usize, candidate: usize| {
+        !prune_impossible
+            || edge_possible_in_cube(
+                state_masks[transition / 3],
+                state_masks[usize::from(forward_targets[candidate])],
+                forward_targets[forward_offsets[transition] as usize..candidate]
+                    .iter()
+                    .map(|&prior| state_masks[usize::from(prior)]),
+                0,
+                u64::MAX,
+            )
+    };
     let mut counts = vec![0_u32; state_count + 1];
-    for &target in forward_targets {
-        counts[usize::from(target) + 1] = counts[usize::from(target) + 1].saturating_add(1);
+    for transition in 0..state_count * 3 {
+        let start = forward_offsets[transition] as usize;
+        let end = forward_offsets[transition + 1] as usize;
+        for candidate in start..end {
+            if retained(transition, candidate) {
+                let target = usize::from(forward_targets[candidate]);
+                counts[target + 1] = counts[target + 1].saturating_add(1);
+            }
+        }
     }
     for index in 1..counts.len() {
         counts[index] = counts[index].saturating_add(counts[index - 1]);
@@ -3254,7 +3287,7 @@ fn compile_reverse_rotation_sources(
             slot: 0,
             prior_target_count: 0,
         };
-        forward_targets.len()
+        *cursors.last().expect("one count per pose and sentinel") as usize
     ];
     for transition in 0..state_count * 3 {
         let start = forward_offsets[transition] as usize;
@@ -3264,6 +3297,9 @@ fn compile_reverse_rotation_sources(
         };
         let slot = (transition % 3) as u8;
         for (prior_target_count, &target) in forward_targets[start..end].iter().enumerate() {
+            if !retained(transition, start + prior_target_count) {
+                continue;
+            }
             let Ok(prior_target_count) = u8::try_from(prior_target_count) else {
                 continue;
             };
@@ -3278,6 +3314,70 @@ fn compile_reverse_rotation_sources(
         }
     }
     (offsets, sources)
+}
+
+/// Exact edge-existence test over `fixed | subset(variable)`.
+///
+/// The caller validates the cube and its board frame. Source and destination
+/// must stay empty. Every earlier valid kick needs a possible blocker outside
+/// those required-empty cells. The single board `fixed | (variable & !empty)`
+/// witnesses all those blockers simultaneously. This tests edge existence,
+/// never source reachability or independence of correlated operation choices.
+fn edge_possible_in_cube(
+    source_mask: u64,
+    target_mask: u64,
+    prior_masks: impl IntoIterator<Item = u64>,
+    fixed: u64,
+    variable: u64,
+) -> bool {
+    if source_mask == INVALID_STATE_MASK || target_mask == INVALID_STATE_MASK {
+        return false;
+    }
+    let required_empty = source_mask | target_mask;
+    fixed & required_empty == 0
+        && prior_masks.into_iter().all(|mask| {
+            mask == INVALID_STATE_MASK
+                || mask & fixed != 0
+                || mask & variable & !required_empty != 0
+        })
+}
+
+#[cfg(test)]
+thread_local! {
+    static GLOBAL_KICK_PRUNING_OVERRIDE: std::cell::Cell<Option<bool>> = const {
+        std::cell::Cell::new(None)
+    };
+}
+
+/// Affects templates newly compiled on this test thread, not existing owners
+/// or spawned workers. Native multiworker A/B uses the process-wide axis.
+#[cfg(test)]
+pub(super) fn with_global_kick_pruning<T>(enabled: bool, action: impl FnOnce() -> T) -> T {
+    struct Restore(Option<bool>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            GLOBAL_KICK_PRUNING_OVERRIDE.with(|mode| mode.set(self.0));
+        }
+    }
+    let _restore = Restore(GLOBAL_KICK_PRUNING_OVERRIDE.with(|mode| mode.replace(Some(enabled))));
+    action()
+}
+
+fn global_kick_pruning_enabled() -> bool {
+    #[cfg(test)]
+    if let Some(mode) = GLOBAL_KICK_PRUNING_OVERRIDE.with(std::cell::Cell::get) {
+        return mode;
+    }
+    #[cfg(all(feature = "local-search-ab", not(target_family = "wasm")))]
+    {
+        // Diagnostic A/B only. Product builds have no configurable bypass;
+        // the benchmark entrypoint validates this process-wide 0/1 axis.
+        static ENABLED: OnceLock<bool> = OnceLock::new();
+        *ENABLED
+            .get_or_init(|| std::env::var("CLEARRA_STRICT_GLOBAL_KICK_PRUNE").as_deref() != Ok("0"))
+    }
+    #[cfg(not(all(feature = "local-search-ab", not(target_family = "wasm"))))]
+    true
 }
 
 fn state_from_index(width: u8, ceiling: i8, index: usize) -> State {

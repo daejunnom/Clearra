@@ -15,7 +15,7 @@ clearra-app = { path = "../clearra-app", default-features = false, features = ["
 clearra-pc4-tablebase = { path = "../clearra-pc4-tablebase" }
 serde_json.workspace = true
 clearra-core-domain = { path = "../clearra-core-domain" }
-clearra-core-executor = { path = "../clearra-core-executor", default-features = false }
+clearra-core-executor = { path = "../clearra-core-executor", default-features = false, features = ["placement-dependency-pc"] }
 clearra-coverage = { path = "../clearra-coverage" }
 clearra-forward-search = { path = "../clearra-forward-search" }
 clearra-host-contract = { path = "../clearra-host-contract", default-features = false }

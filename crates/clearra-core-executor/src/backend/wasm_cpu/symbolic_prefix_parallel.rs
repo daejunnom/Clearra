@@ -38,6 +38,8 @@ pub struct StrictParallelPrefixReport {
     pub worklist_pops: u64,
     pub pose_domains: u64,
     pub ordered_kick_terms: u64,
+    /// Largest immutable template reduction observed by any completed worker.
+    pub global_kick_pruned_edges_peak: u64,
     pub catalog_static_guard_hits: u64,
     /// Shared table payload once, not per-worker bytes or RSS.
     pub catalog_static_guard_bytes: usize,
@@ -235,6 +237,9 @@ impl StrictParallelPrefixRequest {
         add!(worklist_pops, work.pose.worklist_pops);
         add!(pose_domains, work.pose.pose_domains);
         add!(ordered_kick_terms, work.pose.ordered_kick_terms);
+        report.global_kick_pruned_edges_peak = report
+            .global_kick_pruned_edges_peak
+            .max(work.pose.global_kick_pruned_edges_peak);
         add!(catalog_static_guard_hits, work.catalog_static_guard_hits);
         report.catalog_static_guard_bytes = report
             .catalog_static_guard_bytes

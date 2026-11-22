@@ -251,6 +251,49 @@ pub(super) enum WasmExactSearchError {
 pub(super) const PC_PLACEMENT_DEPENDENCY_UNSUPPORTED: &str =
     "wasm_placement_dependency_request_unsupported";
 
+#[cfg(test)]
+thread_local! {
+    static PC_PLACEMENT_DEPENDENCY_REFERENCE: std::cell::Cell<bool> = const {
+        std::cell::Cell::new(false)
+    };
+}
+
+/// Serial differential tests explicitly retain the former concrete verifier.
+/// The override never exists in product builds or propagates to new workers.
+#[cfg(test)]
+pub(super) fn with_pc_placement_dependency_reference<T>(run: impl FnOnce() -> T) -> T {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            PC_PLACEMENT_DEPENDENCY_REFERENCE.with(|mode| mode.set(self.0));
+        }
+    }
+    let _restore = Restore(PC_PLACEMENT_DEPENDENCY_REFERENCE.with(|mode| mode.replace(true)));
+    run()
+}
+
+fn pc_placement_dependency_reference_requested() -> bool {
+    #[cfg(test)]
+    if PC_PLACEMENT_DEPENDENCY_REFERENCE.with(std::cell::Cell::get) {
+        return true;
+    }
+    #[cfg(all(feature = "local-search-ab", not(target_family = "wasm")))]
+    {
+        // The native diagnostic validates this existing process-wide 0/1
+        // axis. Only its explicit zero arm may select the BuildUp reference.
+        static REFERENCE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *REFERENCE.get_or_init(|| std::env::var("CLEARRA_STRICT_PREFIX").as_deref() == Ok("0"))
+    }
+    #[cfg(not(all(feature = "local-search-ab", not(target_family = "wasm"))))]
+    false
+}
+
+fn uses_pc_placement_dependency(problem: &clearra_problem::SearchProblem) -> bool {
+    cfg!(feature = "placement-dependency-pc")
+        && problem.pc_placement_dependency_eligible()
+        && !pc_placement_dependency_reference_requested()
+}
+
 fn ensure_pc_placement_dependency_mode(
     problem: &clearra_problem::SearchProblem,
 ) -> Result<(), WasmExactSearchError> {

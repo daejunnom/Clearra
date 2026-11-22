@@ -299,6 +299,10 @@ mod run {
         let terminal_identity_move_mode = experiment_mode("CLEARRA_TERMINAL_IDENTITY_MOVE")?;
         let operation_mask_mode = optional_experiment_mode("CLEARRA_OPERATION_MASKS")?;
         let strict_prefix_mode = optional_experiment_mode("CLEARRA_STRICT_PREFIX")?;
+        let product_prefix_route =
+            optional_experiment_mode("CLEARRA_PRODUCT_PREFIX_ROUTE")?.unwrap_or(false);
+        let global_kick_prune =
+            optional_experiment_mode("CLEARRA_STRICT_GLOBAL_KICK_PRUNE")?.unwrap_or(true);
         let catalog_guard_mode = optional_experiment_mode("CLEARRA_STRICT_CATALOG_GUARDS")?;
         let frontier_mode = optional_experiment_mode("CLEARRA_STRICT_LANGUAGE_FRONTIER")?;
         let subsumption_mode = optional_experiment_mode("CLEARRA_STRICT_SUBSUMPTION")?;
@@ -313,6 +317,16 @@ mod run {
             strict_prefix_mode,
             coverage_slot.is_some(),
             cfg!(feature = "wasm-stage-profiling"),
+        )?;
+        validate_product_prefix_configuration(
+            product_prefix_route,
+            strict_prefix_mode,
+            cfg!(all(
+                feature = "placement-dependency-pc",
+                not(target_family = "wasm")
+            )),
+            [catalog_guard_mode, frontier_mode, subsumption_mode],
+            stage_diagnostic,
         )?;
         if catalog_guard_mode == Some(true)
             && stage_diagnostic == Some(StrictStageDiagnostic::LegacyUpper)
@@ -426,6 +440,12 @@ mod run {
         let problem = compile_problem(fixture, policy, strict_prefix_mode.is_some())?;
         if problem.count_policy() != fixture.count_policy() {
             return Err("compiled fixture changed the requested count policy".into());
+        }
+        if product_prefix_route
+            && (!problem.pc_placement_dependency_eligible()
+                || problem.backend_policy().precompute_build_dependencies())
+        {
+            return Err("automatic product measurement requires an eligible request with the legacy flag disabled".into());
         }
         let compile_ms = compile_started.elapsed().as_secs_f64() * 1000.0;
         eprintln!(
@@ -544,6 +564,13 @@ mod run {
                     let (outcome, report) = with_operation_mask_experiment(enabled, execute);
                     (outcome, Some((enabled, report)), None)
                 }
+                (None, Some(true)) if product_prefix_route => {
+                    // Do not activate an experiment or change the request. The
+                    // qualified product dispatcher must admit this ordinary
+                    // request on its own; absence of a strict report is part of
+                    // the evidence that this is the automatic product route.
+                    (execute(), None, None)
+                }
                 (None, Some(true)) => {
                     let (outcome, report) = if catalog_guard_mode == Some(true) {
                         with_catalog_guard_strict_parallel_prefix_experiment(execute)
@@ -590,6 +617,7 @@ mod run {
                 fixture,
                 capacity.hard_limit(),
                 enabled,
+                product_prefix_route,
                 strict_prefix,
                 &mut errors,
             );
@@ -877,6 +905,17 @@ mod run {
             |enabled| {
                 json!({
                     "strict_prefix_mode": if enabled { "1" } else { "0" },
+                    "product_prefix_route_mode": if product_prefix_route { "1" } else { "0" },
+                    "product_prefix_admission": product_prefix_route.then(|| json!({
+                        "eligible": problem.pc_placement_dependency_eligible(),
+                        "legacy_flag": problem.backend_policy().precompute_build_dependencies(),
+                        "placement_dependency_feature": cfg!(feature = "placement-dependency-pc"),
+                        "strict_experiment_applied": strict_prefix.is_some(),
+                    })),
+                    "strict_global_kick_prune_mode": if global_kick_prune { "1" } else { "0" },
+                    "strict_catalog_guards_mode": if catalog_guard_mode == Some(true) { "1" } else { "0" },
+                    "strict_language_frontier_mode": if frontier_mode == Some(true) { "1" } else { "0" },
+                    "strict_subsumption_mode": if subsumption_mode == Some(true) { "1" } else { "0" },
                     "strict_prefix": strict_prefix.map(strict_prefix_evidence),
                     "coverage_presentation": "coverage-summary-omit",
                     "coverage_capture_sink": if coverage_slot.is_some() { "exact-spool" } else { "discard" },
@@ -1049,6 +1088,24 @@ mod run {
         })
     }
 
+    fn validate_product_prefix_configuration(
+        enabled: bool,
+        strict_prefix: Option<bool>,
+        native_product_available: bool,
+        other_strict_modes: [Option<bool>; 3],
+        stage_diagnostic: Option<StrictStageDiagnostic>,
+    ) -> Result<(), String> {
+        if enabled
+            && (strict_prefix != Some(true)
+                || !native_product_available
+                || other_strict_modes.contains(&Some(true))
+                || stage_diagnostic.is_some())
+        {
+            return Err("CLEARRA_PRODUCT_PREFIX_ROUTE=1 requires a native placement-dependency-pc build, CLEARRA_STRICT_PREFIX=1, and disabled catalog/frontier/subsumption/stage diagnostics".into());
+        }
+        Ok(())
+    }
+
     fn operation_mask_evidence(report: OperationMaskExperimentReport) -> Value {
         json!({
             "scope": "one native search, successful worker exits; concrete representative replay is a separate owner",
@@ -1082,6 +1139,7 @@ mod run {
             "worklist_pops": report.worklist_pops,
             "pose_domains": report.pose_domains,
             "ordered_kick_terms": report.ordered_kick_terms,
+            "global_kick_pruned_edges_peak": report.global_kick_pruned_edges_peak,
             "peak_relation_logical_bytes": report.peak_relation_logical_bytes,
             "catalog_static_guard_hits": report.catalog_static_guard_hits,
             "catalog_static_guard_bytes": report.catalog_static_guard_bytes,
@@ -1094,6 +1152,7 @@ mod run {
         fixture: Fixture,
         worker_cap: usize,
         enabled: bool,
+        product_prefix_route: bool,
         report: Option<StrictParallelPrefixReport>,
         errors: &mut Vec<String>,
     ) {
@@ -1151,12 +1210,20 @@ mod run {
         let candidates = result.usize_field("packing_candidate_count");
         if candidates.is_none_or(|count| count == 0)
             || (fixture == Fixture::P7 && candidates != Some(P7_CANDIDATE_COUNT))
+            || result.bool_field("packing_count_complete") != Some(true)
         {
             errors.push("strict prefix candidate universe differs from the fixture".into());
         }
         let graph_nodes = result.usize_field("total_build_order_nodes");
         let pose_states = result.usize_field("total_reachability_states");
-        if enabled {
+        if result.bool_field("buildability_verified") != Some(true) {
+            errors.push("strict comparison requires verified buildability".into());
+        }
+        if product_prefix_route {
+            if !enabled || report.is_some() || graph_nodes != Some(0) || pose_states != Some(0) {
+                errors.push("automatic product execution entered an experiment or used the old BuildUp path".into());
+            }
+        } else if enabled {
             if report.is_none_or(|work| {
                 !work.sealed
                     || work.workers != workers
@@ -1178,6 +1245,44 @@ mod run {
         {
             errors.push("reference arm did not use concrete BuildUp".into());
         }
+    }
+
+    fn validate_product_prefix_evidence(report: &Value) -> Result<(), &'static str> {
+        let admission = &report["product_prefix_admission"];
+        if report["schema"] != StrictStageDiagnostic::schema(None)
+            || report["strict_prefix_mode"] != "1"
+            || report["product_prefix_route_mode"] != "1"
+            || !report["strict_prefix"].is_null()
+            || admission["eligible"] != true
+            || admission["legacy_flag"] != false
+            || admission["placement_dependency_feature"] != true
+            || admission["strict_experiment_applied"] != false
+            || [
+                "strict_catalog_guards_mode",
+                "strict_language_frontier_mode",
+                "strict_subsumption_mode",
+            ]
+            .into_iter()
+            .any(|key| report[key] != "0")
+        {
+            return Err("automatic product source controls are missing or enabled an experiment");
+        }
+        let summary = &report["summary"];
+        if [
+            "count_complete",
+            "packing_count_complete",
+            "probability_complete",
+            "buildability_verified",
+        ]
+        .into_iter()
+        .any(|key| summary[key] != "true")
+            || summary["resource_truncated"] != "false"
+            || summary["total_build_order_nodes"] != "0"
+            || summary["total_reachability_states"] != "0"
+        {
+            return Err("automatic product completion evidence is missing or used BuildUp");
+        }
+        Ok(())
     }
 
     fn validate_operation_mask_evidence(
@@ -1936,6 +2041,9 @@ mod run {
         let operation_mask_comparison = reports
             .iter()
             .any(|report| report.get("operation_mask_mode").is_some());
+        let strict_prefix_comparison = reports
+            .iter()
+            .any(|report| report.get("strict_prefix_mode").is_some());
         let rectangle_fixture = [Fixture::NonemptyEightI, Fixture::EmptyTenI]
             .into_iter()
             .any(|fixture| first["case"] == fixture.name());
@@ -1984,6 +2092,56 @@ mod run {
             for key in summary_keys {
                 if report["summary"][key] != first["summary"][key] {
                     differences.push(format!("{}: summary.{key} mismatch", paths[index]));
+                }
+            }
+            if strict_prefix_comparison {
+                if !valid_experiment_source(report["compiled_source_commit"].as_str())
+                    || report["compiled_source_commit"] != first["compiled_source_commit"]
+                {
+                    differences.push(format!("{}: strict source identity mismatch", paths[index]));
+                }
+                for key in [
+                    "strict_catalog_guards_mode",
+                    "strict_language_frontier_mode",
+                    "strict_subsumption_mode",
+                    "coverage_presentation",
+                    "coverage_capture_sink",
+                ] {
+                    if report[key].is_null() || report[key] != first[key] {
+                        differences.push(format!(
+                            "{}: strict configuration {key} mismatch",
+                            paths[index]
+                        ));
+                    }
+                }
+                for key in [
+                    "workers_used",
+                    "parallel_active_workers",
+                    "cpu_parallel_execution",
+                    "packing_candidate_count",
+                    "packing_count_complete",
+                    "geometry_catalog_digest",
+                    "buildability_verified",
+                ] {
+                    if report["summary"][key].is_null()
+                        || report["summary"][key] != first["summary"][key]
+                    {
+                        differences.push(format!("{}: strict result {key} mismatch", paths[index]));
+                    }
+                }
+                if report["product_prefix_route_mode"] == "1" {
+                    if let Err(error) = validate_product_prefix_evidence(report) {
+                        differences.push(format!("{}: {error}", paths[index]));
+                    }
+                } else if report["strict_prefix_mode"] == "1"
+                    && (report["strict_prefix"]["sealed"] != true
+                        || report["summary"]["total_build_order_nodes"] != "0"
+                        || report["summary"]["total_reachability_states"] != "0")
+                {
+                    differences.push(format!(
+                        "{}: strict completion evidence missing",
+                        paths[index]
+                    ));
                 }
             }
             if rectangle_fixture || grounded_o_fixture {
@@ -2110,6 +2268,7 @@ mod run {
         let mut all_axes_times: BTreeMap<String, Vec<f64>> = BTreeMap::new();
         let mut domain_work: BTreeMap<String, Vec<&Value>> = BTreeMap::new();
         let mut operation_mask_times = [Vec::new(), Vec::new()];
+        let mut strict_times: BTreeMap<String, Vec<f64>> = BTreeMap::new();
         for report in &reports {
             let dependency_mode = report["mode"].as_str().ok_or("mode missing")?;
             let structural_mode = match report.get("structural_mode") {
@@ -2170,6 +2329,24 @@ mod run {
             let mut all_axes = format!(
                 "{mode},movement_clear={movement},incremental_domain={incremental},first_kick={first_kick},ordered_kick={ordered_kick},ordered_kick_guard_reuse={ordered_kick_guard_reuse},geometric_edge_reuse={geometric_edge_reuse},ilc_lazy_frame={ilc_lazy_frame},no_entry_components={no_entry_components},same_tile_parent_reuse={same_tile_parent_reuse},conditional_order={conditional},terminal_identity_move={terminal_move},minimum_domain_cutoff={minimum_domain_cutoff},minimum_domain_work={minimum_domain_work}"
             );
+            if strict_prefix_comparison {
+                let prefix = extra_mode("strict_prefix_mode")?;
+                let prune = extra_mode("strict_global_kick_prune_mode")?;
+                let product = extra_mode("product_prefix_route_mode")?;
+                if report.get("strict_prefix_mode").is_none()
+                    || report.get("strict_global_kick_prune_mode").is_none()
+                    || report.get("product_prefix_route_mode").is_none()
+                {
+                    return Err(
+                        "strict comparison requires explicit prefix, global-prune, and product-route arms".into(),
+                    );
+                }
+                let group = format!(
+                    "strict_prefix={prefix},global_kick_prune={prune},product_prefix_route={product}"
+                );
+                all_axes.push_str(&format!(",{group}"));
+                strict_times.entry(group).or_default().push(ms);
+            }
             if operation_mask_comparison {
                 let op = extra_mode("operation_mask_mode")?;
                 if [
@@ -2210,6 +2387,7 @@ mod run {
             }
             all_axes_times.entry(all_axes).or_default().push(ms);
             if !operation_mask_comparison
+                && !strict_prefix_comparison
                 && movement == "0"
                 && incremental == "0"
                 && minimum_domain_cutoff == "0"
@@ -2334,6 +2512,44 @@ mod run {
         if rectangle_fixture {
             comparison["geometry_domain_work_samples_by_all_axes"] = json!(domain_work);
         }
+        if strict_prefix_comparison {
+            let mean = |key: &str| {
+                strict_times
+                    .get(key)
+                    .map(|times| times.iter().sum::<f64>() / times.len() as f64)
+            };
+            let baseline = "strict_prefix=1,global_kick_prune=0,product_prefix_route=0";
+            let treatment = "strict_prefix=1,global_kick_prune=1,product_prefix_route=0";
+            let product = "strict_prefix=1,global_kick_prune=1,product_prefix_route=1";
+            let time_change = |before, after| {
+                differences
+                    .is_empty()
+                    .then(|| {
+                        mean(before)
+                            .zip(mean(after))
+                            .map(|(before, after)| (after / before - 1.0) * 100.0)
+                    })
+                    .flatten()
+            };
+            comparison["mode_grouping"] = json!("strict-prefix-global-kick-prune-product-route");
+            comparison["search_times_ms_by_mode"] = json!(strict_times);
+            comparison["mean_search_ms_by_mode"] = json!(strict_times
+                .iter()
+                .map(|(key, values)| (key, values.iter().sum::<f64>() / values.len() as f64))
+                .collect::<BTreeMap<_, _>>());
+            comparison["primary_comparison"] =
+                json!({ "baseline": baseline, "treatment": treatment });
+            comparison["treatment_time_change_percent"] = json!(time_change(baseline, treatment));
+            comparison["time_change_percent"] = json!({
+                "strict_filtered_vs_unfiltered": time_change(baseline, treatment),
+                "automatic_product_vs_strict_filtered": time_change(treatment, product),
+                "automatic_product_vs_reference_unfiltered": time_change(
+                    "strict_prefix=0,global_kick_prune=0,product_prefix_route=0", product),
+                "automatic_product_vs_reference_filtered": time_change(
+                    "strict_prefix=0,global_kick_prune=1,product_prefix_route=0", product),
+            });
+            comparison["scope"] = json!("same source/binary/input/CPU and reported global evidence; exact per-solution queue maps require separate --compare-coverage; no p95 claim");
+        }
         if operation_mask_comparison {
             let [control, treatment] = operation_mask_times.each_ref();
             if control.is_empty() || treatment.is_empty() {
@@ -2382,6 +2598,108 @@ mod run {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[test]
+        fn automatic_product_measurement_rejects_reference_or_experiment_controls() {
+            let validate = validate_product_prefix_configuration;
+            assert!(validate(true, Some(true), true, [None; 3], None).is_ok());
+            assert!(validate(true, Some(true), true, [Some(false); 3], None).is_ok());
+            assert!(validate(false, None, false, [None; 3], None).is_ok());
+            for strict in [None, Some(false)] {
+                assert!(validate(true, strict, true, [None; 3], None).is_err());
+            }
+            assert!(validate(true, Some(true), false, [None; 3], None).is_err());
+            for axis in 0..3 {
+                let mut modes = [Some(false); 3];
+                modes[axis] = Some(true);
+                assert!(validate(true, Some(true), true, modes, None).is_err());
+            }
+            for diagnostic in [
+                StrictStageDiagnostic::Reference,
+                StrictStageDiagnostic::OptimizedUpper,
+                StrictStageDiagnostic::LegacyUpper,
+            ] {
+                assert!(validate(true, Some(true), true, [None; 3], Some(diagnostic)).is_err());
+            }
+        }
+
+        #[test]
+        fn automatic_product_evidence_requires_ordinary_admission_and_complete_execution() {
+            let report = json!({
+                "schema": StrictStageDiagnostic::schema(None),
+                "strict_prefix_mode": "1",
+                "product_prefix_route_mode": "1",
+                "strict_prefix": null,
+                "strict_catalog_guards_mode": "0",
+                "strict_language_frontier_mode": "0",
+                "strict_subsumption_mode": "0",
+                "product_prefix_admission": {
+                    "eligible": true,
+                    "legacy_flag": false,
+                    "placement_dependency_feature": true,
+                    "strict_experiment_applied": false,
+                },
+                "summary": {
+                    "count_complete": "true",
+                    "packing_count_complete": "true",
+                    "probability_complete": "true",
+                    "buildability_verified": "true",
+                    "resource_truncated": "false",
+                    "total_build_order_nodes": "0",
+                    "total_reachability_states": "0",
+                },
+            });
+            assert!(validate_product_prefix_evidence(&report).is_ok());
+            for (pointer, invalid) in [
+                ("/strict_prefix_mode", json!("0")),
+                ("/strict_prefix", json!({ "sealed": true })),
+                ("/strict_catalog_guards_mode", json!("1")),
+                ("/product_prefix_admission/eligible", json!(false)),
+                ("/product_prefix_admission/legacy_flag", json!(true)),
+                (
+                    "/product_prefix_admission/placement_dependency_feature",
+                    json!(false),
+                ),
+                (
+                    "/product_prefix_admission/strict_experiment_applied",
+                    json!(true),
+                ),
+                ("/summary/count_complete", json!("false")),
+                ("/summary/packing_count_complete", json!("false")),
+                ("/summary/probability_complete", json!("false")),
+                ("/summary/buildability_verified", json!("false")),
+                ("/summary/resource_truncated", json!("true")),
+                ("/summary/total_build_order_nodes", json!("1")),
+                ("/summary/total_reachability_states", json!("1")),
+            ] {
+                let mut invalid_report = report.clone();
+                *invalid_report.pointer_mut(pointer).unwrap() = invalid;
+                assert!(
+                    validate_product_prefix_evidence(&invalid_report).is_err(),
+                    "{pointer}"
+                );
+            }
+        }
+
+        #[test]
+        fn automatic_product_fixtures_are_eligible_without_the_legacy_flag() {
+            let policy = PcExecutionPolicy::mvp_default()
+                .with_requested_backend(RequestedSearchBackend::Cpu)
+                .with_allow_backend_fallback(false)
+                .with_exact_legal_board_enabled(false)
+                .with_conditioned_reachability_enabled(false)
+                .with_tablebase_requested(false);
+            for fixture in [Fixture::P7, Fixture::P7P4] {
+                let problem = compile_problem(fixture, policy.clone(), true).unwrap();
+                assert!(problem.pc_placement_dependency_eligible(), "{fixture:?}");
+                assert!(!problem.backend_policy().precompute_build_dependencies());
+                assert_eq!(problem.output_policy(), SearchOutputPolicy::CoverageSummary);
+                assert_eq!(
+                    problem.solution_probability_policy(),
+                    PcSolutionProbabilityPolicy::Omit
+                );
+            }
+        }
 
         #[test]
         fn strict_stage_diagnostics_cannot_claim_unprofiled_or_exact_output() {

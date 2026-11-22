@@ -284,6 +284,20 @@ fn evaluate_prefix_order(
     work.candidates_certified += 1;
     let result = certified_language_result(coverage);
     #[cfg(feature = "placement-dependency-pc")]
+    if matches!(evaluation, PrefixEvaluation::Product { .. })
+        && result.buildable
+        && problem
+            .queue_observation_policy()
+            .requires_observation_policy()
+    {
+        // An oracle-empty candidate cannot contribute to an observation
+        // policy for this exact universe. Reuse that completed composition
+        // before retaining its physical action language.
+        orders
+            .compile_observation_language(&mut workspace.dependency_observation, control)
+            .map_err(PrefixEvaluationError::Execution)?;
+    }
+    #[cfg(feature = "placement-dependency-pc")]
     let result = match evaluation {
         PrefixEvaluation::Product { retain_trace: true } if result.buildable => {
             let mut result = result;

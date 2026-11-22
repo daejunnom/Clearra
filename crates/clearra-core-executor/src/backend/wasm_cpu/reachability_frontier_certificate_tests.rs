@@ -235,9 +235,13 @@ impl<'a> FrontierCertificate<'a> {
         }
 
         let mut matched = [false; MAX_CLAUSES];
-        let mut require = |destination, clause: FrontierClause| {
+        let mut require = |destination, clause: FrontierClause, globally_impossible: bool| {
             if members.contains(&destination) && !members.contains(&clause.source()) {
-                matched[claimed.iter().position(|&candidate| candidate == clause)?] = true;
+                if let Some(index) = claimed.iter().position(|&candidate| candidate == clause) {
+                    matched[index] = true;
+                } else if !globally_impossible {
+                    return None;
+                }
             }
             Some(())
         };
@@ -255,7 +259,7 @@ impl<'a> FrontierCertificate<'a> {
                 if *template.state_masks.get(usize::from(destination))? == INVALID_STATE_MASK {
                     return None;
                 }
-                require(destination, FrontierClause::Translation(source_id))?;
+                require(destination, FrontierClause::Translation(source_id), false)?;
             }
             for slot in 0..3 {
                 charge()?;
@@ -269,13 +273,27 @@ impl<'a> FrontierCertificate<'a> {
                 }
                 for (prior, &destination) in targets.iter().enumerate() {
                     charge()?;
+                    let destination_mask = *template.state_masks.get(usize::from(destination))?;
                     // Invalid or out-of-ceiling kicks are already absent
                     // from this compiled list; surviving kick order is strict.
                     if (prior > 0 && kick_indices[prior - 1] >= kick_indices[prior])
-                        || *template.state_masks.get(usize::from(destination))?
-                            == INVALID_STATE_MASK
+                        || destination_mask == INVALID_STATE_MASK
                     {
                         return None;
+                    }
+                    // Independently reconstruct E2 from the original forward
+                    // footprints, as in the raw-template structure qualifier.
+                    // A missing incoming clause is harmless only if its source
+                    // is invalid or some earlier candidate must be clear when
+                    // this source and destination are clear. Keep every prior
+                    // candidate, including those whose own edge was removed.
+                    let source_mask = template.state_masks[source];
+                    let required_empty = source_mask | destination_mask;
+                    let mut globally_impossible = source_mask == INVALID_STATE_MASK;
+                    for &earlier in &targets[..prior] {
+                        charge()?;
+                        let earlier_mask = *template.state_masks.get(usize::from(earlier))?;
+                        globally_impossible |= earlier_mask & !required_empty == 0;
                     }
                     require(
                         destination,
@@ -284,6 +302,7 @@ impl<'a> FrontierCertificate<'a> {
                             slot: slot as u8,
                             prior_target_count: u8::try_from(prior).ok()?,
                         }),
+                        globally_impossible,
                     )?;
                 }
             }
@@ -507,6 +526,12 @@ fn frontier_certificate_verifier_reconstructs_the_cut_and_rejects_weakened_guard
 
 #[test]
 fn frontier_certificate_preserves_exact_same_candidate_4l_operation_graph() {
+    let reference = with_global_kick_pruning(false, same_candidate_4l_certificate_answers);
+    let filtered = with_global_kick_pruning(true, same_candidate_4l_certificate_answers);
+    assert_eq!(filtered, reference);
+}
+
+fn same_candidate_4l_certificate_answers() -> ([u8; 8], [bool; 8]) {
     // One actual 10x4 exact-cover candidate, with the minimum three distinct
     // operations needed to compare the target across two different prefixes.
     // I and L can independently lock first without clearing. Either prefix
@@ -655,4 +680,12 @@ fn frontier_certificate_preserves_exact_same_candidate_4l_operation_graph() {
     assert_eq!(oracle, [0b111, 0b110, 0b100, 0b100, 0b010, 0b010, 0, 0]);
     assert_eq!(accelerated, oracle);
     assert_eq!(certified_prefixes, (1 << I_ONLY) | (1 << L_ONLY));
+    let certificate_answers = states.map(|(board, deleted)| {
+        // The terminal subset has deleted every row and has no remaining
+        // lock query. Its absent frame grants no negative certificate.
+        LocalRelationRowFrame::new(HEIGHT, deleted)
+            .is_some_and(|frame| certificate.excludes(&templates[0], frame, t_target, board))
+    });
+    assert!(!certificate_answers[0b111]);
+    (accelerated, certificate_answers)
 }

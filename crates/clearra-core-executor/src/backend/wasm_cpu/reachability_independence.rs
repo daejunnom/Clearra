@@ -203,33 +203,8 @@ pub(in super::super) fn static_lock_dependency_mask(
     static_lock_dependency_mask_filtered(template, rotation, x, y, None, |_, _, _| true)
 }
 
-/// Exact edge-existence test over the cube `fixed | subset(variable)`.
-///
-/// The caller validates the cube and the board width. Source and destination
-/// must stay empty. Every earlier valid kick must have at least one possible
-/// blocker outside those required-empty cells; selecting one such blocker for
-/// each earlier kick constructs a witness board inside the cube. Different
-/// earlier kicks may share a blocker. This decides whether an edge can exist,
-/// not whether its source is reachable.
 #[cfg(test)]
-pub(super) fn edge_possible_in_cube(
-    source_mask: u64,
-    target_mask: u64,
-    prior_masks: impl IntoIterator<Item = u64>,
-    fixed: u64,
-    variable: u64,
-) -> bool {
-    if source_mask == INVALID_STATE_MASK || target_mask == INVALID_STATE_MASK {
-        return false;
-    }
-    let required_empty = source_mask | target_mask;
-    fixed & required_empty == 0
-        && prior_masks.into_iter().all(|mask| {
-            mask == INVALID_STATE_MASK
-                || mask & fixed != 0
-                || mask & variable & !required_empty != 0
-        })
-}
+pub(super) use super::edge_possible_in_cube;
 
 /// The static target quotient restricted to one declared occupancy cube.
 ///

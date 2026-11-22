@@ -3545,20 +3545,40 @@ mod target_group_memory_admission_tests {
             ProblemCompiler::compile_opening_pc(&OpeningPcSearchQuery::new(PcTarget::two_lines()))
                 .expect("two-line problem");
         let catalog = GeometryCatalog::compile(&problem).expect("two-line catalog");
+        // The deferred owner also retains a universe clone and its index
+        // compiler's overlapping clone. The eager constructor above borrows
+        // the caller's universe, so its peak alone is not this owner's cap.
+        let deferred_peak = universe
+            .checked_retained_capacity_bytes()
+            .and_then(|bytes| bytes.checked_mul(2))
+            .and_then(|bytes| peak.checked_add(bytes))
+            .expect("checked deferred owner and index construction peak");
+        assert!(matches!(
+            GeometrySearch::external_deferred(
+                &universe,
+                &family,
+                true,
+                Some((already_retained, already_retained + deferred_peak - 1)),
+            ),
+            Err(WasmExactSearchError::InvalidProblem(
+                "wasm_pattern_index_memory_capacity_exceeded"
+            ))
+        ));
         let mut deferred = GeometrySearch::external_deferred(
             &universe,
             &family,
             true,
-            Some((already_retained, already_retained + peak)),
+            Some((already_retained, already_retained + deferred_peak)),
         )
         .expect("deferred external targets");
+        assert_eq!(deferred.retained_bytes() as u128, deferred_peak);
         assert!(deferred.target_preparation_pending());
         for _ in 0..16 {
             if !deferred.target_preparation_pending() {
                 break;
             }
             assert!(matches!(
-                deferred.advance_with_retained_limit(&catalog, peak),
+                deferred.advance_with_retained_limit(&catalog, deferred_peak),
                 GeometryAdvance::Pending
             ));
         }

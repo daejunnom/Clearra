@@ -365,8 +365,6 @@ export const japaneseWorkspaceMessages = Object.freeze({
   tablebaseReady: '準備完了 · {size}',
   progressStageTablebase: 'オンラインテーブルベースの部分取得',
   tablebaseUnavailable: '使用不可',
-  pcPrecomputeBuildDependencies: 'ミノの依存関係を事前計算',
-  pcPrecomputeBuildDependenciesHelp: '通常の配置探索の代わりにミノの依存関係で検証します。検証を完了できない場合は探索を停止します。',
   exactLegalBoard: 'Exact legal-boardフィルター',
   conditionedReachability: '条件付き到達性キャッシュ',
   exactAcceleratorsHelp: '適格性を満たしたassetは既定で有効です。未導入・破損・対象外の場合は従来のexact searchへフォールバックします。',

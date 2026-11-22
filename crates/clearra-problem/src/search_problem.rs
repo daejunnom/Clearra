@@ -695,7 +695,7 @@ mod pc_placement_dependency {
     use clearra_core_domain::objective::objective_kind::ObjectiveKind;
     use clearra_pc_graph::request::RequestedSearchBackend;
     use clearra_rules::kicks::KickTableProfileId;
-    use clearra_supply::bag::BagState;
+    use clearra_supply::{bag::BagState, QueueObservationPolicy};
 
     use crate::goal::SearchGoal;
 
@@ -704,15 +704,20 @@ mod pc_placement_dependency {
     };
 
     impl SearchProblem {
-        /// Whether the compiled PC request opts into the bounded placement
-        /// dependency proof. This grants neither a candidate proof nor an
-        /// alternative result contract. The CPU verifier still checks its
-        /// candidate, retained witness and resource boundaries.
+        /// Compatibility query for the former explicit dependency option.
+        /// A false legacy flag does not disable the automatic eligible route.
         pub fn pc_placement_dependency_requested(&self) -> bool {
+            self.backend_policy().precompute_build_dependencies()
+                && self.pc_placement_dependency_eligible()
+        }
+
+        /// Whether this PC contract uses the bounded dependency product.
+        /// Eligibility is independent of the retained legacy option. It grants
+        /// no candidate proof: the CPU still checks every candidate, witness
+        /// and resource boundary. Ordinary oracle and visible-seven consumers
+        /// share this exact placement owner; their probability policies differ.
+        pub fn pc_placement_dependency_eligible(&self) -> bool {
             let backend = self.backend_policy();
-            if !backend.precompute_build_dependencies() {
-                return false;
-            }
             let ordinary = self.pc_chance_evidence_policy() == PcChanceEvidencePolicy::Disabled
                 && matches!(
                     self.output_policy(),
@@ -752,9 +757,9 @@ mod pc_placement_dependency {
                 || self.objective().execution_constraints().requested()
                 || self.build_replay_evidence_requested()
                 || self.allowed_colored_solution_identities().is_some()
-                || self
-                    .queue_observation_policy()
-                    .requires_observation_policy()
+                || !(self.queue_observation_policy() == QueueObservationPolicy::FullQueueOracle
+                    || (ordinary
+                        && self.queue_observation_policy() == QueueObservationPolicy::VisibleSeven))
                 || !matches!(
                     backend.requested_backend(),
                     RequestedSearchBackend::Cpu | RequestedSearchBackend::Auto
@@ -764,6 +769,21 @@ mod pc_placement_dependency {
                 || backend.max_candidates() != 0
                 || backend.max_frontier_states() != 0
                 || backend.max_memory_mib().is_some()
+            {
+                return false;
+            }
+            // One catalog fixes the original required cells, so every exact
+            // cover in this session has this same operation count even when
+            // exact_pieces was omitted. Observation roots cannot mix horizons.
+            let area = usize::from(self.compact_pc_geometry_height()) * 10;
+            let all_cells = (1_u64 << area) - 1;
+            let initial = self.initial_board().occupied_mask();
+            let required = (all_cells & !initial).count_ones() as usize;
+            if initial & !all_cells != 0
+                || !required.is_multiple_of(4)
+                || !(1..=10).contains(&(required / 4))
+                || self.compact_pc_proven_empty_family_depth().is_some()
+                || self.compact_pc_has_unqualified_capped_family()
             {
                 return false;
             }
@@ -1295,7 +1315,7 @@ mod retained_capacity {
         }
 
         #[test]
-        fn compact_pc_dependency_opt_in_preserves_supported_family_memory_authority() {
+        fn compact_pc_dependency_automatic_route_preserves_supported_family_memory_authority() {
             use clearra_pc_graph::request::{PcExecutionPolicy, PcSolutionProbabilityPolicy};
             use clearra_rules::profile::builtin_rules::jstris_180;
 
@@ -1305,6 +1325,7 @@ mod retained_capacity {
                 .with_objective(ObjectivePolicy::unique());
             let baseline = ProblemCompiler::compile_opening_pc(&ordinary_query).unwrap();
             assert!(!baseline.pc_placement_dependency_requested());
+            assert!(baseline.pc_placement_dependency_eligible());
             assert!(baseline
                 .checked_pc_family_pointee_retained_bytes()
                 .is_some());
@@ -1317,6 +1338,7 @@ mod retained_capacity {
             )
             .unwrap();
             assert!(ordinary.pc_placement_dependency_requested());
+            assert!(ordinary.pc_placement_dependency_eligible());
             assert_eq!(
                 ordinary.checked_pc_family_pointee_retained_bytes(),
                 manual_expected(&ordinary)
@@ -1349,13 +1371,40 @@ mod retained_capacity {
             assert!(one_line
                 .checked_pc_family_pointee_retained_bytes()
                 .is_some());
+
+            for legacy in [false, true] {
+                let visible = ProblemCompiler::compile_opening_pc(
+                    &ordinary_query
+                        .clone()
+                        .with_queue_observation_policy(
+                            clearra_supply::QueueObservationPolicy::VisibleSeven,
+                        )
+                        .with_execution_policy(
+                            PcExecutionPolicy::mvp_default()
+                                .with_precompute_build_dependencies(legacy),
+                        ),
+                )
+                .unwrap();
+                assert!(visible.pc_placement_dependency_eligible());
+                assert_eq!(visible.pc_placement_dependency_requested(), legacy);
+                assert_eq!(
+                    visible.checked_pc_family_pointee_retained_bytes(),
+                    manual_expected(&visible)
+                );
+                assert!(
+                    !visible
+                        .with_pc_chance_probability_v2_evidence()
+                        .with_output_policy(crate::SearchOutputPolicy::CoverageSummary)
+                        .pc_placement_dependency_eligible(),
+                    "the typed chance product retains its full-oracle contract"
+                );
+            }
         }
 
         #[test]
         fn compact_pc_dependency_opt_in_does_not_authorize_other_families() {
             use clearra_pc_graph::request::{PcExecutionPolicy, RequestedSearchBackend};
             use clearra_rules::profile::builtin_rules::srs;
-            use clearra_supply::QueueObservationPolicy;
 
             let policy = PcExecutionPolicy::mvp_default().with_precompute_build_dependencies(true);
             let base = OpeningPcSearchQuery::new(PcTarget::two_lines())
@@ -1383,8 +1432,6 @@ mod retained_capacity {
                 base.clone().with_rule(srs()),
                 base.clone().with_objective(ObjectivePolicy::all()),
                 base.clone()
-                    .with_queue_observation_policy(QueueObservationPolicy::VisibleSeven),
-                base.clone()
                     .with_queue(PcQueueInput::fixed_sequence(FixedSequence::new(vec![
                         PieceKind::I,
                         PieceKind::O,
@@ -1399,6 +1446,7 @@ mod retained_capacity {
             ] {
                 let problem = ProblemCompiler::compile_opening_pc(&query).unwrap();
                 assert!(!problem.pc_placement_dependency_requested(), "{query:?}");
+                assert!(!problem.pc_placement_dependency_eligible(), "{query:?}");
                 assert!(problem.checked_pc_family_pointee_retained_bytes().is_none());
             }
 

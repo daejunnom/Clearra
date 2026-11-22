@@ -506,7 +506,9 @@ struct OracleCaseOutcome {
 #[cfg(feature = "placement-dependency-pc")]
 #[test]
 fn product_pc_placement_dependencies_match_concrete_p7_coverage() {
-    use super::super::super::buildup::with_product_verifier_counts;
+    use super::super::super::{
+        buildup::with_product_verifier_counts, with_pc_placement_dependency_reference,
+    };
 
     let origin = P7Origin::new(CTK_ORIGIN);
     let make_problem = |precompute_dependencies, count, output: SearchOutputPolicy| {
@@ -548,15 +550,29 @@ fn product_pc_placement_dependencies_match_concrete_p7_coverage() {
         SearchOutputPolicy::Summary,
         SearchOutputPolicy::CoverageSummary,
     ] {
-        let (concrete, (default_build_up, default_proof)) = run(false, output);
-        let (dependency, (selected_build_up, selected_proof)) = run(true, output);
-        assert_eq!(default_proof, 0, "the default must not call the proof");
-        assert!(default_build_up > 0, "the default uses BuildUp");
+        let (concrete, (reference_build_up, reference_proof)) =
+            with_pc_placement_dependency_reference(|| run(false, output));
+        let (dependency, (selected_build_up, selected_proof)) = run(false, output);
+        let (legacy, legacy_calls) = run(true, output);
+        assert_eq!(
+            reference_proof, 0,
+            "the explicit test reference uses BuildUp"
+        );
+        assert!(reference_build_up > 0);
         assert_eq!(
             selected_build_up, 0,
             "the proof may not fall back to BuildUp"
         );
-        assert!(selected_proof > 0, "the explicit option selects the proof");
+        assert!(
+            selected_proof > 0,
+            "eligible default requests select the proof"
+        );
+        assert_eq!(legacy_calls, (selected_build_up, selected_proof));
+        assert_eq!(legacy.solution_coverages(), dependency.solution_coverages());
+        assert_eq!(
+            legacy.field("coverage_probability"),
+            dependency.field("coverage_probability")
+        );
         assert_eq!(concrete.solution_coverages().len(), 246);
         assert_eq!(
             dependency.solution_coverages(),

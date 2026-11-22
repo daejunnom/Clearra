@@ -30,6 +30,20 @@ use super::{
     WasmExactSearchError,
 };
 
+#[cfg(any(test, feature = "placement-dependency-pc"))]
+#[path = "queue_observation_physical_actions.rs"]
+mod physical_actions;
+#[cfg(any(test, feature = "placement-dependency-pc"))]
+pub(super) use physical_actions::{PhysicalActionEdge, PhysicalActionLanguage};
+
+#[cfg(test)]
+#[path = "queue_observation_dependency_tests.rs"]
+mod dependency_tests;
+
+#[cfg(all(test, feature = "placement-dependency-pc"))]
+#[path = "placement_dependency_observation_tests.rs"]
+mod product_dependency_tests;
+
 const NO_NODE: u32 = u32::MAX;
 const NO_TERMINAL: u32 = u32::MAX;
 const CANCELLATION_POLL_MASK: u32 = 0xff;

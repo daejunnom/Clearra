@@ -883,6 +883,8 @@ pub(super) struct BuildUpWorkspace {
     standard_bag_coverage_initialized: bool,
     shared_standard_bag_request: Option<Arc<SharedStandardBagRequest>>,
     observation_language_roots: Vec<u32>,
+    #[cfg(feature = "placement-dependency-pc")]
+    dependency_observation: super::queue_observation_policy::PhysicalActionLanguage,
     reachability: ReachabilityWorkspace,
     graph_nodes: Vec<BuildNode>,
     graph_edges: Vec<BuildEdge>,
@@ -909,6 +911,22 @@ pub(super) struct BuildUpWorkspace {
 }
 
 impl BuildUpWorkspace {
+    #[cfg(any(test, all(feature = "local-search-ab", feature = "parallel")))]
+    fn operation_mask_experiment_active(&self) -> bool {
+        #[cfg(test)]
+        if OPERATION_MASK_TEST.get().is_some() {
+            return true;
+        }
+        #[cfg(all(feature = "local-search-ab", feature = "parallel"))]
+        {
+            self.operation_mask_worker.is_some()
+        }
+        #[cfg(not(all(feature = "local-search-ab", feature = "parallel")))]
+        {
+            false
+        }
+    }
+
     #[cfg(any(test, all(feature = "local-search-ab", feature = "parallel")))]
     fn operation_masks_enabled(&self) -> bool {
         #[cfg(test)]
@@ -1077,8 +1095,13 @@ impl BuildUpWorkspace {
     fn other_retained_bytes(&self) -> usize {
         // Count private components directly, never subtract two snapshots of
         // a shared OnceLock which another worker may initialize in between.
+        #[cfg(feature = "placement-dependency-pc")]
+        let dependency_observation_bytes = self.dependency_observation.retained_bytes();
+        #[cfg(not(feature = "placement-dependency-pc"))]
+        let dependency_observation_bytes = 0;
         self.realization_feasibility.retained_bytes()
             + self.observation_language_roots.capacity() * core::mem::size_of::<u32>()
+            + dependency_observation_bytes
             + self.legal_board_query_cache.retained_bytes()
     }
 
@@ -1251,7 +1274,11 @@ impl BuildUpWorkspace {
         problem: &SearchProblem,
         control: &ExecutionControl,
     ) -> Result<Option<QueueObservationCoverage>, WasmExactSearchError> {
-        if self.observation_language_roots.is_empty() {
+        #[cfg(feature = "placement-dependency-pc")]
+        let physical_actions = self.dependency_observation.has_roots();
+        #[cfg(not(feature = "placement-dependency-pc"))]
+        let physical_actions = false;
+        if self.observation_language_roots.is_empty() && !physical_actions {
             return Ok(None);
         }
         self.observation_language_roots.sort_unstable();
@@ -1273,6 +1300,22 @@ impl BuildUpWorkspace {
             problem.supply().projects_standard_bag_lookahead(),
             None,
         )?;
+        #[cfg(feature = "placement-dependency-pc")]
+        if physical_actions {
+            if !self.observation_language_roots.is_empty() {
+                return Err(WasmExactSearchError::InvalidProblem(
+                    "wasm_observation_physical_and_kind_owners_mixed",
+                ));
+            }
+            let language = self.dependency_observation.view(control)?.ok_or(
+                WasmExactSearchError::InvalidProblem("wasm_observation_physical_root_missing"),
+            )?;
+            // The owner unions only identical physical locks. Different
+            // locks of the same kind stay separate alternatives for the
+            // evaluator's existing action-before-reveal recurrence.
+            // Its retained storage is already counted by this workspace.
+            return evaluator.evaluate(&language, control).map(Some);
+        }
         let language = RootedPieceLanguageUnion::new(
             &self.piece_order_languages,
             &self.observation_language_roots,
@@ -2124,8 +2167,14 @@ fn verify_candidate_for_completion_mode(
             profile_scale,
         );
     }
-    if problem.backend_policy().precompute_build_dependencies() {
-        super::ensure_pc_placement_dependency_mode(problem)?;
+    super::ensure_pc_placement_dependency_mode(problem)?;
+    let use_dependency = super::uses_pc_placement_dependency(problem);
+    #[cfg(any(test, all(feature = "local-search-ab", feature = "parallel")))]
+    // Both arms explicitly compare the concrete graph/mask producer. The
+    // zero arm is a requested reference, not an unscoped product default.
+    // The worker already owns this request; no global experiment is read.
+    let use_dependency = use_dependency && !workspace.operation_mask_experiment_active();
+    if use_dependency {
         #[cfg(feature = "placement-dependency-pc")]
         {
             if !use_builtin_rule
@@ -2151,7 +2200,7 @@ fn verify_candidate_for_completion_mode(
         }
     }
     // Preserve the explicitly selected local A/B axis, outside product
-    // builds. The product's default BuildUp never runs this prepass.
+    // builds. Unsupported product contracts retain their existing verifier.
     if cfg!(feature = "local-search-ab")
         && RealizationFeasibilityWorkspace::dependency_relaxation_is_infeasible(catalog, candidate)
     {
