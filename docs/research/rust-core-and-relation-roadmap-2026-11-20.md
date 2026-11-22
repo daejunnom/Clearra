@@ -10,7 +10,9 @@
 
 ### 2026-11-22의 적용 범위와 현황 해석
 
-이번 수학 검토는 **ILC를 사용하는 고정 타일링**을 대상으로 하며, oracle과 see-7에서 공통 연산과 정확한 배치 관계를 재사용하는 방향을 다룬다. damage·spin 탐색에 의존성 사전 분석을 새로 적용하는 일은 이번 범위에 포함하지 않는다. 구현은 보류하며, 높이 일반화·공급 결합·prefix 열거 제거와 안전한 조기 탈락의 증명은 [고정 타일링 ILC 의존성 증명](fixed-tiling-ilc-dependency-proofs-2026-11-22.md)에 기록한다.
+당시 수학 검토는 **ILC를 사용하는 고정 타일링**을 대상으로 하며, oracle과 see-7에서 공통 연산과 정확한 배치 관계를 재사용하는 방향을 다뤘다. damage·spin 탐색에 의존성 사전 분석을 새로 적용하는 일은 이번 범위에 포함하지 않는다. `f1c57e4` 검토 시점에는 구현을 보류했고, 높이 일반화·공급 결합·prefix 열거 제거와 안전한 조기 탈락의 증명은 [고정 타일링 ILC 의존성 증명](fixed-tiling-ilc-dependency-proofs-2026-11-22.md)에 기록했다.
+
+그 이후 실제 연결·정리는 [소비자 확대와 중복 계산 정리](dependency-consumers-cleanup-2026-11-22.md), 추가 최적화는 [see-7 전 경로 축약 증명](see7-quotient-pruning-proof-2026-11-22.md)과 [생성·검색 측정 보고서](see7-pruning-measurements-2026-11-22.md)가 담당한다. 후속 보고의 완료된 8-lock 비교, 10/11-lock의 실제 종료 단계, 채택된 기본값과 실험 옵션을 각각 확인한다. 이 링크 추가만으로 V05의 전체 see-7 완주나 V06의 exact-SHA CI·main·제품 host gate를 완료 처리하지 않는다.
 
 이 문서는 당시의 실행 계획과 감사 이력을 보존한다. **11절의 88개 체크 항목이 체크되지 않았다는 이유로 현재 88개가 모두 미완료라고 추정하지 않는다.** 반대로 수학 증명이나 일부 소스 연결 확인만으로 관련 항목을 완료 처리하지도 않는다. 현재 진행 상태는 해당 구현·호출 경로·검증 증거를 작업별로 다시 확인해 판단한다.
 
@@ -65,7 +67,7 @@
 초안에서 지목한 중복 중 `f1c57e4`에서 해소된 범위와 남은 범위는 다음과 같다.
 
 - `PlacementConditionCatalog`의 영구 cell-incidence 복제는 제거되었고, `influencing_placements`는 실제 소유 `GeometryCatalog`를 확인한 뒤 `catalog.support`를 사용한다. Exact clear domain은 `GeometryCatalog::exact_clear_domain_mask`를 통해 기존 instantiation offsets의 결과를 이용하며, 표가 없으면 requirement 후보 frame을 기존 raw instantiation으로 확인한다. row별 domain mask 처리·interning과 영향 조회 결과의 임시 `Vec` 생성은 남는다. 이 catalog는 현재 `test` 또는 `local-search-ab` 범위이므로 기본 제품 경로의 상시 비용으로 취급하지 않는다.
-- 일반 reachability, extended reachability, finesse는 `clearra-rules::kicks::normalized_kick_delta`를 함께 사용하며 `normalized_rotation_center`도 그 공통 구현이 소유한다. 다만 `clearra-forward-search/src/reachability.rs`와 `clearra-spin-structure-search/src/entry.rs`에는 같은 정규화 계산의 로컬 정의가 남아 있다. 이는 남은 의미 원천 통합의 감사 대상이며, 이번 의존성 분석을 해당 제품에 새로 적용한다는 뜻은 아니다.
+- 일반 reachability, extended reachability, finesse는 `clearra-rules::kicks::normalized_kick_delta`를 함께 사용하며 `normalized_rotation_center`도 그 공통 구현이 소유한다. `f1c57e4`에서 남아 있던 forward-search와 spin-structure-search의 로컬 정의도 후속 `fa199dfc` 소비자 정리에서 같은 공통 구현으로 연결했다. 이 공통화는 의존성 분석을 해당 제품에 새로 적용한다는 뜻은 아니다.
 - C FFI의 `CoreContext = ContractCoreContext`와 실제 C 메모리를 감싼 `NativeCoreContext`가 공존한다. 이름이 아닌 실제 호출 경로와 수명을 기준으로 책임을 정리한다. [S2][S3]
 
 `clearra-exact-cover`의 현재 `solve_first` 중심 solver와 ILC 전체 family compiler는 계약이 다르다. `clearra-geometry`의 정적 placement 열거도 stretched target-frame ILC를 자동 대체하지 않는다. **기존 코어를 우선 검토하되, 의미가 같은 부분만 재사용한다.**
@@ -328,7 +330,7 @@ M_{peak}\approx M_{shared}+W M_{worker}+M_{live\ candidate}
 - **기존 구현·소비자:** `clearra-piece-registry`, `clearra-rules/src/kicks`; C `reachability/kick_first_success.c::{clearra_reachability_kick_offsets_for_transition,clearra_kick_first_success}`. `f1c57e4`에서 `W/reachability.rs`, `W/extended_reachability.rs`, `clearra-finesse/src/lib.rs`는 `clearra-rules`의 공통 `normalized_kick_delta`를 사용하고, `normalized_rotation_center`는 그 내부 구현이다. `W/kick_profiles.rs`는 Rust `SrsKicks`·`NoKick`를 사용한다.
 - **입출력·불변식:** `(shape definition, from/to rotation, 순서 있는 kick offsets, 좌표 규약)`을 정규화된 후보 전이로 만든다. delta는 `kick + center(from) - center(to)`이며 앞 후보 실패 조건과 선택된 kick index를 잃지 않는다. 같은 occupied mask도 orientation·spin/finesse evidence까지 같은 것은 아니다.
 - **공유·무효화:** 불변 shape/rule/dimensions/source-entry 계약별 템플릿을 공유한다. builtin profile ID만으로 식별하는 계약을 custom profile까지 넓힐 때에는 실제 내용·버전의 동일성도 보존한다. shape registry·180 허용·좌표 또는 source-entry 규약 변경 시 기존 증명이 유효한지 확인한다.
-- **남은 작업:** 지목했던 세 Rust 소비자의 정규화 공통화는 소스에서 확인된다. forward-search와 spin-structure-search에 남은 로컬 정의의 계약과 소비자를 확인하고, ABI ID 인코딩과 실행 의미의 경계를 검토한다. 관계 compiler는 기존 공통 전이 계약을 재사용한다. 최대 kick offset만으로 독립적인 영향 반경을 새로 추정하지 않는다. 이 확인만으로 O01·O02·O07·G05 전체를 완료 처리하지 않는다. [S2][S13]
+- **현재 상태와 남은 작업:** 지목했던 세 Rust 소비자에 이어 forward-search와 spin-structure-search도 `fa199dfc5873322aa457615248b384b6d91d79cc`에서 공통 `normalized_kick_delta`로 합쳐졌다. 두 소비자의 현재 import·호출을 확인했다. ABI ID 인코딩과 실행 의미의 경계, 각 계약의 적용 범위는 계속 별도로 검토한다. 관계 compiler는 기존 공통 전이 계약을 재사용한다. 최대 kick offset만으로 독립적인 영향 반경을 새로 추정하지 않는다. 이 공통화만으로 O01·O02·O07·G05 전체를 완료 처리하지 않는다. [S2][S13]
 
 #### OP03 — ILC 행 투영 필요조건: I05·I08
 
@@ -792,7 +794,7 @@ MS2·MS3·MS4는 병렬 진행 가능하다. MS1의 개선을 모든 연구의 �
 | ID | 확인한 근거 |
 | --- | --- |
 | S1 | [app 서비스](../../crates/clearra-app/src/app_services.rs)의 `AppCoreExecutorBackend`, `execute_search_backend_with_control`, `execute_build_coverage_with_control`; [CoreExecutor](../../crates/clearra-core-executor/src/core_executor.rs)의 Rust/reference 분기와 [Rust legacy cover](../../crates/clearra-core-executor/src/service/rust_legacy_cover.rs)의 `execute`, `execute_bridge`, 지원 계약; [CLI 선택](../../crates/clearra-cli/src/cli_routing.rs)의 `product_app_context`; [C source manifest](../../core-c/cmake/source_manifest.cmake) |
-| S2 | [GeometryCatalog](../../crates/clearra-core-executor/src/backend/wasm_cpu/catalog.rs)의 `support`, `exact_clear_domain_mask`와 [PlacementConditionCatalog](../../crates/clearra-core-executor/src/backend/wasm_cpu/placement_conditions.rs)의 `compile`, `influencing_placements`; [APDP index](../../crates/clearra-core-executor/src/backend/wasm_cpu/geometry_apdp.rs), [family](../../crates/clearra-core-executor/src/backend/wasm_cpu/geometry_family.rs); [공통 kick 정규화](../../crates/clearra-rules/src/kicks/kick_table.rs)와 이를 사용하는 [일반 reachability](../../crates/clearra-core-executor/src/backend/wasm_cpu/reachability.rs), [extended](../../crates/clearra-core-executor/src/backend/wasm_cpu/extended_reachability.rs), [finesse](../../crates/clearra-finesse/src/lib.rs); 로컬 정규화가 남은 [forward search](../../crates/clearra-forward-search/src/reachability.rs), [spin structure](../../crates/clearra-spin-structure-search/src/entry.rs) |
+| S2 | [GeometryCatalog](../../crates/clearra-core-executor/src/backend/wasm_cpu/catalog.rs)의 `support`, `exact_clear_domain_mask`와 [PlacementConditionCatalog](../../crates/clearra-core-executor/src/backend/wasm_cpu/placement_conditions.rs)의 `compile`, `influencing_placements`; [APDP index](../../crates/clearra-core-executor/src/backend/wasm_cpu/geometry_apdp.rs), [family](../../crates/clearra-core-executor/src/backend/wasm_cpu/geometry_family.rs); [공통 kick 정규화](../../crates/clearra-rules/src/kicks/kick_table.rs)와 이를 사용하는 [일반 reachability](../../crates/clearra-core-executor/src/backend/wasm_cpu/reachability.rs), [extended](../../crates/clearra-core-executor/src/backend/wasm_cpu/extended_reachability.rs), [finesse](../../crates/clearra-finesse/src/lib.rs); 후속 소비자 정리에서 같은 구현으로 연결한 [forward search](../../crates/clearra-forward-search/src/reachability.rs), [spin structure](../../crates/clearra-spin-structure-search/src/entry.rs) |
 | S3 | [Rust 계약 facade](../../crates/clearra-core-ffi/src/memory/core_context.rs), [native RAII](../../crates/clearra-core-ffi/src/memory/native_core_context.rs), [C allocator](../../core-c/src/memory/clr_allocators.c), [scope](../../core-c/src/memory/clr_scope.c) |
 | S4 | [geometry.rs](../../crates/clearra-core-executor/src/backend/wasm_cpu/geometry.rs)의 `FamilyCompiler::advance`, `GeometryCompletionOracle`; [geometry_domain.rs](../../crates/clearra-core-executor/src/backend/wasm_cpu/geometry_domain.rs)의 `compile`, `compile_minimum`, APDP complete-domain 판단 |
 | S5 | [기존 구현·미완료 P7P4 보고서](static-movement-influence-2026-11-20.md), [이전 graph probability 보고서](graph-only-probability-2026-11-20.md), [manager runtime](../../tools/clearra-manage/src/runtime.rs)의 exit status 처리 |

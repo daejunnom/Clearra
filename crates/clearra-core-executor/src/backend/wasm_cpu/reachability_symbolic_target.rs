@@ -287,6 +287,10 @@ pub(super) fn compile_prefix_target_lanes_from_planes(
                 check()?;
             }
             work.ordered_kick_terms += 1;
+            #[cfg(any(test, feature = "local-search-ab"))]
+            {
+                work.reverse_rotation_candidate_checks += 1;
+            }
             let source = usize::from(rotation.source);
             let mut added = delta & relation.free(template, source, work);
             for &prior in super::reverse_rotation_prior_targets(template, rotation) {
@@ -298,6 +302,10 @@ pub(super) fn compile_prefix_target_lanes_from_planes(
                     check()?;
                 }
                 work.ordered_kick_terms += 1;
+                #[cfg(any(test, feature = "local-search-ab"))]
+                {
+                    work.reverse_rotation_prior_checks += 1;
+                }
                 // Current is already known free. Any earlier free target
                 // wins, even if that earlier pose was already visited.
                 added &= !relation.free(template, usize::from(prior), work);
@@ -336,19 +344,31 @@ mod tests {
         (occupied, lanes)
     }
 
-    fn set_global_filter(
+    fn set_global_filter(template: ReachabilityTemplate, enabled: bool) -> ReachabilityTemplate {
+        set_global_filter_mode(
+            template,
+            if enabled {
+                super::super::GlobalKickPruneMode::Current
+            } else {
+                super::super::GlobalKickPruneMode::Off
+            },
+        )
+    }
+
+    fn set_global_filter_mode(
         mut template: ReachabilityTemplate,
-        enabled: bool,
+        mode: super::super::GlobalKickPruneMode,
     ) -> ReachabilityTemplate {
-        let (offsets, sources) = super::super::compile_reverse_rotation_sources(
+        let (offsets, sources, work) = super::super::compile_reverse_rotation_sources(
             &template.state_masks,
             &template.rotation_target_offsets,
             &template.rotation_targets,
-            enabled,
+            mode,
         );
         template.globally_pruned_rotation_sources = template.rotation_targets.len() - sources.len();
         template.reverse_rotation_offsets = offsets;
         template.reverse_rotation_sources = sources;
+        template.global_kick_prune_compile_work = work;
         template
     }
 
@@ -410,10 +430,14 @@ mod tests {
                 authority.piece(PieceKind::O).ceiling,
                 i16::from(HEIGHT) + i16::from(upward)
             );
-            for enabled in [false, true] {
-                let template = set_global_filter(
+            for mode in [
+                super::super::GlobalKickPruneMode::Off,
+                super::super::GlobalKickPruneMode::Current,
+                super::super::GlobalKickPruneMode::Improved,
+            ] {
+                let template = set_global_filter_mode(
                     ReachabilityTemplate::compile_authority(&authority, PieceKind::O),
-                    enabled,
+                    mode,
                 );
                 let result = compile_prefix_target_lanes_from_planes(
                     &template,
@@ -426,7 +450,7 @@ mod tests {
                 )
                 .unwrap()
                 .expect("full admitted sky domain is evaluated");
-                assert_eq!(result, 1_u64 << 63, "upward={upward}, filter={enabled}");
+                assert_eq!(result, 1_u64 << 63, "upward={upward}, filter={mode:?}");
                 for (lane, board) in boards {
                     let oracle = reachability_reference::reference_spawn_locks_for_ordered_profile(
                         WIDTH,
@@ -485,10 +509,14 @@ mod tests {
             x: 2,
             lock_y: 0,
         };
-        for enabled in [false, true] {
-            let template = set_global_filter(
+        for mode in [
+            super::super::GlobalKickPruneMode::Off,
+            super::super::GlobalKickPruneMode::Current,
+            super::super::GlobalKickPruneMode::Improved,
+        ] {
+            let template = set_global_filter_mode(
                 ReachabilityTemplate::compile_authority(&authority, PieceKind::T),
-                enabled,
+                mode,
             );
             let source = super::super::state_index(
                 10,
@@ -518,7 +546,7 @@ mod tests {
             )
             .unwrap()
             .expect("all 300 earlier free-candidate reads remain representable");
-            assert_eq!(result, 1_u64 << 63, "filter={enabled}");
+            assert_eq!(result, 1_u64 << 63, "filter={mode:?}");
             for (lane, board) in boards {
                 let oracle = reachability_reference::reference_spawn_locks_for_ordered_profile(
                     10,
@@ -572,6 +600,18 @@ mod tests {
                         ReachabilityTemplate::compile(WIDTH, height, piece, profile),
                         true,
                     );
+                    let reused = set_global_filter_mode(
+                        ReachabilityTemplate::compile(WIDTH, height, piece, profile),
+                        super::super::GlobalKickPruneMode::Improved,
+                    );
+                    assert_eq!(
+                        filtered.reverse_rotation_offsets,
+                        reused.reverse_rotation_offsets
+                    );
+                    assert_eq!(
+                        filtered.reverse_rotation_sources,
+                        reused.reverse_rotation_sources
+                    );
                     // Both runs retain precisely the same ordered guard input.
                     assert_eq!(baseline.state_masks, filtered.state_masks);
                     assert_eq!(
@@ -611,9 +651,11 @@ mod tests {
                     }
                     let mut old_scratch = ReverseScratch::default();
                     let mut new_scratch = ReverseScratch::default();
+                    let mut reused_scratch = ReverseScratch::default();
                     for locks in targets.values().step_by(11) {
                         let mut old_work = PrefixPoseWork::default();
                         let mut new_work = PrefixPoseWork::default();
+                        let mut reused_work = PrefixPoseWork::default();
                         let old = compile_prefix_target_lanes_from_planes(
                             &baseline,
                             &occupied,
@@ -636,11 +678,29 @@ mod tests {
                         )
                         .unwrap()
                         .expect("filtered finite target relation");
+                        let reused_result = compile_prefix_target_lanes_from_planes(
+                            &reused,
+                            &occupied,
+                            lanes,
+                            locks,
+                            &control,
+                            &mut reused_work,
+                            &mut reused_scratch,
+                        )
+                        .unwrap()
+                        .expect("reused-predicate finite target relation");
                         assert_eq!(new, old, "{height}L {piece:?} {profile:?} {locks:?}");
+                        assert_eq!(reused_result, new);
+                        assert_eq!(reused_work, new_work);
                         assert_eq!(new_work.worklist_pops, old_work.worklist_pops);
                         assert_eq!(new_work.reached_pose_lanes, old_work.reached_pose_lanes);
                         assert!(new_work.pose_domains <= old_work.pose_domains);
                         assert!(new_work.ordered_kick_terms <= old_work.ordered_kick_terms);
+                        assert_eq!(
+                            new_work.ordered_kick_terms,
+                            new_work.reverse_rotation_candidate_checks
+                                + new_work.reverse_rotation_prior_checks
+                        );
                         assert_eq!(old_work.global_kick_pruned_edges_peak, 0);
                         assert_eq!(
                             new_work.global_kick_pruned_edges_peak,

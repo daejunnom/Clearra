@@ -30,11 +30,25 @@ use super::{
     WasmExactSearchError,
 };
 
+#[path = "queue_observation_kind_union.rs"]
+pub(super) mod kind_union;
+#[cfg(feature = "placement-dependency-pc")]
+use kind_union::KnownSupplyQuery;
 #[path = "queue_observation_physical_actions.rs"]
 mod physical_actions;
+#[cfg(all(feature = "placement-dependency-pc", feature = "parallel"))]
+pub(super) use physical_actions::board_actions::shared_producer::{
+    SharedObservationOutput, SharedObservationProducer,
+};
+#[cfg(feature = "placement-dependency-pc")]
+pub(super) use physical_actions::board_actions::BoardObservationPlan;
 #[cfg(test)]
 pub(super) use physical_actions::PhysicalActionEdge;
 pub(super) use physical_actions::PhysicalActionLanguage;
+
+#[cfg(test)]
+#[path = "queue_observation_policy_tests.rs"]
+mod physical_tie_tests;
 
 #[cfg(test)]
 #[path = "queue_observation_dependency_tests.rs"]
@@ -49,6 +63,7 @@ const NO_TERMINAL: u32 = u32::MAX;
 const CANCELLATION_POLL_MASK: u32 = 0xff;
 const MAX_REVEAL_BRANCHES: usize = 49;
 const TERMINAL_USED_HELD_CODE: u8 = 8;
+const MAX_PRE_REVEAL_VALUES: usize = 65_536;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct ObservationLanguageNode {
@@ -61,6 +76,20 @@ pub(super) trait ObservationPieceLanguage {
     fn node(&self, node: u32) -> Option<ObservationLanguageNode>;
     fn edge_count(&self, node: u32) -> Option<usize>;
     fn edge(&self, node: u32, index: usize) -> Option<(u8, u32)>;
+
+    /// True for physical board nodes, including those with no outgoing edges.
+    /// Revealed kind-only aliases and frontier unions keep the default.
+    fn has_physical_actions(&self, _node: u32) -> bool {
+        false
+    }
+
+    /// The four current-frame cells locked by this physical edge. Every edge
+    /// of a physical node must have a label, and each same-kind subsequence
+    /// must be ordered by increasing cells, independently of child node IDs.
+    /// Distinct cell labels remain distinct actions even if children coincide.
+    fn physical_action_cells(&self, _node: u32, _index: usize) -> Option<u64> {
+        None
+    }
 
     /// Materialize only actions that the current supply state can execute.
     /// Existing edge indices must remain stable when another piece is prepared.
@@ -82,6 +111,45 @@ pub(super) trait ObservationPieceLanguage {
         _control: &ExecutionControl,
     ) -> Result<u32, WasmExactSearchError> {
         Ok(node)
+    }
+
+    /// Ask for supply counts only at a still-unfiltered frontier. Most kind
+    /// states need no count extraction before their policy memo lookup.
+    fn wants_revealed_supply(&self, _node: u32) -> bool {
+        false
+    }
+
+    /// The evaluator has actually observed every draw relevant to completion.
+    /// Counts include those draws and at most one usable held piece, so they
+    /// bound every possible remaining lock multiset. A determined but hidden
+    /// future alone never authorizes this hook.
+    fn fully_revealed_node_with_supply(
+        &self,
+        node: u32,
+        _available: [u8; 7],
+        control: &ExecutionControl,
+    ) -> Result<u32, WasmExactSearchError> {
+        self.fully_revealed_node(node, control)
+    }
+
+    /// An optional exact membership kernel for one already-observed suffix.
+    /// Eligibility alone never grants permission to read future source values.
+    #[cfg(feature = "placement-dependency-pc")]
+    fn supports_revealed_word_membership(&self, _node: u32) -> bool {
+        false
+    }
+
+    /// Some(false) is an exact negative certificate, while None requests the
+    /// existing policy recurrence. The evaluator supplies only actual observed
+    /// draws, without projected EOF/held-release or terminal-target semantics.
+    #[cfg(feature = "placement-dependency-pc")]
+    fn revealed_word_membership(
+        &self,
+        _node: u32,
+        _query: &KnownSupplyQuery,
+        _control: &ExecutionControl,
+    ) -> Result<Option<bool>, WasmExactSearchError> {
+        Ok(None)
     }
 
     /// Every accepting path has this depth. Variable-horizon consumers keep
@@ -202,18 +270,12 @@ impl PieceLanguageUnionBuilder<'_> {
             }
             accepting |= node.accepting;
             for (piece_index, child_set) in child_sets.iter_mut().enumerate() {
-                let edges = self
-                    .source
-                    .edges_for_piece(source_node, piece_index as u8 + 1)
-                    .ok_or(WasmExactSearchError::InvalidProblem(
-                        "wasm_observation_language_edge_out_of_range",
-                    ))?;
-                child_set.try_reserve(edges.len()).map_err(|_| {
-                    WasmExactSearchError::InvalidProblem(
-                        "wasm_observation_language_union_storage_unavailable",
-                    )
-                })?;
-                child_set.extend(edges.iter().map(|edge| edge.child()));
+                kind_union::append_kind_children(
+                    self.source,
+                    source_node,
+                    piece_index as u8 + 1,
+                    child_set,
+                )?;
             }
         }
 
@@ -291,13 +353,33 @@ impl ObservationPieceLanguage for RootedPieceLanguageUnion {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug)]
 pub(super) struct QueueObservationMetrics {
     pub policy_states: usize,
     pub action_checks: usize,
     pub observation_nodes: usize,
     pub retained_bytes: usize,
-    pub physical_actions: [usize; 11],
+    pub physical_actions: [usize; 13],
+    pub board_actions: [usize; 14],
+    pub kind_union: [usize; 5],
+    pub supply_multiset: [usize; 5],
+    pub multiset_groups: [usize; 9],
+    pub branch_bound: [usize; 4],
+    pub prefix_cones: [usize; 5],
+    pub prefix_cone_exact: [usize; 9],
+    pub boundary_classes: [usize; 7],
+    pub word_bitmap: [usize; 9],
+    pub word_bitmap_board: [usize; 6],
+    pub shared_producer: [usize; 8],
+    pub prefix_masks: [usize; 6],
+    pub suffix_import: [usize; 13],
+    pub source_existence: [usize; 6],
+    pub source_filter: [usize; 4],
+    pub pre_reveal: [usize; 4],
+    pub pre_reveal_retained_bytes: usize,
+    pub pre_reveal_peak_bytes: usize,
+    pub collection: [usize; 2],
+    pub physical_representation: &'static str,
     // Detailed memo diagnostics are consumed only by the native opt-in
     // `CLEARRA_SETUP_POLICY_DIAGNOSTICS` reporter.
     #[cfg(not(target_arch = "wasm32"))]
@@ -318,6 +400,56 @@ pub(super) struct QueueObservationMetrics {
     pub shared_zero_score_capacity: usize,
     #[cfg(not(target_arch = "wasm32"))]
     pub shared_hits: usize,
+}
+
+impl Default for QueueObservationMetrics {
+    fn default() -> Self {
+        Self {
+            policy_states: 0,
+            action_checks: 0,
+            observation_nodes: 0,
+            retained_bytes: 0,
+            physical_actions: [0; 13],
+            board_actions: [0; 14],
+            kind_union: [0; 5],
+            supply_multiset: [0; 5],
+            multiset_groups: [0; 9],
+            branch_bound: [0; 4],
+            prefix_cones: [0; 5],
+            prefix_cone_exact: [0; 9],
+            boundary_classes: [0; 7],
+            word_bitmap: [0; 9],
+            word_bitmap_board: [0; 6],
+            shared_producer: [0; 8],
+            prefix_masks: [0; 6],
+            suffix_import: [0; 13],
+            source_existence: [0; 6],
+            source_filter: [0; 4],
+            pre_reveal: [0; 4],
+            pre_reveal_retained_bytes: 0,
+            pre_reveal_peak_bytes: 0,
+            collection: [0; 2],
+            physical_representation: "none",
+            #[cfg(not(target_arch = "wasm32"))]
+            local_values: 0,
+            #[cfg(not(target_arch = "wasm32"))]
+            local_zero_scores: 0,
+            #[cfg(not(target_arch = "wasm32"))]
+            shared_values: 0,
+            #[cfg(not(target_arch = "wasm32"))]
+            shared_zero_scores: 0,
+            #[cfg(not(target_arch = "wasm32"))]
+            local_value_capacity: 0,
+            #[cfg(not(target_arch = "wasm32"))]
+            local_zero_score_capacity: 0,
+            #[cfg(not(target_arch = "wasm32"))]
+            shared_value_capacity: 0,
+            #[cfg(not(target_arch = "wasm32"))]
+            shared_zero_score_capacity: 0,
+            #[cfg(not(target_arch = "wasm32"))]
+            shared_hits: 0,
+        }
+    }
 }
 
 pub(super) struct QueueObservationCoverage {
@@ -394,15 +526,40 @@ struct ObservationFutureSignature {
     subtree_count: u32,
 }
 
+#[derive(Clone, Copy)]
+enum ObservationPatternDomain<'a> {
+    // Whole-universe observation needs the ordinal identity mapping, not
+    // position-by-piece bitplanes or an allocated Vec containing 0..N.
+    OriginalUniverse,
+    // Subset consumers retain their established dense-to-global mapping.
+    Indexed(&'a PatternPiecePositionIndex),
+}
+
 impl ObservationTrie {
     #[allow(clippy::too_many_arguments)]
     fn compile(
         universe: &MaterializedPatternUniverse,
-        pattern_index: &PatternPiecePositionIndex,
+        domain: ObservationPatternDomain<'_>,
         initial_cursor: usize,
         visible_piece_count: usize,
         projects_standard_bag_lookahead: bool,
     ) -> Result<Self, WasmExactSearchError> {
+        let (global_pattern_count, local_pattern_count, materialized_sequence_len) = match domain {
+            ObservationPatternDomain::OriginalUniverse => {
+                let count = universe.pattern_count();
+                if count != 0 && u32::try_from(count - 1).is_err() {
+                    return Err(WasmExactSearchError::InvalidProblem(
+                        "wasm_observation_pattern_index_overflow",
+                    ));
+                }
+                (count, count, 0)
+            }
+            ObservationPatternDomain::Indexed(index) => (
+                index.global_pattern_count(),
+                index.local_pattern_count(),
+                index.sequence_len(),
+            ),
+        };
         let mut trie = Self {
             nodes: vec![ObservationTrieNode::root()],
             terminals: Vec::new(),
@@ -411,20 +568,30 @@ impl ObservationTrie {
             deterministic_future_classes: Vec::new(),
             uniform_weight: None,
             sequence_len: 0,
-            materialized_sequence_len: pattern_index.sequence_len(),
-            global_pattern_count: pattern_index.global_pattern_count(),
+            materialized_sequence_len,
+            global_pattern_count,
         };
         let mut sequence = Vec::new();
         let mut expected_len = None;
         let mut first_weight = None;
         let mut uniform_positive = true;
-        for local_pattern_index in 0..pattern_index.local_pattern_count() {
-            let global_pattern_index = pattern_index
-                .global_pattern_index(local_pattern_index)
-                .ok_or(WasmExactSearchError::InvalidProblem(
-                    "wasm_observation_pattern_index_missing",
-                ))?;
+        for local_pattern_index in 0..local_pattern_count {
+            let global_pattern_index = match domain {
+                ObservationPatternDomain::OriginalUniverse => local_pattern_index,
+                ObservationPatternDomain::Indexed(index) => index
+                    .global_pattern_index(local_pattern_index)
+                    .ok_or(WasmExactSearchError::InvalidProblem(
+                        "wasm_observation_pattern_index_missing",
+                    ))?,
+            };
             universe.write_sequence_at(global_pattern_index, &mut sequence);
+            if matches!(domain, ObservationPatternDomain::OriginalUniverse) {
+                // Match the index's maximum ORIGINAL length, before an
+                // optional projected final-bag piece changes the sequence.
+                // The existing post-projection uniform-length check below
+                // still decides admission; no new uniform-source assumption.
+                trie.materialized_sequence_len = trie.materialized_sequence_len.max(sequence.len());
+            }
             if projects_standard_bag_lookahead {
                 append_projected_standard_bag_piece(&mut sequence)?;
             }
@@ -958,12 +1125,39 @@ enum SupplyAction {
     ReleaseHeldAtTerminal,
 }
 
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PhysicalPolicyAction {
+    kind: u8,
+    cells: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct PolicyTransition {
     child: u32,
     source_cursor: u16,
     hold_code: u8,
     action: SupplyAction,
+    physical_action: Option<PhysicalPolicyAction>,
+}
+
+impl PolicyTransition {
+    fn precedes(self, other: Self) -> bool {
+        match (self.physical_action, other.physical_action) {
+            (Some(left), Some(right)) => {
+                (self.action, left.kind, left.cells) < (other.action, right.kind, right.cells)
+            }
+            (None, None) => {
+                (self.child, self.source_cursor, self.hold_code, self.action)
+                    < (
+                        other.child,
+                        other.source_cursor,
+                        other.hold_code,
+                        other.action,
+                    )
+            }
+            _ => unreachable!("one policy state cannot mix physical and kind-only action ties"),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -981,6 +1175,105 @@ impl PolicyValue {
     };
 }
 
+/// A transition-local proof that an action cannot replace the exact incumbent.
+/// This is deliberately distinct from a zero policy value: an unfinished
+/// action is never entered into any policy, zero-score, or pre-reveal memo.
+enum TransitionValue {
+    Exact(PolicyValue),
+    Dominated,
+}
+
+#[derive(Clone, Copy)]
+struct TransitionBound {
+    incumbent_count: u32,
+    wins_equal_count: bool,
+}
+
+impl TransitionBound {
+    fn dominates(self, upper_count: u32) -> bool {
+        upper_count < self.incumbent_count
+            || (upper_count == self.incumbent_count && !self.wins_equal_count)
+    }
+}
+
+/// An optional DP value cache before revealed-language normalization. Keys
+/// retain the exact original supply memo state and one raw language class.
+/// Only completed Ok values, including exact rejections, enter this cache;
+/// the canonical memo remains populated for sharing and reconstruction.
+/// Probes use the existing DP memo accounting and are reported separately.
+/// Skipped language normalization really does not run; no language work
+/// counter is reset or adjusted after a query has already been performed.
+#[derive(Default)]
+struct PreRevealMemo {
+    values: ExactHashMap<PolicyMemoState, PolicyValue>,
+    // probes, hits, successful insertions, full-cache admission fallbacks
+    metrics: [usize; 4],
+    peak_bytes: usize,
+}
+
+impl PreRevealMemo {
+    fn clear_values(&mut self) {
+        self.values.clear();
+    }
+
+    fn begin_evaluation(&mut self) {
+        self.clear_values();
+        self.metrics = [0; 4];
+        self.peak_bytes = self.retained_bytes();
+    }
+
+    fn get(&mut self, key: &PolicyMemoState) -> Option<PolicyValue> {
+        self.metrics[0] = self.metrics[0].saturating_add(1);
+        let value = self.values.get(key).copied();
+        if value.is_some() {
+            self.metrics[1] = self.metrics[1].saturating_add(1);
+        }
+        value
+    }
+
+    fn insert(
+        &mut self,
+        key: PolicyMemoState,
+        value: PolicyValue,
+    ) -> Result<(), WasmExactSearchError> {
+        if self.values.len() >= MAX_PRE_REVEAL_VALUES {
+            self.metrics[3] = self.metrics[3].saturating_add(1);
+            return Ok(());
+        }
+        let old_capacity = self.values.capacity();
+        let old_bytes = self.retained_bytes();
+        self.values.try_reserve(1).map_err(|_| {
+            WasmExactSearchError::InvalidProblem("wasm_observation_pre_reveal_storage_unavailable")
+        })?;
+        self.peak_bytes = self.peak_bytes.max(self.retained_bytes().saturating_add(
+            if self.values.capacity() != old_capacity {
+                old_bytes
+            } else {
+                0
+            },
+        ));
+        self.values.insert(key, value);
+        self.metrics[2] = self.metrics[2].saturating_add(1);
+        Ok(())
+    }
+
+    fn retained_bytes(&self) -> usize {
+        let capacity = self.values.capacity();
+        if capacity == 0 {
+            return 0;
+        }
+        // Match the conservative bucket/control-byte convention of other
+        // compact memo owners. This is an owned allocation estimate, not RSS.
+        let buckets = capacity
+            .checked_add(1)
+            .and_then(usize::checked_next_power_of_two)
+            .unwrap_or(usize::MAX);
+        buckets
+            .saturating_mul(core::mem::size_of::<(PolicyMemoState, PolicyValue)>() + 1)
+            .saturating_add(core::mem::align_of::<(PolicyMemoState, PolicyValue)>() + 16)
+    }
+}
+
 pub(super) struct QueueObservationPolicyEvaluator {
     trie: Arc<ObservationTrie>,
     policy: QueueObservationPolicy,
@@ -988,6 +1281,7 @@ pub(super) struct QueueObservationPolicyEvaluator {
     initial_hold_code: u8,
     hold_enabled: bool,
     projects_unplaced_lookahead: bool,
+    projects_standard_bag_lookahead: bool,
     supply_identity: SupplyExecutionState,
     terminal_supply_target: Option<SetupTerminalSupplyTarget>,
     memo: ExactHashMap<PolicyMemoState, PolicyValue>,
@@ -997,12 +1291,22 @@ pub(super) struct QueueObservationPolicyEvaluator {
     shared_terminal_supply_target: Option<SetupTerminalSupplyTarget>,
     shared_memo_domain: Option<u64>,
     next_shared_memo_domain: u64,
+    pre_reveal_enabled: bool,
+    pre_reveal_memo: PreRevealMemo,
     selected_patterns: Vec<u32>,
     selected_min_depth: u8,
     selected_max_depth: u8,
     cancellation_poll_counter: u32,
     action_checks: usize,
     shared_hits: usize,
+    collect_full: bool,
+    collection: [usize; 2],
+    branch_bound_enabled: bool,
+    // Eligible action attempts, dominated actions, skipped reveal descendants,
+    // and exact integer upper-bound comparisons. These are DP diagnostics;
+    // no language work counter is discounted after an operation has run.
+    branch_bound: [usize; 4],
+    initial_observation_progress: [usize; 2],
     peer_abort: Option<Arc<AtomicBool>>,
     #[cfg(test)]
     raw_memo_keys: bool,
@@ -1063,6 +1367,58 @@ impl QueueObservationPolicyEvaluator {
         projects_standard_bag_lookahead: bool,
         terminal_supply_target: Option<SetupTerminalSupplyTarget>,
     ) -> Result<Self, WasmExactSearchError> {
+        Self::from_domain(
+            universe,
+            ObservationPatternDomain::Indexed(pattern_index),
+            policy,
+            initial_cursor,
+            initial_hold,
+            hold_enabled,
+            projects_unplaced_lookahead,
+            projects_standard_bag_lookahead,
+            terminal_supply_target,
+        )
+    }
+
+    /// Observe the complete original universe in canonical ID order. This
+    /// shares the indexed constructor's trie, weights, and evaluator kernel
+    /// without compiling unused bitplanes or an identity-ID vector first.
+    #[allow(clippy::too_many_arguments)]
+    pub fn for_original_universe(
+        universe: &MaterializedPatternUniverse,
+        policy: QueueObservationPolicy,
+        initial_cursor: u16,
+        initial_hold: Option<clearra_core_domain::piece::piece_kind::PieceKind>,
+        hold_enabled: bool,
+        projects_unplaced_lookahead: bool,
+        projects_standard_bag_lookahead: bool,
+        terminal_supply_target: Option<SetupTerminalSupplyTarget>,
+    ) -> Result<Self, WasmExactSearchError> {
+        Self::from_domain(
+            universe,
+            ObservationPatternDomain::OriginalUniverse,
+            policy,
+            initial_cursor,
+            initial_hold,
+            hold_enabled,
+            projects_unplaced_lookahead,
+            projects_standard_bag_lookahead,
+            terminal_supply_target,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn from_domain(
+        universe: &MaterializedPatternUniverse,
+        domain: ObservationPatternDomain<'_>,
+        policy: QueueObservationPolicy,
+        initial_cursor: u16,
+        initial_hold: Option<clearra_core_domain::piece::piece_kind::PieceKind>,
+        hold_enabled: bool,
+        projects_unplaced_lookahead: bool,
+        projects_standard_bag_lookahead: bool,
+        terminal_supply_target: Option<SetupTerminalSupplyTarget>,
+    ) -> Result<Self, WasmExactSearchError> {
         let visible_piece_count = usize::from(policy.visible_piece_count().ok_or(
             WasmExactSearchError::InvalidProblem(
                 "wasm_observation_evaluator_requires_visible_window",
@@ -1071,7 +1427,7 @@ impl QueueObservationPolicyEvaluator {
         let initial_cursor = usize::from(initial_cursor);
         let trie = ObservationTrie::compile(
             universe,
-            pattern_index,
+            domain,
             initial_cursor,
             visible_piece_count,
             projects_standard_bag_lookahead,
@@ -1084,6 +1440,7 @@ impl QueueObservationPolicyEvaluator {
             initial_hold_code: initial_hold.map_or(0, piece_code),
             hold_enabled,
             projects_unplaced_lookahead,
+            projects_standard_bag_lookahead,
             supply_identity: SupplyExecutionState::with_contract(
                 PieceSourceId::new(supply_identity),
                 PieceSourceKind::ObservedWindow,
@@ -1109,12 +1466,19 @@ impl QueueObservationPolicyEvaluator {
             shared_terminal_supply_target: terminal_supply_target,
             shared_memo_domain: None,
             next_shared_memo_domain: 0,
+            pre_reveal_enabled: pre_reveal_enabled()?,
+            pre_reveal_memo: PreRevealMemo::default(),
             selected_patterns: Vec::new(),
             selected_min_depth: u8::MAX,
             selected_max_depth: 0,
             cancellation_poll_counter: 0,
             action_checks: 0,
             shared_hits: 0,
+            collect_full: collect_full_enabled()?,
+            collection: [0; 2],
+            branch_bound_enabled: branch_bound_enabled()?,
+            branch_bound: [0; 4],
+            initial_observation_progress: [0; 2],
             peer_abort: None,
             #[cfg(test)]
             raw_memo_keys: false,
@@ -1138,17 +1502,24 @@ impl QueueObservationPolicyEvaluator {
         }
         self.memo.clear();
         self.zero_scores.clear();
+        self.pre_reveal_memo.begin_evaluation();
         self.selected_patterns.clear();
         self.selected_min_depth = u8::MAX;
         self.selected_max_depth = 0;
         self.cancellation_poll_counter = 0;
         self.action_checks = 0;
         self.shared_hits = 0;
+        self.collection = [0; 2];
+        self.branch_bound = [0; 4];
         let root = language.root();
         let initial_observations = self.trie.initial_observations.clone();
+        self.initial_observation_progress = [0, initial_observations.len()];
         let mut total_score = 0.0;
         let mut total_count = 0usize;
+        #[cfg(feature = "local-search-ab")]
+        let mut initial_observations_done = 0usize;
         for observation_node in initial_observations.iter().copied() {
+            self.pre_reveal_memo.clear_values();
             let state = PolicyState {
                 language_node: root,
                 observation_node,
@@ -1160,8 +1531,28 @@ impl QueueObservationPolicyEvaluator {
             let value = self.solve(language, state, control)?;
             total_score += value.score;
             total_count = total_count.saturating_add(value.pattern_count as usize);
+            self.initial_observation_progress[0] += 1;
+            #[cfg(feature = "local-search-ab")]
+            {
+                initial_observations_done += 1;
+                if initial_observations_done == 1
+                    || initial_observations_done & 0xff == 0
+                    || initial_observations_done == initial_observations.len()
+                {
+                    eprintln!(
+                        "clearra_observation_policy_progress initial_observations_done={initial_observations_done} initial_observations_total={} policy_states={} action_checks={}",
+                        initial_observations.len(),
+                        self.memo.len()
+                            .saturating_add(self.zero_scores.len())
+                            .saturating_add(self.shared_memo.len())
+                            .saturating_add(self.shared_zero_scores.len()),
+                        self.action_checks,
+                    );
+                }
+            }
         }
         for observation_node in initial_observations {
+            self.pre_reveal_memo.clear_values();
             self.collect_selected(
                 language,
                 PolicyState {
@@ -1205,7 +1596,27 @@ impl QueueObservationPolicyEvaluator {
                 action_checks: self.action_checks,
                 observation_nodes: self.trie.nodes.len(),
                 retained_bytes: self.retained_bytes(),
-                physical_actions: [0; 11],
+                physical_actions: [0; 13],
+                board_actions: [0; 14],
+                kind_union: [0; 5],
+                supply_multiset: [0; 5],
+                multiset_groups: [0; 9],
+                branch_bound: self.branch_bound_metrics(),
+                prefix_cones: [0; 5],
+                prefix_cone_exact: [0; 9],
+                boundary_classes: [0; 7],
+                word_bitmap: [0; 9],
+                word_bitmap_board: [0; 6],
+                shared_producer: [0; 8],
+                prefix_masks: [0; 6],
+                suffix_import: [0; 13],
+                source_existence: [0; 6],
+                source_filter: [0; 4],
+                pre_reveal: self.pre_reveal_metrics(),
+                pre_reveal_retained_bytes: self.pre_reveal_retained_bytes(),
+                pre_reveal_peak_bytes: self.pre_reveal_peak_bytes(),
+                collection: self.collection,
+                physical_representation: "none",
                 #[cfg(not(target_arch = "wasm32"))]
                 local_values: self.memo.len(),
                 #[cfg(not(target_arch = "wasm32"))]
@@ -1229,6 +1640,9 @@ impl QueueObservationPolicyEvaluator {
     }
 
     pub fn set_terminal_supply_target(&mut self, target: Option<SetupTerminalSupplyTarget>) {
+        if self.terminal_supply_target != target {
+            self.pre_reveal_memo.clear_values();
+        }
         if self.terminal_supply_target != target && self.shared_memo_domain.is_some() {
             self.shared_memo.clear();
             self.shared_zero_scores.clear();
@@ -1253,6 +1667,7 @@ impl QueueObservationPolicyEvaluator {
             initial_hold_code: self.initial_hold_code,
             hold_enabled: self.hold_enabled,
             projects_unplaced_lookahead: self.projects_unplaced_lookahead,
+            projects_standard_bag_lookahead: self.projects_standard_bag_lookahead,
             supply_identity: self.supply_identity,
             terminal_supply_target: self.terminal_supply_target,
             memo: ExactHashMap::default(),
@@ -1262,12 +1677,19 @@ impl QueueObservationPolicyEvaluator {
             shared_terminal_supply_target: self.terminal_supply_target,
             shared_memo_domain: None,
             next_shared_memo_domain: 0,
+            pre_reveal_enabled: self.pre_reveal_enabled,
+            pre_reveal_memo: PreRevealMemo::default(),
             selected_patterns: Vec::new(),
             selected_min_depth: u8::MAX,
             selected_max_depth: 0,
             cancellation_poll_counter: 0,
             action_checks: 0,
             shared_hits: 0,
+            collect_full: self.collect_full,
+            collection: [0; 2],
+            branch_bound_enabled: self.branch_bound_enabled,
+            branch_bound: [0; 4],
+            initial_observation_progress: [0; 2],
             peer_abort: None,
             #[cfg(test)]
             raw_memo_keys: self.raw_memo_keys,
@@ -1286,6 +1708,7 @@ impl QueueObservationPolicyEvaluator {
     }
 
     pub fn begin_reusable_memo_domain(&mut self) -> u64 {
+        self.pre_reveal_memo.clear_values();
         self.shared_memo.clear();
         self.shared_zero_scores.clear();
         let domain = self.next_shared_memo_domain;
@@ -1310,7 +1733,34 @@ impl QueueObservationPolicyEvaluator {
             + self.shared_memo.capacity()
                 * (core::mem::size_of::<PolicyMemoState>() + core::mem::size_of::<PolicyValue>())
             + self.shared_zero_scores.capacity() * core::mem::size_of::<PolicyMemoState>()
+            + self.pre_reveal_memo.retained_bytes()
             + self.selected_patterns.capacity() * core::mem::size_of::<u32>()
+    }
+
+    pub(super) fn pre_reveal_metrics(&self) -> [usize; 4] {
+        self.pre_reveal_memo.metrics
+    }
+
+    pub(super) fn pre_reveal_retained_bytes(&self) -> usize {
+        self.pre_reveal_memo.retained_bytes()
+    }
+
+    pub(super) fn pre_reveal_peak_bytes(&self) -> usize {
+        self.pre_reveal_memo.peak_bytes
+    }
+
+    pub(super) fn branch_bound_metrics(&self) -> [usize; 4] {
+        self.branch_bound
+    }
+
+    #[cfg(feature = "local-search-ab")]
+    pub(super) fn initial_observation_progress(&self) -> [usize; 2] {
+        self.initial_observation_progress
+    }
+
+    #[cfg(test)]
+    fn set_branch_bound_enabled(&mut self, enabled: bool) {
+        self.branch_bound_enabled = enabled;
     }
 
     fn solve<G: ObservationPieceLanguage>(
@@ -1320,6 +1770,46 @@ impl QueueObservationPolicyEvaluator {
         control: &ExecutionControl,
     ) -> Result<PolicyValue, WasmExactSearchError> {
         self.poll_cancellation(control)?;
+        #[cfg(feature = "placement-dependency-pc")]
+        if let Some(value) = self.revealed_word_value(language, state, control)? {
+            return Ok(value);
+        }
+        let raw_key = if self.pre_reveal_enabled
+            && language.wants_revealed_supply(state.language_node)
+            && !language.memo_reusable(state.language_node)
+        {
+            let key = self.memo_state(language, state)?;
+            if let Some(value) = self.pre_reveal_memo.get(&key) {
+                // Normalization normally checks this on every reveal. A DP
+                // hit must not weaken that cancellation boundary.
+                if control.is_cancelled() {
+                    return Err(WasmExactSearchError::Cancelled);
+                }
+                return Ok(value);
+            }
+            Some(key)
+        } else {
+            None
+        };
+        let value = self.solve_normalized(language, state, control)?;
+        if let Some(key) = raw_key {
+            if control.is_cancelled() {
+                return Err(WasmExactSearchError::Cancelled);
+            }
+            self.pre_reveal_memo.insert(key, value)?;
+        }
+        Ok(value)
+    }
+
+    /// The one existing recurrence, including canonical memo lookup. A raw
+    /// cache miss always runs this path; collect_selected continues to use
+    /// its original normalization and replay, never the raw value as a path.
+    fn solve_normalized<G: ObservationPieceLanguage>(
+        &mut self,
+        language: &G,
+        state: PolicyState,
+        control: &ExecutionControl,
+    ) -> Result<PolicyValue, WasmExactSearchError> {
         let state = self.observation_language_state(language, state, control)?;
         let memo_state = self.memo_state(language, state)?;
         let reusable = language.memo_reusable(state.language_node);
@@ -1434,47 +1924,159 @@ impl QueueObservationPolicyEvaluator {
         Ok(Some((PolicyValue::REJECT, None)))
     }
 
+    fn observed_completion_end<G: ObservationPieceLanguage>(
+        &self,
+        language: &G,
+        state: PolicyState,
+    ) -> Option<usize> {
+        // A fixed-depth Boolean suffix can read at most one source draw per
+        // lock, plus one when an initially empty hold is first filled. Keep
+        // the original observation/EOF state; only erase physical choices
+        // when all source values that can influence them are already known.
+        self.terminal_supply_target
+            .is_none()
+            .then(|| language.fixed_horizon())
+            .flatten()
+            .and_then(|horizon| {
+                let node = language.node(state.language_node)?;
+                let remaining = horizon.checked_sub(node.depth)?;
+                let extra =
+                    usize::from(self.hold_enabled && state.hold_code == 0 && remaining != 0);
+                let required_end = usize::from(state.source_cursor)
+                    .checked_add(usize::from(remaining))?
+                    .checked_add(extra)?;
+                // Current/Store may consume the projected final draw. The
+                // materialized length is only the terminal held-release gate.
+                let end = required_end.min(self.trie.sequence_len);
+                self.trie
+                    .nodes
+                    .get(state.observation_node as usize)
+                    .filter(|observed| usize::from(observed.depth) >= end)
+                    .map(|_| end)
+            })
+    }
+
+    #[cfg(feature = "placement-dependency-pc")]
+    fn revealed_word_value<G: ObservationPieceLanguage>(
+        &mut self,
+        language: &G,
+        state: PolicyState,
+        control: &ExecutionControl,
+    ) -> Result<Option<PolicyValue>, WasmExactSearchError> {
+        if self.trie.uniform_weight.is_none()
+            || self.terminal_supply_target.is_some()
+            || self.projects_unplaced_lookahead
+            || self.projects_standard_bag_lookahead
+            || !language.supports_revealed_word_membership(state.language_node)
+        {
+            return Ok(None);
+        }
+        let Some(end) = self.observed_completion_end(language, state) else {
+            return Ok(None);
+        };
+        let cursor = usize::from(state.source_cursor);
+        let Some(len) = end.checked_sub(cursor).filter(|&len| len <= 7) else {
+            return Ok(None);
+        };
+        if state.hold_code > 7 {
+            return Ok(None);
+        }
+        // H-board IDs occupy a different namespace from normalized kind
+        // states. The original supply future/visible window/hold key is kept;
+        // no selected-ID set or unfinished branch is cached as a Boolean.
+        let key = self.memo_state(language, state)?;
+        if let Some(value) = self.memo.get(&key).copied() {
+            self.check_cancellation(control)?;
+            return Ok(Some(value));
+        }
+        if self.zero_scores.contains(&key) {
+            self.check_cancellation(control)?;
+            return Ok(Some(PolicyValue::REJECT));
+        }
+        let mut query = KnownSupplyQuery {
+            queue: [0; 7],
+            len: len as u8,
+            hold_code: state.hold_code,
+            hold_enabled: self.hold_enabled,
+        };
+        for (offset, position) in (cursor..end).enumerate() {
+            query.queue[offset] = self.trie.piece_at(state.observation_node, position).ok_or(
+                WasmExactSearchError::InvalidProblem("wasm_observation_visible_piece_missing"),
+            )?;
+        }
+        let Some(accepts) =
+            language.revealed_word_membership(state.language_node, &query, control)?
+        else {
+            return Ok(None);
+        };
+        self.check_cancellation(control)?;
+        let count = if accepts {
+            self.trie.nodes[state.observation_node as usize].subtree_count
+        } else {
+            0
+        };
+        let value = PolicyValue {
+            score: f64::from(count),
+            pattern_count: count,
+        };
+        self.insert_memo(key, value, false)?;
+        Ok(Some(value))
+    }
+
     fn observation_language_state<G: ObservationPieceLanguage>(
         &self,
         language: &G,
         mut state: PolicyState,
         control: &ExecutionControl,
     ) -> Result<PolicyState, WasmExactSearchError> {
-        // A fixed-depth Boolean suffix can read at most one source draw per
-        // lock, plus one when an initially empty hold is first filled. Keep
-        // the original observation/EOF state; only erase physical choices
-        // when all source values that can influence them are already known.
-        let relevant_draws_observed = self.terminal_supply_target.is_none()
-            && language.fixed_horizon().is_some_and(|horizon| {
-                let Some(node) = language.node(state.language_node) else {
-                    return false;
-                };
-                let Some(remaining) = horizon.checked_sub(node.depth) else {
-                    return false;
-                };
-                let extra =
-                    usize::from(self.hold_enabled && state.hold_code == 0 && remaining != 0);
-                let required_end = usize::from(state.source_cursor)
-                    .checked_add(usize::from(remaining))
-                    .and_then(|end| end.checked_add(extra));
-                required_end.is_some_and(|end| {
-                    self.trie
-                        .nodes
-                        .get(state.observation_node as usize)
-                        .is_some_and(|observed| {
-                            usize::from(observed.depth) >= end.min(self.trie.sequence_len)
-                        })
-                })
-            });
+        let relevant_end = self.observed_completion_end(language, state);
+        if language.wants_revealed_supply(state.language_node) {
+            if let Some(available) = relevant_end.and_then(|end| {
+                self.revealed_supply_counts(
+                    state.observation_node,
+                    state.source_cursor,
+                    state.hold_code,
+                    end,
+                )
+            }) {
+                state.language_node = language.fully_revealed_node_with_supply(
+                    state.language_node,
+                    available,
+                    control,
+                )?;
+                return Ok(state);
+            }
+        }
         if self
             .policy
             .fully_observes_source(self.trie.sequence_len, usize::from(state.source_cursor))
             || self.trie.future_is_determined(state.observation_node)?
-            || relevant_draws_observed
+            || relevant_end.is_some()
         {
             state.language_node = language.fully_revealed_node(state.language_node, control)?;
         }
         Ok(state)
+    }
+
+    fn revealed_supply_counts(
+        &self,
+        observation_node: u32,
+        cursor: u16,
+        hold_code: u8,
+        end: usize,
+    ) -> Option<[u8; 7]> {
+        let cursor = usize::from(cursor);
+        if cursor > end {
+            return None;
+        }
+        let mut counts = self
+            .trie
+            .sequence_range_counts(observation_node, cursor, end)?;
+        if self.hold_enabled && (1..=7).contains(&hold_code) {
+            let count = &mut counts[usize::from(hold_code - 1)];
+            *count = count.checked_add(1)?;
+        }
+        Some(counts)
     }
 
     fn best_transition<G: ObservationPieceLanguage>(
@@ -1504,6 +2106,17 @@ impl QueueObservationPolicyEvaluator {
         let edge_count = language.edge_count(state.language_node).ok_or(
             WasmExactSearchError::InvalidProblem("wasm_observation_language_node_out_of_range"),
         )?;
+        if language.has_physical_actions(state.language_node) {
+            return self.best_physical_transition(
+                language,
+                state,
+                current_piece,
+                next_piece,
+                edge_count,
+                control,
+                record_action_checks,
+            );
+        }
         let mut best = PolicyValue::REJECT;
         let mut best_transition = None;
         let complete_count_cutoff =
@@ -1582,6 +2195,7 @@ impl QueueObservationPolicyEvaluator {
                     source_cursor: state.source_cursor,
                     hold_code: TERMINAL_USED_HELD_CODE,
                     action: SupplyAction::ReleaseHeldAtTerminal,
+                    physical_action: None,
                 };
                 self.consider(
                     language,
@@ -1599,6 +2213,137 @@ impl QueueObservationPolicyEvaluator {
             if complete_count_cutoff && best.pattern_count == observation.subtree_count {
                 best.score = f64::from(observation.subtree_count);
                 return Ok((best, best_transition));
+            }
+        }
+        Ok((best, best_transition))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn best_physical_transition<G: ObservationPieceLanguage>(
+        &mut self,
+        language: &G,
+        state: PolicyState,
+        current_piece: Option<u8>,
+        next_piece: Option<u8>,
+        edge_count: usize,
+        control: &ExecutionControl,
+        record_action_checks: bool,
+    ) -> Result<(PolicyValue, Option<PolicyTransition>), WasmExactSearchError> {
+        let held_piece = (1..=7)
+            .contains(&state.hold_code)
+            .then_some(state.hold_code);
+        let requests = [
+            (SupplyAction::UseCurrent, current_piece),
+            (
+                SupplyAction::SwapHeld,
+                (self.hold_enabled && current_piece.is_some())
+                    .then_some(held_piece)
+                    .flatten(),
+            ),
+            (
+                SupplyAction::StoreCurrentUseNext,
+                (self.hold_enabled && state.hold_code == 0 && current_piece.is_some())
+                    .then_some(next_piece)
+                    .flatten(),
+            ),
+            (
+                SupplyAction::ReleaseHeldAtTerminal,
+                (self.projects_unplaced_lookahead
+                    && self.hold_enabled
+                    && usize::from(state.source_cursor) == self.trie.materialized_sequence_len)
+                    .then_some(held_piece)
+                    .flatten(),
+            ),
+        ];
+        let complete_count_cutoff =
+            self.trie.uniform_weight.is_some() && language.fixed_horizon().is_some();
+        let observation = self.trie.nodes[state.observation_node as usize];
+        let mut best = PolicyValue::REJECT;
+        let mut best_transition = None;
+        // Physical actions use a semantic order: supply action, kind, cells.
+        // A supply action fixes one kind in this information set. Providers
+        // order that kind's edges by cells, so the complete-count early exit
+        // selects the same minimum key as exhaustive tie comparison. Child
+        // IDs only identify execution states. This deliberately replaces the
+        // legacy numeric-child tie and may choose another equally good policy.
+        for (action, desired_piece) in requests {
+            let Some(desired_piece) = desired_piece else {
+                continue;
+            };
+            let mut previous_cells = None;
+            for edge_index in 0..edge_count {
+                let (piece, child) = language.edge(state.language_node, edge_index).ok_or(
+                    WasmExactSearchError::InvalidProblem(
+                        "wasm_observation_language_edge_out_of_range",
+                    ),
+                )?;
+                if piece != desired_piece {
+                    continue;
+                }
+                let cells = language
+                    .physical_action_cells(state.language_node, edge_index)
+                    .filter(|cells| cells.count_ones() == 4)
+                    .ok_or(WasmExactSearchError::InvalidProblem(
+                        "wasm_observation_physical_action_cells_invalid",
+                    ))?;
+                if previous_cells.is_some_and(|previous| previous >= cells) {
+                    return Err(WasmExactSearchError::InvalidProblem(
+                        "wasm_observation_physical_action_order_invalid",
+                    ));
+                }
+                previous_cells = Some(cells);
+                let mut transition = match action {
+                    SupplyAction::UseCurrent => self.supply_transition(
+                        state,
+                        child,
+                        SupplyBranchKind::Current,
+                        desired_piece,
+                        None,
+                    )?,
+                    SupplyAction::SwapHeld => self.supply_transition(
+                        state,
+                        child,
+                        SupplyBranchKind::SwapHeld,
+                        current_piece.expect("swap request has a current piece"),
+                        None,
+                    )?,
+                    SupplyAction::StoreCurrentUseNext => self.supply_transition(
+                        state,
+                        child,
+                        SupplyBranchKind::StoreCurrent,
+                        current_piece.expect("store request has a current piece"),
+                        Some(desired_piece),
+                    )?,
+                    SupplyAction::ReleaseHeldAtTerminal => {
+                        if !language.node(child).is_some_and(|child| child.accepting) {
+                            continue;
+                        }
+                        PolicyTransition {
+                            child,
+                            source_cursor: state.source_cursor,
+                            hold_code: TERMINAL_USED_HELD_CODE,
+                            action,
+                            physical_action: None,
+                        }
+                    }
+                };
+                transition.physical_action = Some(PhysicalPolicyAction {
+                    kind: desired_piece,
+                    cells,
+                });
+                self.consider(
+                    language,
+                    state,
+                    transition,
+                    &mut best,
+                    &mut best_transition,
+                    control,
+                    record_action_checks,
+                )?;
+                if complete_count_cutoff && best.pattern_count == observation.subtree_count {
+                    best.score = f64::from(observation.subtree_count);
+                    return Ok((best, best_transition));
+                }
             }
         }
         Ok((best, best_transition))
@@ -1653,6 +2398,7 @@ impl QueueObservationPolicyEvaluator {
                 SupplyBranchKind::SwapHeld => SupplyAction::SwapHeld,
                 SupplyBranchKind::StoreCurrent => SupplyAction::StoreCurrentUseNext,
             },
+            physical_action: None,
         })
     }
 
@@ -1782,12 +2528,31 @@ impl QueueObservationPolicyEvaluator {
         if record_action_check {
             self.action_checks = self.action_checks.saturating_add(1);
         }
-        let value = self.transition_value(language, state, transition, control)?;
+        // With a uniform positive source, score is the exact integer count.
+        // Keep the first legal action, including an exact zero, and preserve
+        // both physical semantic ties and the established raw-child tie.
+        let bound = if self.branch_bound_enabled
+            && self.trie.uniform_weight.is_some()
+            && language.fixed_horizon().is_some()
+            && self.terminal_supply_target.is_none()
+        {
+            best_transition.map(|incumbent| TransitionBound {
+                incumbent_count: best.pattern_count,
+                wins_equal_count: transition.precedes(incumbent),
+            })
+        } else {
+            None
+        };
+        let TransitionValue::Exact(value) =
+            self.transition_value(language, state, transition, bound, control)?
+        else {
+            return Ok(());
+        };
         let better = value.score.total_cmp(&best.score).is_gt()
             || (value.score.total_cmp(&best.score).is_eq()
                 && (value.pattern_count > best.pattern_count
                     || (value.pattern_count == best.pattern_count
-                        && best_transition.is_none_or(|current| transition < current))));
+                        && best_transition.is_none_or(|current| transition.precedes(current)))));
         if better {
             *best = value;
             *best_transition = Some(transition);
@@ -1800,8 +2565,9 @@ impl QueueObservationPolicyEvaluator {
         language: &G,
         state: PolicyState,
         transition: PolicyTransition,
+        bound: Option<TransitionBound>,
         control: &ExecutionControl,
-    ) -> Result<PolicyValue, WasmExactSearchError> {
+    ) -> Result<TransitionValue, WasmExactSearchError> {
         let _child =
             language
                 .node(transition.child)
@@ -1809,16 +2575,18 @@ impl QueueObservationPolicyEvaluator {
                     "wasm_observation_language_node_out_of_range",
                 ))?;
         if transition.action == SupplyAction::ReleaseHeldAtTerminal {
-            return self.solve(
-                language,
-                PolicyState {
-                    language_node: transition.child,
-                    observation_node: state.observation_node,
-                    source_cursor: transition.source_cursor,
-                    hold_code: transition.hold_code,
-                },
-                control,
-            );
+            return self
+                .solve(
+                    language,
+                    PolicyState {
+                        language_node: transition.child,
+                        observation_node: state.observation_node,
+                        source_cursor: transition.source_cursor,
+                        hold_code: transition.hold_code,
+                    },
+                    control,
+                )
+                .map(TransitionValue::Exact);
         }
         let target_depth = usize::from(transition.source_cursor)
             .saturating_add(usize::from(
@@ -1835,9 +2603,49 @@ impl QueueObservationPolicyEvaluator {
             &mut observations,
             &mut observation_count,
         )?;
+        // Known-source singleton transitions have no later reveal branch to
+        // skip. Keep their hot path free of bound arithmetic and extra polls.
+        let bound = bound.filter(|_| observation_count > 1);
         let mut score = 0.0;
         let mut pattern_count = 0_u32;
-        for observation_node in observations[..observation_count].iter().copied() {
+        // The trie contains equal-length original sequences. Descendants at
+        // one later observed depth therefore partition this information set,
+        // including distinct IDs with duplicate queue values. Reuse its exact
+        // count instead of summing all descendants before every action.
+        let mut remaining_count = if bound.is_some() {
+            self.branch_bound[0] = self.branch_bound[0].saturating_add(1);
+            self.trie
+                .nodes
+                .get(state.observation_node as usize)
+                .ok_or(WasmExactSearchError::InvalidProblem(
+                    "wasm_observation_node_out_of_range",
+                ))?
+                .subtree_count
+        } else {
+            0
+        };
+        for (index, observation_node) in observations[..observation_count]
+            .iter()
+            .copied()
+            .enumerate()
+        {
+            if let Some(bound) = bound {
+                self.poll_cancellation(control)?;
+                let upper_count = pattern_count.checked_add(remaining_count).ok_or(
+                    WasmExactSearchError::InvalidProblem("wasm_observation_pattern_count_overflow"),
+                )?;
+                self.branch_bound[3] = self.branch_bound[3].saturating_add(1);
+                if bound.dominates(upper_count) {
+                    // The next solve (and its cancellation poll) will not run.
+                    // Honor both caller cancellation and a native peer abort
+                    // before returning this transition-local certificate.
+                    self.check_cancellation(control)?;
+                    self.branch_bound[1] = self.branch_bound[1].saturating_add(1);
+                    self.branch_bound[2] =
+                        self.branch_bound[2].saturating_add(observation_count - index);
+                    return Ok(TransitionValue::Dominated);
+                }
+            }
             let value = self.solve(
                 language,
                 PolicyState {
@@ -1848,15 +2656,28 @@ impl QueueObservationPolicyEvaluator {
                 },
                 control,
             )?;
+            if bound.is_some() {
+                let observed_count = self.trie.nodes[observation_node as usize].subtree_count;
+                if value.pattern_count > observed_count {
+                    return Err(WasmExactSearchError::InvalidProblem(
+                        "wasm_observation_policy_count_exceeds_information_set",
+                    ));
+                }
+                remaining_count = remaining_count.checked_sub(observed_count).ok_or(
+                    WasmExactSearchError::InvalidProblem(
+                        "wasm_observation_reveal_count_not_disjoint",
+                    ),
+                )?;
+            }
             score += value.score;
             pattern_count = pattern_count.checked_add(value.pattern_count).ok_or(
                 WasmExactSearchError::InvalidProblem("wasm_observation_pattern_count_overflow"),
             )?;
         }
-        Ok(PolicyValue {
+        Ok(TransitionValue::Exact(PolicyValue {
             score,
             pattern_count,
-        })
+        }))
     }
 
     fn collect_selected<G: ObservationPieceLanguage>(
@@ -1866,6 +2687,25 @@ impl QueueObservationPolicyEvaluator {
         control: &ExecutionControl,
     ) -> Result<(), WasmExactSearchError> {
         self.poll_cancellation(control)?;
+        self.collection[0] = self.collection[0].saturating_add(1);
+        #[cfg(feature = "placement-dependency-pc")]
+        if let Some(value) = self.revealed_word_value(language, state, control)? {
+            if value.pattern_count == 0 {
+                return Ok(());
+            }
+            let horizon = language
+                .fixed_horizon()
+                .ok_or(WasmExactSearchError::InvalidProblem(
+                    "wasm_observation_word_bitmap_horizon_missing",
+                ))?;
+            if value.pattern_count != self.trie.nodes[state.observation_node as usize].subtree_count
+            {
+                return Err(WasmExactSearchError::InvalidProblem(
+                    "wasm_observation_revealed_membership_not_uniform",
+                ));
+            }
+            return self.collect_full_information_set(state.observation_node, horizon, control);
+        }
         let state = self.observation_language_state(language, state, control)?;
         let memo_state = self.memo_state(language, state)?;
         let reusable = language.memo_reusable(state.language_node);
@@ -1905,6 +2745,26 @@ impl QueueObservationPolicyEvaluator {
         }
         if value.pattern_count == 0 {
             return Ok(());
+        }
+        if self.collect_full {
+            if let Some(horizon) = language.fixed_horizon() {
+                let observed = self.trie.nodes.get(state.observation_node as usize).ok_or(
+                    WasmExactSearchError::InvalidProblem("wasm_observation_node_out_of_range"),
+                )?;
+                if value.pattern_count == observed.subtree_count {
+                    // Every policy selects a subset of these original IDs;
+                    // reveal descendants are disjoint. Equal positive
+                    // cardinality therefore identifies the whole information
+                    // set, independently of weights and whether it is revealed.
+                    // The solved value already includes terminal supply/EOF
+                    // requirements: do not test them on this earlier state.
+                    return self.collect_full_information_set(
+                        state.observation_node,
+                        horizon,
+                        control,
+                    );
+                }
+            }
         }
         if let Some((_, alternative)) = self.best_revealed_alternative(language, state, control)? {
             return match alternative {
@@ -1970,22 +2830,92 @@ impl QueueObservationPolicyEvaluator {
         Ok(())
     }
 
+    fn collect_full_information_set(
+        &mut self,
+        observation_node: u32,
+        horizon: u8,
+        control: &ExecutionControl,
+    ) -> Result<(), WasmExactSearchError> {
+        self.collection[1] = self.collection[1].saturating_add(1);
+        self.selected_min_depth = self.selected_min_depth.min(horizon);
+        self.selected_max_depth = self.selected_max_depth.max(horizon);
+        self.trie
+            .collect_patterns(observation_node, &mut self.selected_patterns, control)
+    }
+
     fn poll_cancellation(
         &mut self,
         control: &ExecutionControl,
     ) -> Result<(), WasmExactSearchError> {
         self.cancellation_poll_counter = self.cancellation_poll_counter.wrapping_add(1);
-        if self.cancellation_poll_counter & CANCELLATION_POLL_MASK == 0
-            && (control.is_cancelled()
-                || self
-                    .peer_abort
-                    .as_ref()
-                    .is_some_and(|abort| abort.load(AtomicOrdering::Acquire)))
+        if self.cancellation_poll_counter & CANCELLATION_POLL_MASK == 0 {
+            self.check_cancellation(control)?;
+        }
+        Ok(())
+    }
+
+    fn check_cancellation(&self, control: &ExecutionControl) -> Result<(), WasmExactSearchError> {
+        if control.is_cancelled()
+            || self
+                .peer_abort
+                .as_ref()
+                .is_some_and(|abort| abort.load(AtomicOrdering::Acquire))
         {
             return Err(WasmExactSearchError::Cancelled);
         }
         Ok(())
     }
+}
+
+fn collect_full_enabled() -> Result<bool, WasmExactSearchError> {
+    #[cfg(feature = "local-search-ab")]
+    {
+        match std::env::var("CLEARRA_OBSERVATION_COLLECT_FULL") {
+            Ok(value) if value == "0" => return Ok(false),
+            Ok(value) if value == "1" => return Ok(true),
+            Err(std::env::VarError::NotPresent) => {}
+            _ => {
+                return Err(WasmExactSearchError::InvalidProblem(
+                    "wasm_observation_collect_full_mode_invalid",
+                ))
+            }
+        }
+    }
+    Ok(true)
+}
+
+fn branch_bound_enabled() -> Result<bool, WasmExactSearchError> {
+    #[cfg(feature = "local-search-ab")]
+    {
+        match std::env::var("CLEARRA_OBSERVATION_BRANCH_BOUND") {
+            Ok(value) if value == "0" => return Ok(false),
+            Ok(value) if value == "1" => return Ok(true),
+            Err(std::env::VarError::NotPresent) => {}
+            _ => {
+                return Err(WasmExactSearchError::InvalidProblem(
+                    "wasm_observation_branch_bound_mode_invalid",
+                ))
+            }
+        }
+    }
+    Ok(true)
+}
+
+fn pre_reveal_enabled() -> Result<bool, WasmExactSearchError> {
+    #[cfg(feature = "local-search-ab")]
+    {
+        match std::env::var("CLEARRA_OBSERVATION_PRE_REVEAL_MEMO") {
+            Ok(value) if value == "0" => return Ok(false),
+            Ok(value) if value == "1" => return Ok(true),
+            Err(std::env::VarError::NotPresent) => {}
+            _ => {
+                return Err(WasmExactSearchError::InvalidProblem(
+                    "wasm_observation_pre_reveal_mode_invalid",
+                ))
+            }
+        }
+    }
+    Ok(false)
 }
 
 fn append_projected_standard_bag_piece(
@@ -2308,6 +3238,142 @@ mod tests {
         .expect("aliased universe");
         let index = PatternPiecePositionIndex::compile(&universe).expect("pattern index");
         (universe, index)
+    }
+
+    #[test]
+    fn original_universe_constructor_preserves_weighted_duplicate_ids_and_ties() {
+        let (universe, index) = aliased_tie_universe();
+        let language = AliasedTieLanguage::new();
+        let control = ExecutionControl::default();
+        let mut indexed = evaluator(&universe, &index);
+        let mut original = QueueObservationPolicyEvaluator::for_original_universe(
+            &universe,
+            QueueObservationPolicy::VisibleSeven,
+            0,
+            None,
+            true,
+            true,
+            false,
+            None,
+        )
+        .unwrap();
+        let expected = indexed.evaluate(&language, &control).unwrap();
+        let actual = original.evaluate(&language, &control).unwrap();
+        assert_eq!(
+            actual.covered_patterns.words(),
+            expected.covered_patterns.words()
+        );
+        assert_eq!(actual.covered_pattern_count, 4);
+        assert_eq!(actual.covered_pattern_count, expected.covered_pattern_count);
+        assert_eq!(
+            actual.covered_weight.to_bits(),
+            expected.covered_weight.to_bits()
+        );
+        assert_eq!(actual.covered_weight, 0.5);
+        assert_eq!(actual.min_accepted_depth, expected.min_accepted_depth);
+        assert_eq!(actual.max_accepted_depth, expected.max_accepted_depth);
+        assert_eq!(original.trie.future_classes, indexed.trie.future_classes);
+        assert_eq!(
+            original.trie.initial_observations,
+            indexed.trie.initial_observations
+        );
+        assert_eq!(
+            original.trie.materialized_sequence_len,
+            indexed.trie.materialized_sequence_len
+        );
+    }
+
+    #[test]
+    fn original_universe_constructor_preserves_preprojection_length_and_hold_eof() {
+        use PieceKind::{I, J, L, O, S, T, Z};
+
+        // Both rows become the same observed seven-piece word. The original
+        // length must still be max(6, 7), not the first row's length.
+        let universe = MaterializedPatternUniverse::from_sequences(
+            PatternUniverseId::new(801),
+            PatternWeightModelId::new(802),
+            vec![vec![I, O, T, S, Z, J], vec![I, O, T, S, Z, J, L]],
+            vec![
+                ProbabilityValue::new(0.25).unwrap(),
+                ProbabilityValue::new(0.75).unwrap(),
+            ],
+            2,
+            true,
+            None,
+        )
+        .unwrap();
+        let index = PatternPiecePositionIndex::compile(&universe).unwrap();
+        let control = ExecutionControl::default();
+        for (cursor, hold, accepted) in [
+            (0, None, vec![I, O, T, S, Z, J, L]),
+            (1, Some(I), vec![O, T, S, Z, J, L, I]),
+        ] {
+            let language = TestLanguage::from_sequences(&[accepted]);
+            let mut indexed = QueueObservationPolicyEvaluator::new(
+                &universe,
+                &index,
+                QueueObservationPolicy::VisibleSeven,
+                cursor,
+                hold,
+                true,
+                true,
+                true,
+                None,
+            )
+            .unwrap();
+            let mut original = QueueObservationPolicyEvaluator::for_original_universe(
+                &universe,
+                QueueObservationPolicy::VisibleSeven,
+                cursor,
+                hold,
+                true,
+                true,
+                true,
+                None,
+            )
+            .unwrap();
+            assert_eq!(original.trie.sequence_len, 7);
+            assert_eq!(original.trie.materialized_sequence_len, 7);
+            let expected = indexed.evaluate(&language, &control).unwrap();
+            let actual = original.evaluate(&language, &control).unwrap();
+            assert_eq!(actual.covered_pattern_count, 2);
+            assert_eq!(actual.covered_weight, 1.0);
+            assert_eq!(actual.min_accepted_depth, Some(7));
+            assert_eq!(actual.max_accepted_depth, Some(7));
+            assert_eq!(
+                actual.covered_patterns.words(),
+                expected.covered_patterns.words()
+            );
+            assert_eq!(actual.covered_pattern_count, expected.covered_pattern_count);
+            assert_eq!(
+                actual.covered_weight.to_bits(),
+                expected.covered_weight.to_bits()
+            );
+            assert_eq!(actual.min_accepted_depth, expected.min_accepted_depth);
+            assert_eq!(actual.max_accepted_depth, expected.max_accepted_depth);
+        }
+    }
+
+    #[test]
+    fn indexed_constructor_keeps_noncontiguous_original_subset_ids() {
+        use clearra_coverage::pattern::pattern_bitset::PatternBitSet;
+
+        let (universe, _) = aliased_tie_universe();
+        let selected =
+            PatternBitSet::from_pattern_indices(universe.pattern_count(), vec![1, 6]).unwrap();
+        let index = PatternPiecePositionIndex::compile_subset_before(
+            &universe,
+            &selected,
+            universe.pattern_count(),
+        )
+        .unwrap();
+        let language = TestLanguage::from_sequences(&[Vec::new()]);
+        let coverage = evaluator(&universe, &index)
+            .evaluate(&language, &ExecutionControl::default())
+            .unwrap();
+        assert_eq!(coverage.covered_patterns.words(), selected.words());
+        assert_eq!(coverage.covered_pattern_count, 2);
+        assert_eq!(coverage.covered_weight, 0.25);
     }
 
     #[test]

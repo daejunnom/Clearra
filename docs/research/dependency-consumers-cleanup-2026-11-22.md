@@ -6,6 +6,12 @@
 작업 브랜치: `codex/dependency-consumers-cleanup-20261122`.
 실행 검증 결과는 아래 통합 검증 절에 기록한다. 후속 문서 커밋은 이 코드 상태를 변경하지 않는다.
 
+후속 최적화의 현재 기록은 [see-7 전 경로 축약 증명](see7-quotient-pruning-proof-2026-11-22.md)과
+[생성·검색 측정 보고서](see7-pruning-measurements-2026-11-22.md)에 둔다. 이 후속 작업은
+완전한 원래 공급/PC family가 인증된 좁은 경로에 board closure를 추가하고 실제
+8-lock see-7 비교를 완료했다. 아래의 과거 실행 수치·factored fallback 계약 및
+CountAll·evidence·Setup·extended·예산·imported Build의 잔여 경계를 일괄 완료로 바꾸지 않는다.
+
 ## 1. 변경 목적과 범위
 
 정확한 고정 타일링 의존성 관계가 이미 만든 결과를 공급·Build 완료·관측 소비자가 다시 계산하지 않고 사용할 수 있도록 연결한다. compact Boolean 소비자에서 필요한 결과는 각 원본 큐에 대한 성공 여부다. 이 결과를 위해 정확한 종류 언어를 얻은 뒤 동일한 BuildUp 그래프를 다시 만들 필요는 없다.

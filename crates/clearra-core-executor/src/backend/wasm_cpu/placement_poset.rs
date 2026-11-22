@@ -577,16 +577,7 @@ pub(super) fn compile_with_movement_guard(
 }
 
 impl CandidateGeometry {
-    #[cfg(any(
-        test,
-        feature = "placement-dependency-pc",
-        all(
-            feature = "local-search-ab",
-            feature = "parallel",
-            not(target_family = "wasm")
-        )
-    ))]
-    #[cfg(any(test, feature = "local-search-ab"))]
+    #[cfg(test)]
     pub(super) fn for_symbolic_prefix(
         catalog: &GeometryCatalog,
         candidate: &GeometryCandidate,
@@ -646,6 +637,11 @@ impl CandidateGeometry {
     #[cfg(feature = "placement-dependency-pc")]
     pub(super) fn symbolic_deleted_rows(&self, executed: u16) -> u16 {
         self.clear_conditions.deleted_rows(executed)
+    }
+
+    #[cfg(feature = "placement-dependency-pc")]
+    pub(super) fn symbolic_board_scope(&self) -> (u8, u8, u64) {
+        (self.width, self.height, self.initial_board)
     }
 
     #[cfg(feature = "placement-dependency-pc")]

@@ -11,6 +11,11 @@
 //! residual equals membership in its exact kind-word projection. This erasure
 //! is not valid before that authorization and is never inferred from the
 //! subset of queues that happened to succeed.
+//!
+//! The last hidden derivative stores only its exact suffix roots in a dormant
+//! Frontier. It has no executable edges until the same observation authority
+//! reveals it. This avoids retaining and then re-scanning candidate/prefix
+//! identities after their physical choice has already been committed.
 
 use std::{
     cell::RefCell,
@@ -30,7 +35,8 @@ use crate::backend::wasm_cpu::{
 
 use super::{
     invalid, piece_code, storage, ObservationLanguageNode, ObservationPieceLanguage,
-    WasmExactSearchError, MAX_EDGES, MAX_NODES, MAX_UNION_MEMBERS, MAX_WORK, NO_NODE,
+    PhysicalActionEdge, WasmExactSearchError, MAX_EDGES, MAX_NODES, MAX_UNION_MEMBERS, MAX_WORK,
+    NO_NODE,
 };
 
 // Lazy residual nodes remain below MAX_NODES. The high-bit namespace reads
@@ -58,8 +64,9 @@ struct PrefixSuffix {
 #[derive(Eq, PartialEq)]
 struct CompactPrefixRelation {
     pieces: Vec<PieceKind>,
-    // Actual operation rows followed by one actual-width active-prefix row.
-    // Increasing the supported n does not add padding to existing n proofs.
+    // Live operation rows followed by the unchanged active-prefix row.
+    // This is equality of productive labelled relations, not of local guard
+    // tables: guards on inactive endpoints cannot affect a complete path.
     words: Vec<u64>,
 }
 
@@ -75,7 +82,7 @@ impl CompactPrefixRelation {
             .try_reserve_exact((proof.operation_count() + 1) * proof.active_words().len())
             .map_err(|_| storage())?;
         for operation in 0..proof.operation_count() {
-            words.extend_from_slice(proof.parent_words(operation));
+            words.extend(live_parent_words(proof, operation));
         }
         words.extend_from_slice(proof.active_words());
         Ok(Self { pieces, words })
@@ -89,7 +96,9 @@ impl CompactPrefixRelation {
         self.words.len() == (proof.operation_count() + 1) * stride
             && (0..proof.operation_count()).all(|operation| {
                 self.words[operation * stride..(operation + 1) * stride]
-                    == *proof.parent_words(operation)
+                    .iter()
+                    .copied()
+                    .eq(live_parent_words(proof, operation))
             })
             && self.words[proof.operation_count() * stride..] == *proof.active_words()
     }
@@ -135,12 +144,59 @@ struct Candidate {
     relation: u32,
 }
 
+/// Both consumers start at an active prefix and retain only pending-operation
+/// edges with an active child. Thus P_i(S) & A(S) & !S_i & A(S | {i}) preserves
+/// every labelled derivative and every suffix at each retained prefix. Keep
+/// the pieces and active set exact; geometry remains candidate-local. Hashing,
+/// storage and reuse comparison all use this same normalization. The typed
+/// producer still owns the validity of its local guard table.
+fn live_parent_words(
+    proof: &ExactPrefixRelation,
+    operation: usize,
+) -> impl Iterator<Item = u64> + '_ {
+    proof
+        .parent_words(operation)
+        .iter()
+        .enumerate()
+        .map(move |(word, &parents)| {
+            live_parent_word(parents, proof.active_words(), operation, word)
+        })
+}
+
+fn live_parent_word(parents: u64, active: &[u64], operation: usize, word: usize) -> u64 {
+    if operation < 6 {
+        let shift = 1_usize << operation;
+        // In each 2*shift lane block the lower half has operation i pending.
+        // Moving those lanes to their children stays in this same u64 word.
+        const PENDING: [u64; 6] = [
+            0x5555_5555_5555_5555,
+            0x3333_3333_3333_3333,
+            0x0f0f_0f0f_0f0f_0f0f,
+            0x00ff_00ff_00ff_00ff,
+            0x0000_ffff_0000_ffff,
+            0x0000_0000_ffff_ffff,
+        ];
+        let pending = PENDING[operation];
+        parents & active[word] & pending & (active[word] >> shift)
+    } else {
+        // Higher operation bits select a different word and preserve its lane.
+        let added = 1_usize << (operation - 6);
+        if word & added != 0 {
+            0
+        } else {
+            parents & active[word] & active[word | added]
+        }
+    }
+}
+
 fn relation_hash(proof: &ExactPrefixRelation) -> u64 {
     let mut hash = DefaultHasher::new();
     proof.operation_count().hash(&mut hash);
     proof.pieces().hash(&mut hash);
     for operation in 0..proof.operation_count() {
-        proof.parent_words(operation).hash(&mut hash);
+        for word in live_parent_words(proof, operation) {
+            word.hash(&mut hash);
+        }
     }
     proof.active_words().hash(&mut hash);
     hash.finish()
@@ -153,6 +209,7 @@ pub(super) struct FactoredActionRelations {
     candidates: Vec<Candidate>,
     total_depth: Option<u8>,
     hidden_horizon: u8,
+    reveal_floor: u8,
     work: usize,
 }
 
@@ -191,7 +248,7 @@ impl FactoredActionRelations {
         hidden_horizon: u8,
         control: &ExecutionControl,
     ) -> Result<(), WasmExactSearchError> {
-        self.register_prepared(orders, suffixes, hidden_horizon, None, control)
+        self.register_prepared(orders, suffixes, hidden_horizon, 0, None, control)
     }
 
     pub(super) fn register_prepared(
@@ -199,6 +256,7 @@ impl FactoredActionRelations {
         orders: SymbolicPrefixOrders,
         suffixes: &[u32],
         hidden_horizon: u8,
+        reveal_floor: u8,
         reused_relation: Option<u32>,
         control: &ExecutionControl,
     ) -> Result<(), WasmExactSearchError> {
@@ -213,8 +271,14 @@ impl FactoredActionRelations {
         let depth = u8::try_from(proof.operation_count())
             .map_err(|_| invalid("wasm_observation_physical_depth_mismatch"))?;
         let hidden_horizon = hidden_horizon.min(depth);
+        if reveal_floor > hidden_horizon {
+            return Err(invalid("wasm_observation_physical_reveal_floor_invalid"));
+        }
         if let Some(total_depth) = self.total_depth {
-            if total_depth != depth || self.hidden_horizon != hidden_horizon {
+            if total_depth != depth
+                || self.hidden_horizon != hidden_horizon
+                || self.reveal_floor != reveal_floor
+            {
                 return Err(invalid("wasm_observation_physical_depth_mismatch"));
             }
         }
@@ -267,7 +331,13 @@ impl FactoredActionRelations {
                     let lane = remaining.trailing_zeros();
                     remaining &= remaining - 1;
                     let prefix = (word * 64 + lane as usize) as u16;
-                    if prefix.count_ones() > u32::from(hidden_horizon) {
+                    let prefix_depth = prefix.count_ones();
+                    // The original source, before any candidate filtering,
+                    // proves that no reveal can query these middle depths.
+                    // Prefix zero remains the exact relation-reuse root.
+                    if prefix_depth > u32::from(hidden_horizon)
+                        || (prefix != 0 && prefix_depth < u32::from(reveal_floor))
+                    {
                         continue;
                     }
                     let language = suffixes[usize::from(prefix)];
@@ -295,6 +365,7 @@ impl FactoredActionRelations {
         self.candidates.push(Candidate { geometry, relation });
         self.total_depth = Some(depth);
         self.hidden_horizon = hidden_horizon;
+        self.reveal_floor = reveal_floor;
         Ok(())
     }
 
@@ -305,7 +376,9 @@ impl FactoredActionRelations {
     /// Merge candidate proofs, never worker-optimal policy values. `rebound`
     /// was produced by exactly importing the source worker's kind arena.
     /// Candidate geometry moves unchanged and shared proofs are re-interned
-    /// after all numeric suffix IDs have been rebound.
+    /// with every numeric suffix ID checked against that import. A duplicate
+    /// proof validates the rebind against its existing suffixes in one pass;
+    /// it does not first rewrite an array that will immediately be discarded.
     #[cfg(any(test, feature = "parallel"))]
     pub(super) fn merge(
         &mut self,
@@ -318,7 +391,10 @@ impl FactoredActionRelations {
             return Ok(());
         };
         if let Some(total_depth) = self.total_depth {
-            if total_depth != depth || self.hidden_horizon != source.hidden_horizon {
+            if total_depth != depth
+                || self.hidden_horizon != source.hidden_horizon
+                || self.reveal_floor != source.reveal_floor
+            {
                 return Err(invalid("wasm_observation_physical_depth_mismatch"));
             }
         }
@@ -333,12 +409,6 @@ impl FactoredActionRelations {
             .map_err(|_| storage())?;
         for mut incoming in source.relations {
             self.charge(incoming.suffixes.len().saturating_add(1), control)?;
-            for suffix in &mut incoming.suffixes {
-                suffix.language = *rebound
-                    .get(suffix.language as usize)
-                    .filter(|&&language| language != NO_NODE)
-                    .ok_or_else(|| invalid("wasm_observation_suffix_language_missing"))?;
-            }
             let head = self
                 .relation_heads
                 .get(&incoming.hash)
@@ -349,14 +419,14 @@ impl FactoredActionRelations {
                 self.charge(1, control)?;
                 let relation = &self.relations[existing as usize];
                 if relation.proof == incoming.proof {
-                    if relation.suffixes != incoming.suffixes {
-                        return Err(invalid("wasm_observation_suffix_arena_changed"));
-                    }
                     break;
                 }
                 existing = relation.next_same_hash;
             }
             if existing == NO_NODE {
+                for suffix in &mut incoming.suffixes {
+                    suffix.language = rebound_suffix(rebound, suffix.language)?;
+                }
                 if self.relations.len() >= MAX_NODES {
                     return Err(invalid("wasm_observation_physical_relation_limit"));
                 }
@@ -366,6 +436,17 @@ impl FactoredActionRelations {
                 incoming.next_same_hash = head;
                 self.relation_heads.insert(incoming.hash, existing);
                 self.relations.push(incoming);
+            } else {
+                let suffixes = &self.relations[existing as usize].suffixes;
+                if suffixes.len() != incoming.suffixes.len() {
+                    return Err(invalid("wasm_observation_suffix_arena_changed"));
+                }
+                for (incoming, existing) in incoming.suffixes.iter().zip(suffixes) {
+                    let language = rebound_suffix(rebound, incoming.language)?;
+                    if incoming.prefix != existing.prefix || language != existing.language {
+                        return Err(invalid("wasm_observation_suffix_arena_changed"));
+                    }
+                }
             }
             relations.push(existing);
         }
@@ -383,6 +464,7 @@ impl FactoredActionRelations {
         }
         self.total_depth = Some(depth);
         self.hidden_horizon = source.hidden_horizon;
+        self.reveal_floor = source.reveal_floor;
         Ok(())
     }
 
@@ -414,21 +496,46 @@ impl FactoredActionRelations {
         if kinds.node_count() >= KIND_NODE_TAG as usize {
             return Err(invalid("wasm_observation_kind_namespace_exhausted"));
         }
-        let mut sources = Vec::new();
-        sources
-            .try_reserve_exact(self.candidates.len())
-            .map_err(|_| storage())?;
-        sources.extend(
-            (0..self.candidates.len()).map(|candidate| ConcreteResidual {
-                candidate: candidate as u32,
-                prefix: 0,
-            }),
-        );
         let mut arena = ResidualArena {
             work: self.work,
             ..Default::default()
         };
-        let root = arena.intern(total_depth, Sources::Physical(sources), control)?;
+        let sources = if self.hidden_horizon == 0 {
+            // An H=0 request must still obtain the evaluator's original-source
+            // certificate. A Frontier cannot execute a kind edge on its own.
+            let mut roots = Vec::new();
+            roots
+                .try_reserve_exact(self.candidates.len())
+                .map_err(|_| storage())?;
+            charge(&mut arena.work, self.candidates.len(), control)?;
+            for (index, candidate) in self.candidates.iter().enumerate() {
+                if index & 255 == 0 && control.is_cancelled() {
+                    return Err(WasmExactSearchError::Cancelled);
+                }
+                let root = self.relations[candidate.relation as usize]
+                    .suffix(0)
+                    .ok_or_else(|| invalid("wasm_observation_suffix_language_missing"))?;
+                validate_suffix_root(kinds, root, total_depth)?;
+                roots.push(root);
+            }
+            arena.revealed_source_visits = roots.len();
+            roots.sort_unstable();
+            roots.dedup();
+            Sources::Frontier(roots)
+        } else {
+            let mut sources = Vec::new();
+            sources
+                .try_reserve_exact(self.candidates.len())
+                .map_err(|_| storage())?;
+            sources.extend(
+                (0..self.candidates.len()).map(|candidate| ConcreteResidual {
+                    candidate: candidate as u32,
+                    prefix: 0,
+                }),
+            );
+            Sources::Physical(sources)
+        };
+        let root = arena.intern(total_depth, sources, control)?;
         Ok(Some(FactoredPhysicalActionLanguageView {
             source: self,
             kinds,
@@ -443,8 +550,37 @@ impl FactoredActionRelations {
         steps: usize,
         control: &ExecutionControl,
     ) -> Result<(), WasmExactSearchError> {
-        charge(&mut self.work, steps, control)
+        let result = charge(&mut self.work, steps, control);
+        #[cfg(feature = "local-search-ab")]
+        if matches!(
+            result,
+            Err(WasmExactSearchError::InvalidProblem(
+                "wasm_observation_physical_work_limit"
+            ))
+        ) {
+            eprintln!(
+                "clearra_observation_registration_work_limit candidates={} relations={} suffix_bindings={} work={} attempted_steps={}",
+                self.candidates.len(),
+                self.relations.len(),
+                self.relations
+                    .iter()
+                    .map(|relation| relation.suffixes.len())
+                    .sum::<usize>(),
+                self.work,
+                steps,
+            );
+        }
+        result
     }
+}
+
+#[cfg(any(test, feature = "parallel"))]
+fn rebound_suffix(rebound: &[u32], source: u32) -> Result<u32, WasmExactSearchError> {
+    rebound
+        .get(source as usize)
+        .copied()
+        .filter(|&language| language != NO_NODE)
+        .ok_or_else(|| invalid("wasm_observation_suffix_language_missing"))
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -456,6 +592,9 @@ struct ConcreteResidual {
 #[derive(Eq, Hash, PartialEq)]
 enum Sources {
     Physical(Vec<ConcreteResidual>),
+    // These suffixes are stored after the last physical commitment, but are
+    // not a kind-action language until fully_revealed_node authorizes them.
+    Frontier(Vec<u32>),
     Revealed(Vec<u32>),
 }
 
@@ -466,7 +605,7 @@ impl Sources {
                 sources.sort_unstable();
                 sources.dedup();
             }
-            Self::Revealed(sources) => {
+            Self::Frontier(sources) | Self::Revealed(sources) => {
                 sources.sort_unstable();
                 sources.dedup();
             }
@@ -476,7 +615,7 @@ impl Sources {
     fn len(&self) -> usize {
         match self {
             Self::Physical(sources) => sources.len(),
-            Self::Revealed(sources) => sources.len(),
+            Self::Frontier(sources) | Self::Revealed(sources) => sources.len(),
         }
     }
 
@@ -494,14 +633,14 @@ impl Sources {
         }
         match self {
             Self::Physical(sources) => exact_capacity(sources),
-            Self::Revealed(sources) => exact_capacity(sources),
+            Self::Frontier(sources) | Self::Revealed(sources) => exact_capacity(sources),
         }
     }
 
     fn capacity(&self) -> usize {
         match self {
             Self::Physical(sources) => sources.capacity(),
-            Self::Revealed(sources) => sources.capacity(),
+            Self::Frontier(sources) | Self::Revealed(sources) => sources.capacity(),
         }
     }
 
@@ -510,7 +649,9 @@ impl Sources {
             Self::Physical(sources) => {
                 sources.capacity() * core::mem::size_of::<ConcreteResidual>()
             }
-            Self::Revealed(sources) => sources.capacity() * core::mem::size_of::<u32>(),
+            Self::Frontier(sources) | Self::Revealed(sources) => {
+                sources.capacity() * core::mem::size_of::<u32>()
+            }
         }
     }
 }
@@ -519,7 +660,7 @@ struct ResidualNode {
     sources: Sources,
     // Piece slices are appended once. A later observation preparing another
     // piece must not invalidate a previously selected transition index.
-    edges: Vec<(u8, u32)>,
+    edges: Vec<PhysicalActionEdge>,
     remaining_depth: u8,
     prepared: u8,
     revealed: Option<u32>,
@@ -596,7 +737,7 @@ impl ResidualArena {
         &mut self,
         node: u32,
         piece_bit: u8,
-        edges: &[(u8, u32)],
+        edges: &[PhysicalActionEdge],
     ) -> Result<(), WasmExactSearchError> {
         let total = self
             .edges
@@ -625,7 +766,7 @@ impl ResidualArena {
                 .iter()
                 .map(|node| {
                     node.sources.retained_bytes()
-                        + node.edges.capacity() * core::mem::size_of::<(u8, u32)>()
+                        + node.edges.capacity() * core::mem::size_of::<PhysicalActionEdge>()
                 })
                 .sum::<usize>()
     }
@@ -652,6 +793,8 @@ pub(in crate::backend::wasm_cpu) struct FactoredActionMetrics {
     pub kind_source_visits: usize,
     pub revealed_source_visits: usize,
     pub work: usize,
+    pub frontier_nodes: usize,
+    pub frontier_members: usize,
 }
 
 impl FactoredPhysicalActionLanguageView<'_> {
@@ -666,6 +809,11 @@ impl FactoredPhysicalActionLanguageView<'_> {
             .iter()
             .filter(|node| matches!(node.sources, Sources::Physical(_)))
             .count();
+        let frontier_nodes = arena
+            .nodes
+            .iter()
+            .filter(|node| matches!(node.sources, Sources::Frontier(_)))
+            .count();
         FactoredActionMetrics {
             candidate_factors: self.source.candidates.len(),
             proof_factors: self.source.relations.len(),
@@ -676,22 +824,35 @@ impl FactoredPhysicalActionLanguageView<'_> {
                 .map(|relation| relation.suffixes.len())
                 .sum(),
             physical_nodes,
-            revealed_nodes: arena.nodes.len() - physical_nodes,
+            revealed_nodes: arena.nodes.len() - physical_nodes - frontier_nodes,
             edges: arena.edges,
             residual_members: arena.members,
             physical_source_visits: arena.physical_source_visits,
             kind_source_visits: arena.kind_source_visits,
             revealed_source_visits: arena.revealed_source_visits,
             work: arena.work,
+            frontier_nodes,
+            frontier_members: arena
+                .nodes
+                .iter()
+                .filter_map(|node| match &node.sources {
+                    Sources::Frontier(roots) => Some(roots.len()),
+                    _ => None,
+                })
+                .sum(),
         }
     }
 
-    fn physical_derivatives(
+    fn physical_derivatives<T: Ord>(
         &self,
         sources: &[ConcreteResidual],
         piece: u8,
         control: &ExecutionControl,
-    ) -> Result<Vec<(u64, ConcreteResidual)>, WasmExactSearchError> {
+        mut continuation: impl FnMut(
+            ConcreteResidual,
+            &SharedRelation,
+        ) -> Result<T, WasmExactSearchError>,
+    ) -> Result<Vec<(u64, T)>, WasmExactSearchError> {
         let mut output = Vec::new();
         for (index, residual) in sources.iter().enumerate() {
             if index & 255 == 0 && control.is_cancelled() {
@@ -719,10 +880,13 @@ impl FactoredPhysicalActionLanguageView<'_> {
                 output.try_reserve(1).map_err(|_| storage())?;
                 output.push((
                     cells,
-                    ConcreteResidual {
-                        candidate: residual.candidate,
-                        prefix: residual.prefix | (1_u16 << operation),
-                    },
+                    continuation(
+                        ConcreteResidual {
+                            candidate: residual.candidate,
+                            prefix: residual.prefix | (1_u16 << operation),
+                        },
+                        relation,
+                    )?,
                 ));
             }
         }
@@ -735,6 +899,31 @@ impl FactoredPhysicalActionLanguageView<'_> {
 impl ObservationPieceLanguage for FactoredPhysicalActionLanguageView<'_> {
     fn root(&self) -> u32 {
         self.root
+    }
+
+    fn has_physical_actions(&self, node: u32) -> bool {
+        kind_node_id(node).is_none()
+            && self
+                .arena
+                .borrow()
+                .nodes
+                .get(node as usize)
+                .is_some_and(|node| {
+                    node.remaining_depth > 0 && matches!(node.sources, Sources::Physical(_))
+                })
+    }
+
+    fn physical_action_cells(&self, node: u32, index: usize) -> Option<u64> {
+        if !self.has_physical_actions(node) {
+            return None;
+        }
+        self.arena
+            .borrow()
+            .nodes
+            .get(node as usize)?
+            .edges
+            .get(index)
+            .map(|edge| edge.cells)
     }
 
     fn fixed_horizon(&self) -> Option<u8> {
@@ -779,7 +968,7 @@ impl ObservationPieceLanguage for FactoredPhysicalActionLanguageView<'_> {
             .get(node as usize)?
             .edges
             .get(index)
-            .copied()
+            .map(|edge| (edge.piece, edge.child))
     }
 
     fn prepare_edges(
@@ -810,6 +999,11 @@ impl ObservationPieceLanguage for FactoredPhysicalActionLanguageView<'_> {
         if remaining_depth == 0 {
             return Ok(());
         }
+        if matches!(target.sources, Sources::Frontier(_)) {
+            // Compact storage is not an observation certificate. Only the
+            // evaluator may turn this boundary into an executable language.
+            return Err(invalid("wasm_observation_physical_hidden_horizon_exceeded"));
+        }
         let mut pending = piece_mask & !target.prepared;
         while pending != 0 {
             let index = pending.trailing_zeros() as u8;
@@ -826,32 +1020,60 @@ impl ObservationPieceLanguage for FactoredPhysicalActionLanguageView<'_> {
                 Sources::Revealed(_) => {
                     arena.kind_source_visits = arena.kind_source_visits.saturating_add(members);
                 }
+                Sources::Frontier(_) => {
+                    return Err(invalid("wasm_observation_physical_hidden_horizon_exceeded"));
+                }
             }
             let mut edges = Vec::new();
             match &arena.nodes[node as usize].sources {
                 Sources::Physical(sources) => {
-                    let output = self.physical_derivatives(sources, piece, control)?;
-                    let mut first = 0;
-                    while first < output.len() {
-                        let cells = output[first].0;
-                        let mut end = first + 1;
-                        while end < output.len() && output[end].0 == cells {
-                            end += 1;
-                        }
-                        let mut children = Vec::new();
-                        children
-                            .try_reserve_exact(end - first)
-                            .map_err(|_| storage())?;
-                        children.extend(output[first..end].iter().map(|entry| entry.1));
-                        let child = arena.intern(
+                    let child_depth = self
+                        .total_depth
+                        .checked_sub(remaining_depth)
+                        .and_then(|depth| depth.checked_add(1))
+                        .ok_or_else(|| invalid("wasm_observation_physical_depth_mismatch"))?;
+                    if child_depth == self.source.hidden_horizon {
+                        let mut projected = 0_usize;
+                        let output = self.physical_derivatives(
+                            sources,
+                            piece,
+                            control,
+                            |residual, relation| {
+                                let root = relation.suffix(residual.prefix).ok_or_else(|| {
+                                    invalid("wasm_observation_suffix_language_missing")
+                                })?;
+                                validate_suffix_root(self.kinds, root, remaining_depth - 1)?;
+                                projected += 1;
+                                Ok(root)
+                            },
+                        )?;
+                        arena.revealed_source_visits =
+                            arena.revealed_source_visits.saturating_add(projected);
+                        edges = intern_physical_groups(
+                            &mut arena,
                             remaining_depth - 1,
-                            Sources::Physical(children),
+                            piece,
+                            &output,
+                            Sources::Frontier,
                             control,
                         )?;
-                        edges.try_reserve(1).map_err(|_| storage())?;
-                        edges.push((piece, child));
-                        first = end;
+                    } else {
+                        let output =
+                            self.physical_derivatives(sources, piece, control, |residual, _| {
+                                Ok(residual)
+                            })?;
+                        edges = intern_physical_groups(
+                            &mut arena,
+                            remaining_depth - 1,
+                            piece,
+                            &output,
+                            Sources::Physical,
+                            control,
+                        )?;
                     }
+                }
+                Sources::Frontier(_) => {
+                    return Err(invalid("wasm_observation_physical_hidden_horizon_exceeded"));
                 }
                 Sources::Revealed(sources) => {
                     let mut children = Vec::new();
@@ -878,7 +1100,11 @@ impl ObservationPieceLanguage for FactoredPhysicalActionLanguageView<'_> {
                             Sources::Revealed(children),
                             control,
                         )?;
-                        edges.push((piece, child));
+                        edges.push(PhysicalActionEdge {
+                            piece,
+                            cells: 0,
+                            child,
+                        });
                     }
                 }
             }
@@ -914,29 +1140,33 @@ impl ObservationPieceLanguage for FactoredPhysicalActionLanguageView<'_> {
             return Ok(node);
         }
         let remaining_depth = target.remaining_depth;
-        let Sources::Physical(sources) = &target.sources else {
-            return Err(invalid("wasm_observation_physical_root_invalid"));
-        };
         let mut roots = Vec::new();
         roots
-            .try_reserve_exact(sources.len())
+            .try_reserve_exact(target.sources.len())
             .map_err(|_| storage())?;
-        for residual in sources {
-            let candidate = &self.source.candidates[residual.candidate as usize];
-            let relation = &self.source.relations[candidate.relation as usize];
-            let root = relation
-                .suffix(residual.prefix)
-                .ok_or_else(|| invalid("wasm_observation_suffix_language_missing"))?;
-            if self
-                .kinds
-                .node(root)
-                .is_none_or(|node| node.remaining_depth != remaining_depth)
-            {
-                return Err(invalid("wasm_observation_physical_depth_mismatch"));
+        let mut projected = 0_usize;
+        match &target.sources {
+            Sources::Physical(sources) => {
+                for (index, residual) in sources.iter().enumerate() {
+                    if index & 255 == 0 && control.is_cancelled() {
+                        return Err(WasmExactSearchError::Cancelled);
+                    }
+                    let candidate = &self.source.candidates[residual.candidate as usize];
+                    let relation = &self.source.relations[candidate.relation as usize];
+                    let root = relation
+                        .suffix(residual.prefix)
+                        .ok_or_else(|| invalid("wasm_observation_suffix_language_missing"))?;
+                    validate_suffix_root(self.kinds, root, remaining_depth)?;
+                    roots.push(root);
+                }
+                projected = sources.len();
             }
-            roots.push(root);
+            Sources::Frontier(sources) => roots.extend_from_slice(sources),
+            Sources::Revealed(_) => {
+                return Err(invalid("wasm_observation_physical_root_invalid"));
+            }
         }
-        arena.revealed_source_visits = arena.revealed_source_visits.saturating_add(roots.len());
+        arena.revealed_source_visits = arena.revealed_source_visits.saturating_add(projected);
         let revealed = arena.intern(remaining_depth, Sources::Revealed(roots), control)?;
         arena.nodes[node as usize].revealed = Some(revealed);
         Ok(revealed)
@@ -987,6 +1217,55 @@ impl ObservationPieceLanguage for FactoredPhysicalActionLanguageView<'_> {
         }
         Ok(Some(roots))
     }
+}
+
+fn validate_suffix_root(
+    kinds: &PieceOrderLanguageCache,
+    root: u32,
+    remaining_depth: u8,
+) -> Result<(), WasmExactSearchError> {
+    if kinds
+        .node(root)
+        .is_none_or(|node| node.remaining_depth != remaining_depth)
+    {
+        return Err(invalid("wasm_observation_physical_depth_mismatch"));
+    }
+    Ok(())
+}
+
+/// The caller has sorted and deduplicated (physical cells, continuation)
+/// pairs. Preserve each lock choice while unioning exactly its continuations.
+fn intern_physical_groups<T: Copy>(
+    arena: &mut ResidualArena,
+    remaining_depth: u8,
+    piece: u8,
+    output: &[(u64, T)],
+    sources: impl Fn(Vec<T>) -> Sources,
+    control: &ExecutionControl,
+) -> Result<Vec<PhysicalActionEdge>, WasmExactSearchError> {
+    let mut edges = Vec::new();
+    let mut first = 0;
+    while first < output.len() {
+        let cells = output[first].0;
+        let mut end = first + 1;
+        while end < output.len() && output[end].0 == cells {
+            end += 1;
+        }
+        let mut children = Vec::new();
+        children
+            .try_reserve_exact(end - first)
+            .map_err(|_| storage())?;
+        children.extend(output[first..end].iter().map(|entry| entry.1));
+        let child = arena.intern(remaining_depth, sources(children), control)?;
+        edges.try_reserve(1).map_err(|_| storage())?;
+        edges.push(PhysicalActionEdge {
+            piece,
+            cells,
+            child,
+        });
+        first = end;
+    }
+    Ok(edges)
 }
 
 fn charge(
@@ -1065,6 +1344,62 @@ mod tests {
     }
 
     #[test]
+    fn dead_guard_bits_share_live_rows_across_lane_and_word_boundaries() {
+        // One complete chain of 11 labelled operations, plus guards wholly
+        // inside an unreachable, nonproductive component. No added guard
+        // repeats an already executed operation or joins the live chain.
+        const OPERATIONS: usize = 11;
+        const PREFIXES: usize = 1 << OPERATIONS;
+        let mut active = vec![0_u64; PREFIXES / 64];
+        for depth in 0..=OPERATIONS {
+            let prefix = (1_usize << depth) - 1;
+            active[prefix / 64] |= 1_u64 << (prefix % 64);
+        }
+        let mut words = Vec::new();
+        for operation in 0..OPERATIONS {
+            let mut clean = vec![0_u64; active.len()];
+            let parent = (1_usize << operation) - 1;
+            clean[parent / 64] = 1_u64 << (parent % 64);
+            let mut noisy = clean.clone();
+            for prefix in 0..PREFIXES {
+                let child = prefix | (1 << operation);
+                if child != prefix
+                    && active[prefix / 64] & (1_u64 << (prefix % 64)) == 0
+                    && active[child / 64] & (1_u64 << (child % 64)) == 0
+                {
+                    noisy[prefix / 64] |= 1_u64 << (prefix % 64);
+                }
+            }
+            assert_ne!(clean, noisy);
+            for word in 0..active.len() {
+                let normalized = live_parent_word(noisy[word], &active, operation, word);
+                assert_eq!(
+                    normalized, clean[word],
+                    "operation {operation}, word {word}"
+                );
+                words.push(normalized);
+            }
+        }
+        words.extend_from_slice(&active);
+        let proof = CompactPrefixRelation {
+            pieces: vec![PieceKind::I; OPERATIONS],
+            words,
+        };
+        for depth in 0..=OPERATIONS {
+            let prefix = (1_u16 << depth) - 1;
+            let expected = if depth == OPERATIONS {
+                Vec::new()
+            } else {
+                vec![(depth, PieceKind::I)]
+            };
+            assert_eq!(
+                proof.live_operations_after(prefix).collect::<Vec<_>>(),
+                expected
+            );
+        }
+    }
+
+    #[test]
     fn shared_proofs_expand_only_requested_physical_derivatives() {
         let control = ExecutionControl::default();
         let mut source = FactoredActionRelations::default();
@@ -1104,6 +1439,150 @@ mod tests {
         assert_eq!(view.edge_count(revealed), Some(1));
         assert_eq!(view.node(revealed).unwrap().depth, 0);
         assert_eq!(view.fixed_horizon(), Some(2));
+    }
+
+    #[test]
+    fn hidden_boundary_keeps_physical_choice_but_deduplicates_dormant_suffixes() {
+        let control = ExecutionControl::default();
+        let mut source = FactoredActionRelations::default();
+        let mut kinds = PieceOrderLanguageCache::default();
+        for _ in 0..32 {
+            register(&mut source, &mut kinds, 1);
+        }
+        let view = source.view(&kinds, &control).unwrap().unwrap();
+        view.prepare_edges(view.root(), 1 << 1, &control).unwrap();
+        assert_eq!(view.edge_count(view.root()), Some(2));
+        let left = view.edge(view.root(), 0).unwrap();
+        let right = view.edge(view.root(), 1).unwrap();
+        assert_eq!(left.0, piece_code(PieceKind::O));
+        assert_eq!(
+            left, right,
+            "both committed locks have the same suffix word O"
+        );
+        let boundary = left.1;
+        assert_eq!(view.node(boundary).unwrap().depth, 1);
+        assert!(!view.node(boundary).unwrap().accepting);
+        assert_eq!(view.metrics().frontier_nodes, 1);
+        assert_eq!(view.metrics().frontier_members, 1);
+        assert_eq!(view.metrics().residual_members, 33);
+        assert_eq!(view.edge_count(boundary), Some(0));
+        assert_eq!(
+            view.revealed_alternatives(boundary, &control).unwrap(),
+            None
+        );
+        assert!(matches!(
+            view.prepare_edges(boundary, 1 << 1, &control),
+            Err(WasmExactSearchError::InvalidProblem(
+                "wasm_observation_physical_hidden_horizon_exceeded"
+            )),
+        ));
+
+        // Only the observation evaluator's certificate enables these roots.
+        let revealed = view.fully_revealed_node(boundary, &control).unwrap();
+        assert_ne!(revealed, boundary);
+        assert_eq!(view.node(revealed).unwrap().depth, 1);
+        view.prepare_edges(revealed, 1 << 1, &control).unwrap();
+        let (_, terminal) = view.edge(revealed, 0).unwrap();
+        assert!(view.node(terminal).unwrap().accepting);
+        assert_eq!(
+            view.fully_revealed_node(boundary, &control).unwrap(),
+            revealed
+        );
+    }
+
+    #[test]
+    fn zero_hidden_horizon_starts_with_a_dormant_exact_kind_union() {
+        let control = ExecutionControl::default();
+        let mut source = FactoredActionRelations::default();
+        let mut kinds = PieceOrderLanguageCache::default();
+        for _ in 0..16 {
+            register(&mut source, &mut kinds, 0);
+        }
+        let view = source.view(&kinds, &control).unwrap().unwrap();
+        assert_eq!(view.metrics().physical_nodes, 0);
+        assert_eq!(view.metrics().frontier_nodes, 1);
+        assert_eq!(view.metrics().frontier_members, 1);
+        assert_eq!(view.metrics().residual_members, 1);
+        assert!(view.prepare_edges(view.root(), 1 << 1, &control).is_err());
+        let revealed = view.fully_revealed_node(view.root(), &control).unwrap();
+        assert_eq!(view.node(revealed).unwrap().depth, 0);
+        view.prepare_edges(revealed, 1 << 1, &control).unwrap();
+        assert_eq!(view.edge_count(revealed), Some(1));
+    }
+
+    #[test]
+    fn reveal_floor_keeps_reuse_root_and_physical_paths_but_rejects_mixed_owners() {
+        let control = ExecutionControl::default();
+        let mut source = FactoredActionRelations::default();
+        let mut kinds = PieceOrderLanguageCache::default();
+        let orders = two_grounded_os();
+        let mut suffixes = Vec::new();
+        orders
+            .compile_product_language_with_residuals(
+                &mut kinds,
+                &mut SymbolicPrefixWork::default(),
+                &mut suffixes,
+            )
+            .unwrap();
+        source
+            .register_prepared(orders, &suffixes, 2, 2, None, &control)
+            .unwrap();
+        assert_eq!(source.relations[0].suffixes.len(), 2);
+        assert!(source.relations[0].suffix(0).is_some());
+        assert_eq!(source.relations[0].suffix(1), None);
+        assert_eq!(source.relations[0].suffix(2), None);
+        assert!(source.relations[0].suffix(3).is_some());
+        let repeated = two_grounded_os();
+        let (relation, root) = source
+            .registered_language(repeated.observation_relation().unwrap(), &control)
+            .unwrap()
+            .unwrap();
+        assert_eq!(Some(root), source.relations[0].suffix(0));
+        source
+            .register_prepared(repeated, &[], 2, 2, Some(relation), &control)
+            .unwrap();
+        let view = source.view(&kinds, &control).unwrap().unwrap();
+        view.prepare_edges(view.root(), 1 << 1, &control).unwrap();
+        assert_eq!(view.edge_count(view.root()), Some(2));
+        for index in 0..2 {
+            let (_, child) = view.edge(view.root(), index).unwrap();
+            view.prepare_edges(child, 1 << 1, &control).unwrap();
+            let (_, terminal) = view.edge(child, 0).unwrap();
+            assert!(view.node(terminal).unwrap().accepting);
+        }
+        drop(view);
+
+        assert!(matches!(
+            source.register_prepared(two_grounded_os(), &suffixes, 2, 0, None, &control),
+            Err(WasmExactSearchError::InvalidProblem(
+                "wasm_observation_physical_depth_mismatch"
+            )),
+        ));
+        let mut worker = FactoredActionRelations::default();
+        let mut worker_kinds = PieceOrderLanguageCache::default();
+        register(&mut worker, &mut worker_kinds, 2);
+        let rebound = kinds.import_node_map(&worker_kinds).unwrap();
+        assert!(matches!(
+            source.merge(worker, &rebound, &control),
+            Err(WasmExactSearchError::InvalidProblem(
+                "wasm_observation_physical_depth_mismatch"
+            )),
+        ));
+        assert_eq!(source.candidates.len(), 2);
+        assert_eq!(source.relations.len(), 1);
+        assert!(matches!(
+            FactoredActionRelations::default().register_prepared(
+                two_grounded_os(),
+                &suffixes,
+                1,
+                2,
+                None,
+                &control,
+            ),
+            Err(WasmExactSearchError::InvalidProblem(
+                "wasm_observation_physical_reveal_floor_invalid"
+            )),
+        ));
     }
 
     #[test]
@@ -1319,6 +1798,32 @@ mod tests {
         assert_eq!(view.edge_count(revealed), Some(1));
         assert_eq!(view.metrics().proof_factors, 1);
         assert_eq!(view.metrics().candidate_factors, 2);
+    }
+
+    #[test]
+    fn duplicate_worker_proof_still_rejects_a_wrong_suffix_rebind() {
+        let control = ExecutionControl::default();
+        let mut source = FactoredActionRelations::default();
+        let mut kinds = PieceOrderLanguageCache::default();
+        register(&mut source, &mut kinds, 2);
+        let mut worker = FactoredActionRelations::default();
+        let mut worker_kinds = PieceOrderLanguageCache::default();
+        register(&mut worker, &mut worker_kinds, 2);
+        let root = worker.relations[0].suffix(0).unwrap();
+        let terminal = worker.relations[0].suffix(3).unwrap();
+        let mut rebound = kinds.import_node_map(&worker_kinds).unwrap();
+        assert_ne!(rebound[root as usize], rebound[terminal as usize]);
+        // Every ID remains in range; equal proofs cannot authorize the wrong
+        // semantic binding even when no incoming suffix array is rewritten.
+        rebound[root as usize] = rebound[terminal as usize];
+        assert!(matches!(
+            source.merge(worker, &rebound, &control),
+            Err(WasmExactSearchError::InvalidProblem(
+                "wasm_observation_suffix_arena_changed"
+            ))
+        ));
+        assert_eq!(source.candidates.len(), 1);
+        assert_eq!(source.relations.len(), 1);
     }
 
     #[test]

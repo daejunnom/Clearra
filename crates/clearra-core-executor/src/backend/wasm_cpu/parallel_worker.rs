@@ -228,6 +228,13 @@ pub(super) struct WorkerMemoryComponents {
     pub shared_standard_bag_request_bytes: usize,
     /// Request-owned immutable transitions and lazy sky entries, never summed.
     pub shared_reachability_template_bytes: usize,
+    /// Request-owned mutable observation producer, moved once at the completed
+    /// native barrier. These snapshots are diagnostic, not worker allocations.
+    pub shared_observation_producer_bytes: usize,
+    pub shared_observation_producer_peak_bytes: usize,
+    /// Sum of private source-to-destination map growth overlaps. The maps'
+    /// live buffers are already in buildup.other_bytes; this is peak-only.
+    pub incremental_import_peak_extra_bytes: usize,
     #[cfg(any(test, feature = "local-search-ab"))]
     pub exit_snapshot_count: usize,
     /// Largest sampled per-worker scratch at return, not a time-series peak.
@@ -306,6 +313,15 @@ impl WorkerMemoryComponents {
         self.shared_reachability_template_bytes = self
             .shared_reachability_template_bytes
             .max(other.shared_reachability_template_bytes);
+        self.shared_observation_producer_bytes = self
+            .shared_observation_producer_bytes
+            .max(other.shared_observation_producer_bytes);
+        self.shared_observation_producer_peak_bytes = self
+            .shared_observation_producer_peak_bytes
+            .max(other.shared_observation_producer_peak_bytes);
+        self.incremental_import_peak_extra_bytes = self
+            .incremental_import_peak_extra_bytes
+            .saturating_add(other.incremental_import_peak_extra_bytes);
         #[cfg(any(test, feature = "local-search-ab"))]
         {
             self.exit_snapshot_count = self
@@ -598,6 +614,11 @@ pub(super) struct ParallelWorkerResult {
 
 pub(super) struct SharedWorkerRequest {
     pub standard_bag: Option<Arc<SharedStandardBagRequest>>,
+    #[cfg(feature = "placement-dependency-pc")]
+    pub board_observation_plan: Option<Arc<super::queue_observation_policy::BoardObservationPlan>>,
+    #[cfg(feature = "placement-dependency-pc")]
+    pub shared_observation_producer:
+        Option<Arc<super::queue_observation_policy::SharedObservationProducer>>,
     pub reachability: Arc<SharedReachabilityTemplates>,
     pub probability_row_budget: Option<ParallelProbabilityRowBudget>,
     #[cfg(any(test, feature = "local-search-ab"))]
@@ -728,7 +749,17 @@ pub(super) fn run_branch_worker(
         request.publish_worker(outcome.candidate_count, work)?;
         return Ok(outcome);
     }
-    run()
+    let result = run();
+    if let Err(error) = &result {
+        inputs.queue.abort();
+        #[cfg(feature = "placement-dependency-pc")]
+        if let Some(shared) = &inputs.request.shared_observation_producer {
+            shared.abort_with_error("native_worker", error);
+        }
+        #[cfg(not(feature = "placement-dependency-pc"))]
+        let _ = error;
+    }
+    result
 }
 
 fn run_branch_worker_inner(
@@ -748,6 +779,14 @@ fn run_branch_worker_inner(
         request: shared_request,
     } = inputs;
     let mut workspace = BuildUpWorkspace::default();
+    #[cfg(feature = "placement-dependency-pc")]
+    if let Some(plan) = &shared_request.board_observation_plan {
+        workspace.set_board_observation_plan(Arc::clone(plan))?;
+    }
+    #[cfg(feature = "placement-dependency-pc")]
+    if let Some(shared) = &shared_request.shared_observation_producer {
+        workspace.set_shared_observation_producer(Arc::clone(shared))?;
+    }
     #[cfg(feature = "local-search-ab")]
     if let Some(experiment) = &shared_request.operation_masks {
         workspace.begin_operation_mask_worker(experiment);
@@ -763,6 +802,11 @@ fn run_branch_worker_inner(
     };
     let mut outcomes = Vec::new();
     let mut worker_candidate_count = 0usize;
+
+    #[cfg(all(feature = "local-search-ab", feature = "placement-dependency-pc"))]
+    if shared_request.board_observation_plan.is_some() {
+        eprintln!("clearra_observation_board_worker_start");
+    }
 
     #[cfg(all(feature = "local-search-ab", target_os = "linux"))]
     if let Some((probe, worker)) = memory_probe {
@@ -822,6 +866,25 @@ fn run_branch_worker_inner(
     // their concrete actions and make one global choice before each reveal.
     aggregate.piece_language_cache_hits = workspace.piece_language_coverage_hits();
     aggregate.piece_language_cache_misses = workspace.piece_language_coverage_misses();
+    #[cfg(all(feature = "local-search-ab", feature = "placement-dependency-pc"))]
+    if shared_request.board_observation_plan.is_some() {
+        eprintln!(
+            "clearra_observation_board_worker_done candidates={} kind_storage={:?} source_existence={:?} board_and_prefix_cones={:?} prefix_cone_exact={:?}",
+            worker_candidate_count,
+            workspace.observation_kind_storage_metrics(),
+            workspace.observation_source_existence_metrics(),
+            workspace.observation_board_producer_metrics(),
+            workspace.observation_prefix_cone_exact_producer_metrics(),
+        );
+        if let Some(shared) = &shared_request.shared_observation_producer {
+            // Common request snapshots overlap. They must not be summed as
+            // if each worker retained an independent producer graph.
+            eprintln!(
+                "clearra_observation_shared_producer_worker_snapshot metrics={:?}",
+                shared.metrics(),
+            );
+        }
+    }
     let mut observation_producer_shards = Vec::new();
     if let Some(shard) = workspace.take_observation_producer_shard() {
         observation_producer_shards
@@ -872,6 +935,12 @@ fn run_branch_worker_inner(
         standard_bag_memo: workspace.standard_bag_memo_accounting(),
         shared_standard_bag_request_bytes,
         shared_reachability_template_bytes: shared_request.reachability.retained_bytes(),
+        // The coordinator reads the one live request owner after the barrier.
+        // Worker snapshots must not multiply its graph or destination arena.
+        shared_observation_producer_bytes: 0,
+        shared_observation_producer_peak_bytes: 0,
+        incremental_import_peak_extra_bytes: workspace
+            .shared_observation_private_peak_extra_bytes(),
         #[cfg(any(test, feature = "local-search-ab"))]
         exit_snapshot_count: 1,
         #[cfg(any(test, feature = "local-search-ab"))]
@@ -1030,113 +1099,135 @@ fn run_branch(
                     local_ordinal = local_ordinal.saturating_add(1);
                     continue;
                 }
-                let target = targets.get(candidate.target_index as usize).ok_or(
-                    WasmExactSearchError::InvalidProblem(
-                        "wasm_geometry_candidate_target_out_of_range",
-                    ),
-                )?;
-                let exact_candidate_coverage = solution_coverage_required || retain_chance_rows;
-                #[cfg(any(test, feature = "local-search-ab"))]
-                let exact_candidate_coverage =
-                    exact_candidate_coverage || solution_coverage_capture.is_some();
-                let witness_mode = CandidateWitnessMode::for_candidate(
-                    problem,
-                    target,
-                    || {
-                        workspace.standard_bag_coverage_complete()
-                            || shared_coverage.is_superset(target.possible_patterns.as_ref())
-                    },
-                    exact_candidate_coverage,
-                );
-                let mut result = verify_candidate(
-                    problem,
-                    catalog,
-                    &candidate,
-                    target,
-                    workspace,
-                    evaluator,
-                    witness_mode,
-                    false,
-                    profile_sample_scale(local_ordinal.saturating_add(1)),
-                    control,
-                )?;
-                let mut solution_coverage = None;
-                #[cfg(any(test, feature = "local-search-ab"))]
-                if let Some(capture) = solution_coverage_capture {
-                    capture_candidate_solution_coverage(
-                        capture,
-                        candidate.identity,
-                        &result,
+                #[cfg(feature = "placement-dependency-pc")]
+                let observation_produced = {
+                    #[cfg(any(test, feature = "local-search-ab"))]
+                    let source_only_allowed = solution_coverage_capture.is_none();
+                    #[cfg(not(any(test, feature = "local-search-ab")))]
+                    let source_only_allowed = true;
+                    source_only_allowed
+                        && workspace.try_produce_board_observation(
+                            problem,
+                            catalog,
+                            &candidate,
+                            control,
+                            profile_sample_scale(local_ordinal.saturating_add(1)),
+                        )? != super::buildup::ObservationProducerDecision::NotSelected
+                };
+                #[cfg(not(feature = "placement-dependency-pc"))]
+                let observation_produced = false;
+                // This typed producer retains physical evidence. It does not
+                // fabricate an oracle row, witness, identity, or execution
+                // count. Common ordinal and memory accounting still run.
+                if !observation_produced {
+                    let target = targets.get(candidate.target_index as usize).ok_or(
+                        WasmExactSearchError::InvalidProblem(
+                            "wasm_geometry_candidate_target_out_of_range",
+                        ),
+                    )?;
+                    let exact_candidate_coverage = solution_coverage_required || retain_chance_rows;
+                    #[cfg(any(test, feature = "local-search-ab"))]
+                    let exact_candidate_coverage =
+                        exact_candidate_coverage || solution_coverage_capture.is_some();
+                    let witness_mode = CandidateWitnessMode::for_candidate(
+                        problem,
+                        target,
+                        || {
+                            workspace.standard_bag_coverage_complete()
+                                || shared_coverage.is_superset(target.possible_patterns.as_ref())
+                        },
+                        exact_candidate_coverage,
+                    );
+                    let mut result = verify_candidate(
+                        problem,
+                        catalog,
+                        &candidate,
+                        target,
                         workspace,
+                        evaluator,
+                        witness_mode,
+                        false,
+                        profile_sample_scale(local_ordinal.saturating_add(1)),
+                        control,
+                    )?;
+                    let mut solution_coverage = None;
+                    #[cfg(any(test, feature = "local-search-ab"))]
+                    if let Some(capture) = solution_coverage_capture {
+                        capture_candidate_solution_coverage(
+                            capture,
+                            candidate.identity,
+                            &result,
+                            workspace,
+                        )?;
+                    }
+                    if let Some(coverage) = result.covered_patterns.as_ref() {
+                        shared_coverage.union(coverage)?;
+                        if solution_coverage_required {
+                            solution_coverage = Some(coverage.clone());
+                        }
+                    }
+                    if let Some(root) = result.symbolic_coverage_root {
+                        if solution_coverage_required || retain_chance_rows {
+                            if let Some(budget) = probability_row_budget {
+                                budget.charge(budget.dense_constructor_bytes)?;
+                            }
+                            let materialized = workspace.materialize_standard_bag_root(root)?;
+                            if retain_chance_rows {
+                                // Concrete and symbolic results are disjoint; a
+                                // second row for one candidate is not valid proof.
+                                if result.covered_patterns.is_some() {
+                                    return Err(WasmExactSearchError::InvalidProblem(
+                                        "wasm_parallel_chance_candidate_row_ambiguous",
+                                    ));
+                                }
+                                if solution_coverage_required {
+                                    solution_coverage = Some(materialized.clone());
+                                }
+                                record_chance_branch_row(
+                                    &mut chance_rows,
+                                    local_ordinal,
+                                    materialized,
+                                )?;
+                            } else if let Some(solution_coverage) = solution_coverage.as_mut() {
+                                solution_coverage.union_with(&materialized).map_err(|_| {
+                                    WasmExactSearchError::InvalidProblem(
+                                        "wasm_parallel_solution_coverage_universe_mismatch",
+                                    )
+                                })?;
+                            } else {
+                                solution_coverage = Some(materialized);
+                            }
+                        }
+                        workspace.merge_standard_bag_coverage(root)?;
+                    }
+                    if retain_chance_rows {
+                        if let Some(coverage) = result.covered_patterns.take() {
+                            if let Some(budget) = probability_row_budget {
+                                budget.charge(coverage.retained_bytes())?;
+                            }
+                            // Account the row and covered ordinals exactly as
+                            // WorkerAggregate::observe would, then move the bits.
+                            aggregate.coverage_row_count =
+                                aggregate.coverage_row_count.saturating_add(1);
+                            aggregate.pattern_verified_execution_count = aggregate
+                                .pattern_verified_execution_count
+                                .saturating_add(coverage.count_ones() as usize);
+                            record_chance_branch_row(&mut chance_rows, local_ordinal, coverage)?;
+                        }
+                    }
+                    let retain_identity = retains_buildable_identity_evidence(problem);
+                    #[cfg(any(test, feature = "local-search-ab"))]
+                    let retain_identity = retain_identity || solution_coverage_capture.is_some();
+                    aggregate.observe(
+                        task.canonical_index,
+                        local_ordinal,
+                        candidate,
+                        result,
+                        solution_coverage,
+                        retain_identity,
+                        problem.output_policy().retains_representative_trace(),
                     )?;
                 }
-                if let Some(coverage) = result.covered_patterns.as_ref() {
-                    shared_coverage.union(coverage)?;
-                    if solution_coverage_required {
-                        solution_coverage = Some(coverage.clone());
-                    }
-                }
-                if let Some(root) = result.symbolic_coverage_root {
-                    if solution_coverage_required || retain_chance_rows {
-                        if let Some(budget) = probability_row_budget {
-                            budget.charge(budget.dense_constructor_bytes)?;
-                        }
-                        let materialized = workspace.materialize_standard_bag_root(root)?;
-                        if retain_chance_rows {
-                            // Concrete and symbolic results are disjoint; a
-                            // second row for one candidate is not valid proof.
-                            if result.covered_patterns.is_some() {
-                                return Err(WasmExactSearchError::InvalidProblem(
-                                    "wasm_parallel_chance_candidate_row_ambiguous",
-                                ));
-                            }
-                            if solution_coverage_required {
-                                solution_coverage = Some(materialized.clone());
-                            }
-                            record_chance_branch_row(
-                                &mut chance_rows,
-                                local_ordinal,
-                                materialized,
-                            )?;
-                        } else if let Some(solution_coverage) = solution_coverage.as_mut() {
-                            solution_coverage.union_with(&materialized).map_err(|_| {
-                                WasmExactSearchError::InvalidProblem(
-                                    "wasm_parallel_solution_coverage_universe_mismatch",
-                                )
-                            })?;
-                        } else {
-                            solution_coverage = Some(materialized);
-                        }
-                    }
-                    workspace.merge_standard_bag_coverage(root)?;
-                }
-                if retain_chance_rows {
-                    if let Some(coverage) = result.covered_patterns.take() {
-                        if let Some(budget) = probability_row_budget {
-                            budget.charge(coverage.retained_bytes())?;
-                        }
-                        // Account the row and covered ordinals exactly as
-                        // WorkerAggregate::observe would, then move the bits.
-                        aggregate.coverage_row_count =
-                            aggregate.coverage_row_count.saturating_add(1);
-                        aggregate.pattern_verified_execution_count = aggregate
-                            .pattern_verified_execution_count
-                            .saturating_add(coverage.count_ones() as usize);
-                        record_chance_branch_row(&mut chance_rows, local_ordinal, coverage)?;
-                    }
-                }
-                let retain_identity = retains_buildable_identity_evidence(problem);
-                #[cfg(any(test, feature = "local-search-ab"))]
-                let retain_identity = retain_identity || solution_coverage_capture.is_some();
-                aggregate.observe(
-                    task.canonical_index,
-                    local_ordinal,
-                    candidate,
-                    result,
-                    solution_coverage,
-                    retain_identity,
-                    problem.output_policy().retains_representative_trace(),
-                )?;
                 local_ordinal = local_ordinal.saturating_add(1);
                 #[cfg(all(feature = "local-search-ab", target_os = "linux"))]
                 if let Some((probe, worker, branch_bytes)) = memory_probe {
@@ -1511,6 +1602,9 @@ mod tests {
             // Eleven workers share this exact request owner once.
             shared_standard_bag_request_bytes: 64,
             shared_reachability_template_bytes: 128,
+            shared_observation_producer_bytes: 256,
+            shared_observation_producer_peak_bytes: 512,
+            incremental_import_peak_extra_bytes: 32,
             exit_snapshot_count: 1,
             max_exit_scratch_bytes: 2_100,
             returned_branch_slots_bytes: 512,
@@ -1528,6 +1622,24 @@ mod tests {
                 .expect("worker components");
         }
         assert_eq!(total.worker_retained_bytes, 60_500);
+        assert_eq!(
+            total
+                .worker_memory_components
+                .shared_observation_producer_bytes,
+            256
+        );
+        assert_eq!(
+            total
+                .worker_memory_components
+                .shared_observation_producer_peak_bytes,
+            512
+        );
+        assert_eq!(
+            total
+                .worker_memory_components
+                .incremental_import_peak_extra_bytes,
+            11 * 32
+        );
         let memory = total.worker_memory_components;
         assert_eq!(memory.total_bytes(), 60_500);
         assert_eq!(memory.private_scratch_bytes(), 23_100);

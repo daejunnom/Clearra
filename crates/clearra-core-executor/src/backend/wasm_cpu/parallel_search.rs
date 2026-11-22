@@ -19,6 +19,8 @@ use crate::{
 use super::buildup::ObservationProducerShard;
 #[cfg(all(feature = "local-search-ab", target_os = "linux"))]
 use super::parallel_memory_peak::{self, CoordinatorStorage};
+#[cfg(feature = "placement-dependency-pc")]
+use super::queue_observation_policy::{BoardObservationPlan, SharedObservationOutput};
 #[cfg(any(test, feature = "local-search-ab"))]
 use super::result::SolutionCoverageCapture;
 use super::{
@@ -88,6 +90,30 @@ pub(super) struct ParallelSearchOutcome {
     pub minimum_worker_candidates: usize,
     pub maximum_worker_candidates: usize,
     pub observation_producer_shards: Vec<ObservationProducerShard>,
+    #[cfg(feature = "placement-dependency-pc")]
+    pub shared_observation: Option<SharedObservationOutput>,
+}
+
+#[cfg(feature = "placement-dependency-pc")]
+struct SharedObservationCompletionGuard {
+    producer: Arc<super::queue_observation_policy::SharedObservationProducer>,
+    completed: bool,
+}
+
+#[cfg(feature = "placement-dependency-pc")]
+impl Drop for SharedObservationCompletionGuard {
+    fn drop(&mut self) {
+        if !self.completed {
+            // Atomic only: never re-enter the shared registration mutex from
+            // an error, unwind, or diagnostic path.
+            self.producer.abort();
+            #[cfg(feature = "local-search-ab")]
+            eprintln!(
+                "clearra_observation_shared_producer_failed metrics={:?}",
+                self.producer.metrics(),
+            );
+        }
+    }
 }
 
 pub(super) fn execute_if_worthwhile(
@@ -97,6 +123,9 @@ pub(super) fn execute_if_worthwhile(
     control: ExecutionControl,
     requested_workers: usize,
     cpu_warmup_requested: bool,
+    #[cfg(feature = "placement-dependency-pc")] board_observation_plan: Option<
+        Arc<BoardObservationPlan>,
+    >,
     #[cfg(any(test, feature = "local-search-ab"))] solution_coverage_capture: Option<
         SolutionCoverageCapture,
     >,
@@ -133,6 +162,8 @@ pub(super) fn execute_if_worthwhile(
         control,
         balanced_workers,
         cpu_warmup_requested,
+        #[cfg(feature = "placement-dependency-pc")]
+        board_observation_plan,
         #[cfg(any(test, feature = "local-search-ab"))]
         solution_coverage_capture,
     )
@@ -483,6 +514,9 @@ fn execute_plan(
     control: ExecutionControl,
     requested_workers: usize,
     cpu_warmup_requested: bool,
+    #[cfg(feature = "placement-dependency-pc")] board_observation_plan: Option<
+        Arc<BoardObservationPlan>,
+    >,
     #[cfg(any(test, feature = "local-search-ab"))] solution_coverage_capture: Option<
         SolutionCoverageCapture,
     >,
@@ -509,8 +543,26 @@ fn execute_plan(
         .then(|| Arc::new(SharedStandardBagRequest::default()));
     #[cfg(all(feature = "local-search-ab", not(target_family = "wasm")))]
     let strict_prefix = super::symbolic_prefix_parallel::claim_strict_parallel_prefix()?;
+    #[cfg(feature = "placement-dependency-pc")]
+    let shared_observation_producer = BuildUpWorkspace::shared_observation_producer_for_parallel(
+        board_observation_plan.as_ref(),
+        workers_used,
+        &control,
+    )?;
+    #[cfg(feature = "placement-dependency-pc")]
+    let mut shared_completion_guard =
+        shared_observation_producer
+            .as_ref()
+            .map(|producer| SharedObservationCompletionGuard {
+                producer: Arc::clone(producer),
+                completed: false,
+            });
     let shared_request = SharedWorkerRequest {
         standard_bag: shared_standard_bag,
+        #[cfg(feature = "placement-dependency-pc")]
+        board_observation_plan,
+        #[cfg(feature = "placement-dependency-pc")]
+        shared_observation_producer,
         reachability: Arc::new(match super::dependency_kick_authority(&problem)? {
             Some(authority) => SharedReachabilityTemplates::with_authority(authority),
             None => SharedReachabilityTemplates::new(
@@ -531,6 +583,23 @@ fn execute_plan(
         #[cfg(all(feature = "local-search-ab", not(target_family = "wasm")))]
         strict_prefix,
     };
+    #[cfg(all(feature = "placement-dependency-pc", feature = "local-search-ab"))]
+    if shared_request.shared_observation_producer.is_some()
+        && (shared_request.operation_masks.is_some() || {
+            #[cfg(not(target_family = "wasm"))]
+            {
+                shared_request.strict_prefix.is_some()
+            }
+            #[cfg(target_family = "wasm")]
+            {
+                false
+            }
+        })
+    {
+        return Err(WasmExactSearchError::InvalidProblem(
+            "wasm_observation_shared_producer_scope_invalid",
+        ));
+    }
     #[cfg(all(feature = "local-search-ab", not(target_family = "wasm")))]
     if shared_request.strict_prefix.is_some()
         && (shared_request.operation_masks.is_some()
@@ -556,6 +625,8 @@ fn execute_plan(
     let memory_probe = parallel_memory_peak::current();
     #[cfg(all(feature = "local-search-ab", target_os = "linux"))]
     if let Some(probe) = &memory_probe {
+        #[cfg(feature = "placement-dependency-pc")]
+        probe.shared_observation(inputs.request.shared_observation_producer.as_ref());
         probe.begin_verify(
             workers_used,
             inputs.catalog.retained_bytes(),
@@ -586,8 +657,14 @@ fn execute_plan(
             }))
             .map_err(|_| WasmExactSearchError::InvalidProblem("wasm_parallel_worker_panicked"))
             .and_then(|result| result);
-            if result.is_err() {
+            if let Err(error) = &result {
                 worker_inputs.queue.abort();
+                #[cfg(feature = "placement-dependency-pc")]
+                if let Some(shared) = &worker_inputs.request.shared_observation_producer {
+                    shared.abort_with_error("native_worker", error);
+                }
+                #[cfg(not(feature = "placement-dependency-pc"))]
+                let _ = error;
             }
             let _ = worker_sender.send(result);
         })
@@ -600,8 +677,14 @@ fn execute_plan(
         #[cfg(all(feature = "local-search-ab", target_os = "linux"))]
         memory_probe.as_deref().map(|probe| (probe, 0)),
     );
-    if caller_result.is_err() {
+    if let Err(error) = &caller_result {
         inputs.queue.abort();
+        #[cfg(feature = "placement-dependency-pc")]
+        if let Some(shared) = &inputs.request.shared_observation_producer {
+            shared.abort_with_error("native_worker", error);
+        }
+        #[cfg(not(feature = "placement-dependency-pc"))]
+        let _ = error;
     }
     let mut results = Vec::with_capacity(workers_used);
     results.push(caller_result);
@@ -647,6 +730,26 @@ fn execute_plan(
         workers_used,
         branch_count,
     )?;
+    #[cfg(feature = "placement-dependency-pc")]
+    if let Some(shared) = &inputs.request.shared_observation_producer {
+        // merge_results checked the exact canonical branch domain, not merely
+        // the number of returned workers. A partial batch cannot be sealed.
+        let complete = outcome.count_complete
+            && outcome.truncated_reason.is_none()
+            && inputs.control.partition().count() == 1
+            && !inputs.control.is_cancelled();
+        let output = shared.finish(complete, &inputs.control)?;
+        outcome
+            .worker_memory_components
+            .shared_observation_producer_bytes = output.metrics[6];
+        outcome
+            .worker_memory_components
+            .shared_observation_producer_peak_bytes = output.metrics[7];
+        outcome.shared_observation = Some(output);
+        if let Some(guard) = &mut shared_completion_guard {
+            guard.completed = true;
+        }
+    }
     #[cfg(all(feature = "local-search-ab", not(target_family = "wasm")))]
     if let Some(request) = &inputs.request.strict_prefix {
         if inputs.control.is_cancelled() {
@@ -845,6 +948,8 @@ fn merge_results(
         minimum_worker_candidates,
         maximum_worker_candidates,
         observation_producer_shards,
+        #[cfg(feature = "placement-dependency-pc")]
+        shared_observation: None,
     })
 }
 

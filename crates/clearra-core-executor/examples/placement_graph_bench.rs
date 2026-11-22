@@ -301,8 +301,7 @@ mod run {
         let strict_prefix_mode = optional_experiment_mode("CLEARRA_STRICT_PREFIX")?;
         let product_prefix_route =
             optional_experiment_mode("CLEARRA_PRODUCT_PREFIX_ROUTE")?.unwrap_or(false);
-        let global_kick_prune =
-            optional_experiment_mode("CLEARRA_STRICT_GLOBAL_KICK_PRUNE")?.unwrap_or(true);
+        let global_kick_prune = global_kick_pruning_mode()?;
         let catalog_guard_mode = optional_experiment_mode("CLEARRA_STRICT_CATALOG_GUARDS")?;
         let frontier_mode = optional_experiment_mode("CLEARRA_STRICT_LANGUAGE_FRONTIER")?;
         let subsumption_mode = optional_experiment_mode("CLEARRA_STRICT_SUBSUMPTION")?;
@@ -912,7 +911,7 @@ mod run {
                         "placement_dependency_feature": cfg!(feature = "placement-dependency-pc"),
                         "strict_experiment_applied": strict_prefix.is_some(),
                     })),
-                    "strict_global_kick_prune_mode": if global_kick_prune { "1" } else { "0" },
+                    "strict_global_kick_prune_mode": global_kick_prune,
                     "strict_catalog_guards_mode": if catalog_guard_mode == Some(true) { "1" } else { "0" },
                     "strict_language_frontier_mode": if frontier_mode == Some(true) { "1" } else { "0" },
                     "strict_subsumption_mode": if subsumption_mode == Some(true) { "1" } else { "0" },
@@ -1079,6 +1078,16 @@ mod run {
         }
     }
 
+    fn global_kick_pruning_mode() -> Result<String, String> {
+        let value =
+            std::env::var("CLEARRA_STRICT_GLOBAL_KICK_PRUNE").unwrap_or_else(|_| "2".into());
+        if matches!(value.as_str(), "0" | "1" | "2") {
+            Ok(value)
+        } else {
+            Err("CLEARRA_STRICT_GLOBAL_KICK_PRUNE must be 0 (off), 1 (current), or 2 (improved) at process start".into())
+        }
+    }
+
     fn valid_experiment_source(source: Option<&str>) -> bool {
         source.is_some_and(|sha| {
             sha.len() == 40
@@ -1139,6 +1148,8 @@ mod run {
             "worklist_pops": report.worklist_pops,
             "pose_domains": report.pose_domains,
             "ordered_kick_terms": report.ordered_kick_terms,
+            "reverse_rotation_candidate_checks": report.reverse_rotation_candidate_checks,
+            "reverse_rotation_prior_checks": report.reverse_rotation_prior_checks,
             "global_kick_pruned_edges_peak": report.global_kick_pruned_edges_peak,
             "peak_relation_logical_bytes": report.peak_relation_logical_bytes,
             "catalog_static_guard_hits": report.catalog_static_guard_hits,
@@ -2331,7 +2342,11 @@ mod run {
             );
             if strict_prefix_comparison {
                 let prefix = extra_mode("strict_prefix_mode")?;
-                let prune = extra_mode("strict_global_kick_prune_mode")?;
+                let prune = report
+                    .get("strict_global_kick_prune_mode")
+                    .and_then(Value::as_str)
+                    .filter(|mode| matches!(*mode, "0" | "1" | "2"))
+                    .ok_or("global kick pruning result mode must be 0, 1, or 2")?;
                 let product = extra_mode("product_prefix_route_mode")?;
                 if report.get("strict_prefix_mode").is_none()
                     || report.get("strict_global_kick_prune_mode").is_none()
@@ -2520,7 +2535,10 @@ mod run {
             };
             let baseline = "strict_prefix=1,global_kick_prune=0,product_prefix_route=0";
             let treatment = "strict_prefix=1,global_kick_prune=1,product_prefix_route=0";
+            let improved = "strict_prefix=1,global_kick_prune=2,product_prefix_route=0";
+            let product_off = "strict_prefix=1,global_kick_prune=0,product_prefix_route=1";
             let product = "strict_prefix=1,global_kick_prune=1,product_prefix_route=1";
+            let product_improved = "strict_prefix=1,global_kick_prune=2,product_prefix_route=1";
             let time_change = |before, after| {
                 differences
                     .is_empty()
@@ -2537,11 +2555,26 @@ mod run {
                 .iter()
                 .map(|(key, values)| (key, values.iter().sum::<f64>() / values.len() as f64))
                 .collect::<BTreeMap<_, _>>());
+            let (primary_before, primary_after) = if mean(product_improved).is_some() {
+                (product, product_improved)
+            } else if mean(product_off).is_some() && mean(product).is_some() {
+                (product_off, product)
+            } else if mean(improved).is_some() {
+                (treatment, improved)
+            } else {
+                (baseline, treatment)
+            };
             comparison["primary_comparison"] =
-                json!({ "baseline": baseline, "treatment": treatment });
-            comparison["treatment_time_change_percent"] = json!(time_change(baseline, treatment));
+                json!({ "baseline": primary_before, "treatment": primary_after });
+            comparison["treatment_time_change_percent"] =
+                json!(time_change(primary_before, primary_after));
             comparison["time_change_percent"] = json!({
                 "strict_filtered_vs_unfiltered": time_change(baseline, treatment),
+                "strict_improved_vs_current": time_change(treatment, improved),
+                "strict_improved_vs_unfiltered": time_change(baseline, improved),
+                "product_current_vs_off": time_change(product_off, product),
+                "product_improved_vs_current": time_change(product, product_improved),
+                "product_improved_vs_off": time_change(product_off, product_improved),
                 "automatic_product_vs_strict_filtered": time_change(treatment, product),
                 "automatic_product_vs_reference_unfiltered": time_change(
                     "strict_prefix=0,global_kick_prune=0,product_prefix_route=0", product),

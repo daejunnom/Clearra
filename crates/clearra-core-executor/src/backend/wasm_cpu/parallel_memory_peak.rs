@@ -134,6 +134,9 @@ struct LiveOwners {
     coordinator_published_at: Instant,
     catalog_at_dispatch_bytes: Option<usize>,
     workers: Vec<Option<PublishedWorker>>,
+    #[cfg(feature = "placement-dependency-pc")]
+    shared_observation:
+        Option<std::sync::Weak<super::queue_observation_policy::SharedObservationProducer>>,
 }
 
 pub(super) struct MemoryProbe {
@@ -184,6 +187,16 @@ impl MemoryProbe {
             });
         }
     }
+
+    /// This is a request owner, not one payload per worker. A weak reference
+    /// avoids extending its lifetime after cancellation or failed production.
+    #[cfg(feature = "placement-dependency-pc")]
+    pub fn shared_observation(
+        &self,
+        owner: Option<&Arc<super::queue_observation_policy::SharedObservationProducer>>,
+    ) {
+        self.owners().shared_observation = owner.map(Arc::downgrade);
+    }
 }
 
 struct Peak {
@@ -194,6 +207,8 @@ struct Peak {
     coordinator_published_at: Instant,
     catalog_at_dispatch_bytes: Option<usize>,
     workers: Vec<Option<PublishedWorker>>,
+    shared_observation_bytes: usize,
+    shared_observation_peak_bytes: usize,
 }
 
 impl Peak {
@@ -225,6 +240,8 @@ impl Peak {
             "oldest_worker_observation_ms": (!worker_reports.is_empty()).then(|| oldest.as_millis()),
             "worker_storage_last_publications_sum": sum.json(),
             "worker_storage_last_publications": worker_reports,
+            "shared_observation_request_bytes_once": self.shared_observation_bytes,
+            "shared_observation_request_peak_bytes_once": self.shared_observation_peak_bytes,
         })
     }
 }
@@ -262,6 +279,14 @@ fn observe(probe: &MemoryProbe) -> io::Result<Value> {
             .as_ref()
             .is_none_or(|previous| rss_bytes > previous.rss_bytes)
         {
+            #[cfg(feature = "placement-dependency-pc")]
+            let shared_observation = owners
+                .shared_observation
+                .as_ref()
+                .and_then(std::sync::Weak::upgrade)
+                .map_or((0, 0), |owner| (owner.retained_bytes(), owner.peak_bytes()));
+            #[cfg(not(feature = "placement-dependency-pc"))]
+            let shared_observation = (0, 0);
             peak = Some(Peak {
                 rss_bytes,
                 preceding_kernel_hwm_bytes: kernel_hwm,
@@ -270,6 +295,8 @@ fn observe(probe: &MemoryProbe) -> io::Result<Value> {
                 coordinator_published_at: owners.coordinator_published_at,
                 catalog_at_dispatch_bytes: owners.catalog_at_dispatch_bytes,
                 workers: owners.workers.clone(),
+                shared_observation_bytes: shared_observation.0,
+                shared_observation_peak_bytes: shared_observation.1,
             });
         }
         drop(owners);
@@ -332,6 +359,8 @@ pub fn observe_native_pc_memory<T>(run: impl FnOnce() -> T) -> io::Result<(T, Va
             coordinator_published_at: started,
             catalog_at_dispatch_bytes: None,
             workers: Vec::new(),
+            #[cfg(feature = "placement-dependency-pc")]
+            shared_observation: None,
         }),
     });
     let observed = Arc::clone(&probe);

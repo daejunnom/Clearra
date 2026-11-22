@@ -22,6 +22,12 @@ use super::{
     WasmExactSearchError,
 };
 
+#[cfg(feature = "placement-dependency-pc")]
+#[path = "symbolic_prefix_source_filter.rs"]
+mod source_filter;
+#[cfg(feature = "placement-dependency-pc")]
+pub(super) use source_filter::SourceFilterMetrics;
+
 #[cfg(any(
     test,
     all(
@@ -294,6 +300,70 @@ pub(super) struct SymbolicPrefixOrders {
     physical_action_complete: bool,
     #[cfg(test)]
     complete_language_only: bool,
+}
+
+/// One source-qualified mask and the same immutable geometry/relation owner.
+/// This view narrows the original word language under a separately issued
+/// fresh-bag request capability; it never becomes an ExactPrefixRelation.
+#[cfg(feature = "placement-dependency-pc")]
+pub(super) struct SourceQualifiedPrefixOrders<'a> {
+    original: &'a SymbolicPrefixOrders,
+    mask: source_filter::SourceQualifiedPrefixMask<'a>,
+}
+
+#[cfg(feature = "placement-dependency-pc")]
+impl<'a> SourceQualifiedPrefixOrders<'a> {
+    pub(super) fn new(
+        original: &'a SymbolicPrefixOrders,
+        control: &ExecutionControl,
+        metrics: &mut SourceFilterMetrics,
+    ) -> Result<Self, WasmExactSearchError> {
+        let mask = source_filter::SourceQualifiedPrefixMask::new(
+            original.observation_relation()?,
+            control,
+            metrics,
+        )?;
+        Ok(Self { original, mask })
+    }
+
+    pub(super) fn original(&self) -> &SymbolicPrefixOrders {
+        self.original
+    }
+
+    pub(super) fn matches_original(&self, original: &SymbolicPrefixOrders) -> bool {
+        core::ptr::eq(self.original, original) && self.mask.matches_original(&original.relation)
+    }
+
+    pub(super) fn active_words(&self) -> &[u64] {
+        self.mask.active_words()
+    }
+
+    #[cfg(test)]
+    pub(super) fn contains_prefix(&self, prefix: u16) -> bool {
+        self.mask.contains_prefix(prefix)
+    }
+
+    pub(super) fn has_witness(&self) -> bool {
+        self.mask.has_witness()
+    }
+
+    pub(super) fn compile_product_suffixes_with_residuals(
+        &self,
+        cache: &mut PieceOrderLanguageCache,
+        min_prefix_depth: u8,
+        work: &mut SymbolicPrefixWork,
+        residuals: &mut Vec<u32>,
+    ) -> Result<super::piece_order_language::PrefixSuffixCompilation, WasmExactSearchError> {
+        let relation = &self.original.relation;
+        cache.compile_product_prefix_suffixes_with_residuals(
+            &relation.pieces[..relation.operation_count],
+            &relation.permitted_parents[..relation.operation_count],
+            self.mask.active_mask(),
+            min_prefix_depth,
+            &mut work.language_transitions,
+            residuals,
+        )
+    }
 }
 
 impl SymbolicPrefixOrders {
@@ -780,6 +850,27 @@ impl SymbolicPrefixOrders {
         )
     }
 
+    /// Retain the exact continuation languages only from this prefix depth
+    /// onward. A nonempty relation with an omitted root-zero language is a
+    /// successful compilation, not a negative buildability result.
+    #[cfg(feature = "placement-dependency-pc")]
+    pub(super) fn compile_product_suffixes_with_residuals(
+        &self,
+        cache: &mut PieceOrderLanguageCache,
+        min_prefix_depth: u8,
+        work: &mut SymbolicPrefixWork,
+        residuals: &mut Vec<u32>,
+    ) -> Result<super::piece_order_language::PrefixSuffixCompilation, WasmExactSearchError> {
+        cache.compile_product_prefix_suffixes_with_residuals(
+            &self.relation.pieces[..self.relation.operation_count],
+            &self.relation.permitted_parents[..self.relation.operation_count],
+            &self.relation.active_prefixes,
+            min_prefix_depth,
+            &mut work.language_transitions,
+            residuals,
+        )
+    }
+
     /// Transfer the complete proof rather than re-expanding every prefix into
     /// a physical action DAG. The receiving owner keeps the geometry paired
     /// with this exact relation; same-kind-only subsumption has no authority.
@@ -945,11 +1036,22 @@ impl ExactPrefixRelation {
         &self,
         prefix: u16,
     ) -> impl Iterator<Item = (usize, PieceKind)> + '_ {
+        self.live_operations_in(self.active_words(), prefix)
+    }
+
+    /// Reuse the same physical edge kernel with a separately authorized
+    /// active-endpoint view. This iterator grants no source qualification;
+    /// the board owner validates the typed view before passing its mask.
+    pub(super) fn live_operations_in<'a>(
+        &'a self,
+        active: &'a [u64],
+        prefix: u16,
+    ) -> impl Iterator<Item = (usize, PieceKind)> + 'a {
         live_operation_derivatives(
             self.pieces(),
             self.permitted_parents.as_flattened(),
             MAX_PREFIX_WORDS,
-            self.active_words(),
+            active,
             prefix,
         )
     }

@@ -57,6 +57,8 @@ use crate::{
 
 #[cfg(feature = "parallel")]
 use super::parallel_search::{self, ParallelSearchDecision, ParallelSearchOutcome};
+#[cfg(feature = "placement-dependency-pc")]
+use super::queue_observation_policy::BoardObservationPlan;
 use super::{
     buildup::{
         checked_candidate_verification_peak_upper_bound, exact_scoring_execution_graph,
@@ -829,6 +831,48 @@ enum ExactCompletionRole {
     DistributedVerifierPartial,
 }
 
+/// Only this session's internal whole-family producer can grant the physical
+/// board closure its root/source completeness authority. External counts,
+/// partial workers and an otherwise successful finalizer are not that proof.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ObservationFamilyProduction {
+    ExternalOrPartial,
+    InternalPending,
+    Complete,
+}
+
+impl ObservationFamilyProduction {
+    fn new(external_geometry: bool) -> Self {
+        if external_geometry {
+            Self::ExternalOrPartial
+        } else {
+            Self::InternalPending
+        }
+    }
+
+    fn finish_internal(&mut self, count_complete: bool, truncated: bool, whole: bool) {
+        if *self == Self::InternalPending && count_complete && !truncated && whole {
+            *self = Self::Complete;
+        }
+    }
+
+    fn authorizes_board_closure(
+        self,
+        role: ExactCompletionRole,
+        count_complete: bool,
+        truncated: bool,
+        whole: bool,
+        cancelled: bool,
+    ) -> bool {
+        self == Self::Complete
+            && matches!(role, ExactCompletionRole::Final)
+            && count_complete
+            && !truncated
+            && whole
+            && !cancelled
+    }
+}
+
 pub(super) enum DistributedGeometryAdvance {
     Pending,
     Candidate {
@@ -864,6 +908,10 @@ pub(crate) struct WasmExactSearchSession {
     catalog: Arc<GeometryCatalog>,
     geometry: GeometrySearch,
     buildup_workspace: BuildUpWorkspace,
+    observation_family_production: ObservationFamilyProduction,
+    observation_family_started: bool,
+    #[cfg(feature = "placement-dependency-pc")]
+    board_observation_plan: Option<Arc<BoardObservationPlan>>,
     coverage_evaluator: CoverageProductEvaluator,
     covered_patterns: PatternBitSet,
     coverage_rows: Vec<CoverageRow>,
@@ -896,7 +944,25 @@ pub(crate) struct WasmExactSearchSession {
     coverage_product_states: usize,
     coverage_product_edge_checks: usize,
     observation_policy_states: usize,
-    observation_physical_actions: [usize; 11],
+    observation_physical_actions: [usize; 13],
+    observation_board_actions: [usize; 14],
+    observation_kind_union: [usize; 5],
+    observation_collection: [usize; 2],
+    observation_supply_multiset: [usize; 5],
+    observation_multiset_groups: [usize; 9],
+    observation_branch_bound: [usize; 4],
+    observation_prefix_cones: [usize; 5],
+    observation_prefix_cone_exact: [usize; 9],
+    observation_boundary_classes: [usize; 7],
+    observation_word_bitmap: [usize; 9],
+    observation_word_bitmap_board: [usize; 6],
+    observation_shared_producer: [usize; 8],
+    observation_prefix_masks: [usize; 6],
+    observation_pre_reveal: [usize; 6],
+    observation_suffix_import: [usize; 13],
+    observation_source_existence: [usize; 6],
+    observation_source_filter: [usize; 4],
+    observation_representation: &'static str,
     observation_policy_action_checks: usize,
     observation_trie_nodes: usize,
     realization_feasibility_states: usize,
@@ -1263,6 +1329,7 @@ impl WasmExactSearchSession {
         &mut self,
         control: &ExecutionControl,
     ) -> Result<bool, WasmExactSearchError> {
+        self.enter_external_observation_production()?;
         self.execution_control = control.clone();
         if control.is_cancelled() {
             return Err(WasmExactSearchError::Cancelled);
@@ -1758,6 +1825,10 @@ impl WasmExactSearchSession {
             catalog,
             geometry,
             buildup_workspace,
+            observation_family_production: ObservationFamilyProduction::new(external_geometry),
+            observation_family_started: false,
+            #[cfg(feature = "placement-dependency-pc")]
+            board_observation_plan: None,
             coverage_evaluator: CoverageProductEvaluator::default(),
             covered_patterns,
             coverage_rows: Vec::new(),
@@ -1796,7 +1867,25 @@ impl WasmExactSearchSession {
             coverage_product_states: 0,
             coverage_product_edge_checks: 0,
             observation_policy_states: 0,
-            observation_physical_actions: [0; 11],
+            observation_physical_actions: [0; 13],
+            observation_board_actions: [0; 14],
+            observation_kind_union: [0; 5],
+            observation_collection: [0; 2],
+            observation_supply_multiset: [0; 5],
+            observation_multiset_groups: [0; 9],
+            observation_branch_bound: [0; 4],
+            observation_prefix_cones: [0; 5],
+            observation_prefix_cone_exact: [0; 9],
+            observation_boundary_classes: [0; 7],
+            observation_word_bitmap: [0; 9],
+            observation_word_bitmap_board: [0; 6],
+            observation_shared_producer: [0; 8],
+            observation_prefix_masks: [0; 6],
+            observation_pre_reveal: [0; 6],
+            observation_suffix_import: [0; 13],
+            observation_source_existence: [0; 6],
+            observation_source_filter: [0; 4],
+            observation_representation: "none",
             observation_policy_action_checks: 0,
             observation_trie_nodes: 0,
             realization_feasibility_states: 0,
@@ -1985,6 +2074,66 @@ impl WasmExactSearchSession {
         }
     }
 
+    fn begin_internal_observation_family(
+        &mut self,
+        control: &ExecutionControl,
+    ) -> Result<(), WasmExactSearchError> {
+        if control.partition().count() != 1 {
+            return self.enter_external_observation_production();
+        }
+        if self.observation_family_started {
+            return Ok(());
+        }
+        self.observation_family_started = true;
+        if self.observation_family_production != ObservationFamilyProduction::InternalPending {
+            return Ok(());
+        }
+        // A fresh internal owner installs one request-bound plan before any
+        // candidate is verified. Its Arc is also the native worker authority.
+        if self.packing_candidate_count != 0 || self.geometry.expanded_nodes() != 0 {
+            self.observation_family_production = ObservationFamilyProduction::ExternalOrPartial;
+            return Ok(());
+        }
+        #[cfg(feature = "placement-dependency-pc")]
+        if let Some(plan) = BuildUpWorkspace::board_observation_plan(&self.problem, &self.catalog)?
+        {
+            self.buildup_workspace
+                .set_board_observation_plan(Arc::clone(&plan))?;
+            self.board_observation_plan = Some(plan);
+        }
+        Ok(())
+    }
+
+    fn enter_external_observation_production(&mut self) -> Result<(), WasmExactSearchError> {
+        #[cfg(feature = "placement-dependency-pc")]
+        if self.board_observation_plan.is_some() {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "wasm_observation_board_family_producer_changed",
+            ));
+        }
+        self.observation_family_started = true;
+        self.observation_family_production = ObservationFamilyProduction::ExternalOrPartial;
+        Ok(())
+    }
+
+    fn finish_internal_observation_family(&mut self, control: &ExecutionControl) {
+        self.observation_family_production.finish_internal(
+            self.count_complete,
+            self.truncated_reason.is_some(),
+            self.observation_family_started
+                && control.partition().count() == 1
+                && !control.is_cancelled(),
+        );
+    }
+
+    fn shared_board_observation_plan_bytes(&self) -> usize {
+        #[cfg(feature = "placement-dependency-pc")]
+        if let Some(plan) = &self.board_observation_plan {
+            return plan.retained_bytes();
+        }
+        0
+    }
+
     #[cfg(feature = "parallel")]
     pub fn execute_parallel_if_worthwhile(
         &mut self,
@@ -2102,6 +2251,14 @@ impl WasmExactSearchSession {
         terminal_identity_move: bool,
     ) -> Result<Option<CoreExecutionResult>, WasmExactSearchError> {
         self.execution_control = control.clone();
+        if self.finished {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "wasm_search_session_already_finished",
+            ));
+        }
+        if control.is_cancelled() {
+            return Err(WasmExactSearchError::Cancelled);
+        }
         if worker_count <= 1 {
             return Ok(None);
         }
@@ -2123,17 +2280,46 @@ impl WasmExactSearchSession {
                 "visible-seven-policy-requires-global-language-finalizer";
             return Ok(None);
         }
+        if control.partition().count() != 1 {
+            self.enter_external_observation_production()?;
+        }
+        #[cfg(feature = "placement-dependency-pc")]
+        if self.observation_family_started && self.board_observation_plan.is_some() {
+            // A serial producer that already owns board edges must finish its
+            // own family. A second parallel attempt cannot replace its proof
+            // with a plan for only the remaining traversal.
+            self.parallel_decision_reason = "observation-board-family-serial-continuation";
+            return Ok(None);
+        }
+        let fresh_whole_family = !self.observation_family_started
+            && self.observation_family_production == ObservationFamilyProduction::InternalPending
+            && self.packing_candidate_count == 0
+            && self.geometry.expanded_nodes() == 0
+            && control.partition().count() == 1;
+        self.begin_internal_observation_family(control)?;
         let geometry = std::mem::replace(&mut self.geometry, GeometrySearch::placeholder());
-        match parallel_search::execute_if_worthwhile(
+        let decision = match parallel_search::execute_if_worthwhile(
             Arc::clone(&self.problem),
             Arc::clone(&self.catalog),
             geometry,
             control.clone(),
             worker_count,
             self.cpu_warmup_requested,
+            #[cfg(feature = "placement-dependency-pc")]
+            self.board_observation_plan.clone(),
             #[cfg(any(test, feature = "local-search-ab"))]
             self.solution_coverage_capture.clone(),
-        )? {
+        ) {
+            Ok(decision) => decision,
+            Err(error) => {
+                // The original geometry has moved. Its placeholder cannot
+                // certify completion if a caller attempts to resume an owner
+                // after a failed native execution.
+                self.observation_family_production = ObservationFamilyProduction::ExternalOrPartial;
+                return Err(error);
+            }
+        };
+        match decision {
             ParallelSearchDecision::Serial { geometry, reason } => {
                 self.geometry = geometry;
                 self.parallel_decision_reason = reason;
@@ -2142,8 +2328,24 @@ impl WasmExactSearchSession {
             ParallelSearchDecision::Completed(outcome) => {
                 self.parallel_decision_reason = "parallel-immutable-family-queue";
                 self.cpu_warmup_performed = self.cpu_warmup_requested;
-                let terminal_identities =
-                    self.absorb_parallel_outcome(outcome, terminal_identity_move)?;
+                let terminal_identities = match self.absorb_parallel_outcome(
+                    outcome,
+                    terminal_identity_move,
+                    fresh_whole_family,
+                ) {
+                    Ok(identities) => identities,
+                    Err(error) => {
+                        self.observation_family_production =
+                            ObservationFamilyProduction::ExternalOrPartial;
+                        return Err(error);
+                    }
+                };
+                // execute_if_worthwhile validated every canonical branch;
+                // absorb also completed every observation shard merge. Only
+                // the fresh whole-family caller may turn that into authority.
+                if fresh_whole_family {
+                    self.finish_internal_observation_family(control);
+                }
                 match self.complete_internal(ExactCompletionRole::Final, terminal_identities)? {
                     ExactSearchAdvance::Completed(result) => Ok(Some(result)),
                     ExactSearchAdvance::Pending | ExactSearchAdvance::Cancelled => {
@@ -2161,15 +2363,39 @@ impl WasmExactSearchSession {
         &mut self,
         mut outcome: ParallelSearchOutcome,
         terminal_identity_move: bool,
+        fresh_whole_family: bool,
     ) -> Result<Option<Vec<StandardBoard64TilingIdentity>>, WasmExactSearchError> {
         let move_terminal_identities =
             terminal_identity_move && self.can_move_terminal_parallel_identities(&outcome);
         let canonical_minimum_source_complete =
             self.validate_parallel_minimum_cover_source(&mut outcome)?;
         let catalog_payload_bytes = self.catalog.retained_bytes();
-        for shard in core::mem::take(&mut outcome.observation_producer_shards) {
-            self.buildup_workspace
-                .merge_observation_producer_shard(shard, &self.execution_control)?;
+        let completed_native_family = fresh_whole_family
+            && outcome.count_complete
+            && outcome.truncated_reason.is_none()
+            && !self.execution_control.is_cancelled();
+        #[cfg(feature = "placement-dependency-pc")]
+        let installed_shared_observation = if let Some(shared) = outcome.shared_observation.take() {
+            self.buildup_workspace.install_shared_observation(
+                shared,
+                core::mem::take(&mut outcome.observation_producer_shards),
+                completed_native_family,
+                &self.execution_control,
+            )?;
+            self.observation_shared_producer =
+                self.buildup_workspace.observation_shared_producer_metrics();
+            true
+        } else {
+            false
+        };
+        #[cfg(not(feature = "placement-dependency-pc"))]
+        let installed_shared_observation = false;
+        if !installed_shared_observation {
+            self.buildup_workspace.merge_observation_producer_shards(
+                core::mem::take(&mut outcome.observation_producer_shards),
+                completed_native_family,
+                &self.execution_control,
+            )?;
         }
         #[cfg(any(test, feature = "local-search-ab"))]
         {
@@ -2266,7 +2492,15 @@ impl WasmExactSearchSession {
             catalog_payload_bytes
                 .saturating_add(self.geometry.retained_bytes())
                 .saturating_add(self.tablebase_retained_bytes)
+                .saturating_add(self.shared_board_observation_plan_bytes())
+                .saturating_add(self.buildup_workspace.retained_bytes())
+                .saturating_add(self.buildup_workspace.observation_extra_peak_bytes())
                 .saturating_add(self.parallel_worker_retained_bytes)
+                .saturating_add(
+                    outcome
+                        .worker_memory_components
+                        .incremental_import_peak_extra_bytes,
+                )
                 .saturating_add(
                     outcome
                         .worker_memory_components
@@ -2425,6 +2659,7 @@ impl WasmExactSearchSession {
                 "wasm_search_session_already_finished",
             ));
         }
+        self.begin_internal_observation_family(control)?;
         let work_budget = work_budget.max(1);
         let mut processed_candidates = 0usize;
         for _ in 0..work_budget {
@@ -2488,7 +2723,18 @@ impl WasmExactSearchSession {
                 GeometryAdvance::Pending => {}
                 GeometryAdvance::Candidate(candidate) => {
                     processed_candidates += 1;
-                    if let Some(outcome) = self.process_candidate(candidate, control)? {
+                    let outcome = match self.process_candidate(candidate, control) {
+                        Ok(outcome) => outcome,
+                        Err(error) => {
+                            // Geometry already consumed this candidate. A
+                            // later traversal end cannot certify a relation
+                            // whose candidate verification was interrupted.
+                            self.observation_family_production =
+                                ObservationFamilyProduction::ExternalOrPartial;
+                            return Err(error);
+                        }
+                    };
+                    if let Some(outcome) = outcome {
                         return Ok(outcome);
                     }
                     if processed_candidates >= MAX_BUILDUP_CANDIDATES_PER_ADVANCE {
@@ -2504,7 +2750,10 @@ impl WasmExactSearchSession {
                     self.mark_truncated(reason);
                     return self.complete();
                 }
-                GeometryAdvance::Complete => return self.complete(),
+                GeometryAdvance::Complete => {
+                    self.finish_internal_observation_family(control);
+                    return self.complete();
+                }
             }
         }
         control.report_progress(
@@ -2519,6 +2768,7 @@ impl WasmExactSearchSession {
         &mut self,
         produced_candidate_count: usize,
     ) -> Result<DistributedGeometryAdvance, WasmExactSearchError> {
+        self.enter_external_observation_production()?;
         if self.finished {
             return Err(WasmExactSearchError::InvalidProblem(
                 "wasm_search_session_already_finished",
@@ -2584,6 +2834,7 @@ impl WasmExactSearchSession {
     }
 
     pub(super) fn into_distributed_finalizer(mut self) -> Result<Self, WasmExactSearchError> {
+        self.enter_external_observation_production()?;
         self.parallel_active_workers = 0;
         self.parallel_minimum_worker_candidates = usize::MAX;
         self.parallel_maximum_worker_candidates = 0;
@@ -2797,6 +3048,7 @@ impl WasmExactSearchSession {
             self.coverage_evaluator.retained_bytes(),
             self.covered_patterns.retained_bytes(),
             self.tablebase_retained_bytes,
+            self.shared_board_observation_plan_bytes(),
         ] {
             bytes = bytes.checked_add(retained as u128)?;
         }
@@ -3335,6 +3587,7 @@ impl WasmExactSearchSession {
         row_ids: &[u32],
         control: &ExecutionControl,
     ) -> Result<Option<ExactSearchAdvance>, WasmExactSearchError> {
+        self.enter_external_observation_production()?;
         self.execution_control = control.clone();
         if self.finished {
             return Err(WasmExactSearchError::InvalidProblem(
@@ -3396,6 +3649,7 @@ impl WasmExactSearchSession {
         &mut self,
         control: &ExecutionControl,
     ) -> Result<(), WasmExactSearchError> {
+        self.enter_external_observation_production()?;
         self.execution_control = control.clone();
         if self.finished {
             return Err(WasmExactSearchError::InvalidProblem(
@@ -3910,6 +4164,7 @@ impl WasmExactSearchSession {
         &mut self,
         result: &CoreExecutionResult,
     ) -> Result<(), WasmExactSearchError> {
+        self.enter_external_observation_production()?;
         let scalar = exact_distributed_worker_scalar_evidence(result).ok_or(
             WasmExactSearchError::InvalidProblem(
                 "wasm_distributed_result_scalar_authority_invalid",
@@ -4360,6 +4615,7 @@ impl WasmExactSearchSession {
         summary: &WasmDistributedGeometrySummary,
         workers_used: usize,
     ) -> Result<ExactSearchAdvance, WasmExactSearchError> {
+        self.enter_external_observation_production()?;
         self.packing_candidate_count = summary.candidate_count;
         self.packing_candidate_digest = summary.candidate_digest;
         self.workers_used = workers_used.max(1);
@@ -4440,6 +4696,7 @@ impl WasmExactSearchSession {
         expanded_nodes: usize,
         peak_frontier: usize,
     ) -> Result<ExactSearchAdvance, WasmExactSearchError> {
+        self.enter_external_observation_production()?;
         self.geometry
             .finish_external(self.packing_candidate_count, expanded_nodes, peak_frontier);
         self.complete()
@@ -4448,6 +4705,7 @@ impl WasmExactSearchSession {
     pub(super) fn complete_distributed_worker(
         &mut self,
     ) -> Result<ExactSearchAdvance, WasmExactSearchError> {
+        self.enter_external_observation_production()?;
         self.geometry
             .finish_external(self.packing_candidate_count, 0, 0);
         self.complete_internal(ExactCompletionRole::DistributedVerifierPartial, None)
@@ -4485,15 +4743,72 @@ impl WasmExactSearchSession {
             {
                 self.coverage_rows_complete = false;
                 let control = self.execution_control.clone();
-                match self
+                if control.is_cancelled() {
+                    return Ok(ExactSearchAdvance::Cancelled);
+                }
+                let complete_board_family =
+                    self.observation_family_production.authorizes_board_closure(
+                        role,
+                        self.count_complete,
+                        self.truncated_reason.is_some(),
+                        control.partition().count() == 1,
+                        control.is_cancelled(),
+                    );
+                #[cfg(feature = "placement-dependency-pc")]
+                let incomplete_board_family =
+                    self.board_observation_plan.is_some() && !complete_board_family;
+                #[cfg(not(feature = "placement-dependency-pc"))]
+                let incomplete_board_family = false;
+                let observation = if incomplete_board_family {
+                    // A partial producer is a valid interrupted search, but
+                    // its board closure has no whole-family authority. Keep
+                    // the existing incomplete-result contract and publish no
+                    // policy coverage from that owner.
+                    self.mark_truncated("observation_family_incomplete");
+                    self.observation_representation = "incomplete-pc-board-family";
+                    Ok(None)
+                } else {
+                    self.buildup_workspace.evaluate_observation_language(
+                        &self.problem,
+                        &self.catalog,
+                        &control,
+                        complete_board_family,
+                    )
+                };
+                self.observation_source_existence = self
                     .buildup_workspace
-                    .evaluate_observation_language(&self.problem, &control)
-                {
+                    .observation_source_existence_metrics();
+                match observation {
                     Ok(Some(coverage)) => {
                         let metrics = coverage.metrics;
                         self.covered_patterns = coverage.covered_patterns;
                         self.observation_policy_states = metrics.policy_states;
                         self.observation_physical_actions = metrics.physical_actions;
+                        self.observation_board_actions = metrics.board_actions;
+                        self.observation_kind_union = metrics.kind_union;
+                        self.observation_collection = metrics.collection;
+                        self.observation_supply_multiset = metrics.supply_multiset;
+                        self.observation_multiset_groups = metrics.multiset_groups;
+                        self.observation_branch_bound = metrics.branch_bound;
+                        self.observation_prefix_cones = metrics.prefix_cones;
+                        self.observation_prefix_cone_exact = metrics.prefix_cone_exact;
+                        self.observation_boundary_classes = metrics.boundary_classes;
+                        self.observation_word_bitmap = metrics.word_bitmap;
+                        self.observation_word_bitmap_board = metrics.word_bitmap_board;
+                        self.observation_shared_producer = metrics.shared_producer;
+                        self.observation_prefix_masks = metrics.prefix_masks;
+                        self.observation_suffix_import = metrics.suffix_import;
+                        self.observation_source_existence = metrics.source_existence;
+                        self.observation_source_filter = metrics.source_filter;
+                        self.observation_pre_reveal = [
+                            metrics.pre_reveal[0],
+                            metrics.pre_reveal[1],
+                            metrics.pre_reveal[2],
+                            metrics.pre_reveal[3],
+                            metrics.pre_reveal_retained_bytes,
+                            metrics.pre_reveal_peak_bytes,
+                        ];
+                        self.observation_representation = metrics.physical_representation;
                         self.observation_policy_action_checks = metrics.action_checks;
                         self.observation_trie_nodes = metrics.observation_nodes;
                         self.peak_cpu_bytes = self.peak_cpu_bytes.max(
@@ -4501,6 +4816,7 @@ impl WasmExactSearchSession {
                                 .retained_bytes()
                                 .saturating_add(self.geometry.retained_bytes())
                                 .saturating_add(self.tablebase_retained_bytes)
+                                .saturating_add(self.shared_board_observation_plan_bytes())
                                 .saturating_add(self.coverage_evaluator.retained_bytes())
                                 .saturating_add(self.buildup_workspace.retained_bytes())
                                 .saturating_add(self.solution_identity_retained_bytes())
@@ -5036,8 +5352,10 @@ impl WasmExactSearchSession {
             .retained_bytes()
             .saturating_add(self.geometry.retained_bytes())
             .saturating_add(self.tablebase_retained_bytes)
+            .saturating_add(self.shared_board_observation_plan_bytes())
             .saturating_add(self.coverage_evaluator.retained_bytes())
             .saturating_add(self.buildup_workspace.retained_bytes())
+            .saturating_add(self.buildup_workspace.observation_extra_peak_bytes())
             .saturating_add(self.solution_identity_retained_bytes())
             .saturating_add(self.coverage_rows_retained_bytes())
             .saturating_add(candidate_bytes)
@@ -5106,7 +5424,9 @@ impl WasmExactSearchSession {
         } else {
             universe.sequence_at(0).len()
         };
-        let coverage_probability = if tiling_only {
+        let probability_calculated =
+            !tiling_only && self.observation_representation != "incomplete-pc-board-family";
+        let coverage_probability = if !probability_calculated {
             "not-calculated".to_owned()
         } else {
             universe
@@ -5117,7 +5437,7 @@ impl WasmExactSearchSession {
                 .to_string()
         };
         let probability_complete =
-            !tiling_only && universe.complete() && self.truncated_reason.is_none();
+            probability_calculated && universe.complete() && self.truncated_reason.is_none();
         let count_complete = self.truncated_reason.is_none()
             && self.count_complete
             && (!tiling_only || self.tiling_supply_projection_complete);
@@ -5723,8 +6043,8 @@ impl WasmExactSearchSession {
             field("build_variant_count", self.build_variant_count),
             field("build_variant_count_exact", build_variant_count_exact),
             field("buildability_verified", !tiling_only),
-            field("coverage_calculated", !tiling_only),
-            field("probability_calculated", !tiling_only),
+            field("coverage_calculated", probability_calculated),
+            field("probability_calculated", probability_calculated),
             field(
                 "pattern_verified_execution_count",
                 self.pattern_verified_execution_count,
@@ -5741,6 +6061,10 @@ impl WasmExactSearchSession {
                 },
             ),
             field("coverage_probability", coverage_probability),
+            field(
+                "observation_representation",
+                self.observation_representation,
+            ),
             field("observation_policy_states", self.observation_policy_states),
             field(
                 "observation_policy_action_checks",
@@ -6063,7 +6387,27 @@ impl WasmExactSearchSession {
         ];
         let mut fields = Vec::new();
         fields
-            .try_reserve_exact(field_values.len() + self.observation_physical_actions.len())
+            .try_reserve_exact(
+                field_values.len()
+                    + self.observation_physical_actions.len()
+                    + self.observation_board_actions.len()
+                    + self.observation_kind_union.len()
+                    + self.observation_collection.len()
+                    + self.observation_supply_multiset.len()
+                    + self.observation_multiset_groups.len()
+                    + self.observation_branch_bound.len()
+                    + self.observation_prefix_cones.len()
+                    + self.observation_prefix_cone_exact.len()
+                    + self.observation_boundary_classes.len()
+                    + self.observation_word_bitmap.len()
+                    + self.observation_word_bitmap_board.len()
+                    + self.observation_shared_producer.len()
+                    + self.observation_prefix_masks.len()
+                    + self.observation_pre_reveal.len()
+                    + self.observation_suffix_import.len()
+                    + self.observation_source_existence.len()
+                    + self.observation_source_filter.len(),
+            )
             .map_err(|_| {
                 WasmExactSearchError::InvalidProblem("wasm_result_field_storage_unavailable")
             })?;
@@ -6080,9 +6424,248 @@ impl WasmExactSearchSession {
             "observation_kind_source_visits",
             "observation_revealed_source_visits",
             "observation_physical_work",
+            "observation_frontier_nodes",
+            "observation_frontier_members",
         ]
         .into_iter()
         .zip(self.observation_physical_actions)
+        {
+            fields.push(field(name, value));
+        }
+        for (name, value) in [
+            "observation_board_candidate_count",
+            "observation_board_nodes",
+            "observation_board_edges",
+            "observation_board_suffix_roots",
+            "observation_board_prefix_visits",
+            "observation_board_edge_attempts",
+            "observation_board_work",
+            "observation_board_source_pruned_prefixes",
+            "observation_board_dead_source_prefixes",
+            "observation_board_closure_pose_checks",
+            "observation_board_closure_harddrop_hits",
+            "observation_board_closure_reach_queries",
+            "observation_board_closure_visited_states",
+            "observation_board_closure_parent_boards",
+        ]
+        .into_iter()
+        .zip(self.observation_board_actions)
+        {
+            fields.push(field(name, value));
+        }
+        for (name, value) in [
+            "observation_kind_union_nodes",
+            "observation_kind_union_edges",
+            "observation_kind_union_members",
+            "observation_kind_union_source_visits",
+            "observation_kind_union_work",
+        ]
+        .into_iter()
+        .zip(self.observation_kind_union)
+        {
+            fields.push(field(name, value));
+        }
+        for (name, value) in [
+            "observation_collection_calls",
+            "observation_collection_full_subtrees",
+        ]
+        .into_iter()
+        .zip(self.observation_collection)
+        {
+            fields.push(field(name, value));
+        }
+        for (name, value) in [
+            "observation_supply_multiset_checked_roots",
+            "observation_supply_multiset_pruned_roots",
+            "observation_supply_multiset_certificate_nodes",
+            "observation_supply_multiset_certificate_edges",
+            "observation_supply_multiset_aliases",
+        ]
+        .into_iter()
+        .zip(self.observation_supply_multiset)
+        {
+            fields.push(field(name, value));
+        }
+        for (name, value) in [
+            "observation_multiset_group_builds",
+            "observation_multiset_group_build_root_visits",
+            "observation_multiset_group_key_lookups",
+            "observation_multiset_group_matched_root_visits",
+            "observation_multiset_group_unknown_root_visits",
+            "observation_multiset_group_fallbacks",
+            "observation_multiset_group_retained_members",
+            "observation_multiset_group_work",
+            "observation_multiset_group_evictions",
+        ]
+        .into_iter()
+        .zip(self.observation_multiset_groups)
+        {
+            fields.push(field(name, value));
+        }
+        for (name, value) in [
+            "observation_branch_bound_attempts",
+            "observation_branch_bound_pruned_actions",
+            "observation_branch_bound_skipped_observations",
+            "observation_branch_bound_checks",
+        ]
+        .into_iter()
+        .zip(self.observation_branch_bound)
+        {
+            fields.push(field(name, value));
+        }
+        for (name, value) in [
+            "observation_prefix_cone_lookups",
+            "observation_prefix_cone_hits",
+            "observation_prefix_cone_misses",
+            "observation_prefix_cone_replacements",
+            "observation_prefix_cone_publishes",
+        ]
+        .into_iter()
+        .zip(self.observation_prefix_cones)
+        {
+            fields.push(field(name, value));
+        }
+        for (name, value) in [
+            "observation_prefix_cone_exact_entries",
+            "observation_prefix_cone_exact_capacity",
+            "observation_prefix_cone_exact_ancestor_lookups",
+            "observation_prefix_cone_exact_ancestor_hits",
+            "observation_prefix_cone_exact_full_fallbacks",
+            "observation_prefix_cone_exact_grows",
+            "observation_prefix_cone_exact_rehashed_entries",
+            "observation_prefix_cone_exact_initialized_slots",
+            "observation_prefix_cone_exact_work",
+        ]
+        .into_iter()
+        .zip(self.observation_prefix_cone_exact)
+        {
+            fields.push(field(name, value));
+        }
+        for (name, value) in [
+            "observation_boundary_class_raw_h_nodes",
+            "observation_boundary_class_distinct_h_boards",
+            "observation_boundary_class_classes",
+            "observation_boundary_class_reuses",
+            "observation_boundary_class_retained_roots",
+            "observation_boundary_class_staging_peak_bytes",
+            "observation_boundary_class_additional_work",
+        ]
+        .into_iter()
+        .zip(self.observation_boundary_classes)
+        {
+            fields.push(field(name, value));
+        }
+        for (name, value) in [
+            "observation_word_bitmap_queries",
+            "observation_word_bitmap_query_cache_hits",
+            "observation_word_bitmap_query_builds",
+            "observation_word_bitmap_query_steps",
+            "observation_word_bitmap_nodes",
+            "observation_word_bitmap_words",
+            "observation_word_bitmap_intersection_words",
+            "observation_word_bitmap_fallbacks",
+            "observation_word_bitmap_work",
+        ]
+        .into_iter()
+        .zip(self.observation_word_bitmap)
+        {
+            fields.push(field(name, value));
+        }
+        for (name, value) in [
+            "observation_word_bitmap_board_queries",
+            "observation_word_bitmap_board_cache_hits",
+            "observation_word_bitmap_board_builds",
+            "observation_word_bitmap_board_words",
+            "observation_word_bitmap_board_fallbacks",
+            "observation_word_bitmap_board_work",
+        ]
+        .into_iter()
+        .zip(self.observation_word_bitmap_board)
+        {
+            fields.push(field(name, value));
+        }
+        for (name, value) in [
+            "observation_shared_producer_registrations",
+            "observation_shared_producer_lock_entries",
+            "observation_shared_producer_pending_groups",
+            "observation_shared_producer_pending_root_refs",
+            "observation_shared_producer_finalized_classes",
+            "observation_shared_producer_finalization_work",
+            "observation_shared_producer_retained_bytes",
+            "observation_shared_producer_peak_bytes",
+        ]
+        .into_iter()
+        .zip(self.observation_shared_producer)
+        {
+            fields.push(field(name, value));
+        }
+        for (name, value) in [
+            "observation_prefix_mask_lookups",
+            "observation_prefix_mask_hits",
+            "observation_prefix_mask_misses",
+            "observation_prefix_mask_full_fallbacks",
+            "observation_prefix_mask_words",
+            "observation_prefix_mask_work",
+        ]
+        .into_iter()
+        .zip(self.observation_prefix_masks)
+        {
+            fields.push(field(name, value));
+        }
+        for (name, value) in [
+            "observation_pre_reveal_probes",
+            "observation_pre_reveal_hits",
+            "observation_pre_reveal_inserts",
+            "observation_pre_reveal_full_fallbacks",
+            "observation_pre_reveal_retained_bytes",
+            "observation_pre_reveal_peak_bytes",
+        ]
+        .into_iter()
+        .zip(self.observation_pre_reveal)
+        {
+            fields.push(field(name, value));
+        }
+        for (name, value) in [
+            "observation_suffix_import_source_nodes",
+            "observation_suffix_import_source_edges",
+            "observation_suffix_import_reachable_nodes",
+            "observation_suffix_import_reachable_edges",
+            "observation_suffix_import_inserted_nodes",
+            "observation_suffix_import_inserted_edges",
+            "observation_suffix_import_root_visits",
+            "observation_suffix_import_node_visits",
+            "observation_suffix_import_edge_visits",
+            "observation_suffix_import_mapping_slots",
+            "observation_suffix_import_before_bytes",
+            "observation_suffix_import_after_bytes",
+            "observation_suffix_import_peak_bytes",
+        ]
+        .into_iter()
+        .zip(self.observation_suffix_import)
+        {
+            fields.push(field(name, value));
+        }
+        for (name, value) in [
+            "observation_source_existence_candidates",
+            "observation_source_existence_kind_rejections",
+            "observation_source_existence_relation_rejections",
+            "observation_source_existence_accepted_candidates",
+            "observation_source_existence_prefix_checks",
+            "observation_source_existence_language_edges",
+        ]
+        .into_iter()
+        .zip(self.observation_source_existence)
+        {
+            fields.push(field(name, value));
+        }
+        for (name, value) in [
+            "observation_source_filter_calls",
+            "observation_source_filter_mask_words",
+            "observation_source_filter_domain_words",
+            "observation_source_filter_prefix_checks",
+        ]
+        .into_iter()
+        .zip(self.observation_source_filter)
         {
             fields.push(field(name, value));
         }
@@ -6599,6 +7182,179 @@ mod tests {
         queue::{fixed_sequence::FixedSequence, queue_pattern_expression::QueuePatternExpression},
         QueueObservationPolicy,
     };
+
+    fn observation_provenance_problem() -> clearra_problem::SearchProblem {
+        ProblemCompiler::compile_scenario_pc(
+            &PcScenarioQuery::new(
+                PcScenarioBoard::standard_10(1, 0x3f0),
+                PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::I])),
+                PieceWindow::new(1),
+            )
+            .with_allow_hold(false)
+            .with_exact_pieces(Some(1))
+            .with_count_policy(PcCountPolicy::CountUnique)
+            .with_retained_trace_limit(0),
+        )
+        .expect("one-lock provenance fixture")
+    }
+
+    fn finish_provenance_fixture(session: &mut WasmExactSearchSession, control: &ExecutionControl) {
+        for _ in 0..128 {
+            match session
+                .advance(64, control)
+                .expect("finite fixture advance")
+            {
+                ExactSearchAdvance::Completed(_) => return,
+                ExactSearchAdvance::Pending => {}
+                ExactSearchAdvance::Cancelled => panic!("fixture was not cancelled"),
+            }
+        }
+        panic!("one-lock fixture must complete within its finite test budget");
+    }
+
+    #[test]
+    fn observation_board_authority_requires_internal_whole_family_completion() {
+        use super::{ExactCompletionRole, ObservationFamilyProduction};
+
+        let problem = observation_provenance_problem();
+        {
+            let mut session = WasmExactSearchSession::new(&problem).unwrap();
+            assert_eq!(
+                session.observation_family_production,
+                ObservationFamilyProduction::InternalPending,
+            );
+            finish_provenance_fixture(&mut session, &ExecutionControl::default());
+            assert_eq!(
+                session.observation_family_production,
+                ObservationFamilyProduction::Complete,
+            );
+            let provenance = session.observation_family_production;
+            assert!(provenance.authorizes_board_closure(
+                ExactCompletionRole::Final,
+                session.count_complete,
+                session.truncated_reason.is_some(),
+                true,
+                false,
+            ));
+            for (role, complete, truncated, whole, cancelled) in [
+                (
+                    ExactCompletionRole::DistributedVerifierPartial,
+                    true,
+                    false,
+                    true,
+                    false,
+                ),
+                (ExactCompletionRole::Final, false, false, true, false),
+                (ExactCompletionRole::Final, true, true, true, false),
+                (ExactCompletionRole::Final, true, false, false, false),
+                (ExactCompletionRole::Final, true, false, true, true),
+            ] {
+                assert!(!provenance
+                    .authorizes_board_closure(role, complete, truncated, whole, cancelled,));
+            }
+        }
+        let mut external = WasmExactSearchSession::new_external_geometry(&problem).unwrap();
+        assert!(matches!(
+            external.complete_external_geometry(99, 99).unwrap(),
+            ExactSearchAdvance::Completed(_),
+        ));
+        assert_eq!(
+            external.observation_family_production,
+            ObservationFamilyProduction::ExternalOrPartial,
+            "external finalization and claimed counters cannot prove full production",
+        );
+        assert!(!external
+            .observation_family_production
+            .authorizes_board_closure(ExactCompletionRole::Final, true, false, true, false,));
+    }
+
+    #[test]
+    fn observation_board_authority_rejects_partitioned_and_truncated_production() {
+        use super::{ExactCompletionRole, ObservationFamilyProduction};
+        use clearra_core_domain::execution_cancellation::ExecutionPartition;
+
+        let problem = observation_provenance_problem();
+        {
+            let control =
+                ExecutionControl::default().with_partition(ExecutionPartition::new(0, 2).unwrap());
+            let mut partitioned = WasmExactSearchSession::new(&problem).unwrap();
+            finish_provenance_fixture(&mut partitioned, &control);
+            assert_eq!(
+                partitioned.observation_family_production,
+                ObservationFamilyProduction::ExternalOrPartial,
+                "a locally exhausted partition is not the complete source family",
+            );
+        }
+        let mut truncated = WasmExactSearchSession::new(&problem).unwrap();
+        let control = ExecutionControl::default();
+        truncated
+            .begin_internal_observation_family(&control)
+            .unwrap();
+        truncated.mark_truncated("candidate_budget_exceeded");
+        truncated.finish_internal_observation_family(&control);
+        assert_eq!(
+            truncated.observation_family_production,
+            ObservationFamilyProduction::InternalPending,
+        );
+        assert!(!truncated
+            .observation_family_production
+            .authorizes_board_closure(
+                ExactCompletionRole::Final,
+                truncated.count_complete,
+                truncated.truncated_reason.is_some(),
+                true,
+                false,
+            ));
+    }
+
+    #[cfg(feature = "placement-dependency-pc")]
+    #[test]
+    fn observation_board_incomplete_family_never_reports_an_exact_zero_probability() {
+        let query = PcScenarioQuery::new(
+            PcScenarioBoard::standard_10(1, 0x3f0),
+            PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::I])),
+            PieceWindow::new(1),
+        )
+        .with_allow_hold(false)
+        .with_exact_pieces(Some(1))
+        .with_count_policy(PcCountPolicy::CountUnique)
+        .with_queue_observation_policy(QueueObservationPolicy::VisibleSeven)
+        .with_retained_trace_limit(0);
+        let problem = ProblemCompiler::compile_scenario_pc(&query)
+            .unwrap()
+            .with_output_policy(clearra_problem::SearchOutputPolicy::CoverageSummary);
+        let mut session = WasmExactSearchSession::new(&problem).unwrap();
+        // Inject only the private producer capability to exercise finalization
+        // independently of this tiny fixture's ordinary known-future routing.
+        let plan = super::BoardObservationPlan::new(10, 1, 0x3f0, 1, 1, 0, None).unwrap();
+        session
+            .buildup_workspace
+            .set_board_observation_plan(std::sync::Arc::clone(&plan))
+            .unwrap();
+        session.board_observation_plan = Some(plan);
+        session.covered_patterns = PatternBitSet::all(1);
+        session.mark_truncated("fixture-resource-interruption");
+        let ExactSearchAdvance::Completed(result) = session
+            .complete_internal(super::ExactCompletionRole::Final, None)
+            .unwrap()
+        else {
+            panic!("interrupted family should produce an explicit incomplete summary");
+        };
+        assert_eq!(result.field("coverage_probability"), Some("not-calculated"));
+        assert_eq!(result.bool_field("coverage_calculated"), Some(false));
+        assert_eq!(result.bool_field("probability_calculated"), Some(false));
+        assert_eq!(result.bool_field("probability_complete"), Some(false));
+        assert_eq!(result.bool_field("count_complete"), Some(false));
+        assert_eq!(result.usize_field("covered_pattern_count"), Some(0));
+        assert_eq!(
+            result.field("count_truncated_reason"),
+            Some("fixture-resource-interruption"),
+        );
+        assert_eq!(
+            result.field("observation_representation"),
+            Some("incomplete-pc-board-family"),
+        );
+    }
 
     #[cfg(feature = "parallel")]
     #[test]
@@ -8387,6 +9143,8 @@ mod tests {
                 ExecutionControl::default(),
                 2,
                 false,
+                #[cfg(feature = "placement-dependency-pc")]
+                None,
                 None,
             )
             .expect("native source");

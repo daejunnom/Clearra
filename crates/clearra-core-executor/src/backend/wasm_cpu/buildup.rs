@@ -904,6 +904,21 @@ pub(super) struct BuildUpMemoryComponents {
 pub(super) struct ObservationProducerShard {
     physical: super::queue_observation_policy::PhysicalActionLanguage,
     kinds: Option<PieceOrderLanguageCache>,
+    source_existence: [usize; 6],
+    // Shared producers return only compiler diagnostics. Their common graph
+    // and destination kind arena travel through the request's single output.
+    shared_producer: bool,
+    suffix_import: [usize; 13],
+}
+
+/// A complete observation producer does not pretend to return an oracle
+/// coverage row. Only the final whole-family policy owns that coverage.
+#[cfg(feature = "placement-dependency-pc")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum ObservationProducerDecision {
+    NotSelected,
+    Rejected,
+    Registered,
 }
 
 #[cfg(feature = "parallel")]
@@ -925,6 +940,16 @@ pub(super) struct BuildUpWorkspace {
     standard_bag_coverage_initialized: bool,
     shared_standard_bag_request: Option<Arc<SharedStandardBagRequest>>,
     dependency_observation: super::queue_observation_policy::PhysicalActionLanguage,
+    #[cfg(all(feature = "placement-dependency-pc", feature = "parallel"))]
+    shared_observation_producer:
+        Option<Arc<super::queue_observation_policy::SharedObservationProducer>>,
+    #[cfg(all(feature = "placement-dependency-pc", feature = "parallel"))]
+    shared_observation_import: super::piece_order_language::PieceLanguageIncrementalImport,
+    observation_shared_producer: [usize; 8],
+    observation_shared_producer_extra_peak: usize,
+    observation_suffix_import: [usize; 13],
+    observation_suffix_import_extra_peak: usize,
+    observation_source_existence: [usize; 6],
     reachability: ReachabilityWorkspace,
     graph_nodes: Vec<BuildNode>,
     graph_edges: Vec<BuildEdge>,
@@ -948,6 +973,8 @@ pub(super) struct BuildUpWorkspace {
     legal_board_policy_enabled: Option<bool>,
     legal_board_query_cache: LegalBoardNegativeQueryCache,
     legal_board_verified_negative_prunes: usize,
+    #[cfg(all(feature = "local-search-ab", feature = "placement-dependency-pc"))]
+    observation_symbolic_recycles: usize,
 }
 
 impl BuildUpWorkspace {
@@ -1137,6 +1164,74 @@ impl BuildUpWorkspace {
         self.realization_feasibility.retained_bytes()
             + self.dependency_observation.retained_bytes()
             + self.legal_board_query_cache.retained_bytes()
+            + self.shared_observation_private_retained_bytes()
+    }
+
+    fn shared_observation_private_retained_bytes(&self) -> usize {
+        #[cfg(all(feature = "placement-dependency-pc", feature = "parallel"))]
+        {
+            self.shared_observation_import.retained_bytes()
+                + self.shared_observation_producer.as_ref().map_or(0, |_| {
+                    core::mem::size_of::<
+                        Arc<super::queue_observation_policy::SharedObservationProducer>,
+                    >()
+                })
+        }
+        #[cfg(not(all(feature = "placement-dependency-pc", feature = "parallel")))]
+        {
+            0
+        }
+    }
+
+    #[cfg(feature = "parallel")]
+    pub(super) fn shared_observation_private_peak_extra_bytes(&self) -> usize {
+        #[cfg(feature = "placement-dependency-pc")]
+        {
+            self.shared_observation_import
+                .peak_bytes()
+                .saturating_sub(self.shared_observation_import.retained_bytes())
+        }
+        #[cfg(not(feature = "placement-dependency-pc"))]
+        {
+            0
+        }
+    }
+
+    #[cfg(all(feature = "placement-dependency-pc", feature = "parallel"))]
+    pub(super) fn observation_shared_producer_metrics(&self) -> [usize; 8] {
+        self.observation_shared_producer
+    }
+
+    pub(super) fn observation_extra_peak_bytes(&self) -> usize {
+        self.dependency_observation
+            .extra_peak_bytes()
+            .saturating_add(self.observation_suffix_import_extra_peak)
+            .saturating_add(self.observation_shared_producer_extra_peak)
+    }
+
+    pub(super) fn observation_source_existence_metrics(&self) -> [usize; 6] {
+        self.observation_source_existence
+    }
+
+    #[cfg(all(feature = "local-search-ab", feature = "placement-dependency-pc"))]
+    pub(super) fn observation_kind_storage_metrics(&self) -> [usize; 4] {
+        [
+            self.piece_order_languages.node_count(),
+            self.piece_order_languages.edge_count(),
+            self.piece_order_languages.local_live_bytes(),
+            self.piece_order_languages.retained_bytes(),
+        ]
+    }
+
+    #[cfg(all(feature = "local-search-ab", feature = "placement-dependency-pc"))]
+    pub(super) fn observation_board_producer_metrics(&self) -> Option<([usize; 9], [usize; 5])> {
+        self.dependency_observation.board_producer_metrics()
+    }
+
+    #[cfg(all(feature = "local-search-ab", feature = "placement-dependency-pc"))]
+    pub(super) fn observation_prefix_cone_exact_producer_metrics(&self) -> Option<[usize; 9]> {
+        self.dependency_observation
+            .board_prefix_cone_exact_metrics()
     }
 
     #[cfg(any(feature = "parallel", test))]
@@ -1293,15 +1388,454 @@ impl BuildUpWorkspace {
 
     #[cfg(feature = "parallel")]
     pub(super) fn take_observation_producer_shard(&mut self) -> Option<ObservationProducerShard> {
-        self.dependency_observation
-            .has_roots()
+        #[cfg(feature = "placement-dependency-pc")]
+        let shared_producer = self.shared_observation_producer.is_some();
+        #[cfg(not(feature = "placement-dependency-pc"))]
+        let shared_producer = false;
+        #[cfg(feature = "placement-dependency-pc")]
+        let suffix_import = if shared_producer {
+            let metrics = self.shared_observation_import.metrics();
+            [
+                metrics.source_nodes,
+                metrics.source_edges,
+                metrics.reachable_nodes,
+                metrics.reachable_edges,
+                metrics.inserted_nodes,
+                metrics.inserted_edges,
+                metrics.root_visits,
+                metrics.node_visits,
+                metrics.edge_visits,
+                metrics.mapping_slots,
+                metrics.before_bytes,
+                metrics.after_bytes,
+                metrics.peak_bytes,
+            ]
+        } else {
+            [0; 13]
+        };
+        #[cfg(not(feature = "placement-dependency-pc"))]
+        let suffix_import = [0; 13];
+        (shared_producer
+            || self.dependency_observation.has_roots()
+            || self.observation_source_existence[0] != 0)
             .then(|| ObservationProducerShard {
                 kinds: self
                     .dependency_observation
-                    .has_factored_roots()
+                    .has_symbolic_roots()
                     .then(|| core::mem::take(&mut self.piece_order_languages)),
                 physical: core::mem::take(&mut self.dependency_observation),
+                source_existence: core::mem::take(&mut self.observation_source_existence),
+                shared_producer,
+                suffix_import,
             })
+    }
+
+    /// A request owns exactly one shared producer, and only an actual native
+    /// parallel dispatch may select it. Serial continuation keeps its owner.
+    #[cfg(all(feature = "placement-dependency-pc", feature = "parallel"))]
+    pub(super) fn shared_observation_producer_for_parallel(
+        plan: Option<&Arc<super::queue_observation_policy::BoardObservationPlan>>,
+        workers: usize,
+        control: &ExecutionControl,
+    ) -> Result<
+        Option<Arc<super::queue_observation_policy::SharedObservationProducer>>,
+        WasmExactSearchError,
+    > {
+        #[cfg(all(feature = "local-search-ab", not(target_family = "wasm")))]
+        {
+            let enabled = match std::env::var("CLEARRA_OBSERVATION_SHARED_PRODUCER") {
+                Ok(mode) if mode == "0" => false,
+                Ok(mode) if mode == "1" => true,
+                Err(std::env::VarError::NotPresent) => false,
+                _ => {
+                    return Err(WasmExactSearchError::InvalidProblem(
+                        "wasm_observation_shared_producer_mode_invalid",
+                    ))
+                }
+            };
+            if !enabled {
+                return Ok(None);
+            }
+            if control.is_cancelled() {
+                return Err(WasmExactSearchError::Cancelled);
+            }
+            if workers <= 1 || control.partition().count() != 1 {
+                return Err(WasmExactSearchError::InvalidProblem(
+                    "wasm_observation_shared_producer_scope_invalid",
+                ));
+            }
+            let plan = plan.ok_or(WasmExactSearchError::InvalidProblem(
+                "wasm_observation_shared_producer_scope_invalid",
+            ))?;
+            if !Self::observation_subset_import_enabled()? {
+                return Err(WasmExactSearchError::InvalidProblem(
+                    "wasm_observation_shared_producer_requires_subset_import",
+                ));
+            }
+            super::queue_observation_policy::SharedObservationProducer::new(Arc::clone(plan))
+                .map(Some)
+        }
+        #[cfg(not(all(feature = "local-search-ab", not(target_family = "wasm"))))]
+        {
+            let _ = (plan, workers, control);
+            Ok(None)
+        }
+    }
+
+    #[cfg(all(feature = "placement-dependency-pc", feature = "parallel"))]
+    pub(super) fn set_shared_observation_producer(
+        &mut self,
+        shared: Arc<super::queue_observation_policy::SharedObservationProducer>,
+    ) -> Result<(), WasmExactSearchError> {
+        if self.shared_observation_producer.is_some()
+            || self.dependency_observation.has_roots()
+            || !self
+                .dependency_observation
+                .has_board_plan_identity(shared.plan())
+            || self.observation_source_existence[0] != 0
+        {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "wasm_observation_shared_producer_already_started",
+            ));
+        }
+        self.shared_observation_producer = Some(shared);
+        Ok(())
+    }
+
+    /// The native coordinator has already sealed the request after validating
+    /// every branch. Its caller must also own the fresh whole-family authority;
+    /// metadata shards may never supply graph fragments or a second kind arena.
+    #[cfg(all(feature = "placement-dependency-pc", feature = "parallel"))]
+    pub(super) fn install_shared_observation(
+        &mut self,
+        mut output: super::queue_observation_policy::SharedObservationOutput,
+        shards: Vec<ObservationProducerShard>,
+        completed_native_family: bool,
+        control: &ExecutionControl,
+    ) -> Result<(), WasmExactSearchError> {
+        if control.is_cancelled() {
+            return Err(WasmExactSearchError::Cancelled);
+        }
+        if !completed_native_family
+            || shards.is_empty()
+            || self.shared_observation_producer.is_some()
+            || self.dependency_observation.has_roots()
+            || self.piece_order_languages.node_count() != 0
+            || !self
+                .dependency_observation
+                .same_board_plan(&output.physical)
+            || shards.iter().any(|shard| {
+                !shard.shared_producer
+                    || shard.physical.has_roots()
+                    || shard.kinds.is_some()
+                    || !shard.physical.same_board_plan(&output.physical)
+            })
+        {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "wasm_observation_shared_producer_completion_invalid",
+            ));
+        }
+        let accepted = shards.iter().try_fold(0_usize, |total, shard| {
+            total.checked_add(shard.source_existence[3])
+        });
+        if accepted != Some(output.metrics[0]) {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "wasm_observation_shared_producer_registration_mismatch",
+            ));
+        }
+        let incoming_bytes = shards.iter().fold(
+            shards.capacity() * core::mem::size_of::<ObservationProducerShard>(),
+            |bytes, shard| bytes.saturating_add(shard.retained_bytes()),
+        );
+        let output_bytes = output
+            .physical
+            .retained_bytes()
+            .saturating_add(output.kinds.retained_bytes());
+        let output_peak = output.metrics[7].max(
+            output_bytes
+                .saturating_add(output.physical.extra_peak_bytes())
+                .saturating_add(incoming_bytes),
+        );
+        // The ordinary workspace owns the final payload after this move.
+        // Add only peak overlap absent from its live bytes/physical peak.
+        self.observation_shared_producer_extra_peak = output_peak
+            .saturating_sub(output_bytes)
+            .saturating_sub(output.physical.extra_peak_bytes());
+        for shard in shards {
+            if control.is_cancelled() {
+                return Err(WasmExactSearchError::Cancelled);
+            }
+            for (total, actual) in self
+                .observation_source_existence
+                .iter_mut()
+                .zip(shard.source_existence)
+            {
+                *total = total.saturating_add(actual);
+            }
+            output
+                .physical
+                .add_source_filter_metrics(shard.physical.source_filter_metrics());
+            for (total, actual) in self.observation_suffix_import[..10]
+                .iter_mut()
+                .zip(shard.suffix_import)
+            {
+                *total = total.saturating_add(actual);
+            }
+            for (total, actual) in self.observation_suffix_import[10..]
+                .iter_mut()
+                .zip(shard.suffix_import[10..].iter().copied())
+            {
+                *total = (*total).max(actual);
+            }
+        }
+        self.observation_shared_producer = output.metrics;
+        self.piece_order_languages = output.kinds;
+        self.dependency_observation = output.physical;
+        Ok(())
+    }
+
+    #[cfg(feature = "placement-dependency-pc")]
+    pub(super) fn observation_boundary_class_metrics(&self) -> [usize; 7] {
+        self.dependency_observation.boundary_class_metrics()
+    }
+
+    #[cfg(all(feature = "placement-dependency-pc", feature = "parallel"))]
+    fn observation_subset_import_enabled() -> Result<bool, WasmExactSearchError> {
+        #[cfg(feature = "local-search-ab")]
+        {
+            match std::env::var("CLEARRA_OBSERVATION_SUFFIX_IMPORT") {
+                Ok(mode) if mode == "0" => Ok(false),
+                Ok(mode) if mode == "1" => Ok(true),
+                Err(std::env::VarError::NotPresent) => Ok(false),
+                _ => Err(WasmExactSearchError::InvalidProblem(
+                    "wasm_observation_suffix_import_mode_invalid",
+                )),
+            }
+        }
+        #[cfg(not(feature = "local-search-ab"))]
+        {
+            Ok(false)
+        }
+    }
+
+    /// The caller supplies a closed native batch only after checking fresh
+    /// internal provenance, all canonical branches, completion and cancellation.
+    /// Final source-relative family authority is still issued after this merge.
+    #[cfg(feature = "parallel")]
+    pub(super) fn merge_observation_producer_shards(
+        &mut self,
+        shards: Vec<ObservationProducerShard>,
+        completed_native_family: bool,
+        control: &ExecutionControl,
+    ) -> Result<(), WasmExactSearchError> {
+        if shards.iter().any(|shard| shard.shared_producer) {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "wasm_observation_shared_producer_output_missing",
+            ));
+        }
+        #[cfg(feature = "placement-dependency-pc")]
+        if completed_native_family
+            && self
+                .dependency_observation
+                .completed_boundary_batch_selected()
+            && Self::observation_subset_import_enabled()?
+        {
+            return self.merge_completed_boundary_producers(shards, control);
+        }
+        #[cfg(not(feature = "placement-dependency-pc"))]
+        let _ = completed_native_family;
+        for shard in shards {
+            self.merge_observation_producer_shard(shard, control)?;
+        }
+        Ok(())
+    }
+
+    #[cfg(all(feature = "placement-dependency-pc", feature = "parallel"))]
+    fn merge_completed_boundary_producers(
+        &mut self,
+        shards: Vec<ObservationProducerShard>,
+        control: &ExecutionControl,
+    ) -> Result<(), WasmExactSearchError> {
+        let result = self.merge_completed_boundary_producers_inner(shards, control);
+        if let Err(error) = &result {
+            self.dependency_observation.fail_completed_boundary_batch();
+            #[cfg(feature = "local-search-ab")]
+            eprintln!("clearra_observation_boundary_batch_failed metrics={:?} source_existence={:?} error={error:?}", self.observation_boundary_class_metrics(), self.observation_source_existence);
+            #[cfg(not(feature = "local-search-ab"))]
+            let _ = error;
+        }
+        result
+    }
+
+    #[cfg(all(feature = "placement-dependency-pc", feature = "parallel"))]
+    fn merge_completed_boundary_producers_inner(
+        &mut self,
+        shards: Vec<ObservationProducerShard>,
+        control: &ExecutionControl,
+    ) -> Result<(), WasmExactSearchError> {
+        use super::piece_order_language::PieceLanguageSubsetImport;
+        use super::queue_observation_policy::PhysicalActionLanguage;
+        if control.is_cancelled() {
+            return Err(WasmExactSearchError::Cancelled);
+        }
+        let incoming_bytes = shards.iter().fold(
+            shards.capacity() * core::mem::size_of::<ObservationProducerShard>(),
+            |bytes, shard| bytes.saturating_add(shard.retained_bytes()),
+        );
+        self.dependency_observation
+            .observe_boundary_owner_bytes(incoming_bytes);
+        let mut physical: Vec<PhysicalActionLanguage> = Vec::new();
+        let mut owners: Vec<Option<PieceOrderLanguageCache>> = Vec::new();
+        let mut imports: Vec<Option<PieceLanguageSubsetImport>> = Vec::new();
+        physical.try_reserve_exact(shards.len()).map_err(|_| {
+            WasmExactSearchError::InvalidProblem("wasm_observation_physical_storage_unavailable")
+        })?;
+        self.dependency_observation.observe_boundary_owner_bytes(
+            incoming_bytes.saturating_add(
+                physical.capacity() * core::mem::size_of::<PhysicalActionLanguage>(),
+            ),
+        );
+        owners.try_reserve_exact(shards.len()).map_err(|_| {
+            WasmExactSearchError::InvalidProblem("wasm_observation_physical_storage_unavailable")
+        })?;
+        self.dependency_observation.observe_boundary_owner_bytes(
+            incoming_bytes
+                .saturating_add(
+                    physical.capacity() * core::mem::size_of::<PhysicalActionLanguage>(),
+                )
+                .saturating_add(
+                    owners.capacity() * core::mem::size_of::<Option<PieceOrderLanguageCache>>(),
+                ),
+        );
+        imports.try_reserve_exact(shards.len()).map_err(|_| {
+            WasmExactSearchError::InvalidProblem("wasm_observation_physical_storage_unavailable")
+        })?;
+        let container_bytes = physical.capacity() * core::mem::size_of::<PhysicalActionLanguage>()
+            + owners.capacity() * core::mem::size_of::<Option<PieceOrderLanguageCache>>()
+            + imports.capacity() * core::mem::size_of::<Option<PieceLanguageSubsetImport>>()
+            + imports.capacity() * core::mem::size_of::<&[u32]>();
+        let mut held_map_bytes = 0_usize;
+        self.dependency_observation
+            .observe_boundary_owner_bytes(incoming_bytes.saturating_add(container_bytes));
+        for shard in shards {
+            if control.is_cancelled() {
+                return Err(WasmExactSearchError::Cancelled);
+            }
+            for (total, incoming) in self
+                .observation_source_existence
+                .iter_mut()
+                .zip(shard.source_existence)
+            {
+                *total = total.saturating_add(incoming);
+            }
+            let imported = if let Some(kinds) = shard.kinds.as_ref() {
+                // The import's dense map is bounded by the source node count.
+                // Record all coexisting owners/maps before entering an import
+                // that may fail or observe cancellation without returning a map.
+                let pending_map_bytes = kinds
+                    .node_count()
+                    .saturating_mul(core::mem::size_of::<u32>());
+                self.dependency_observation.observe_boundary_owner_bytes(
+                    incoming_bytes
+                        .saturating_add(container_bytes)
+                        .saturating_add(held_map_bytes)
+                        .saturating_add(pending_map_bytes),
+                );
+                let imported = shard
+                    .physical
+                    .import_board_suffixes(kinds, &mut self.piece_order_languages, control)?
+                    .ok_or(WasmExactSearchError::InvalidProblem(
+                        "wasm_observation_board_and_factored_owners_mixed",
+                    ))?;
+                held_map_bytes = held_map_bytes.saturating_add(imported.retained_bytes());
+                self.dependency_observation.observe_boundary_owner_bytes(
+                    incoming_bytes
+                        .saturating_add(container_bytes)
+                        .saturating_add(held_map_bytes),
+                );
+                let metrics = imported.metrics();
+                for (total, incoming) in self.observation_suffix_import.iter_mut().zip([
+                    metrics.source_nodes,
+                    metrics.source_edges,
+                    metrics.reachable_nodes,
+                    metrics.reachable_edges,
+                    metrics.inserted_nodes,
+                    metrics.inserted_edges,
+                    metrics.root_visits,
+                    metrics.node_visits,
+                    metrics.edge_visits,
+                    metrics.mapping_slots,
+                ]) {
+                    *total = total.saturating_add(incoming);
+                }
+                for (total, incoming) in self.observation_suffix_import[10..].iter_mut().zip([
+                    metrics.before_bytes,
+                    metrics.after_bytes,
+                    metrics.peak_bytes,
+                ]) {
+                    *total = (*total).max(incoming);
+                }
+                self.observation_suffix_import_extra_peak =
+                    self.observation_suffix_import_extra_peak.max(
+                        imported
+                            .retained_bytes()
+                            .saturating_add(metrics.peak_bytes.saturating_sub(metrics.after_bytes)),
+                    );
+                Some(imported)
+            } else {
+                if shard.physical.has_symbolic_roots() {
+                    return Err(WasmExactSearchError::InvalidProblem(
+                        "wasm_observation_kind_owner_missing",
+                    ));
+                }
+                None
+            };
+            owners.push(shard.kinds);
+            imports.push(imported);
+            physical.push(shard.physical);
+        }
+        // Maps carry both arena identities, and every source owner remains
+        // alive until the entire completed H merge has returned.
+        let mut rebounds = Vec::new();
+        rebounds.try_reserve_exact(imports.len()).map_err(|_| {
+            WasmExactSearchError::InvalidProblem("wasm_observation_physical_storage_unavailable")
+        })?;
+        for (imported, source) in imports.iter().zip(&owners) {
+            rebounds.push(match (imported.as_ref(), source.as_ref()) {
+                (Some(imported), Some(source)) => {
+                    imported.rebound_for(source, &self.piece_order_languages)?
+                }
+                (None, None) => &[],
+                _ => {
+                    return Err(WasmExactSearchError::InvalidProblem(
+                        "wasm_observation_kind_owner_missing",
+                    ))
+                }
+            });
+        }
+        let staged_bytes = incoming_bytes
+            .saturating_add(physical.capacity() * core::mem::size_of::<PhysicalActionLanguage>())
+            .saturating_add(
+                owners.capacity() * core::mem::size_of::<Option<PieceOrderLanguageCache>>(),
+            )
+            .saturating_add(
+                imports.capacity() * core::mem::size_of::<Option<PieceLanguageSubsetImport>>(),
+            )
+            .saturating_add(rebounds.capacity() * core::mem::size_of::<&[u32]>())
+            .saturating_add(
+                imports
+                    .iter()
+                    .flatten()
+                    .map(PieceLanguageSubsetImport::retained_bytes)
+                    .sum::<usize>(),
+            );
+        self.dependency_observation.merge_completed_board_shards(
+            physical,
+            &rebounds,
+            staged_bytes,
+            &self.piece_order_languages,
+            control,
+        )
     }
 
     #[cfg(feature = "parallel")]
@@ -1313,14 +1847,76 @@ impl BuildUpWorkspace {
         if control.is_cancelled() {
             return Err(WasmExactSearchError::Cancelled);
         }
+        if shard.shared_producer {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "wasm_observation_shared_producer_output_missing",
+            ));
+        }
+        for (total, incoming) in self
+            .observation_source_existence
+            .iter_mut()
+            .zip(shard.source_existence)
+        {
+            *total = total.saturating_add(incoming);
+        }
         #[cfg(feature = "placement-dependency-pc")]
-        if shard.physical.has_factored_roots() {
+        if shard.physical.has_symbolic_roots() {
             let kinds = shard
                 .kinds
                 .as_ref()
                 .ok_or(WasmExactSearchError::InvalidProblem(
                     "wasm_observation_kind_owner_missing",
                 ))?;
+            let subset_enabled = Self::observation_subset_import_enabled()?;
+            if subset_enabled {
+                if let Some(imported) = shard.physical.import_board_suffixes(
+                    kinds,
+                    &mut self.piece_order_languages,
+                    control,
+                )? {
+                    let metrics = imported.metrics();
+                    let counts = [
+                        metrics.source_nodes,
+                        metrics.source_edges,
+                        metrics.reachable_nodes,
+                        metrics.reachable_edges,
+                        metrics.inserted_nodes,
+                        metrics.inserted_edges,
+                        metrics.root_visits,
+                        metrics.node_visits,
+                        metrics.edge_visits,
+                        metrics.mapping_slots,
+                    ];
+                    for (total, incoming) in self.observation_suffix_import.iter_mut().zip(counts) {
+                        *total = total.saturating_add(incoming);
+                    }
+                    // Byte fields are maximum coexistence snapshots, not sums
+                    // across sequential shard imports. The worker aggregate
+                    // already owns source arenas, and this workspace owns the
+                    // destination: add only the map and old/new growth overlap.
+                    for (total, incoming) in self.observation_suffix_import[10..].iter_mut().zip([
+                        metrics.before_bytes,
+                        metrics.after_bytes,
+                        metrics.peak_bytes,
+                    ]) {
+                        *total = (*total).max(incoming);
+                    }
+                    self.observation_suffix_import_extra_peak = self
+                        .observation_suffix_import_extra_peak
+                        .max(imported.retained_bytes().saturating_add(
+                            metrics.peak_bytes.saturating_sub(metrics.after_bytes),
+                        ));
+                    #[cfg(feature = "local-search-ab")]
+                    eprintln!("clearra_observation_suffix_import metrics={metrics:?}");
+                    let rebound = imported.rebound_for(kinds, &self.piece_order_languages)?;
+                    return self.dependency_observation.merge_factored(
+                        shard.physical,
+                        rebound,
+                        control,
+                        &self.piece_order_languages,
+                    );
+                }
+            }
             let rebound = self.piece_order_languages.import_node_map(kinds)?;
             return self.dependency_observation.merge_factored(
                 shard.physical,
@@ -1333,23 +1929,285 @@ impl BuildUpWorkspace {
             .merge_eager(shard.physical, control)
     }
 
+    /// Select the physical board closure only for a request whose complete
+    /// source product is exactly an unrestricted PC family. This is request
+    /// scope, not production-completion authority: the session separately
+    /// certifies its internal whole-family traversal before evaluation.
+    #[cfg(feature = "placement-dependency-pc")]
+    pub(super) fn board_observation_plan(
+        problem: &SearchProblem,
+        catalog: &GeometryCatalog,
+    ) -> Result<
+        Option<Arc<super::queue_observation_policy::BoardObservationPlan>>,
+        WasmExactSearchError,
+    > {
+        #[cfg(feature = "local-search-ab")]
+        match std::env::var("CLEARRA_OBSERVATION_BOARD_QUOTIENT") {
+            Ok(mode) if mode == "0" => return Ok(None),
+            Ok(mode) if mode == "1" => (),
+            Err(std::env::VarError::NotPresent) => (),
+            _ => {
+                return Err(WasmExactSearchError::InvalidProblem(
+                    "wasm_observation_board_mode_invalid",
+                ))
+            }
+        }
+        if !super::uses_pc_placement_dependency(problem)
+            || problem.queue_observation_policy()
+                != clearra_supply::QueueObservationPolicy::VisibleSeven
+            || problem.output_policy() != clearra_problem::SearchOutputPolicy::CoverageSummary
+            || problem.pc_chance_evidence_policy()
+                != clearra_problem::PcChanceEvidencePolicy::Disabled
+            || problem.solution_probability_policy().requested()
+            || problem.allowed_colored_solution_identities().is_some()
+            || problem.objective().score().requested()
+            || problem.objective().execution_constraints().requested()
+            || problem.build_replay_evidence_requested()
+            || problem.setup_query().is_some()
+            || problem.build_query().is_some()
+        {
+            return Ok(None);
+        }
+        let Some(universe) = problem.piece_source().materialized_universe() else {
+            return Ok(None);
+        };
+        let Some(source_len) = placement_dependency::complete_fresh_bag_sequence_len(universe)
+        else {
+            return Ok(None);
+        };
+        if source_len != problem.supply().source_sequence_length() {
+            return Ok(None);
+        }
+        let (width, height, initial) = (catalog.width(), catalog.height(), catalog.initial_board());
+        let area = u32::from(width) * u32::from(height);
+        if width != 10 || !(1..=60).contains(&area) {
+            return Ok(None);
+        }
+        let field = (1_u64 << area) - 1;
+        let required = field & !initial;
+        let count = required.count_ones();
+        if initial & !field != 0
+            || catalog.required_cells() != required
+            || !count.is_multiple_of(4)
+            || !(1..=11).contains(&(count / 4))
+        {
+            return Ok(None);
+        }
+        // The lift proof begins with occupied row indices 0..h. Initial
+        // full rows require a separate preclear authority and stay on the
+        // existing exact route; a floating row also has no such certificate.
+        let row_mask = (1_u64 << width) - 1;
+        let mut empty_row_seen = false;
+        for row in 0..height {
+            let cells = (initial >> (u32::from(row) * u32::from(width))) & row_mask;
+            if cells == row_mask || (empty_row_seen && cells != 0) {
+                return Ok(None);
+            }
+            empty_row_seen |= cells == 0;
+        }
+        let n = (count / 4) as u8;
+        let projected_last =
+            problem.supply().projects_standard_bag_lookahead() && source_len % 7 == 6;
+        let effective_len = source_len.checked_add(usize::from(projected_last)).ok_or(
+            WasmExactSearchError::InvalidProblem("wasm_observation_physical_depth_mismatch"),
+        )?;
+        let cursor = usize::from(problem.initial_hold().cursor());
+        if cursor > effective_len {
+            return Ok(None);
+        }
+        let hidden = effective_len
+            .saturating_sub(cursor)
+            .saturating_sub(7)
+            .min(usize::from(n)) as u8;
+        if hidden == 0 {
+            return Ok(None);
+        }
+        let floor = placement_dependency::original_standard_bag_reveal_floor(
+            universe,
+            source_len,
+            projected_last,
+            usize::from(n),
+            7,
+            cursor,
+            problem.supply().hold_enabled() && problem.initial_hold().hold_piece().is_none(),
+        );
+        #[cfg(feature = "local-search-ab")]
+        let source_prefix_pruning = match std::env::var("CLEARRA_OBSERVATION_SOURCE_PREFIX") {
+            Ok(mode) if mode == "0" => false,
+            Ok(mode) if mode == "1" => true,
+            Err(std::env::VarError::NotPresent) => true,
+            _ => {
+                return Err(WasmExactSearchError::InvalidProblem(
+                    "wasm_observation_source_prefix_mode_invalid",
+                ))
+            }
+        };
+        #[cfg(not(feature = "local-search-ab"))]
+        let source_prefix_pruning = true;
+        let extra_draw = usize::from(
+            problem.supply().hold_enabled() && problem.initial_hold().hold_piece().is_none(),
+        );
+        // A nonterminal lock consumes at most one original draw, except
+        // the initial empty-hold store, which may consume one extra once.
+        // Inside the first fresh bag each kind can therefore be placed at
+        // most once, plus the separately supplied initial held piece.
+        let prefix_kind_limits = (source_prefix_pruning
+            && cursor
+                .checked_add(usize::from(hidden))
+                .and_then(|draws| draws.checked_add(extra_draw))
+                .is_some_and(|draws| draws <= 7))
+        .then(|| {
+            let mut limits = [1; 7];
+            if let Some(held) = problem.initial_hold().hold_piece() {
+                limits[usize::from(witness_piece_code(held) - 1)] += 1;
+            }
+            limits
+        });
+        let mut plan = super::queue_observation_policy::BoardObservationPlan::new(
+            width,
+            height,
+            initial,
+            n,
+            hidden,
+            floor,
+            prefix_kind_limits,
+        )?;
+        #[cfg(feature = "local-search-ab")]
+        let source_existence = match std::env::var("CLEARRA_OBSERVATION_SOURCE_EXISTENCE") {
+            Ok(mode) if mode == "0" => false,
+            Ok(mode) if mode == "1" => true,
+            Err(std::env::VarError::NotPresent) => false,
+            _ => {
+                return Err(WasmExactSearchError::InvalidProblem(
+                    "wasm_observation_source_existence_mode_invalid",
+                ))
+            }
+        };
+        #[cfg(not(feature = "local-search-ab"))]
+        let source_existence = false;
+        #[cfg(feature = "local-search-ab")]
+        let source_filter = match std::env::var("CLEARRA_OBSERVATION_SOURCE_FILTER") {
+            Ok(mode) if mode == "0" => false,
+            Ok(mode) if mode == "1" => true,
+            Err(std::env::VarError::NotPresent) => false,
+            _ => {
+                return Err(WasmExactSearchError::InvalidProblem(
+                    "wasm_observation_source_filter_mode_invalid",
+                ))
+            }
+        };
+        #[cfg(not(feature = "local-search-ab"))]
+        let source_filter = false;
+        // The actual complete, positive uniform fresh-bag universe was
+        // certified above. Retain that authority on the shared request plan
+        // instead of walking the original source again for every candidate.
+        // The constructive witness consumes N draws and leaves one held
+        // piece; projected acceptance has a different terminal contract.
+        if source_existence
+            && (7..=11).contains(&n)
+            && source_len == usize::from(n) + 1
+            && cursor == 0
+            && problem.initial_hold().hold_piece().is_none()
+            && problem.supply().hold_enabled()
+            && !problem.supply().projects_unplaced_lookahead()
+            && !problem.supply().projects_standard_bag_lookahead()
+            && plan.boundary_suffixes_only()
+        {
+            let certified_plan = Arc::get_mut(&mut plan).ok_or(
+                WasmExactSearchError::InvalidProblem("wasm_observation_source_plan_already_shared"),
+            )?;
+            certified_plan.enable_fresh_bag_observation();
+            if source_filter && hidden <= 5 {
+                certified_plan.enable_source_filter();
+            }
+        }
+        Ok(Some(plan))
+    }
+
+    #[cfg(feature = "placement-dependency-pc")]
+    pub(super) fn set_board_observation_plan(
+        &mut self,
+        plan: Arc<super::queue_observation_policy::BoardObservationPlan>,
+    ) -> Result<(), WasmExactSearchError> {
+        self.dependency_observation.set_board_plan(plan)
+    }
+
+    #[cfg(feature = "placement-dependency-pc")]
+    pub(super) fn try_produce_board_observation(
+        &mut self,
+        problem: &SearchProblem,
+        catalog: &GeometryCatalog,
+        candidate: &GeometryCandidate,
+        control: &ExecutionControl,
+        profile_scale: u64,
+    ) -> Result<ObservationProducerDecision, WasmExactSearchError> {
+        if !self
+            .dependency_observation
+            .board_fresh_bag_observation_enabled()
+        {
+            return Ok(ObservationProducerDecision::NotSelected);
+        }
+        #[cfg(any(
+            test,
+            all(
+                feature = "local-search-ab",
+                feature = "parallel",
+                not(target_family = "wasm")
+            )
+        ))]
+        if super::symbolic_prefix_orders::in_strict_prefix_order() {
+            return Ok(ObservationProducerDecision::NotSelected);
+        }
+        #[cfg(any(test, all(feature = "local-search-ab", feature = "parallel")))]
+        if self.operation_mask_experiment_active() {
+            return Ok(ObservationProducerDecision::NotSelected);
+        }
+        let result = placement_dependency::produce_board_observation(
+            problem,
+            catalog,
+            candidate,
+            self,
+            control,
+            profile_scale,
+        );
+        #[cfg(feature = "local-search-ab")]
+        if result.is_err() {
+            eprintln!(
+                "clearra_observation_source_producer_failed metrics={:?} source_filter={:?} kind_storage={:?} error={:?}",
+                self.observation_source_existence,
+                self.dependency_observation.source_filter_metrics(),
+                self.observation_kind_storage_metrics(),
+                result.as_ref().err(),
+            );
+        }
+        result
+    }
+
     pub fn evaluate_observation_language(
         &mut self,
         problem: &SearchProblem,
+        catalog: &GeometryCatalog,
         control: &ExecutionControl,
+        complete_board_family: bool,
     ) -> Result<Option<QueueObservationCoverage>, WasmExactSearchError> {
+        #[cfg(feature = "placement-dependency-pc")]
+        if self.dependency_observation.has_board_plan() && !complete_board_family {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "wasm_observation_board_requires_complete_internal_family",
+            ));
+        }
+        #[cfg(not(feature = "placement-dependency-pc"))]
+        let _ = (complete_board_family, catalog);
         if !self.dependency_observation.has_roots() {
             return Ok(None);
         }
+        #[cfg(feature = "local-search-ab")]
+        let source_start = std::time::Instant::now();
         let universe = problem.piece_source().materialized_universe().ok_or(
             WasmExactSearchError::InvalidProblem("wasm_piece_source_not_materialized"),
         )?;
-        let pattern_index = PatternPiecePositionIndex::compile(universe).map_err(|_| {
-            WasmExactSearchError::InvalidProblem("wasm_observation_pattern_index_compile_failed")
-        })?;
-        let mut evaluator = QueueObservationPolicyEvaluator::new(
+        let mut evaluator = QueueObservationPolicyEvaluator::for_original_universe(
             universe,
-            &pattern_index,
             problem.queue_observation_policy(),
             problem.initial_hold().cursor(),
             problem.initial_hold().hold_piece(),
@@ -1358,6 +2216,153 @@ impl BuildUpWorkspace {
             problem.supply().projects_standard_bag_lookahead(),
             None,
         )?;
+        #[cfg(feature = "local-search-ab")]
+        let source_seconds = source_start.elapsed().as_secs_f64();
+        #[cfg(feature = "placement-dependency-pc")]
+        if self.dependency_observation.has_board_roots() {
+            let source_filter_metrics = self.dependency_observation.source_filter_metrics();
+            if self.dependency_observation.requires_board_edge_closure() {
+                self.reachability.configure_kick_profile(
+                    problem.kick_profile().profile_id(),
+                    problem.backend_policy().conditioned_reachability_enabled(),
+                );
+            }
+            #[cfg(feature = "local-search-ab")]
+            let freeze_start = std::time::Instant::now();
+            let language = self
+                .dependency_observation
+                .board_view(
+                    &self.piece_order_languages,
+                    catalog,
+                    &mut self.reachability,
+                    control,
+                )?
+                .ok_or(WasmExactSearchError::InvalidProblem(
+                    "wasm_observation_board_root_missing",
+                ))?;
+            #[cfg(feature = "local-search-ab")]
+            let freeze_seconds = freeze_start.elapsed().as_secs_f64();
+            #[cfg(feature = "local-search-ab")]
+            eprintln!(
+                "clearra_observation_board_ready source_seconds={source_seconds} freeze_seconds={freeze_seconds} metrics={:?} closure={:?} kind_nodes={} source_existence={:?} source_filter={source_filter_metrics:?}",
+                language.metrics(),
+                language.edge_closure_metrics(),
+                self.piece_order_languages.node_count(),
+                self.observation_source_existence,
+            );
+            #[cfg(feature = "local-search-ab")]
+            let policy_start = std::time::Instant::now();
+            let evaluated = evaluator.evaluate(&language, control);
+            #[cfg(feature = "local-search-ab")]
+            eprintln!(
+                "clearra_observation_board_stages source_seconds={source_seconds} freeze_seconds={freeze_seconds} policy_seconds={}",
+                policy_start.elapsed().as_secs_f64(),
+            );
+            let metrics = language.metrics();
+            let closure = language.edge_closure_metrics();
+            #[cfg(feature = "local-search-ab")]
+            if evaluated.is_err() {
+                eprintln!("clearra_observation_board_failure_metrics={metrics:?}");
+                eprintln!(
+                    "clearra_observation_kind_union_failure_metrics={:?}",
+                    language.kind_union_metrics(),
+                );
+                eprintln!(
+                    "clearra_observation_supply_multiset_failure_metrics={:?}",
+                    language.supply_multiset_metrics(),
+                );
+                eprintln!(
+                    "clearra_observation_multiset_group_failure_metrics={:?}",
+                    language.multiset_group_metrics(),
+                );
+                eprintln!(
+                    "clearra_observation_prefix_mask_failure_metrics={:?}",
+                    language.prefix_mask_metrics(),
+                );
+                eprintln!(
+                    "clearra_observation_prefix_cone_failure_metrics={:?}",
+                    language.prefix_cone_metrics(),
+                );
+                eprintln!(
+                    "clearra_observation_prefix_cone_exact_failure_metrics={:?}",
+                    language.prefix_cone_exact_metrics(),
+                );
+                eprintln!(
+                    "clearra_observation_boundary_class_failure_metrics={:?}",
+                    language.boundary_class_metrics(),
+                );
+                eprintln!(
+                    "clearra_observation_word_bitmap_failure_metrics={:?}",
+                    language.word_bitmap_metrics(),
+                );
+                eprintln!(
+                    "clearra_observation_word_bitmap_board_failure_metrics={:?}",
+                    language.word_bitmap_board_metrics(),
+                );
+                eprintln!(
+                    "clearra_observation_pre_reveal_failure_metrics={:?} retained_bytes={} peak_bytes={}",
+                    evaluator.pre_reveal_metrics(),
+                    evaluator.pre_reveal_retained_bytes(),
+                    evaluator.pre_reveal_peak_bytes(),
+                );
+                eprintln!(
+                    "clearra_observation_branch_bound_failure_metrics={:?}",
+                    evaluator.branch_bound_metrics(),
+                );
+                eprintln!(
+                    "clearra_observation_initial_progress_at_failure={:?}",
+                    evaluator.initial_observation_progress(),
+                );
+            }
+            let mut result = evaluated?;
+            result.metrics.physical_representation = "complete-pc-board-closure";
+            result.metrics.kind_union = language.kind_union_metrics();
+            result.metrics.supply_multiset = language.supply_multiset_metrics();
+            result.metrics.multiset_groups = language.multiset_group_metrics();
+            result.metrics.prefix_masks = language.prefix_mask_metrics();
+            result.metrics.prefix_cones = language.prefix_cone_metrics();
+            result.metrics.prefix_cone_exact = language.prefix_cone_exact_metrics();
+            result.metrics.boundary_classes = language.boundary_class_metrics();
+            result.metrics.word_bitmap = language.word_bitmap_metrics();
+            result.metrics.word_bitmap_board = language.word_bitmap_board_metrics();
+            result.metrics.suffix_import = self.observation_suffix_import;
+            result.metrics.shared_producer = self.observation_shared_producer;
+            result.metrics.source_existence = self.observation_source_existence;
+            result.metrics.source_filter = source_filter_metrics;
+            let union_peak_bytes = language.peak_bytes().max(language.retained_bytes());
+            result.metrics.board_actions = [
+                metrics.candidate_count,
+                metrics.nodes,
+                metrics.edges,
+                metrics.suffix_roots,
+                metrics.prefix_visits,
+                metrics.edge_attempts,
+                metrics.work,
+                metrics.source_pruned_prefixes,
+                metrics.dead_source_prefixes,
+                closure[0],
+                closure[1],
+                closure[2],
+                closure[3],
+                closure[4],
+            ];
+            // The frozen graph borrows the owner already counted by this
+            // workspace. Charge only transient construction/merge overlap.
+            result.metrics.retained_bytes = result
+                .metrics
+                .retained_bytes
+                .saturating_add(union_peak_bytes)
+                .saturating_add(
+                    result
+                        .metrics
+                        .pre_reveal_peak_bytes
+                        .saturating_sub(result.metrics.pre_reveal_retained_bytes),
+                )
+                .saturating_add(self.observation_extra_peak_bytes());
+            return Ok(Some(result));
+        }
+        #[cfg(all(feature = "local-search-ab", not(feature = "placement-dependency-pc")))]
+        let _ = source_seconds;
         #[cfg(feature = "placement-dependency-pc")]
         if self.dependency_observation.has_factored_roots() {
             let language = self
@@ -1378,6 +2383,7 @@ impl BuildUpWorkspace {
                 );
             }
             let mut result = evaluation?;
+            result.metrics.physical_representation = "factored-physical-residuals";
             result.metrics.retained_bytes = result
                 .metrics
                 .retained_bytes
@@ -1395,15 +2401,18 @@ impl BuildUpWorkspace {
                 physical.kind_source_visits,
                 physical.revealed_source_visits,
                 physical.work,
+                physical.frontier_nodes,
+                physical.frontier_members,
             ];
             return Ok(Some(result));
         }
-        let result = {
+        let mut result = {
             let language = self.dependency_observation.view(control)?.ok_or(
                 WasmExactSearchError::InvalidProblem("wasm_observation_physical_root_missing"),
             )?;
             evaluator.evaluate(&language, control)?
         };
+        result.metrics.physical_representation = "concrete-physical-union";
         // This view borrows the eager owner already charged by the workspace.
         // Only the factored view above creates additional local memo storage.
         Ok(Some(result))
@@ -1522,12 +2531,32 @@ impl BuildUpWorkspace {
         {
             return Ok(());
         }
+        #[cfg(all(feature = "local-search-ab", feature = "placement-dependency-pc"))]
+        if self.dependency_observation.has_board_plan() {
+            self.observation_symbolic_recycles =
+                self.observation_symbolic_recycles.saturating_add(1);
+            if self.observation_symbolic_recycles.is_power_of_two() {
+                eprintln!(
+                    "clearra_observation_symbolic_recycle count={} standard_live={} kind_storage={:?}",
+                    self.observation_symbolic_recycles,
+                    standard_live,
+                    self.observation_kind_storage_metrics(),
+                );
+            }
+        }
         if let Some(coverage) = self.standard_bag_coverage.as_mut() {
             coverage.flush_and_recycle_local_cache()?;
         }
-        if self.dependency_observation.has_factored_roots() {
+        if self.dependency_observation.has_symbolic_roots() {
             self.piece_order_languages.clear_coverage_caches();
         } else {
+            #[cfg(all(feature = "placement-dependency-pc", feature = "parallel"))]
+            if self.shared_observation_producer.is_some() {
+                // Every registered suffix already belongs to the common
+                // destination. Recycling the source changes its ID namespace;
+                // discard that map's bindings while retaining cumulative work.
+                self.shared_observation_import.reset_source();
+            }
             self.piece_order_languages.clear_retain_capacity();
         }
         Ok(())
@@ -8323,3 +9352,358 @@ mod fixed_witness_tests {
     }
 }
 // SRP rationale: this module has one behavior-level change reason: exact WASM BuildUp state expansion and trace preservation.
+
+#[cfg(all(test, feature = "placement-dependency-pc"))]
+mod board_observation_admission_tests {
+    use clearra_objectives::policy::{
+        objective_policy::ObjectivePolicy, score_objective_policy::SpinProfileSelection,
+    };
+    use clearra_pc_graph::request::{
+        PcExecutionPolicy, PcQueueInput, PcScenarioBoard, PcScenarioQuery,
+        PcSolutionProbabilityPolicy, PieceWindow, RequestedSearchBackend, SupplyWindowSize,
+    };
+    use clearra_problem::{ProblemCompiler, SearchOutputPolicy};
+    use clearra_rules::profile::builtin_rules::srs_plus;
+    use clearra_supply::queue::fixed_sequence::FixedSequence;
+
+    use super::*;
+
+    fn execution() -> PcExecutionPolicy {
+        PcExecutionPolicy::mvp_default()
+            .with_requested_backend(RequestedSearchBackend::Cpu)
+            .with_allow_backend_fallback(false)
+            .with_exact_legal_board_enabled(false)
+            .with_conditioned_reachability_enabled(false)
+            .with_tablebase_requested(false)
+            .with_max_patterns(0)
+            .with_max_memory_mib(None)
+    }
+
+    fn query(
+        height: u16,
+        initial: u64,
+        locks: usize,
+        draws: usize,
+        source: PcQueueInput,
+    ) -> PcScenarioQuery {
+        PcScenarioQuery::new(
+            PcScenarioBoard::standard_10(height, initial),
+            source,
+            PieceWindow::new(locks),
+        )
+        .with_rule(srs_plus())
+        .with_allow_hold(true)
+        .with_exact_pieces(Some(locks))
+        .with_supply_window_size(SupplyWindowSize::new(draws))
+        .with_count_policy(PcCountPolicy::CountUnique)
+        .with_queue_observation_policy(QueueObservationPolicy::VisibleSeven)
+        .with_solution_probability_policy(PcSolutionProbabilityPolicy::Omit)
+        .with_retained_trace_limit(0)
+        .with_execution_policy(execution())
+    }
+
+    fn compile(query: &PcScenarioQuery) -> SearchProblem {
+        ProblemCompiler::compile_scenario_pc(query)
+            .expect("finite admission fixture")
+            .with_output_policy(SearchOutputPolicy::CoverageSummary)
+    }
+
+    fn eight_query() -> PcScenarioQuery {
+        query(4, 0xff, 8, 9, PcQueueInput::standard_7_bag())
+    }
+
+    #[test]
+    fn board_plan_admits_actual_eight_and_eleven_lock_complete_bag_fixtures() {
+        // These are the benchmark's actual source lengths, not shortened
+        // representative queues. Their compact source owners need no 9/12-
+        // draw sequence expansion to establish this admission certificate.
+        for (height, initial, locks, draws, hidden, floor) in
+            [(4, 0xff, 8, 9, 2, 1), (5, 0x3f, 11, 12, 5, 4)]
+        {
+            let problem = compile(&query(
+                height,
+                initial,
+                locks,
+                draws,
+                PcQueueInput::standard_7_bag(),
+            ));
+            assert!(problem.pc_placement_dependency_eligible());
+            let universe = problem.piece_source().materialized_universe().unwrap();
+            assert_eq!(
+                placement_dependency::complete_fresh_bag_sequence_len(universe),
+                Some(draws),
+            );
+            let catalog = GeometryCatalog::compile(&problem).expect("full target catalog");
+            let plan = BuildUpWorkspace::board_observation_plan(&problem, &catalog)
+                .expect("plan admission")
+                .expect("complete unrestricted source product");
+            assert_eq!(plan.initial_board(), initial);
+            assert_eq!(plan.total_depth(), locks as u8);
+            assert_eq!(plan.hidden_horizon(), hidden);
+            assert_eq!(plan.reveal_floor(), floor);
+            assert_eq!(plan.prefix_kind_limits(), Some([1; 7]));
+        }
+    }
+
+    #[test]
+    fn board_plan_first_bag_caps_preserve_initial_held_piece_and_forbidden_hold() {
+        for (height, initial, locks, draws) in [(4, 0xff, 8, 9), (5, 0x3f, 11, 12)] {
+            let base = query(
+                height,
+                initial,
+                locks,
+                draws,
+                PcQueueInput::standard_7_bag(),
+            );
+            for (held, hold_enabled, expected) in [
+                (Some(PieceKind::O), true, [1, 2, 1, 1, 1, 1, 1]),
+                (None, false, [1; 7]),
+            ] {
+                let problem = compile(
+                    &base
+                        .clone()
+                        .with_hold_piece(held)
+                        .with_allow_hold(hold_enabled),
+                );
+                assert!(problem.pc_placement_dependency_eligible());
+                assert_eq!(problem.initial_hold().cursor(), 0);
+                assert_eq!(problem.initial_hold().hold_piece(), held);
+                assert_eq!(problem.supply().hold_enabled(), hold_enabled);
+                let catalog = GeometryCatalog::compile(&problem).unwrap();
+                let plan = BuildUpWorkspace::board_observation_plan(&problem, &catalog)
+                    .unwrap()
+                    .expect("complete original source remains board-admissible");
+                // The initial held O is separate from the fresh bag. No
+                // other kind gains a second copy, and disabling Hold does
+                // not create an extra source draw.
+                assert_eq!(plan.prefix_kind_limits(), Some(expected));
+            }
+        }
+    }
+
+    #[test]
+    fn board_plan_first_bag_caps_stop_at_the_original_draw_boundary() {
+        let catalog = GeometryCatalog::compile(&compile(&query(
+            5,
+            0x3f,
+            11,
+            12,
+            PcQueueInput::standard_7_bag(),
+        )))
+        .unwrap();
+        for (draws, hold_enabled, held, hidden, expected) in [
+            (13, true, None, 6, Some([1; 7])),
+            (14, true, None, 7, None),
+            (14, false, None, 7, Some([1; 7])),
+            (14, true, Some(PieceKind::O), 7, Some([1, 2, 1, 1, 1, 1, 1])),
+        ] {
+            let problem = compile(
+                &query(5, 0x3f, 11, draws, PcQueueInput::standard_7_bag())
+                    .with_allow_hold(hold_enabled)
+                    .with_hold_piece(held),
+            );
+            let universe = problem.piece_source().materialized_universe().unwrap();
+            // This is the real complete source owner, stored compactly.
+            // No sequence list, piece-position index, or search is built.
+            assert!(universe.uniform_compact_source().is_some());
+            assert_eq!(
+                placement_dependency::complete_fresh_bag_sequence_len(universe),
+                Some(draws),
+            );
+            assert!(problem.pc_placement_dependency_eligible());
+            assert_eq!(problem.supply().source_sequence_length(), draws);
+            assert!(!problem.supply().projects_standard_bag_lookahead());
+            assert_eq!(problem.initial_hold().cursor(), 0);
+            let plan = BuildUpWorkspace::board_observation_plan(&problem, &catalog)
+                .unwrap()
+                .expect("crossing the bag boundary removes only the optional prefix cap");
+            assert_eq!(plan.hidden_horizon(), hidden);
+            // With empty enabled Hold, H=7 may consume eight source draws;
+            // H=6 consumes at most seven. Forbidden or already occupied
+            // Hold has E=0, so the H=7 equality boundary is still qualified.
+            assert_eq!(
+                plan.prefix_kind_limits(),
+                expected,
+                "draws={draws}, hold_enabled={hold_enabled}, held={held:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn board_plan_requires_contiguous_occupied_rows_and_no_initial_full_row() {
+        // The lift certificate concerns occupied row indices, not cell
+        // connectivity: these two disconnected occupied rows are admissible.
+        let disconnected = 0xf | (0x1e0 << 10);
+        let problem = compile(&query(
+            4,
+            disconnected,
+            8,
+            9,
+            PcQueueInput::standard_7_bag(),
+        ));
+        let catalog = GeometryCatalog::compile(&problem).unwrap();
+        assert!(BuildUpWorkspace::board_observation_plan(&problem, &catalog)
+            .unwrap()
+            .is_some());
+
+        for (label, height, initial, locks, draws) in [
+            ("empty bottom row", 4, 0xff << 10, 8, 9),
+            ("internal empty row", 4, 0xf | (0xf << 20), 8, 9),
+        ] {
+            let problem = compile(&query(
+                height,
+                initial,
+                locks,
+                draws,
+                PcQueueInput::standard_7_bag(),
+            ));
+            assert!(problem.pc_placement_dependency_eligible(), "{label}");
+            let catalog = GeometryCatalog::compile(&problem).expect(label);
+            assert_eq!(catalog.initial_board(), initial, "{label}");
+            assert!(
+                BuildUpWorkspace::board_observation_plan(&problem, &catalog)
+                    .expect(label)
+                    .is_none(),
+                "{label}: no implicit preclear or initial lift authority",
+            );
+        }
+
+        // The public compiler already preclears the full input row without
+        // shrinking the five-row target. The resulting empty 50-cell field
+        // is not tetromino-aligned, so ordinary dependency admission rejects
+        // this request before the board closure's additional row condition.
+        let initial = 0x3ff;
+        let problem = compile(&query(5, initial, 10, 11, PcQueueInput::standard_7_bag()));
+        assert_eq!(problem.initial_board().occupied_mask(), 0);
+        assert!(!problem.pc_placement_dependency_eligible());
+        // Even a geometrically aligned catalog of the unnormalized input
+        // cannot supply authority that the compiled request does not have.
+        let raw_catalog = GeometryCatalog::compile_for_required_cells_on_dimensions(
+            10,
+            5,
+            initial,
+            ((1_u64 << 50) - 1) & !initial,
+        )
+        .expect("raw full-row catalog");
+        assert!(
+            BuildUpWorkspace::board_observation_plan(&problem, &raw_catalog)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn board_plan_rejects_explicit_and_truncated_original_source_domains() {
+        use PieceKind::{I, J, L, O, S, T, Z};
+        let fixed = compile(&query(
+            4,
+            0xff,
+            8,
+            9,
+            PcQueueInput::fixed_sequence(FixedSequence::new(vec![I, O, T, S, Z, J, L, I, O])),
+        ));
+        let truncated =
+            compile(&eight_query().with_execution_policy(execution().with_max_patterns(2)));
+        let catalog = GeometryCatalog::compile(&fixed).unwrap();
+        assert!(fixed
+            .piece_source()
+            .materialized_universe()
+            .unwrap()
+            .complete());
+        let truncated_source = truncated.piece_source().materialized_universe().unwrap();
+        assert_eq!(truncated_source.pattern_count(), 2);
+        assert!(!truncated_source.complete());
+        assert!(truncated_source.truncation_reason().is_some());
+        for (label, problem) in [("explicit source", fixed), ("truncated bag", truncated)] {
+            assert!(problem.pc_placement_dependency_eligible(), "{label}");
+            assert_eq!(problem.supply().source_sequence_length(), 9);
+            assert!(
+                BuildUpWorkspace::board_observation_plan(&problem, &catalog)
+                    .expect(label)
+                    .is_none(),
+                "{label}: ordinary dependency eligibility grants no complete bag certificate",
+            );
+        }
+    }
+
+    #[test]
+    fn board_plan_keeps_trace_and_evidence_consumers_outside_boolean_closure() {
+        let base = compile(&eight_query());
+        let catalog = GeometryCatalog::compile(&base).unwrap();
+        let probability = compile(
+            &eight_query().with_solution_probability_policy(PcSolutionProbabilityPolicy::Include),
+        );
+        for (label, problem) in [
+            (
+                "trace",
+                base.clone().with_output_policy(SearchOutputPolicy::Trace),
+            ),
+            (
+                "summary",
+                base.clone().with_output_policy(SearchOutputPolicy::Summary),
+            ),
+            (
+                "chance evidence",
+                base.clone().with_pc_chance_probability_v2_evidence(),
+            ),
+            ("replay evidence", base.with_build_replay_evidence()),
+            ("per-solution probability", probability),
+        ] {
+            assert!(
+                BuildUpWorkspace::board_observation_plan(&problem, &catalog)
+                    .expect(label)
+                    .is_none(),
+                "{label}",
+            );
+        }
+    }
+
+    #[test]
+    fn board_plan_rejects_score_execution_constraints_and_colored_allowlists() {
+        let base = eight_query();
+        let catalog = GeometryCatalog::compile(&compile(&base)).unwrap();
+        let score = compile(
+            &base
+                .clone()
+                .with_objective(ObjectivePolicy::unique().with_score_summary()),
+        );
+        assert!(score.objective().score().requested());
+        let constrained = compile(&base.clone().with_objective(
+            ObjectivePolicy::unique().with_back_to_back_preservation(SpinProfileSelection::TSpins),
+        ));
+        assert!(constrained.objective().execution_constraints().requested());
+        let filtered = compile(&base.with_allowed_colored_solution_identities([]));
+        assert!(filtered.allowed_colored_solution_identities().is_some());
+        for (label, problem) in [
+            ("score", score),
+            ("history-dependent constraint", constrained),
+            ("colored allowlist", filtered),
+        ] {
+            assert!(
+                BuildUpWorkspace::board_observation_plan(&problem, &catalog)
+                    .expect(label)
+                    .is_none(),
+                "{label}",
+            );
+        }
+    }
+
+    #[test]
+    fn board_plan_requires_the_entire_post_initial_target_cell_set() {
+        let problem = compile(&eight_query());
+        let full = (1_u64 << 40) - 1;
+        let required = full & !0xff;
+        let catalog = GeometryCatalog::compile_for_required_cells_on_dimensions(
+            10,
+            4,
+            0xff,
+            required & !0xf00,
+        )
+        .expect("aligned partial target");
+        assert!(problem.pc_placement_dependency_eligible());
+        assert_eq!(catalog.required_cells().count_ones(), 28);
+        assert!(BuildUpWorkspace::board_observation_plan(&problem, &catalog)
+            .unwrap()
+            .is_none());
+    }
+}

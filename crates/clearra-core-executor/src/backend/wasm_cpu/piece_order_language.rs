@@ -118,6 +118,420 @@ pub(super) enum CoverageCacheLookup {
     Miss { admit_after_compute: bool },
 }
 
+/// Suffix compilation need not materialize the language at prefix zero.
+/// An omitted shallow root is therefore distinct from an empty relation.
+#[cfg(feature = "placement-dependency-pc")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum PrefixSuffixCompilation {
+    EmptyRelation,
+    Compiled,
+}
+
+/// Structural work performed by a root-reachable import. Kind-language
+/// compilation/import has its own accounting domain; these visits do not
+/// reset or replace the physical owner's cumulative work counter.
+#[cfg(all(feature = "placement-dependency-pc", any(test, feature = "parallel")))]
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) struct PieceLanguageSubsetImportMetrics {
+    pub source_nodes: usize,
+    pub source_edges: usize,
+    pub reachable_nodes: usize,
+    pub reachable_edges: usize,
+    pub inserted_nodes: usize,
+    pub inserted_edges: usize,
+    pub root_visits: usize,
+    pub node_visits: usize,
+    pub edge_visits: usize,
+    /// Slots initialized/examined by the subset map passes, or initialized
+    /// and conservatively relocated when an incremental map grows. Child
+    /// map accesses are already represented by the edge-visit counters.
+    pub mapping_slots: usize,
+    /// Source and destination arenas, including their existing capacities.
+    pub before_bytes: usize,
+    /// Both arenas and the returned map, which coexist until shard merge.
+    pub after_bytes: usize,
+    /// Also includes old/new buffer coexistence during destination growth.
+    pub peak_bytes: usize,
+}
+
+/// A complete source-ID to destination-ID map, with unreachable IDs left
+/// missing. The identities are pinned until the map is consumed; neither a
+/// reset source nor a reset destination may authorize these numeric IDs.
+#[cfg(all(feature = "placement-dependency-pc", any(test, feature = "parallel")))]
+pub(super) struct PieceLanguageSubsetImport {
+    source_arena: Arc<()>,
+    destination_arena: Arc<()>,
+    rebound: Vec<u32>,
+    metrics: PieceLanguageSubsetImportMetrics,
+}
+
+#[cfg(all(feature = "placement-dependency-pc", any(test, feature = "parallel")))]
+impl PieceLanguageSubsetImport {
+    pub(super) fn rebound_for(
+        &self,
+        source: &PieceOrderLanguageCache,
+        destination: &PieceOrderLanguageCache,
+    ) -> Result<&[u32], WasmExactSearchError> {
+        if !Arc::ptr_eq(&self.source_arena, source.arena_identity())
+            || !Arc::ptr_eq(&self.destination_arena, destination.arena_identity())
+        {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "wasm_piece_language_subset_import_arena_changed",
+            ));
+        }
+        Ok(&self.rebound)
+    }
+
+    pub(super) fn metrics(&self) -> PieceLanguageSubsetImportMetrics {
+        self.metrics
+    }
+
+    pub(super) fn retained_bytes(&self) -> usize {
+        self.rebound.capacity() * core::mem::size_of::<u32>()
+    }
+}
+
+/// One worker's persistent exact import into an append-only shared arena.
+/// A source reset is explicit; the destination epoch stays pinned for this
+/// owner's whole lifetime. Completed mappings survive source appends. An
+/// error poisons the importer and never returns a partial root certificate.
+#[cfg(all(feature = "placement-dependency-pc", any(test, feature = "parallel")))]
+#[derive(Default)]
+pub(super) struct PieceLanguageIncrementalImport {
+    source_arena: Option<Arc<()>>,
+    destination_arena: Option<Arc<()>>,
+    rebound: Vec<u32>,
+    observed_source_nodes: usize,
+    observed_source_edges: usize,
+    metrics: PieceLanguageSubsetImportMetrics,
+    map_peak_bytes: usize,
+    destination_peak_extra_bytes: usize,
+    failed: bool,
+}
+
+#[cfg(all(feature = "placement-dependency-pc", any(test, feature = "parallel")))]
+impl PieceLanguageIncrementalImport {
+    /// Keep cumulative work/memory evidence and the destination authority.
+    /// Primitive map entries need no per-element destruction. A failed owner
+    /// cannot be revived by recycling its source.
+    pub(super) fn reset_source(&mut self) {
+        self.source_arena = None;
+        self.rebound.clear();
+        self.observed_source_nodes = 0;
+        self.observed_source_edges = 0;
+    }
+
+    /// Counts are cumulative across roots and explicitly reset source epochs.
+    /// Source sizes count only newly observed nodes/edges in each epoch.
+    /// Before/after are the last call's two arenas plus this map; peak includes
+    /// every source/map/destination coexistence and old/new buffer overlap.
+    pub(super) fn metrics(&self) -> PieceLanguageSubsetImportMetrics {
+        self.metrics
+    }
+
+    pub(super) fn retained_bytes(&self) -> usize {
+        self.rebound.capacity() * core::mem::size_of::<u32>()
+    }
+
+    /// Importer-owned heap only, including old/new map coexistence.
+    pub(super) fn peak_bytes(&self) -> usize {
+        self.map_peak_bytes
+    }
+
+    /// Add this once to a shared destination's retained upper bound. It
+    /// excludes worker source/map memory already owned by those workspaces.
+    pub(super) fn destination_peak_extra_bytes(&self) -> usize {
+        self.destination_peak_extra_bytes
+    }
+
+    pub(super) fn import_root(
+        &mut self,
+        source: &PieceOrderLanguageCache,
+        destination: &mut PieceOrderLanguageCache,
+        root: u32,
+        remaining: u8,
+        control: &clearra_core_domain::execution_cancellation::ExecutionControl,
+    ) -> Result<u32, WasmExactSearchError> {
+        let before_nodes = destination.nodes.len();
+        let before_edges = destination.edges.len();
+        let before_buffers = destination.subset_import_buffers();
+        let arena_bytes = source
+            .retained_bytes()
+            .saturating_add(destination.retained_bytes());
+        let fixed_bytes = arena_bytes.saturating_sub(before_buffers.total());
+        self.metrics.before_bytes = arena_bytes.saturating_add(self.retained_bytes());
+        self.metrics.after_bytes = self.metrics.before_bytes;
+        self.metrics.peak_bytes = self.metrics.peak_bytes.max(self.metrics.before_bytes);
+        let result =
+            self.import_root_inner(source, destination, root, remaining, control, fixed_bytes);
+        self.observe_buffers(
+            destination,
+            fixed_bytes,
+            destination.subset_import_buffers(),
+            0,
+        );
+        let accounted = (|| {
+            Self::add(
+                &mut self.metrics.inserted_nodes,
+                destination.nodes.len() - before_nodes,
+            )?;
+            Self::add(
+                &mut self.metrics.inserted_edges,
+                destination.edges.len() - before_edges,
+            )
+        })();
+        let result = result.and_then(|root| accounted.map(|()| root));
+        if let Err(error) = &result {
+            self.failed = true;
+            #[cfg(feature = "local-search-ab")]
+            eprintln!(
+                "clearra_observation_kind_incremental_import_failed metrics={:?} error={error:?}",
+                self.metrics,
+            );
+            #[cfg(not(feature = "local-search-ab"))]
+            let _ = error;
+        }
+        result
+    }
+
+    fn import_root_inner(
+        &mut self,
+        source: &PieceOrderLanguageCache,
+        destination: &mut PieceOrderLanguageCache,
+        root: u32,
+        remaining: u8,
+        control: &clearra_core_domain::execution_cancellation::ExecutionControl,
+        fixed_bytes: usize,
+    ) -> Result<u32, WasmExactSearchError> {
+        let invalid = WasmExactSearchError::InvalidProblem;
+        self.check_control(control)?;
+        if self
+            .source_arena
+            .as_ref()
+            .is_some_and(|owner| !Arc::ptr_eq(owner, source.arena_identity()))
+            || self
+                .destination_arena
+                .as_ref()
+                .is_some_and(|owner| !Arc::ptr_eq(owner, destination.arena_identity()))
+        {
+            return Err(invalid(
+                "wasm_piece_language_incremental_import_arena_changed",
+            ));
+        }
+        if self.source_arena.is_none() {
+            self.source_arena = Some(Arc::clone(source.arena_identity()));
+        }
+        if self.destination_arena.is_none() {
+            self.destination_arena = Some(Arc::clone(destination.arena_identity()));
+        }
+        let new_nodes = source
+            .nodes
+            .len()
+            .checked_sub(self.observed_source_nodes)
+            .ok_or_else(|| invalid("wasm_piece_language_incremental_import_arena_changed"))?;
+        let new_edges = source
+            .edges
+            .len()
+            .checked_sub(self.observed_source_edges)
+            .ok_or_else(|| invalid("wasm_piece_language_incremental_import_arena_changed"))?;
+        Self::add(&mut self.metrics.source_nodes, new_nodes)?;
+        Self::add(&mut self.metrics.source_edges, new_edges)?;
+        self.observed_source_nodes = source.nodes.len();
+        self.observed_source_edges = source.edges.len();
+        Self::add(&mut self.metrics.root_visits, 1)?;
+        let node = source
+            .nodes
+            .get(root as usize)
+            .ok_or_else(|| invalid("wasm_observation_language_root_out_of_range"))?;
+        if node.remaining_depth != remaining || node.accepting != (remaining == 0) {
+            return Err(invalid("wasm_piece_language_import_depth_mismatch"));
+        }
+
+        if self.rebound.len() < source.nodes.len() {
+            let before_len = self.rebound.len();
+            let before_bytes = self.retained_bytes();
+            let added = source.nodes.len() - before_len;
+            let reserved = self.rebound.try_reserve(added);
+            let grew = self.retained_bytes() != before_bytes;
+            self.observe_buffers(
+                destination,
+                fixed_bytes,
+                destination.subset_import_buffers(),
+                if grew { before_bytes } else { 0 },
+            );
+            reserved.map_err(|_| invalid("wasm_piece_language_import_storage_unavailable"))?;
+            Self::add(&mut self.metrics.mapping_slots, added)?;
+            if grew {
+                // Vec may relocate the previous initialized map on growth.
+                // Count that upper bound instead of hiding its copy cost.
+                Self::add(&mut self.metrics.mapping_slots, before_len)?;
+            }
+            self.rebound.resize(source.nodes.len(), EMPTY_REFERENCE);
+            self.check_control(control)?;
+        }
+        if self.rebound[root as usize] == EMPTY_REFERENCE {
+            let before = destination.subset_import_buffers();
+            destination.ensure_buckets();
+            self.observe_buffers(destination, fixed_bytes, before, 0);
+        }
+        let imported = self.import_node(source, destination, root, control, fixed_bytes)?;
+        self.check_control(control)?;
+        Ok(imported)
+    }
+
+    fn import_node(
+        &mut self,
+        source: &PieceOrderLanguageCache,
+        destination: &mut PieceOrderLanguageCache,
+        root: u32,
+        control: &clearra_core_domain::execution_cancellation::ExecutionControl,
+        fixed_bytes: usize,
+    ) -> Result<u32, WasmExactSearchError> {
+        let invalid = WasmExactSearchError::InvalidProblem;
+        self.check_control(control)?;
+        let index = root as usize;
+        let mapped = self.rebound[index];
+        if mapped != EMPTY_REFERENCE {
+            // Both epochs are pinned and append-only; a mapped language is
+            // immutable. Validate its depth without revisiting its closure.
+            let imported = destination
+                .nodes
+                .get(mapped as usize)
+                .ok_or_else(|| invalid("wasm_piece_language_incremental_import_arena_changed"))?;
+            let original = source.nodes[index];
+            if imported.remaining_depth != original.remaining_depth
+                || imported.accepting != original.accepting
+            {
+                return Err(invalid("wasm_piece_language_import_depth_mismatch"));
+            }
+            return Ok(mapped);
+        }
+        Self::add(&mut self.metrics.node_visits, 1)?;
+        Self::add(&mut self.metrics.reachable_nodes, 1)?;
+        let node = source.nodes[index];
+        let edges = source.subset_import_node_edges(node)?;
+        if node.accepting != (node.remaining_depth == 0) || node.accepting != edges.is_empty() {
+            return Err(invalid("wasm_piece_language_import_depth_mismatch"));
+        }
+        Self::add(&mut self.metrics.reachable_edges, edges.len())?;
+        // Strictly smaller IDs and strictly decreasing depth bound this
+        // postorder stack by u8::MAX; no dense rescan or pending mark is needed.
+        for edge in edges {
+            self.check_control(control)?;
+            Self::add(&mut self.metrics.edge_visits, 1)?;
+            if edge.child() as usize >= index {
+                return Err(invalid("wasm_piece_language_import_not_topological"));
+            }
+            let child = source.nodes[edge.child() as usize];
+            if child.remaining_depth.checked_add(1) != Some(node.remaining_depth) {
+                return Err(invalid("wasm_piece_language_import_depth_mismatch"));
+            }
+            self.import_node(source, destination, edge.child(), control, fixed_bytes)?;
+        }
+        self.check_control(control)?;
+        Self::add(&mut self.metrics.node_visits, 1)?;
+        let imported = destination.import_rebound_node(
+            source,
+            index,
+            &self.rebound,
+            control,
+            fixed_bytes,
+            self.retained_bytes(),
+            &mut self.metrics,
+            &mut self.destination_peak_extra_bytes,
+        )?;
+        // Only a complete exact intern result is published into this map.
+        self.rebound[index] = imported;
+        Ok(imported)
+    }
+
+    fn observe_buffers(
+        &mut self,
+        destination: &PieceOrderLanguageCache,
+        fixed_bytes: usize,
+        before: SubsetImportBuffers,
+        old_map_bytes: usize,
+    ) {
+        let after = destination.subset_import_buffers();
+        let map_bytes = self.retained_bytes();
+        self.metrics
+            .observe_buffers(fixed_bytes, map_bytes, before, after);
+        let replaced = before.replaced_bytes(after);
+        self.destination_peak_extra_bytes = self.destination_peak_extra_bytes.max(replaced);
+        self.map_peak_bytes = self
+            .map_peak_bytes
+            .max(map_bytes.saturating_add(old_map_bytes));
+        self.metrics.peak_bytes = self.metrics.peak_bytes.max(
+            self.metrics
+                .after_bytes
+                .saturating_add(replaced)
+                .saturating_add(old_map_bytes),
+        );
+    }
+
+    fn check_control(
+        &self,
+        control: &clearra_core_domain::execution_cancellation::ExecutionControl,
+    ) -> Result<(), WasmExactSearchError> {
+        if control.is_cancelled() {
+            return Err(WasmExactSearchError::Cancelled);
+        }
+        if self.failed {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "wasm_piece_language_incremental_import_failed",
+            ));
+        }
+        Ok(())
+    }
+
+    fn add(value: &mut usize, amount: usize) -> Result<(), WasmExactSearchError> {
+        *value = value
+            .checked_add(amount)
+            .ok_or(WasmExactSearchError::InvalidProblem(
+                "wasm_piece_language_subset_import_work_overflow",
+            ))?;
+        Ok(())
+    }
+}
+
+#[cfg(all(feature = "placement-dependency-pc", any(test, feature = "parallel")))]
+#[derive(Clone, Copy)]
+struct SubsetImportBuffers([usize; 5]);
+
+#[cfg(all(feature = "placement-dependency-pc", any(test, feature = "parallel")))]
+impl SubsetImportBuffers {
+    fn total(self) -> usize {
+        self.0.into_iter().fold(0, usize::saturating_add)
+    }
+
+    fn replaced_bytes(self, after: Self) -> usize {
+        self.0
+            .into_iter()
+            .zip(after.0)
+            .filter_map(|(before, after)| (before != after).then_some(before))
+            .fold(0, usize::saturating_add)
+    }
+}
+
+#[cfg(all(feature = "placement-dependency-pc", any(test, feature = "parallel")))]
+impl PieceLanguageSubsetImportMetrics {
+    fn observe_buffers(
+        &mut self,
+        fixed_bytes: usize,
+        map_bytes: usize,
+        before: SubsetImportBuffers,
+        after: SubsetImportBuffers,
+    ) {
+        self.after_bytes = fixed_bytes
+            .saturating_add(map_bytes)
+            .saturating_add(after.total());
+        self.peak_bytes = self.peak_bytes.max(
+            self.after_bytes
+                .saturating_add(before.replaced_bytes(after)),
+        );
+    }
+}
+
 /// A language constructed from a separately certified placement poset.
 /// These are residual class-count states, not physical/subset build states.
 #[cfg(any(test, feature = "local-search-ab"))]
@@ -283,6 +697,249 @@ impl PieceOrderLanguageCache {
             rebound.push(self.intern_node(node.accepting, depth)?);
         }
         Ok(rebound)
+    }
+
+    /// Import only the closure of the retained roots into this existing
+    /// arena. Existing destination IDs and both owner identities stay valid.
+    /// The expected depth on each root belongs to the retaining consumer;
+    /// accepting/depth and every labelled child are independently checked.
+    ///
+    /// A single dense map doubles as the mark set. Source children precede
+    /// parents, so one descending pass marks the complete closure and one
+    /// ascending pass reuses the ordinary exact interning kernel. No geometry,
+    /// movement proof, supply product, or physical root is recomputed here.
+    /// An error never returns a partial map. Any already imported destination
+    /// nodes remain valid, and no existing destination node is changed.
+    #[cfg(all(feature = "placement-dependency-pc", any(test, feature = "parallel")))]
+    pub(super) fn import_reachable_node_map(
+        &mut self,
+        source: &Self,
+        roots: impl IntoIterator<Item = (u32, u8)>,
+        control: &clearra_core_domain::execution_cancellation::ExecutionControl,
+    ) -> Result<PieceLanguageSubsetImport, WasmExactSearchError> {
+        let before_nodes = self.nodes.len();
+        let before_edges = self.edges.len();
+        let before_buffers = self.subset_import_buffers();
+        let before_bytes = source
+            .retained_bytes()
+            .saturating_add(self.retained_bytes());
+        // Non-graph cache and scratch capacities stay unchanged during this
+        // append-only import. Measure them once rather than rescanning cached
+        // coverage payload for every imported node.
+        let fixed_bytes = before_bytes.saturating_sub(before_buffers.total());
+        let mut metrics = PieceLanguageSubsetImportMetrics {
+            source_nodes: source.nodes.len(),
+            source_edges: source.edges.len(),
+            before_bytes,
+            after_bytes: before_bytes,
+            peak_bytes: before_bytes,
+            ..PieceLanguageSubsetImportMetrics::default()
+        };
+        let result = self.import_reachable_inner(source, roots, control, fixed_bytes, &mut metrics);
+        metrics.inserted_nodes = self.nodes.len() - before_nodes;
+        metrics.inserted_edges = self.edges.len() - before_edges;
+        match result {
+            Ok(rebound) => Ok(PieceLanguageSubsetImport {
+                source_arena: Arc::clone(source.arena_identity()),
+                destination_arena: Arc::clone(self.arena_identity()),
+                rebound,
+                metrics,
+            }),
+            Err(error) => {
+                #[cfg(feature = "local-search-ab")]
+                eprintln!(
+                    "clearra_observation_kind_subset_import_failed metrics={metrics:?} error={error:?}"
+                );
+                Err(error)
+            }
+        }
+    }
+
+    #[cfg(all(feature = "placement-dependency-pc", any(test, feature = "parallel")))]
+    fn import_reachable_inner(
+        &mut self,
+        source: &Self,
+        roots: impl IntoIterator<Item = (u32, u8)>,
+        control: &clearra_core_domain::execution_cancellation::ExecutionControl,
+        fixed_bytes: usize,
+        metrics: &mut PieceLanguageSubsetImportMetrics,
+    ) -> Result<Vec<u32>, WasmExactSearchError> {
+        const PENDING: u32 = u32::MAX - 1;
+        let invalid = WasmExactSearchError::InvalidProblem;
+        if control.is_cancelled() {
+            return Err(WasmExactSearchError::Cancelled);
+        }
+        // The counters below include map initialization and both full linear
+        // scans, even though unmarked nodes never have their edges inspected.
+        source
+            .nodes
+            .len()
+            .checked_mul(3)
+            .ok_or_else(|| invalid("wasm_piece_language_subset_import_work_overflow"))?;
+        let mut rebound = Vec::new();
+        rebound
+            .try_reserve_exact(source.nodes.len())
+            .map_err(|_| invalid("wasm_piece_language_import_storage_unavailable"))?;
+        rebound.resize(source.nodes.len(), EMPTY_REFERENCE);
+        metrics.mapping_slots = source.nodes.len();
+        let map_bytes = rebound.capacity() * core::mem::size_of::<u32>();
+        let buffers = self.subset_import_buffers();
+        metrics.observe_buffers(fixed_bytes, map_bytes, buffers, buffers);
+
+        for (root, expected_depth) in roots {
+            if metrics.root_visits & 0xfff == 0 && control.is_cancelled() {
+                return Err(WasmExactSearchError::Cancelled);
+            }
+            metrics.root_visits = metrics
+                .root_visits
+                .checked_add(1)
+                .ok_or_else(|| invalid("wasm_piece_language_subset_import_work_overflow"))?;
+            let node = source
+                .nodes
+                .get(root as usize)
+                .ok_or_else(|| invalid("wasm_observation_language_root_out_of_range"))?;
+            if node.remaining_depth != expected_depth || node.accepting != (expected_depth == 0) {
+                return Err(invalid("wasm_piece_language_import_depth_mismatch"));
+            }
+            rebound[root as usize] = PENDING;
+        }
+
+        if metrics.root_visits != 0 {
+            for index in (0..source.nodes.len()).rev() {
+                if index & 0xfff == 0 && control.is_cancelled() {
+                    return Err(WasmExactSearchError::Cancelled);
+                }
+                metrics.mapping_slots += 1;
+                if rebound[index] != PENDING {
+                    continue;
+                }
+                metrics.node_visits += 1;
+                metrics.reachable_nodes += 1;
+                let node = source.nodes[index];
+                let edges = source.subset_import_node_edges(node)?;
+                metrics.reachable_edges += edges.len();
+                for edge in edges {
+                    metrics.edge_visits += 1;
+                    if edge.child() as usize >= index {
+                        return Err(invalid("wasm_piece_language_import_not_topological"));
+                    }
+                    rebound[edge.child() as usize] = PENDING;
+                }
+            }
+
+            let before = self.subset_import_buffers();
+            self.ensure_buckets();
+            metrics.observe_buffers(fixed_bytes, map_bytes, before, self.subset_import_buffers());
+            let mut destination_peak_extra = 0;
+            for index in 0..source.nodes.len() {
+                if index & 0xfff == 0 && control.is_cancelled() {
+                    return Err(WasmExactSearchError::Cancelled);
+                }
+                metrics.mapping_slots += 1;
+                if rebound[index] != PENDING {
+                    continue;
+                }
+                metrics.node_visits += 1;
+                rebound[index] = self.import_rebound_node(
+                    source,
+                    index,
+                    &rebound,
+                    control,
+                    fixed_bytes,
+                    map_bytes,
+                    metrics,
+                    &mut destination_peak_extra,
+                )?;
+            }
+        }
+        if control.is_cancelled() {
+            return Err(WasmExactSearchError::Cancelled);
+        }
+        Ok(rebound)
+    }
+
+    /// Shared exact node-copy kernel for completed-batch and incremental
+    /// imports. Every labelled child is rebound; equal kinds never select a
+    /// single child. Callers prove the child closure before entering here.
+    #[cfg(all(feature = "placement-dependency-pc", any(test, feature = "parallel")))]
+    fn import_rebound_node(
+        &mut self,
+        source: &Self,
+        index: usize,
+        rebound: &[u32],
+        control: &clearra_core_domain::execution_cancellation::ExecutionControl,
+        fixed_bytes: usize,
+        map_bytes: usize,
+        metrics: &mut PieceLanguageSubsetImportMetrics,
+        destination_peak_extra: &mut usize,
+    ) -> Result<u32, WasmExactSearchError> {
+        let invalid = WasmExactSearchError::InvalidProblem;
+        let node = source.nodes[index];
+        let edges = source.subset_import_node_edges(node)?;
+        self.edge_scratch.clear();
+        let before = self.subset_import_buffers();
+        let reserved = self.edge_scratch.try_reserve(edges.len());
+        let after = self.subset_import_buffers();
+        metrics.observe_buffers(fixed_bytes, map_bytes, before, after);
+        *destination_peak_extra = (*destination_peak_extra).max(before.replaced_bytes(after));
+        reserved.map_err(|_| invalid("wasm_piece_language_import_storage_unavailable"))?;
+        for (ordinal, edge) in edges.iter().enumerate() {
+            if ordinal & 0xfff == 0 && control.is_cancelled() {
+                return Err(WasmExactSearchError::Cancelled);
+            }
+            PieceLanguageIncrementalImport::add(&mut metrics.edge_visits, 1)?;
+            let child = rebound
+                .get(edge.child() as usize)
+                .copied()
+                .filter(|&child| child < u32::MAX - 1)
+                .ok_or_else(|| invalid("wasm_piece_language_import_not_topological"))?;
+            if edge.child() as usize >= index {
+                return Err(invalid("wasm_piece_language_import_not_topological"));
+            }
+            self.edge_scratch.push(
+                CanonicalPieceEdge::new(child, edge.piece_code())
+                    .ok_or_else(|| invalid("wasm_piece_language_child_index_overflow"))?,
+            );
+        }
+        self.edge_scratch.sort_unstable();
+        self.edge_scratch.dedup();
+        let depth = self.remaining_depth(node.accepting)?;
+        if depth != node.remaining_depth {
+            return Err(invalid("wasm_piece_language_import_depth_mismatch"));
+        }
+        let before = self.subset_import_buffers();
+        let imported = self.intern_node(node.accepting, depth);
+        let after = self.subset_import_buffers();
+        metrics.observe_buffers(fixed_bytes, map_bytes, before, after);
+        *destination_peak_extra = (*destination_peak_extra).max(before.replaced_bytes(after));
+        imported
+    }
+
+    #[cfg(all(feature = "placement-dependency-pc", any(test, feature = "parallel")))]
+    fn subset_import_node_edges(
+        &self,
+        node: CanonicalPieceNode,
+    ) -> Result<&[CanonicalPieceEdge], WasmExactSearchError> {
+        let start = node.edge_start as usize;
+        let end = start.checked_add(usize::from(node.edge_count)).ok_or(
+            WasmExactSearchError::InvalidProblem("wasm_piece_language_import_edge_range_invalid"),
+        )?;
+        self.edges
+            .get(start..end)
+            .ok_or(WasmExactSearchError::InvalidProblem(
+                "wasm_piece_language_import_edge_range_invalid",
+            ))
+    }
+
+    #[cfg(all(feature = "placement-dependency-pc", any(test, feature = "parallel")))]
+    fn subset_import_buffers(&self) -> SubsetImportBuffers {
+        SubsetImportBuffers([
+            self.nodes.capacity() * core::mem::size_of::<CanonicalPieceNode>(),
+            self.edges.capacity() * core::mem::size_of::<CanonicalPieceEdge>(),
+            self.piece_range_ends.capacity() * core::mem::size_of::<[u8; 7]>(),
+            self.bucket_heads.capacity() * core::mem::size_of::<u32>(),
+            self.edge_scratch.capacity() * core::mem::size_of::<CanonicalPieceEdge>(),
+        ])
     }
 
     /// A numeric root is scoped to its source owner and must never be copied
@@ -648,6 +1305,52 @@ impl PieceOrderLanguageCache {
         )
     }
 
+    /// Compile only the exact suffixes at and below the requested prefix
+    /// depth. Every child of a retained prefix is also retained, so the
+    /// ordinary bottom-up kernel computes exactly the same language at each
+    /// retained prefix. No source-relative filtering or determinization is
+    /// performed here. The typed producer still owns validity of the whole
+    /// prefix relation, including the shallow guards we do not inspect.
+    #[cfg(feature = "placement-dependency-pc")]
+    pub(super) fn compile_product_prefix_suffixes_with_residuals(
+        &mut self,
+        pieces: &[PieceKind],
+        permitted_parents: &[[u64; super::symbolic_prefix_domain::MAX_PREFIX_WORDS]],
+        active: &[u64; super::symbolic_prefix_domain::MAX_PREFIX_WORDS],
+        min_prefix_depth: u8,
+        inspected_edges: &mut usize,
+        residuals: &mut Vec<u32>,
+    ) -> Result<PrefixSuffixCompilation, WasmExactSearchError> {
+        residuals.clear();
+        let (domain, has_path) =
+            Self::checked_prefix_language_domain(pieces, permitted_parents, active)?;
+        if usize::from(min_prefix_depth) > pieces.len() {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "wasm_symbolic_prefix_language_bound_inconsistent",
+            ));
+        }
+        let full = domain.terminal();
+        if !has_path {
+            residuals.try_reserve_exact(full + 1).map_err(|_| {
+                WasmExactSearchError::InvalidProblem(
+                    "wasm_observation_dependency_storage_unavailable",
+                )
+            })?;
+            residuals.resize(full + 1, EMPTY_REFERENCE);
+            return Ok(PrefixSuffixCompilation::EmptyRelation);
+        }
+        let classes = self.compile_prefix_suffix_classes(
+            pieces,
+            permitted_parents,
+            active,
+            full,
+            min_prefix_depth,
+            inspected_edges,
+        )?;
+        Self::publish_prefix_suffix_classes(residuals, &classes[..=full])?;
+        Ok(PrefixSuffixCompilation::Compiled)
+    }
+
     #[cfg(any(
         test,
         all(
@@ -680,32 +1383,15 @@ impl PieceOrderLanguageCache {
         _explicit_frontier_budget: Option<usize>,
         mut residuals: Option<&mut Vec<u32>>,
     ) -> Result<Option<u32>, WasmExactSearchError> {
-        use super::symbolic_prefix_domain::{PrefixDomain, MAX_PREFIX_WORDS};
-
-        let invalid = || {
-            WasmExactSearchError::InvalidProblem("wasm_symbolic_prefix_language_bound_inconsistent")
-        };
         if let Some(residuals) = residuals.as_mut() {
             residuals.clear();
         }
-        let domain = PrefixDomain::new(pieces.len()).ok_or_else(invalid)?;
-        if pieces.len() != permitted_parents.len() {
-            return Err(invalid());
-        }
-        if active.iter().all(|&word| word == 0) {
+        let (domain, has_path) =
+            Self::checked_prefix_language_domain(pieces, permitted_parents, active)?;
+        if !has_path {
             return Ok(None);
         }
         let full = domain.terminal();
-        let last = full / 64;
-        let terminal_bit = 1_u64 << (full % 64);
-        let last_valid = domain.nonterminal_lanes(last) | terminal_bit;
-        if active[0] & 1 == 0
-            || active[last] & terminal_bit == 0
-            || active[last] & !last_valid != 0
-            || active[last + 1..].iter().any(|&word| word != 0)
-        {
-            return Err(invalid());
-        }
         #[cfg(any(
             test,
             all(
@@ -741,6 +1427,84 @@ impl PieceOrderLanguageCache {
                 }
             }
         }
+        let classes = self.compile_prefix_suffix_classes(
+            pieces,
+            permitted_parents,
+            active,
+            full,
+            0,
+            inspected_edges,
+        )?;
+        if let Some(residuals) = residuals {
+            Self::publish_prefix_suffix_classes(residuals, &classes[..=full])?;
+        }
+        Ok(Some(classes[0]))
+    }
+
+    #[cfg(any(
+        test,
+        feature = "placement-dependency-pc",
+        all(
+            feature = "local-search-ab",
+            feature = "parallel",
+            not(target_family = "wasm")
+        )
+    ))]
+    fn checked_prefix_language_domain(
+        pieces: &[PieceKind],
+        permitted_parents: &[[u64; super::symbolic_prefix_domain::MAX_PREFIX_WORDS]],
+        active: &[u64; super::symbolic_prefix_domain::MAX_PREFIX_WORDS],
+    ) -> Result<(super::symbolic_prefix_domain::PrefixDomain, bool), WasmExactSearchError> {
+        use super::symbolic_prefix_domain::PrefixDomain;
+
+        let invalid = || {
+            WasmExactSearchError::InvalidProblem("wasm_symbolic_prefix_language_bound_inconsistent")
+        };
+        let domain = PrefixDomain::new(pieces.len()).ok_or_else(invalid)?;
+        if pieces.len() != permitted_parents.len() {
+            return Err(invalid());
+        }
+        let has_path = active.iter().any(|&word| word != 0);
+        if has_path {
+            let full = domain.terminal();
+            let last = full / 64;
+            let terminal_bit = 1_u64 << (full % 64);
+            let last_valid = domain.nonterminal_lanes(last) | terminal_bit;
+            if active[0] & 1 == 0
+                || active[last] & terminal_bit == 0
+                || active[last] & !last_valid != 0
+                || active[last + 1..].iter().any(|&word| word != 0)
+            {
+                return Err(invalid());
+            }
+        }
+        Ok((domain, has_path))
+    }
+
+    #[cfg(any(
+        test,
+        feature = "placement-dependency-pc",
+        all(
+            feature = "local-search-ab",
+            feature = "parallel",
+            not(target_family = "wasm")
+        )
+    ))]
+    fn compile_prefix_suffix_classes(
+        &mut self,
+        pieces: &[PieceKind],
+        permitted_parents: &[[u64; super::symbolic_prefix_domain::MAX_PREFIX_WORDS]],
+        active: &[u64; super::symbolic_prefix_domain::MAX_PREFIX_WORDS],
+        full: usize,
+        min_prefix_depth: u8,
+        inspected_edges: &mut usize,
+    ) -> Result<[u32; super::symbolic_prefix_domain::MAX_PREFIX_WORDS * 64], WasmExactSearchError>
+    {
+        use super::symbolic_prefix_domain::MAX_PREFIX_WORDS;
+
+        let invalid = || {
+            WasmExactSearchError::InvalidProblem("wasm_symbolic_prefix_language_bound_inconsistent")
+        };
         self.ensure_buckets();
         self.edge_scratch.clear();
         self.edge_scratch.try_reserve(pieces.len()).map_err(|_| {
@@ -749,13 +1513,16 @@ impl PieceOrderLanguageCache {
             )
         })?;
         let mut classes = [EMPTY_REFERENCE; MAX_PREFIX_WORDS * 64];
-        for (word, &active_word) in active[..=last].iter().enumerate().rev() {
+        for (word, &active_word) in active[..=full / 64].iter().enumerate().rev() {
             let mut uncompiled = active_word;
             while uncompiled != 0 {
                 let lane = (u64::BITS - 1 - uncompiled.leading_zeros()) as usize;
                 let subset = word * 64 + lane;
                 let bit = 1_u64 << lane;
                 uncompiled ^= bit;
+                if subset.count_ones() < u32::from(min_prefix_depth) {
+                    continue;
+                }
                 self.edge_scratch.clear();
                 for (operation, (&piece, parent)) in
                     pieces.iter().zip(permitted_parents).enumerate()
@@ -786,15 +1553,27 @@ impl PieceOrderLanguageCache {
                 classes[subset] = self.intern_node(accepting, depth)?;
             }
         }
-        if let Some(residuals) = residuals {
-            residuals.try_reserve_exact(full + 1).map_err(|_| {
-                WasmExactSearchError::InvalidProblem(
-                    "wasm_observation_dependency_storage_unavailable",
-                )
-            })?;
-            residuals.extend_from_slice(&classes[..=full]);
-        }
-        Ok(Some(classes[0]))
+        Ok(classes)
+    }
+
+    #[cfg(any(
+        test,
+        feature = "placement-dependency-pc",
+        all(
+            feature = "local-search-ab",
+            feature = "parallel",
+            not(target_family = "wasm")
+        )
+    ))]
+    fn publish_prefix_suffix_classes(
+        residuals: &mut Vec<u32>,
+        classes: &[u32],
+    ) -> Result<(), WasmExactSearchError> {
+        residuals.try_reserve_exact(classes.len()).map_err(|_| {
+            WasmExactSearchError::InvalidProblem("wasm_observation_dependency_storage_unavailable")
+        })?;
+        residuals.extend_from_slice(classes);
+        Ok(())
     }
 
     /// Consume an exact BFS operation-mask traversal, without repeating any
@@ -1654,6 +2433,9 @@ const fn piece_code(piece: clearra_core_domain::piece::piece_kind::PieceKind) ->
 mod tests {
     use std::collections::BTreeSet;
 
+    #[cfg(feature = "placement-dependency-pc")]
+    use super::{PrefixSuffixCompilation, EMPTY_REFERENCE};
+
     use clearra_core_domain::piece::{piece_kind::PieceKind, rotation::RotationState};
 
     use super::{
@@ -1724,6 +2506,451 @@ mod tests {
         let mut output = BTreeSet::new();
         visit(cache, root, &mut Vec::new(), &mut output);
         output
+    }
+
+    #[cfg(feature = "placement-dependency-pc")]
+    mod subset_import {
+        use std::sync::Arc;
+
+        use clearra_core_domain::execution_cancellation::ExecutionControl;
+
+        use super::super::PieceLanguageIncrementalImport;
+        use super::{words, CanonicalPieceEdge, PieceOrderLanguageCache};
+        use crate::backend::wasm_cpu::WasmExactSearchError;
+
+        fn node(cache: &mut PieceOrderLanguageCache, edges: &[(u8, u32)]) -> u32 {
+            cache.ensure_buckets();
+            cache.edge_scratch = edges
+                .iter()
+                .map(|&(piece, child)| CanonicalPieceEdge::new(child, piece).unwrap())
+                .collect();
+            cache.edge_scratch.sort_unstable();
+            cache.edge_scratch.dedup();
+            let accepting = edges.is_empty();
+            let remaining = cache.remaining_depth(accepting).unwrap();
+            cache.intern_node(accepting, remaining).unwrap()
+        }
+
+        #[test]
+        fn retained_closure_matches_full_import_and_preserves_same_kind_alternatives() {
+            let control = ExecutionControl::default();
+            let mut source = PieceOrderLanguageCache::default();
+            let terminal = node(&mut source, &[]);
+            let i = node(&mut source, &[(1, terminal)]);
+            let o = node(&mut source, &[(2, terminal)]);
+            // The kind arena is an NFA: both children of I are required.
+            let retained = node(&mut source, &[(1, i), (1, o)]);
+            let oracle_only = node(&mut source, &[(3, retained)]);
+            let source_owner = Arc::clone(source.arena_identity());
+
+            let mut destination = PieceOrderLanguageCache::default();
+            let old_terminal = node(&mut destination, &[]);
+            let old_o = node(&mut destination, &[(2, old_terminal)]);
+            let old_words = words(&destination, old_o);
+            let destination_owner = Arc::clone(destination.arena_identity());
+            let imported = destination
+                .import_reachable_node_map(&source, [(retained, 2), (retained, 2)], &control)
+                .unwrap();
+            let rebound = imported.rebound_for(&source, &destination).unwrap();
+            assert_eq!(rebound[oracle_only as usize], u32::MAX);
+            assert_eq!(rebound[o as usize], old_o);
+            let root = rebound[retained as usize];
+            assert_eq!(destination.edges_for_piece(root, 1).unwrap().len(), 2);
+            assert_eq!(words(&destination, root), words(&source, retained));
+            assert_eq!(words(&destination, old_o), old_words);
+            assert!(Arc::ptr_eq(&source_owner, source.arena_identity()));
+            assert!(Arc::ptr_eq(
+                &destination_owner,
+                destination.arena_identity()
+            ));
+
+            let mut complete = PieceOrderLanguageCache::default();
+            let complete_map = complete.import_node_map(&source).unwrap();
+            assert_eq!(
+                words(&destination, root),
+                words(&complete, complete_map[retained as usize])
+            );
+            let metrics = imported.metrics();
+            assert_eq!((metrics.source_nodes, metrics.reachable_nodes), (5, 4));
+            assert_eq!((metrics.source_edges, metrics.reachable_edges), (5, 4));
+            assert_eq!(
+                (
+                    metrics.root_visits,
+                    metrics.node_visits,
+                    metrics.edge_visits
+                ),
+                (2, 8, 8)
+            );
+            assert_eq!(metrics.mapping_slots, 3 * source.node_count());
+            assert_eq!((metrics.inserted_nodes, metrics.inserted_edges), (2, 3));
+            assert!(metrics.after_bytes >= metrics.before_bytes + imported.retained_bytes());
+            assert!(metrics.peak_bytes >= metrics.after_bytes);
+            assert!(destination.node_count() < complete.node_count());
+        }
+
+        #[test]
+        fn subset_maps_pin_both_epochs_but_allow_append_only_imports() {
+            let control = ExecutionControl::default();
+            let mut source = PieceOrderLanguageCache::default();
+            let terminal = node(&mut source, &[]);
+            let root = node(&mut source, &[(1, terminal)]);
+            let mut destination = PieceOrderLanguageCache::default();
+            let imported = destination
+                .import_reachable_node_map(&source, [(root, 1)], &control)
+                .unwrap();
+            let imported_terminal =
+                imported.rebound_for(&source, &destination).unwrap()[terminal as usize];
+            node(&mut destination, &[(2, imported_terminal)]);
+            assert!(imported.rebound_for(&source, &destination).is_ok());
+            let other = PieceOrderLanguageCache::default();
+            assert!(imported.rebound_for(&other, &destination).is_err());
+            assert!(imported.rebound_for(&source, &other).is_err());
+            source.clear_retain_capacity();
+            assert!(matches!(
+                imported.rebound_for(&source, &destination),
+                Err(WasmExactSearchError::InvalidProblem(
+                    "wasm_piece_language_subset_import_arena_changed"
+                ))
+            ));
+            // Resetting an owner and reusing the same small numeric IDs
+            // never revives a map from the previous epoch.
+            node(&mut source, &[]);
+            node(&mut source, &[(1, 0)]);
+            assert!(imported.rebound_for(&source, &destination).is_err());
+            destination.clear_retain_capacity();
+            assert!(imported.rebound_for(&source, &destination).is_err());
+        }
+
+        #[test]
+        fn subset_import_refuses_partial_malformed_and_cancelled_results() {
+            let control = ExecutionControl::default();
+            let mut source = PieceOrderLanguageCache::default();
+            let terminal = node(&mut source, &[]);
+            let i = node(&mut source, &[(1, terminal)]);
+            let root = node(&mut source, &[(2, i)]);
+            let mut destination = PieceOrderLanguageCache::default();
+            let owner = Arc::clone(destination.arena_identity());
+
+            // The terminal is copied before the malformed child is reached.
+            // No partial map escapes, and the copied terminal remains valid.
+            source.nodes[i as usize].remaining_depth = 2;
+            assert!(matches!(
+                destination.import_reachable_node_map(&source, [(root, 2)], &control),
+                Err(WasmExactSearchError::InvalidProblem(
+                    "wasm_piece_language_import_depth_mismatch"
+                ))
+            ));
+            assert_eq!(destination.node_count(), 1);
+            assert!(destination.node(0).unwrap().accepting);
+            assert!(Arc::ptr_eq(&owner, destination.arena_identity()));
+            source.nodes[i as usize].remaining_depth = 1;
+            let complete = destination
+                .import_reachable_node_map(&source, [(root, 2)], &control)
+                .unwrap();
+            let copied = complete.rebound_for(&source, &destination).unwrap()[root as usize];
+            assert_eq!(words(&source, root), words(&destination, copied));
+
+            let before = (destination.node_count(), destination.edge_count());
+            assert!(destination
+                .import_reachable_node_map(&source, [(root, 1)], &control)
+                .is_err());
+            let edge = source.nodes[root as usize].edge_start as usize;
+            source.edges[edge] = CanonicalPieceEdge::new(root, 2).unwrap();
+            assert!(matches!(
+                destination.import_reachable_node_map(&source, [(root, 2)], &control),
+                Err(WasmExactSearchError::InvalidProblem(
+                    "wasm_piece_language_import_not_topological"
+                ))
+            ));
+            assert_eq!(before, (destination.node_count(), destination.edge_count()));
+            control.cancellation.handle().cancel();
+            assert!(matches!(
+                destination.import_reachable_node_map(&source, [(root, 2)], &control),
+                Err(WasmExactSearchError::Cancelled)
+            ));
+            assert_eq!(before, (destination.node_count(), destination.edge_count()));
+        }
+
+        #[test]
+        fn incremental_import_matches_full_nfa_and_reuses_completed_roots_after_append() {
+            let control = ExecutionControl::default();
+            let mut source = PieceOrderLanguageCache::default();
+            let terminal = node(&mut source, &[]);
+            let i = node(&mut source, &[(1, terminal)]);
+            let o = node(&mut source, &[(2, terminal)]);
+            let root = node(&mut source, &[(1, i), (1, o)]);
+            let mut destination = PieceOrderLanguageCache::default();
+            let mut importer = PieceLanguageIncrementalImport::default();
+            let imported = importer
+                .import_root(&source, &mut destination, root, 2, &control)
+                .unwrap();
+            assert_eq!(words(&source, root), words(&destination, imported));
+            assert_eq!(destination.edges_for_piece(imported, 1).unwrap().len(), 2);
+            let first = importer.metrics();
+            assert_eq!(
+                (
+                    first.source_nodes,
+                    first.reachable_nodes,
+                    first.inserted_nodes
+                ),
+                (4, 4, 4)
+            );
+            assert_eq!(
+                (
+                    first.source_edges,
+                    first.reachable_edges,
+                    first.inserted_edges
+                ),
+                (4, 4, 4)
+            );
+            assert_eq!(
+                (first.root_visits, first.node_visits, first.edge_visits),
+                (1, 8, 8)
+            );
+            assert_eq!(first.mapping_slots, source.node_count());
+
+            let destination_count = destination.node_count();
+            assert_eq!(
+                importer
+                    .import_root(&source, &mut destination, root, 2, &control)
+                    .unwrap(),
+                imported
+            );
+            let hit = importer.metrics();
+            assert_eq!(hit.root_visits, first.root_visits + 1);
+            assert_eq!(
+                (hit.node_visits, hit.edge_visits, hit.mapping_slots),
+                (first.node_visits, first.edge_visits, first.mapping_slots)
+            );
+            assert_eq!(destination.node_count(), destination_count);
+
+            let old_map_bytes = importer.retained_bytes();
+            let mut unused = root;
+            for _ in 0..48 {
+                unused = node(&mut source, &[(3, unused)]);
+            }
+            assert_eq!(
+                importer
+                    .import_root(&source, &mut destination, root, 2, &control)
+                    .unwrap(),
+                imported
+            );
+            let appended = importer.metrics();
+            assert_eq!(appended.source_nodes, source.node_count());
+            assert_eq!(appended.source_edges, source.edge_count());
+            assert_eq!(
+                (appended.node_visits, appended.edge_visits),
+                (first.node_visits, first.edge_visits)
+            );
+            assert_eq!(destination.node_count(), destination_count);
+            assert!(appended.mapping_slots >= source.node_count());
+            assert!(importer.peak_bytes() >= importer.retained_bytes() + old_map_bytes);
+            assert!(appended.peak_bytes >= appended.after_bytes);
+
+            let mut complete = PieceOrderLanguageCache::default();
+            let full = complete.import_node_map(&source).unwrap();
+            assert_eq!(
+                words(&destination, imported),
+                words(&complete, full[root as usize])
+            );
+            assert!(destination.node_count() < complete.node_count());
+            assert!(source.node(unused).unwrap().remaining_depth > 2);
+        }
+
+        #[test]
+        fn incremental_import_two_workers_share_exact_destination_without_id_changes() {
+            let control = ExecutionControl::default();
+            let mut first_source = PieceOrderLanguageCache::default();
+            let terminal = node(&mut first_source, &[]);
+            let child = node(&mut first_source, &[(1, terminal)]);
+            let first_root = node(&mut first_source, &[(2, child)]);
+            let mut second_source = PieceOrderLanguageCache::default();
+            let terminal = node(&mut second_source, &[]);
+            node(&mut second_source, &[(7, terminal)]); // Different numeric IDs.
+            let child = node(&mut second_source, &[(1, terminal)]);
+            let second_root = node(&mut second_source, &[(2, child)]);
+            let mut destination = PieceOrderLanguageCache::default();
+            let mut first = PieceLanguageIncrementalImport::default();
+            let mut second = PieceLanguageIncrementalImport::default();
+            let a = first
+                .import_root(&first_source, &mut destination, first_root, 2, &control)
+                .unwrap();
+            let count = destination.node_count();
+            let owner = Arc::clone(destination.arena_identity());
+            let b = second
+                .import_root(&second_source, &mut destination, second_root, 2, &control)
+                .unwrap();
+            assert_eq!(a, b);
+            assert_eq!(destination.node_count(), count);
+            assert!(Arc::ptr_eq(&owner, destination.arena_identity()));
+            assert_eq!(
+                (
+                    second.metrics().inserted_nodes,
+                    second.metrics().inserted_edges
+                ),
+                (0, 0)
+            );
+            assert_eq!(second.metrics().reachable_nodes, 3);
+            assert_eq!(
+                first
+                    .import_root(&first_source, &mut destination, first_root, 2, &control)
+                    .unwrap(),
+                a
+            );
+        }
+
+        #[test]
+        fn incremental_import_source_reset_preserves_destination_and_cumulative_evidence() {
+            let control = ExecutionControl::default();
+            let mut source = PieceOrderLanguageCache::default();
+            let terminal = node(&mut source, &[]);
+            let first = node(&mut source, &[(1, terminal)]);
+            let mut destination = PieceOrderLanguageCache::default();
+            let mut importer = PieceLanguageIncrementalImport::default();
+            let i = importer
+                .import_root(&source, &mut destination, first, 1, &control)
+                .unwrap();
+            let before = importer.metrics();
+            let map_bytes = importer.retained_bytes();
+            let peak = importer.peak_bytes();
+            importer.reset_source();
+            source.clear_retain_capacity();
+            let terminal = node(&mut source, &[]);
+            let second = node(&mut source, &[(2, terminal)]);
+            assert_eq!(first, second); // Same numeric source root, a new epoch/language.
+            let o = importer
+                .import_root(&source, &mut destination, second, 1, &control)
+                .unwrap();
+            assert_ne!(i, o);
+            assert_eq!(words(&destination, o), words(&source, second));
+            assert_eq!(importer.retained_bytes(), map_bytes);
+            assert!(importer.peak_bytes() >= peak);
+            let after = importer.metrics();
+            assert_eq!(
+                after.source_nodes,
+                before.source_nodes + source.node_count()
+            );
+            assert_eq!(
+                after.source_edges,
+                before.source_edges + source.edge_count()
+            );
+            assert_eq!(
+                after.mapping_slots,
+                before.mapping_slots + source.node_count()
+            );
+            assert_eq!(after.root_visits, before.root_visits + 1);
+            assert!(after.peak_bytes >= after.after_bytes);
+            assert!(
+                after.after_bytes
+                    >= source.retained_bytes()
+                        + destination.retained_bytes()
+                        + importer.retained_bytes()
+            );
+
+            // Explicit source recycling never grants a new destination epoch.
+            importer.reset_source();
+            destination.clear_retain_capacity();
+            assert!(matches!(
+                importer.import_root(&source, &mut destination, second, 1, &control),
+                Err(WasmExactSearchError::InvalidProblem(
+                    "wasm_piece_language_incremental_import_arena_changed"
+                ))
+            ));
+            importer.reset_source();
+            assert!(matches!(
+                importer.import_root(&source, &mut destination, second, 1, &control),
+                Err(WasmExactSearchError::InvalidProblem(
+                    "wasm_piece_language_incremental_import_failed"
+                ))
+            ));
+        }
+
+        #[test]
+        fn incremental_import_refuses_unannounced_source_epoch_and_cancelled_cache_hits() {
+            let control = ExecutionControl::default();
+            let mut source = PieceOrderLanguageCache::default();
+            let terminal = node(&mut source, &[]);
+            let root = node(&mut source, &[(1, terminal)]);
+            let mut destination = PieceOrderLanguageCache::default();
+            let mut importer = PieceLanguageIncrementalImport::default();
+            importer
+                .import_root(&source, &mut destination, root, 1, &control)
+                .unwrap();
+            source.clear_retain_capacity();
+            let terminal = node(&mut source, &[]);
+            let root = node(&mut source, &[(2, terminal)]);
+            assert!(matches!(
+                importer.import_root(&source, &mut destination, root, 1, &control),
+                Err(WasmExactSearchError::InvalidProblem(
+                    "wasm_piece_language_incremental_import_arena_changed"
+                ))
+            ));
+
+            let mut importer = PieceLanguageIncrementalImport::default();
+            importer
+                .import_root(&source, &mut destination, root, 1, &control)
+                .unwrap();
+            let before = importer.metrics();
+            let counts = (destination.node_count(), destination.edge_count());
+            let cancelled = ExecutionControl::default();
+            cancelled.cancellation.handle().cancel();
+            assert!(matches!(
+                importer.import_root(&source, &mut destination, root, 1, &cancelled),
+                Err(WasmExactSearchError::Cancelled)
+            ));
+            assert_eq!(
+                (
+                    importer.metrics().root_visits,
+                    importer.metrics().node_visits
+                ),
+                (before.root_visits, before.node_visits)
+            );
+            assert_eq!((destination.node_count(), destination.edge_count()), counts);
+            importer.reset_source();
+            assert!(matches!(
+                importer.import_root(&source, &mut destination, root, 1, &control),
+                Err(WasmExactSearchError::InvalidProblem(
+                    "wasm_piece_language_incremental_import_failed"
+                ))
+            ));
+        }
+
+        #[test]
+        fn incremental_import_partial_failure_never_publishes_a_root_or_revives_the_owner() {
+            let control = ExecutionControl::default();
+            let mut source = PieceOrderLanguageCache::default();
+            let terminal = node(&mut source, &[]);
+            let i = node(&mut source, &[(1, terminal)]);
+            let o = node(&mut source, &[(2, terminal)]);
+            let root = node(&mut source, &[(1, i), (2, o)]);
+            source.nodes[o as usize].remaining_depth = 2;
+            let mut destination = PieceOrderLanguageCache::default();
+            let mut importer = PieceLanguageIncrementalImport::default();
+            assert!(matches!(
+                importer.import_root(&source, &mut destination, root, 2, &control),
+                Err(WasmExactSearchError::InvalidProblem(
+                    "wasm_piece_language_import_depth_mismatch"
+                ))
+            ));
+            assert_eq!(destination.node_count(), 2); // Valid terminal and I remain append-only.
+            assert_eq!(importer.metrics().inserted_nodes, 2);
+            assert!(importer.metrics().peak_bytes >= importer.metrics().after_bytes);
+            source.nodes[o as usize].remaining_depth = 1;
+            assert!(matches!(
+                importer.import_root(&source, &mut destination, root, 2, &control),
+                Err(WasmExactSearchError::InvalidProblem(
+                    "wasm_piece_language_incremental_import_failed"
+                ))
+            ));
+
+            let mut fresh = PieceLanguageIncrementalImport::default();
+            let imported = fresh
+                .import_root(&source, &mut destination, root, 2, &control)
+                .unwrap();
+            assert_eq!(words(&source, root), words(&destination, imported));
+            assert_eq!(fresh.metrics().inserted_nodes, 2);
+            assert!(fresh.destination_peak_extra_bytes() <= fresh.metrics().peak_bytes);
+        }
     }
 
     fn prefix_path_masks<const N: usize>(
@@ -1797,6 +3024,204 @@ mod tests {
             BTreeSet::from([vec![1, 1, 2], vec![1, 2, 1]])
         );
         assert_eq!(cache.frontier_compilations(), 0);
+    }
+
+    #[cfg(feature = "placement-dependency-pc")]
+    #[test]
+    fn product_suffixes_preserve_every_retained_language_and_same_kind_choice() {
+        use PieceKind::{I, J, O};
+
+        // The common J prefix leaves two I transitions with incomparable,
+        // overlapping suffix languages. A suffix compiler must preserve both.
+        let pieces = [J, I, I, O];
+        let (parents, active) = prefix_path_masks(&[[0, 1, 3, 2], [0, 2, 1, 3], [0, 2, 3, 1]]);
+        let mut complete = PieceOrderLanguageCache::default();
+        let mut full_residuals = Vec::new();
+        let mut full_edges = 0;
+        complete
+            .compile_product_closed_prefix_language_with_residuals(
+                &pieces,
+                &parents,
+                &active,
+                &mut full_edges,
+                &mut full_residuals,
+            )
+            .unwrap()
+            .unwrap();
+        for min_depth in 0..=pieces.len() as u8 {
+            let mut suffixes = PieceOrderLanguageCache::default();
+            let mut residuals = vec![17];
+            let mut inspected = 0;
+            assert_eq!(
+                suffixes
+                    .compile_product_prefix_suffixes_with_residuals(
+                        &pieces,
+                        &parents,
+                        &active,
+                        min_depth,
+                        &mut inspected,
+                        &mut residuals,
+                    )
+                    .unwrap(),
+                PrefixSuffixCompilation::Compiled
+            );
+            assert_eq!(residuals.len(), full_residuals.len());
+            for (prefix, (&full, &suffix)) in full_residuals.iter().zip(&residuals).enumerate() {
+                if full == EMPTY_REFERENCE || prefix.count_ones() < u32::from(min_depth) {
+                    assert_eq!(suffix, EMPTY_REFERENCE);
+                } else {
+                    assert_eq!(words(&suffixes, suffix), words(&complete, full));
+                    assert_eq!(
+                        suffixes.node(suffix).unwrap().remaining_depth,
+                        pieces.len() as u8 - prefix.count_ones() as u8
+                    );
+                }
+            }
+            assert!(inspected <= full_edges);
+            assert_eq!(suffixes.frontier_compilations(), 0);
+            if min_depth == 1 {
+                assert_eq!(suffixes.edges_for_piece(residuals[1], 1).unwrap().len(), 2);
+            }
+            if min_depth != 0 {
+                assert_eq!(residuals[0], EMPTY_REFERENCE);
+                assert!(suffixes.node_count() < complete.node_count());
+                assert!(inspected < full_edges);
+            }
+            if min_depth == pieces.len() as u8 {
+                assert_eq!(inspected, 0);
+                assert_eq!(suffixes.node_count(), 1);
+                assert_eq!(words(&suffixes, residuals[15]), BTreeSet::from([vec![]]));
+            }
+        }
+    }
+
+    #[cfg(feature = "placement-dependency-pc")]
+    #[test]
+    fn product_suffixes_preserve_maximum_domain_across_operation_word_boundaries() {
+        use PieceKind::{I, J, L, O, S, T, Z};
+
+        let pieces = [I, J, L, O, T, S, I, J, L, O, Z];
+        let (parents, active) = prefix_path_masks(&[
+            [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+            [6, 7, 8, 9, 10, 5, 0, 1, 2, 3, 4],
+        ]);
+        let mut complete = PieceOrderLanguageCache::default();
+        let mut full_residuals = Vec::new();
+        complete
+            .compile_product_closed_prefix_language_with_residuals(
+                &pieces,
+                &parents,
+                &active,
+                &mut 0,
+                &mut full_residuals,
+            )
+            .unwrap()
+            .unwrap();
+        for min_depth in [5, 6, 11] {
+            let mut cache = PieceOrderLanguageCache::default();
+            let mut residuals = Vec::new();
+            assert_eq!(
+                cache
+                    .compile_product_prefix_suffixes_with_residuals(
+                        &pieces,
+                        &parents,
+                        &active,
+                        min_depth,
+                        &mut 0,
+                        &mut residuals,
+                    )
+                    .unwrap(),
+                PrefixSuffixCompilation::Compiled
+            );
+            assert_eq!(residuals.len(), 1 << pieces.len());
+            for (prefix, (&full, &suffix)) in full_residuals.iter().zip(&residuals).enumerate() {
+                if full != EMPTY_REFERENCE && prefix.count_ones() >= u32::from(min_depth) {
+                    assert_eq!(words(&cache, suffix), words(&complete, full));
+                } else {
+                    assert_eq!(suffix, EMPTY_REFERENCE);
+                }
+            }
+        }
+    }
+
+    #[cfg(feature = "placement-dependency-pc")]
+    #[test]
+    fn product_suffixes_distinguish_empty_relations_and_refuse_invalid_bounds() {
+        use super::super::symbolic_prefix_domain::{MAX_OPERATIONS, MAX_PREFIX_WORDS};
+
+        let pieces = [PieceKind::I, PieceKind::O];
+        let (parents, active) = prefix_path_masks(&[[0, 1]]);
+        let mut cache = PieceOrderLanguageCache::default();
+        let mut residuals = vec![17];
+        assert_eq!(
+            cache
+                .compile_product_prefix_suffixes_with_residuals(
+                    &pieces,
+                    &parents,
+                    &[0; MAX_PREFIX_WORDS],
+                    1,
+                    &mut 0,
+                    &mut residuals,
+                )
+                .unwrap(),
+            PrefixSuffixCompilation::EmptyRelation
+        );
+        assert_eq!(residuals, [EMPTY_REFERENCE; 4]);
+        assert_eq!(cache.node_count(), 0);
+
+        let mut outside = active;
+        outside[0] |= 1 << 4;
+        let mut missing_root = active;
+        missing_root[0] &= !1;
+        let mut missing_terminal = active;
+        missing_terminal[0] &= !(1 << 3);
+        for (parents, active, min_depth) in [
+            (parents.as_slice(), &active, 3),
+            (parents[..1].as_ref(), &active, 1),
+            (parents.as_slice(), &outside, 1),
+            (parents.as_slice(), &missing_root, 1),
+            (parents.as_slice(), &missing_terminal, 1),
+            (parents.as_slice(), &[0; MAX_PREFIX_WORDS], 3),
+        ] {
+            residuals.push(17);
+            assert!(cache
+                .compile_product_prefix_suffixes_with_residuals(
+                    &pieces,
+                    parents,
+                    active,
+                    min_depth,
+                    &mut 0,
+                    &mut residuals,
+                )
+                .is_err());
+            assert!(residuals.is_empty());
+        }
+        assert!(cache
+            .compile_product_prefix_suffixes_with_residuals(
+                &[PieceKind::I; MAX_OPERATIONS + 1],
+                &[[0; MAX_PREFIX_WORDS]; MAX_OPERATIONS + 1],
+                &[0; MAX_PREFIX_WORDS],
+                1,
+                &mut 0,
+                &mut residuals,
+            )
+            .is_err());
+        assert!(residuals.is_empty());
+
+        // A retained active prefix may not execute an already consumed op.
+        let mut malformed = parents;
+        malformed[0][0] |= 1 << 1;
+        assert!(cache
+            .compile_product_prefix_suffixes_with_residuals(
+                &pieces,
+                &malformed,
+                &active,
+                1,
+                &mut 0,
+                &mut residuals,
+            )
+            .is_err());
+        assert!(residuals.is_empty());
     }
 
     #[test]
