@@ -1,0 +1,316 @@
+# 일반 큐 재사용·메모리 회계·worker 준비 후속 최적화
+
+## 1. 복구한 기준과 범위
+
+사용자가 제공한 목표의 100% 확률은 확정 전제다. 이 작업은 그 확률을 추가로
+검색·탐색·증명하지 않는다. 실제 전체 열거의 완료 여부와 구현 성능은 별도
+상태로 기록한다.
+
+GitHub `codex/full6l-p1p7p7-20261122`의 `92dc86b0`와 이전 로컬 작업공간
+`Clearra-resumed`의 `5f5adcfd`는 같은 tree
+`f206496e48eec09a32d0ee87dc2480eb42408664`였다. 최신 구현과 측정은
+[일반 큐·병렬 실행 기록](general-queue-parallel-numa-2026-11-23.md)에 있었다.
+첨부 프로젝트 핸드오프는 초기 장기 설계이므로 현재 구현 완료표로 해석하지 않았다.
+
+이번 원격 제품 commit은 `ea3dc26faf05293cd625e1463de21133c91ae567`이며,
+검증된 로컬 commit `44c9dad7135fe055912eaa87baa003525e59ec55`와 같은 tree
+`a39988f2901b8d842da5e2665fc4923391e1d032`다. 검증 때의 로컬 commit
+`662a02e0`를 동일 tree인 원격 기준 위에 재배치했고, 원격 기록에서도 그 tree를
+다시 확인했다. 소스 내용과 검증 실행파일은 바뀌지 않았다. 이후 commit은 이 검토
+문서를 기록한다.
+
+옛 작업공간의 미커밋 자료도 읽기 전용으로 확인했다. 큰 WebGPU 제거·생성 한도
+정리는 현재 구현에 계승되어 있었고, 미연결 `extended_build_symbolic.rs` 초안은
+현재 `extended_build_probability.rs`의 정식 경로에 통합되어 있었다. 초기 two-bag
+진단은 현재 `clearra-app/examples/oracle_ctk3_bench.rs`가 계승한다. 별도의 높이
+5·6 fixture 초안은 보존했으며, 현재 5·6L 지원과 모순되는 옛 거절 기대를 그대로
+복원하지 않았다. 옛 소스와 실행 근거는 삭제하지 않았다.
+
+## 2. 의존 그래프와 공급 계산의 공통 인수
+
+[coverage_product.rs](../../crates/clearra-core-executor/src/backend/wasm_cpu/coverage_product.rs)는
+이미 정확한 물리 BuildOrderGraph 또는 허용된 종류 언어와 원본 source/Hold를
+교차한다. 원본 bitmap word를 w, graph 깊이를 d, 초기 source cursor를 q라 하면
+공급 조회는 다음 함수로 분리된다.
+
+```text
+M(d,e,k,w) = source의 q+d+e 위치가 종류 k인 원본 ordinal bits
+e ∈ {0,1}
+
+Current/Swap: A AND M(d,e,k,w)
+Store:        A AND M(d,1,desired,w) AND M(d,0,current,w)
+```
+
+`M`은 같은 depth·word 안에서 graph node, held kind, physical realization과
+무관하다. Empty Hold의 Store는 extra_draw=0에서만 가능하며, 그 다음 위치는
+extra_draw=1인 상태의 Current 위치와 같다. 따라서 두 위치의 7종 word를 lazy로
+공유하면 충분하다. 새로운 source 전체 순회나 후보별 heap allocation은 없다.
+
+**재사용이 켜진 `(depth, 원본 bitmap word)` 쌍**에서 Current·Swap·Store에 필요한
+서로 다른 position-word 조회는 최대 14개다. Hold가 꺼져 있고
+해당 층의 product state가 하나뿐이면 이미 존재하는 depth queue 길이만 보고 직접
+조회한다. 이 경로에서도 구체 pose edge와 CountAll의 labeled history는 전부 유지한다.
+직접 조회 층이나 기존 terminal held-release helper까지 포함해 전역 조회 수가
+14 이하라고 주장하지 않는다.
+
+Cache에는 source word만 저장한다. 각 상태의 active ordinal bits는 매번 다시
+AND하므로 서로 다른 의존 상태나 Hold 후속 상태를 합치지 않는다. 초기 cursor의
+overflow 검사, finite EOF held-release, Standard6의 projected complement, finesse
+spawn guard와 원본 범위도 기존 owner가 계속 검증한다.
+
+새 분기·합류 fixture는 explicit 130원본, partial factorized source, 초기 cursor와
+Hold, Boolean/CountAll, 같은 operation의 여러 pose를 독립 labeled-history oracle과
+대조한다. 이전 전이 재사용만 적용한 기준과 비교해 source position-word 조회가
+**1,524 → 972회(36.22% 감소)**였다. Coverage, path count, completeness, active
+states, edge checks, transition 횟수와 retained heap bytes는 같았다. 이 수치는
+조회 작업량이며 실행 시간 감소율이 아니다.
+
+추가 공간은 평가 호출의 작은 stack 객체다. Word 14개는 112 bytes이며 borrowed
+source 참조, 위치·word index, loaded tag와 전략 상태의 고정 metadata가 더해진다.
+Retained heap 동일성과 stack 공간 증가를 구분한다. 작은 입력의 초기화·분기
+비용은 아래 연산량 분석으로 한정하고, 추가 실측을 진행하지 않는다.
+
+이 재사용은 materialized bitmap product와 rooted language adapter의 공통 공급
+연산에 적용된다. 특정 P1P7P7 inventory를 조건으로 삼지 않는다. Full6에서
+`StandardBagCoverage`의 symbolic owner로 처리하는 부분은 이 bitmap cache의
+직접 적용 대상이 아니다. 해당 경로는 memo 개선과 실제 큰 입력 관측으로 따로
+평가하며, 위 조회 감소율을 Full6 전체 가속률로 해석하지 않는다.
+
+## 3. 절약한 메모리를 유지하며 회계 비용 제거
+
+[standard_bag_product_memo.rs](../../crates/clearra-core-executor/src/backend/wasm_cpu/standard_bag_product_memo.rs)의
+StateMajor 경로를 다음과 같이 정리했다.
+
+- 삽입의 범위 확인·admission·row 준비에서 같은 row index를 한 번만 계산한다.
+- 이미 존재하는 row를 다시 준비하지 않는다. 실제 성장 때만 reserve와 capacity
+  전후 회계를 실행한다. Allocation이 없어도 admission callback은 유지한다.
+- Migration 첫 pass에서 정확한 population을 reserve했으므로 두 번째 복사 pass에서
+  entry마다 capacity를 다시 합산하지 않는다.
+- Clear가 capacity를 유지한다는 계약에 따라 누적 capacity를 재사용한다. 이미 빈
+  StateMajor memo를 다시 clear할 때는 directory 전체를 순회하지 않는다.
+
+Entry 폭, directory, full-key equality, hash, 승격의 최소 12.5% 절약 기준,
+logical-live recycle 경계, epoch와 실패 시 exact fallback은 그대로다.
+Compact 12B map의 lookup에는 새 raw table이나 unsafe를 도입하지 않았다.
+
+Flat에서 reserve 호출을 생략한 첫 실험은 작은 compact 입력에서 큰 지연 증가가
+나타나 철회했다. 최종 flat 경로는 기존 reserve 호출을 유지한다. 두 실제 memo
+모듈의 synthetic ABBA는 warmup 후 8 round, arm별 16표본을 사용했다.
+
+| 입력 | 이전 중앙값(ms) | 변경 중앙값(ms) | 관측 |
+| --- | ---: | ---: | --- |
+| StateMajor 262,144 entries × 4 epochs | 43.471 | 42.992 | 1.10% 감소 |
+| Adaptive 524,288 entries × 2 epochs | 62.154 | 61.524 | 1.01% 감소 |
+| 작은 Adaptive 1,024 entries × 1,024 epochs | 16.501 | 16.756 | 1.55% 증가 |
+| 작은 Compact 1,024 entries × 1,024 epochs | 17.9935 | 18.280 | 1.59% 증가 |
+
+128회 모두 checksum, capacity, payload, directory bytes와 승격 횟수가 같았다.
+표본 변동과 작은 증가를 숨기지 않으며 이 microbenchmark로 전체 검색의 가속이나
+작은 요청의 무회귀를 확정하지 않는다. Receipt `1795378602810927944-5-runtime`은
+exit 0, sampled RSS peak 19,091,456 bytes, pressure 0, automatic retry false다.
+
+## 4. 준비된 worker의 실행과 NUMA
+
+[cpu_worker_pool.rs](../../crates/clearra-core-executor/src/cpu_worker_pool.rs)의 기존
+즉시 투입 정책을 유지하면서, 증설 중 요청이 겹칠 때 하나의 coordinator가 가장 큰
+요청 target을 받도록 했다. Ready worker와 caller는 나머지 worker 생성을 기다리지
+않는다. Target 갱신과 coordinator 종료 판정을 같은 짧은 mutex 안에서 처리하여
+완료 직전의 증설 요청이 유실되지 않는다. 이 mutex는 worker 생성이나 실제 job 실행
+중에 유지하지 않는다. Warm pool에는 기존 atomic 빠른 경로가 남는다.
+
+한 worker만 요구하면 pool 생성과 topology 발견을 생략한다. Late spawn 실패에도
+이미 발행한 logical job은 queue에 남고 준비된 worker가 처리한다. 요청 worker 수나
+원본 작업 집합을 줄이는 변경은 아니다.
+
+이전의 native NUMA 배치와 first-touch 경계를 계속 사용한다. 단일·불명확 topology는
+OS scheduler로 돌아가고, main thread의 affinity를 바꾸지 않는다. 이 환경은 허용
+논리 CPU 0–8, memory node 0이며 실제 다중 NUMA 성능 검증 환경이 아니다. 이번
+coordinator 개선을 다중 NUMA에서의 실측 가속으로 표현하지 않는다.
+
+## 5. Chromium host의 독립 대기와 요청 root
+
+[ClearraVerifierPool.ts](../../apps/clearra-web/src/workers/ClearraVerifierPool.ts)에서
+세 독립 구간을 겹쳤다.
+
+1. 별도 accelerator slot인 pack과 synopsis의 설치·제거 ACK를 함께 기다린다.
+2. Payload SHA-256과 durable authority 복구를 함께 시작한다.
+3. 결과 봉인용 merger-ready digest와 worker-reply digest를 함께 계산한다.
+
+각 구간의 양쪽 완료 후에만 기존 initializer, permit prepare 또는 result seal로
+진입한다. Prepare/offer/publish/start/commit 순서는 유지한다. 새 worker나 장기
+cache를 추가하지 않으며, hashing 자체의 단기 작업이 겹치는 것은 구분한다.
+Digest 입력과 임시 버퍼가 동시에 살아 있을 수 있으므로, 장기 cache를 추가하지
+않았다는 사실을 Chromium peak memory 무증가의 보장으로 해석하지 않는다.
+
+동일 warm worker를 새 요청으로 초기화할 때 permit이 이전 request SHA를 참조하던
+문제도 수정했다. Initialize는 항상 현재 payload SHA를 새 root로 사용하고 후속
+consume/finish가 그 root를 따른다. 명시적인 gate를 쓰는 새 회귀로 ACK·hash 대기
+순서와 두 요청의 모든 journal event를 검증했다.
+
+실제 Chromium orchestration는 page/worker 실행 전
+`process_singleton_posix.cc: socket() failed: Operation not permitted`로 종료됐다.
+Receipt는 `1795378424825023867-7-runtime`이다. 권한 우회나 플래그 재시도는 하지
+않았다. Node 계약·TypeScript·WASM compile을 실제 Chromium 성능 통과로 대체하지 않는다.
+
+## 6. 검증 및 실행 측정
+
+| 검증 | 결과 |
+| --- | --- |
+| Core 집중 회귀 | 38 PASS, 0 FAIL; 1.08초 |
+| 독립 memo 회귀 | 원본+변경 39 PASS, 최종 변경 20 PASS |
+| Browser 계약 | Pool, durable journal, distributed runner, host yield 4개 실행 통과 |
+| Focused strict TypeScript | TS 5.9.3, 실제 imported closure 73개, diagnostics 0 |
+| WASM32 check | PASS, 32.80초; 기존 dead-code 경고 7개 |
+| Rustfmt / diff whitespace | PASS |
+
+Node 계약 실행 환경은 Node 24.22.3이다. Focused TypeScript는 저장소 contract
+설정과 typed Node shim을 사용했으며 전체 Svelte 앱 typecheck와 구분한다.
+성능 비교의 source·binary와 결과는 아래 최종 측정 절에 기록한다.
+
+### 6.1. P7P4 전체 열거 ABBA
+
+고정 입력은 기존 `wasm_cpu_parallel_exact`의 P7P4 Unique 테스트다. 각 실행의
+실제 참가자는 8명이며 이 테스트 정책과 Full6 Auto 9명을 구분한다. 네 실행 모두
+**456,923개**, **`cts1:98ebe8726537b29f`**, complete와 parallel 계약을 통과했다.
+
+| Arm | Test 시간(초) | Sampled RSS peak(bytes) | GiB | Receipt ID |
+| --- | ---: | ---: | ---: | --- |
+| A1 이전 | 69.97 | 4,113,567,744 | 3.8311 | `1795379079684380390-99` |
+| B1 변경 | 68.50 | 4,064,047,104 | 3.7849 | `1795379149749399029-118` |
+| B2 변경 | 69.96 | 4,195,909,632 | 3.9077 | `1795379218370025812-137` |
+| A2 이전 | 73.88 | 4,214,812,672 | 3.9254 | `1795379288404569005-156` |
+
+시간 중앙값은 **71.925 → 69.230초**, 이 입력의 관측 감소는 **3.747%**다.
+Sampled peak 중앙값은 **4,164,190,208 → 4,129,978,368 bytes**, 0.822% 낮았다.
+네 receipt 모두 normal/exit 0, pressure event 0, automatic retry false다.
+Peak는 `linux-sampled-process-group-rss`이며 kernel high-water가 아니다. 두 표본씩의
+관측이고 여러 변경을 함께 포함하므로 개별 변경의 가속률이나 일반적 성능 보장으로
+확대하지 않는다.
+
+### 6.2. 작은 입력은 연산량만 확인
+
+사용자의 최종 우선순위는 아주 작은 입력의 지연보다 큰 입력의 개선이다. 작은
+입력의 추가 실측과 그 수치에 맞춘 별도 구조 변경은 중단했다. 지시 이전에 완료된
+fresh-process, in-process, profile 및 같은 실행파일 control의 원본 로그는
+보존했다. 최초 in-process에서 관측한 약 11% 증가는 긴 반복에서 같은 방향으로
+재현되지 않았고, 같은 실행파일끼리도 차이가 있었다. 이를 확정 회귀 또는 특정
+cache 변경의 인과 효과로 기록하지 않는다.
+
+코드상 비용은 다음과 같다.
+
+- 평가 호출마다 14개 word와 고정 metadata를 초기화한다. 새 heap 할당이나 큐·graph
+  전체 prepass는 없다.
+- 각 `(depth, word)`에서 두 loaded tag와 위치·word metadata를 갱신한다. 비어 있는
+  기존 depth queue를 지나는 경우에도 이 상수 작업은 남는다.
+- Hold가 꺼진 단일 상태 층은 전략 분기 후 기존 source 조회로 바로 간다. Cache
+  유효 bit 검사와 저장은 생략하지만 초기화·분기 비용이 정확히 0인 것은 아니다.
+
+큰 입력에서 한 `(depth, word)`의 공급 조회 요청을 Q회, 실제로 요청된 서로 다른
+`(position, kind)`를 U개라 하면 기존 원본 조회 Q회가 U회로 줄고, `U ≤ min(Q, 14)`다.
+대신 Q회의 작은 cache 검사와 U회의 저장이 남는다. 원본 조회 비용을 C라고 하면
+그 구간의 비용은 `O(Q × C)`에서 `O(U × C + Q)`가 된다. 실제 graph 전이, active
+ordinal 교집합과 CountAll의 실행 이력 수는 유지된다. 전체 탐색의 복잡도 차수가
+바뀐다는 뜻은 아니다.
+
+### 6.3. Full6 P1P7P7의 240초 진단
+
+최종 제품 실행파일을 240초 cooperative cancellation, 270초 supervisor hard
+timeout으로 한 번 실행했다. Width 10, empty height 6, SRS+, 15 locks, empty Hold,
+FullQueueOracle, CountUnique와 전체 177,811,200개 원본의 계약 검사를 통과했다.
+Chance evidence는 Disabled, solution probability는 Omit이며 원본·node·candidate·
+frontier의 제품 생성 한도를 추가하지 않았다. 이 실행은 100% 확률에 대한 탐색이나
+추가 증명이 아니다.
+
+| 항목 | 관측 |
+| --- | ---: |
+| 요청 참가자 / task split | Auto 9 / 9개 |
+| Family compile | 116.558초 |
+| Family compile 및 준비·split span | 118.212초 |
+| Family expanded states | 13,304,012 |
+| Family nodes | 52,325,237 |
+| 원시 geometry family paths | 247,794,216,021,372 |
+| 취소까지 emitted candidates, caller + pool | 12,781,308 |
+| 프로그램 총 경과 시간 | 240.820초 |
+| Supervisor sampled process-group RSS peak | 5,947,895,808 bytes, 5.5394 GiB |
+| 프로세스 kernel RSS high-water | 5,947,514,880 bytes |
+| Memory pressure events / automatic retry | 0 / false |
+
+Family 준비 후 path-count pass는 1.607초, pooled worker의 row-order 준비 pass는
+1.355초였다. 이 독립 pass들은 겹쳐 실행되므로 둘을 더해서 준비 wall time으로
+표현하지 않는다. 9개 task 분할과 caller·pooled worker의 실제 작업 계측이 남았다.
+
+탐색 중 누적 profile에서는 물리 build-order/reachability가 caller 97.984초,
+pooled workers 합계 323.715초로 가장 큰 축이었다. Coverage language product는
+각각 0.769초와 92.147초였다. Profile은 겹칠 수 있는 중첩 span이며 일부 duration은
+sampling 추정치다. Worker 누계는 wall time이 아니고, 위 값을 합산하거나 240초로
+나누어 비중·전체 완료 시간을 계산하지 않는다. 실제 병목이 공급 mask 조회에만
+있지 않으며, 큰 물리 의존 그래프 준비·검증을 다음 대상으로 삼아야 한다는 근거다.
+
+최종 상태는 **`complete=false`, `native Rust PC: Cancelled`**다. 240초 진단 취소에
+협조적으로 종료했고 receipt의 exit 1은 이 미완료 상태를 반영한다. Supervisor의
+강제 종료, OOM, 자원 변경 재시도는 없었다. 원시 paths와 emitted candidates는
+성공 해답 수가 아니며, 최종 Unique count 또는 전체 결과 hash를 얻지 못했다.
+이번 실행을 Full6 완주나 이전 버전 대비 Full6 가속 측정으로 기록하지 않는다.
+
+Receipt는 `1795380028297435399-5-runtime`, 원본은 `full6-after.json`과
+`full6-after.stderr`다. 이번에는 현재 버전의 병목 진단만 수행했다. 준비해 둔 이전
+Full6 실행파일을 재실행하여 불완전한 두 표본의 속도 비교를 추가하지 않았다.
+
+### 6.4. 실행파일과 재현
+
+모든 Rust 실행은 1.98.1이며 제품 코드에 `local-search-ab`를 켜지 않았다.
+이전 P7P4 binary의 source는 `e6dc9377`(원격 동등 코드 `dd36cad4`), 이전 Full6
+binary는 같은 코드의 문서 후속 `5f5adcfd`다. 변경 binary는 위 1절의 같은 tree다.
+
+| 실행파일 | SHA-256 |
+| --- | --- |
+| P7P4 이전 | `d4913e748d33985ac79028cc31aafb77b3dbf4b25663ba331feb681b9cf6fc51` |
+| P7P4 변경 | `6c731c5c94ce2a7f647a366edf9b1d77ca7448421d9d9af0cf3b7264618ca0f0` |
+| Full6 이전 | `dc369bc755f165622e3889ed1ba7859a2ade038f2be0342f99850b6018707fcf` |
+| Full6 변경 | `c73d5c0f3e7656631b61b8f2334298efe51f79334ab76fee4204cbaa435ac21d` |
+
+Raw 실행 자료와 Rust 집계 helper는 `_local/artifacts/general-queue-perf-20261123/`,
+Browser 자료는 `_local/artifacts/browser-latency-20261123/`에 있다. 이 문서는 그중
+검토한 결과를 기록한다. 초기 ENOSPC 빌드 실패는 성능 표본에 넣지 않았고, 선언된
+옛 build root의 재생성 가능한 incremental cache만 검토 후 정리했다.
+
+```sh
+cargo test --locked --offline -p clearra-core-executor \
+  --features parallel,wasm-stage-profiling --lib -- \
+  coverage_product standard_bag_product_memo \
+  standard_bag_coverage::supply_reuse_tests cpu_worker_pool --test-threads=1
+
+cargo test --locked --offline --release -p clearra-core-executor \
+  --features parallel,wasm-stage-profiling \
+  --test wasm_cpu_parallel_exact --no-run
+
+clearra-manage runtime run --producer queue-p7p4-reproduce \
+  --profile benchmark-search --timeout 180 -- <built-integration-binary> \
+  p7p4_parallel_matches_exact_solution_oracle --exact --ignored \
+  --nocapture --test-threads=1
+
+clearra-manage runtime run --producer queue-full6-reproduce \
+  --profile benchmark-search --timeout 270 -- <built-full6l-bench> \
+  run --objective unique --profile --cancel-after-seconds 240
+
+cargo check --locked --offline -p clearra-core-executor \
+  --features parallel,wasm-stage-profiling --target wasm32-unknown-unknown --lib
+```
+
+## 7. 남은 작업
+
+Full6 전체 후보 영역 소진과 수 분 내 완주는 아직 달성하지 못했다.
+이번 진단에서도 약 5232만-node family 생성과 큰 물리 BuildOrder/source product가
+핵심 경계다. 다음 구현은 `geometry.rs`의 공유 residual 의존성을 보존하는 준비
+작업 분할, `buildup.rs`와 종류 언어의 같은 물리 계산 재사용, 실제로 비용을 회수하는
+일반적인 음성 가지치기를 대상으로 해야 한다. Thread만 늘리면서 대형 family를
+worker별로 복제하는 방식은 메모리 목표를 충족하지 않는다.
+
+완료한 결과의 전체 identity·canonical key 보관 비용도 별도 과제다. 정렬·중복 제거·
+hash·전체 결과 조회 계약을 보존해야 하며, 부분 count나 단순 hash 합으로 전체 열거를
+대체하지 않는다. 실제 Chromium 및 다중 NUMA/Windows 환경에서의 실측도 남아 있다.
+
+새 Rust 코드는 [Google Rust Style Guide](https://google.github.io/styleguide/rustguide.html)의
+borrowing, 명시적인 소유 범위, 단순한 자료구조와 설명형 실패 문맥, rustfmt를 따른다.
+Chromium 코드베이스 전용 thread 지침을 이 Cargo 프로젝트의 표준 thread 금지로
+확대하지 않는다.
