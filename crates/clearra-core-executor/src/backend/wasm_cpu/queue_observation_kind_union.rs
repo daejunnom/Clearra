@@ -74,6 +74,34 @@ mod lazy {
     pub(in crate::backend::wasm_cpu) const KIND_SOURCE_TAG: u32 = 1 << 31;
     const NO_NODE: u32 = u32::MAX;
     const NO_MULTISET: u32 = u32::MAX;
+    const MULTISET_COUNTS_MASK: u32 = (1 << 28) - 1;
+    const FULL_MULTISET: u32 = 1 << 28;
+
+    /// Group indices stay below the existing finite node bound. Their spare
+    /// high bit records a Full witness without another allocation or member.
+    #[derive(Clone, Copy)]
+    struct MultisetGroupIndex(usize);
+
+    impl MultisetGroupIndex {
+        const FULL: usize = 1 << (usize::BITS - 1);
+
+        fn new(index: usize) -> Self {
+            debug_assert!(index < Self::FULL);
+            Self(index)
+        }
+
+        fn index(self) -> usize {
+            self.0 & !Self::FULL
+        }
+
+        fn is_full(self) -> bool {
+            self.0 & Self::FULL != 0
+        }
+
+        fn mark_full(&mut self) {
+            self.0 |= Self::FULL;
+        }
+    }
 
     struct StoredWordProfile {
         profile: QueryProfile,
@@ -132,8 +160,9 @@ mod lazy {
     /// certificates stay in their own group and are included in every query.
     struct BoardMultisetGroups {
         remaining: u8,
+        has_full: bool,
         root_count: usize,
-        by_multiset: HashMap<u32, usize>,
+        by_multiset: HashMap<u32, MultisetGroupIndex>,
         groups: Vec<Vec<u32>>,
         unknown: Vec<u32>,
         member_capacity_bytes: usize,
@@ -143,6 +172,7 @@ mod lazy {
         fn new(remaining: u8, root_count: usize) -> Self {
             Self {
                 remaining,
+                has_full: false,
                 root_count,
                 by_multiset: HashMap::new(),
                 groups: Vec::new(),
@@ -152,7 +182,7 @@ mod lazy {
         }
 
         fn retained_bytes(&self) -> usize {
-            self.by_multiset.capacity() * (core::mem::size_of::<(u32, usize)>() + 1)
+            self.by_multiset.capacity() * (core::mem::size_of::<(u32, MultisetGroupIndex)>() + 1)
                 + self.groups.capacity() * core::mem::size_of::<Vec<u32>>()
                 + self.member_capacity_bytes
         }
@@ -184,6 +214,11 @@ mod lazy {
         multisets: HashMap<u32, u32>,
         supply_aliases: HashMap<u64, u32>,
         supply_metrics: [usize; 4],
+        full_multiset_enabled: bool,
+        // Queries, roots checked while building shared groups, new uniform
+        // certificate nodes, sufficient Full proofs, positive witnesses,
+        // and additional work (a subset of the same cumulative kind work).
+        full_multiset_metrics: [usize; 6],
         multiset_grouping_enabled: bool,
         multiset_groups: Vec<BoardMultisetGroups>,
         multiset_group_index: HashMap<u32, usize>,
@@ -245,6 +280,8 @@ mod lazy {
                 multisets: HashMap::new(),
                 supply_aliases: HashMap::new(),
                 supply_metrics: [0; 4],
+                full_multiset_enabled: false,
+                full_multiset_metrics: [0; 6],
                 multiset_grouping_enabled: false,
                 multiset_groups: Vec::new(),
                 multiset_group_index: HashMap::new(),
@@ -272,6 +309,119 @@ mod lazy {
             enabled: bool,
         ) {
             self.multiset_grouping_enabled = enabled;
+        }
+
+        /// Configure once on a fresh view. Previously cached ordinary
+        /// certificates remain conservative if a direct caller enables this
+        /// later: an absent Full flag never means the language is incomplete.
+        pub(in crate::backend::wasm_cpu) fn set_full_multiset_enabled(&mut self, enabled: bool) {
+            self.full_multiset_enabled = enabled;
+        }
+
+        pub(in crate::backend::wasm_cpu) fn full_multiset_metrics(&self) -> [usize; 6] {
+            self.full_multiset_metrics
+        }
+
+        fn full_multiset_charge(
+            &mut self,
+            steps: usize,
+            control: &ExecutionControl,
+        ) -> Result<(), WasmExactSearchError> {
+            self.charge(steps, control)?;
+            self.full_multiset_metrics[5] += steps;
+            Ok(())
+        }
+
+        /// A positive-only shortcut for the caller's actual known suffix.
+        /// A Full root supplies every word of one exact multiset M. Under
+        /// KnownSupplyQuery's existing no-EOF contract, len >= remaining and
+        /// M <= available ensure at least one legal Hold word. An unproved
+        /// root, optional cache refusal or unavailable M keeps the old DP.
+        ///
+        /// `board` pins an immutable root list in this frozen view. Group
+        /// construction is shared with intern_for_supply; hot queries inspect
+        /// at most seven M keys, never the complete root list again.
+        #[allow(clippy::too_many_arguments)]
+        pub(in crate::backend::wasm_cpu) fn full_multiset_membership(
+            &mut self,
+            board: u32,
+            remaining: u8,
+            roots: &[u32],
+            query: &KnownSupplyQuery,
+            kinds: &PieceOrderLanguageCache,
+            control: &ExecutionControl,
+        ) -> Result<Option<bool>, WasmExactSearchError> {
+            let result = self.bind_kinds(kinds).and_then(|()| {
+                self.full_multiset_membership_inner(board, remaining, roots, query, kinds, control)
+            });
+            if result.is_err() {
+                self.failed = true;
+            }
+            result
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        fn full_multiset_membership_inner(
+            &mut self,
+            board: u32,
+            remaining: u8,
+            roots: &[u32],
+            query: &KnownSupplyQuery,
+            kinds: &PieceOrderLanguageCache,
+            control: &ExecutionControl,
+        ) -> Result<Option<bool>, WasmExactSearchError> {
+            self.charge(0, control)?;
+            if !self.full_multiset_enabled || !self.multiset_grouping_enabled {
+                return Ok(None);
+            }
+            self.full_multiset_metrics[0] += 1;
+            self.full_multiset_charge(1, control)?;
+            let Some(key) = query.key(remaining)? else {
+                return Ok(None);
+            };
+            if roots.is_empty() {
+                return Err(invalid("wasm_observation_kind_union_empty"));
+            }
+            if roots.len() > self.limits.members {
+                return Err(invalid("wasm_observation_physical_union_limit"));
+            }
+            if key.supply.len < remaining {
+                return Ok(None);
+            }
+
+            let before = self.work;
+            self.full_multiset_charge(1, control)?;
+            let grouped = self.ensure_multiset_groups(board, remaining, roots, kinds, control);
+            self.group_metrics[6] += self.work - before;
+            self.group_staging_bytes = 0;
+            let Some(index) = grouped? else {
+                return Ok(None);
+            };
+            // Most non-Full families require neither source counting nor
+            // target construction here. The following ordinary DP reuses the
+            // already validated group and uniform certificates.
+            if !self.multiset_groups[index].has_full {
+                return Ok(None);
+            }
+            let profile =
+                QueryProfile::new(key, |steps| self.full_multiset_charge(steps, control))?;
+            debug_assert!(profile.target_has_a_word());
+            for target in 0..profile.target_count() {
+                self.full_multiset_charge(1, control)?;
+                self.group_metrics[2] += 1;
+                let counts = profile
+                    .target(target)
+                    .ok_or_else(|| invalid("wasm_observation_word_bitmap_multiset_invalid"))?;
+                if self.multiset_groups[index]
+                    .by_multiset
+                    .get(&counts)
+                    .is_some_and(|group| group.is_full())
+                {
+                    self.full_multiset_metrics[4] += 1;
+                    return Ok(Some(true));
+                }
+            }
+            Ok(None)
         }
 
         pub(in crate::backend::wasm_cpu) fn multiset_group_metrics(&self) -> [usize; 9] {
@@ -1230,6 +1380,33 @@ mod lazy {
                 }
             }
 
+            let Some(index) =
+                self.ensure_multiset_groups(board, remaining, roots, kinds, control)?
+            else {
+                return Ok(false);
+            };
+
+            for &key in &keys[..key_count] {
+                self.charge(1, control)?;
+                self.group_metrics[2] += 1;
+                if let Some(&group) = self.multiset_groups[index].by_multiset.get(&key) {
+                    self.append_grouped_members(index, Some(group.index()), control)?;
+                }
+            }
+            self.append_grouped_members(index, None, control)?;
+            Ok(true)
+        }
+
+        /// The caller charges the one lookup before entering this shared
+        /// construction kernel. It never copies roots on an existing group.
+        fn ensure_multiset_groups(
+            &mut self,
+            board: u32,
+            remaining: u8,
+            roots: &[u32],
+            kinds: &PieceOrderLanguageCache,
+            control: &ExecutionControl,
+        ) -> Result<Option<usize>, WasmExactSearchError> {
             let index = if let Some(&index) = self.multiset_group_index.get(&board) {
                 let cached = &self.multiset_groups[index];
                 if cached.remaining != remaining {
@@ -1250,16 +1427,24 @@ mod lazy {
                     .is_some_and(|count| count <= self.limits.members);
                 if !admitted || self.multiset_groups.len() >= self.limits.nodes {
                     self.group_metrics[5] += 1;
-                    return Ok(false);
+                    return Ok(None);
                 }
                 let mut grouped = BoardMultisetGroups::new(remaining, roots.len());
                 for &root in roots {
                     self.charge(1, control)?;
                     self.group_metrics[1] += 1;
                     Self::check_supply_root(root, remaining, kinds)?;
-                    let counts = self.uniform_multiset(root, kinds, control)?;
+                    let certificate = self.uniform_multiset_certificate(root, kinds, control)?;
+                    let counts = certificate.map(|value| value & MULTISET_COUNTS_MASK);
+                    let full = if self.full_multiset_enabled && self.multiset_grouping_enabled {
+                        self.full_multiset_charge(1, control)?;
+                        self.full_multiset_metrics[1] += 1;
+                        certificate.is_some_and(|value| value & FULL_MULTISET != 0)
+                    } else {
+                        false
+                    };
                     self.charge(1, control)?;
-                    self.push_grouped_root(&mut grouped, counts, root)?;
+                    self.push_grouped_root(&mut grouped, counts, root, full)?;
                 }
                 self.charge(1, control)?;
                 let old =
@@ -1301,15 +1486,7 @@ mod lazy {
                 index
             };
 
-            for &key in &keys[..key_count] {
-                self.charge(1, control)?;
-                self.group_metrics[2] += 1;
-                if let Some(&group) = self.multiset_groups[index].by_multiset.get(&key) {
-                    self.append_grouped_members(index, Some(group), control)?;
-                }
-            }
-            self.append_grouped_members(index, None, control)?;
-            Ok(true)
+            Ok(Some(index))
         }
 
         fn observe_group_staging(&mut self, grouped: &BoardMultisetGroups, extra: usize) {
@@ -1322,10 +1499,15 @@ mod lazy {
             grouped: &mut BoardMultisetGroups,
             counts: Option<u32>,
             root: u32,
+            full: bool,
         ) -> Result<(), WasmExactSearchError> {
             let group = if let Some(counts) = counts {
-                if let Some(&index) = grouped.by_multiset.get(&counts) {
-                    Some(index)
+                if let Some(index) = grouped.by_multiset.get_mut(&counts) {
+                    if full {
+                        index.mark_full();
+                        grouped.has_full = true;
+                    }
+                    Some(index.index())
                 } else {
                     let old = grouped.groups.capacity() * core::mem::size_of::<Vec<u32>>();
                     grouped.groups.try_reserve(1).map_err(|_| storage())?;
@@ -1337,13 +1519,13 @@ mod lazy {
                             0
                         },
                     );
-                    let old =
-                        grouped.by_multiset.capacity() * (core::mem::size_of::<(u32, usize)>() + 1);
+                    let old = grouped.by_multiset.capacity()
+                        * (core::mem::size_of::<(u32, MultisetGroupIndex)>() + 1);
                     grouped.by_multiset.try_reserve(1).map_err(|_| storage())?;
                     self.observe_group_staging(
                         grouped,
                         if grouped.by_multiset.capacity()
-                            * (core::mem::size_of::<(u32, usize)>() + 1)
+                            * (core::mem::size_of::<(u32, MultisetGroupIndex)>() + 1)
                             != old
                         {
                             old
@@ -1353,7 +1535,12 @@ mod lazy {
                     );
                     let index = grouped.groups.len();
                     grouped.groups.push(Vec::new());
-                    grouped.by_multiset.insert(counts, index);
+                    let mut entry = MultisetGroupIndex::new(index);
+                    if full {
+                        entry.mark_full();
+                        grouped.has_full = true;
+                    }
+                    grouped.by_multiset.insert(counts, entry);
                     Some(index)
                 }
             } else {
@@ -1428,30 +1615,58 @@ mod lazy {
             kinds: &PieceOrderLanguageCache,
             control: &ExecutionControl,
         ) -> Result<Option<u32>, WasmExactSearchError> {
+            self.uniform_multiset_certificate(root, kinds, control)
+                .map(|certificate| certificate.map(|value| value & MULTISET_COUNTS_MASK))
+        }
+
+        /// Counts occupy exactly seven nibbles. The private spare flag means
+        /// a sufficient Full proof, never that an unflagged language is not
+        /// Full. Every NFA edge still participates in the uniform proof.
+        ///
+        /// For each kind p in M, one Full p-child witnesses every permutation
+        /// of M-e_p. Their disjoint first-kind blocks cover Perm(M). Several
+        /// non-Full same-kind children may jointly cover a block; this cheap
+        /// test deliberately leaves that case unproved for the existing DP.
+        fn uniform_multiset_certificate(
+            &mut self,
+            root: u32,
+            kinds: &PieceOrderLanguageCache,
+            control: &ExecutionControl,
+        ) -> Result<Option<u32>, WasmExactSearchError> {
             self.charge(1, control)?;
-            if let Some(&counts) = self.multisets.get(&root) {
-                return Ok((counts != NO_MULTISET).then_some(counts));
+            if let Some(&certificate) = self.multisets.get(&root) {
+                return Ok((certificate != NO_MULTISET).then_some(certificate));
             }
             if self.multisets.len() >= self.limits.nodes {
                 return Ok(None);
             }
             self.supply_metrics[2] += 1;
+            let prove_full = self.full_multiset_enabled && self.multiset_grouping_enabled;
+            if prove_full {
+                self.full_multiset_metrics[2] += 1;
+            }
             let node = kinds
                 .node(root)
                 .ok_or_else(|| invalid("wasm_observation_suffix_language_missing"))?;
             let edges = kinds
                 .node_edge_count(root)
                 .ok_or_else(|| invalid("wasm_observation_language_edge_out_of_range"))?;
-            let counts = if node.accepting {
+            let certificate = if node.accepting {
                 if node.remaining_depth != 0 || edges != 0 {
                     return Err(invalid("wasm_observation_physical_depth_mismatch"));
                 }
-                Some(0)
+                if prove_full {
+                    self.full_multiset_charge(1, control)?;
+                    Some(FULL_MULTISET)
+                } else {
+                    Some(0)
+                }
             } else {
                 if node.remaining_depth == 0 || edges == 0 {
                     return Err(invalid("wasm_observation_physical_depth_mismatch"));
                 }
                 let mut common = None;
+                let mut full_first_kinds = 0_u32;
                 for index in 0..edges {
                     self.charge(1, control)?;
                     self.supply_metrics[3] += 1;
@@ -1467,10 +1682,13 @@ mod lazy {
                     {
                         return Err(invalid("wasm_observation_physical_depth_mismatch"));
                     }
-                    let Some(counts) = self.uniform_multiset(edge.child(), kinds, control)? else {
+                    let Some(child_certificate) =
+                        self.uniform_multiset_certificate(edge.child(), kinds, control)?
+                    else {
                         common = None;
                         break;
                     };
+                    let counts = child_certificate & MULTISET_COUNTS_MASK;
                     let shift = usize::from(edge.piece_code() - 1) * 4;
                     if (counts >> shift) & 15 == 15 {
                         common = None;
@@ -1482,15 +1700,43 @@ mod lazy {
                         break;
                     }
                     common = Some(counts);
+                    if prove_full {
+                        // One additional flag inspection/word-mask update in
+                        // the existing child loop, with no second edge pass.
+                        self.full_multiset_charge(1, control)?;
+                        if child_certificate & FULL_MULTISET != 0 {
+                            full_first_kinds |= 1 << shift;
+                        }
+                    }
                 }
-                common
+                if let Some(counts) = common {
+                    if prove_full {
+                        // Nibble witnesses are 0/1, so multiplying by 15
+                        // expands them to disjoint 0/F fields without carry.
+                        // Charge both expansion and required-kind containment.
+                        self.full_multiset_charge(2, control)?;
+                        if counts & !(full_first_kinds * 15) == 0 {
+                            Some(counts | FULL_MULTISET)
+                        } else {
+                            Some(counts)
+                        }
+                    } else {
+                        Some(counts)
+                    }
+                } else {
+                    None
+                }
             };
+            if prove_full && certificate.is_some_and(|value| value & FULL_MULTISET != 0) {
+                self.full_multiset_metrics[3] += 1;
+            }
             // Children can fill the cache while this frame is being proved.
             // Not retaining this optional result never licenses a prune.
             if self.multisets.len() < self.limits.nodes {
                 let old = self.multisets.capacity() * (core::mem::size_of::<(u32, u32)>() + 1);
                 self.multisets.try_reserve(1).map_err(|_| storage())?;
-                self.multisets.insert(root, counts.unwrap_or(NO_MULTISET));
+                self.multisets
+                    .insert(root, certificate.unwrap_or(NO_MULTISET));
                 self.observe_peak(
                     if self.multisets.capacity() * (core::mem::size_of::<(u32, u32)>() + 1) != old {
                         old
@@ -1499,7 +1745,7 @@ mod lazy {
                     },
                 );
             }
-            Ok(counts)
+            Ok(certificate)
         }
 
         fn intern_inner(
@@ -1915,6 +2161,453 @@ mod tests {
         .unwrap()
         .covered_pattern_count
             == 1
+    }
+
+    mod full_multiset_tests {
+        use crate::backend::wasm_cpu::{
+            buildup::{BuildOrderGraph, BuildOrderNodeSpec},
+            queue_observation_policy::piece_code,
+        };
+        use clearra_core_domain::piece::rotation::RotationState;
+
+        use super::*;
+
+        fn enabled() -> KindUnionArena {
+            let mut result = arena();
+            result.set_multiset_grouping_enabled(true);
+            result.set_full_multiset_enabled(true);
+            result
+        }
+
+        fn permutations(size: usize) -> Vec<Vec<usize>> {
+            fn visit(prefix: &mut Vec<usize>, size: usize, output: &mut Vec<Vec<usize>>) {
+                if prefix.len() == size {
+                    output.push(prefix.clone());
+                    return;
+                }
+                for operation in 0..size {
+                    if !prefix.contains(&operation) {
+                        prefix.push(operation);
+                        visit(prefix, size, output);
+                        prefix.pop();
+                    }
+                }
+            }
+            let mut output = Vec::new();
+            visit(&mut Vec::new(), size, &mut output);
+            output
+        }
+
+        /// Separate chains preserve several NFA children for one first kind.
+        fn independent_words(kinds: &mut PieceOrderLanguageCache, words: &[&[PieceKind]]) -> u32 {
+            let depth = words[0].len();
+            assert!(depth > 0 && words.iter().all(|word| word.len() == depth));
+            let mut edges = words
+                .iter()
+                .enumerate()
+                .map(|(index, word)| {
+                    BuildOrderGraph::edge(
+                        (1 + index * depth) as u32,
+                        0,
+                        word[0],
+                        RotationState::Zero,
+                        0,
+                        0,
+                        0,
+                    )
+                })
+                .collect::<Vec<_>>();
+            let mut nodes = vec![BuildOrderNodeSpec {
+                edge_start: 0,
+                edge_count: words.len() as u32,
+                depth: 0,
+                accepting: false,
+            }];
+            for word in words {
+                for position in 1..=depth {
+                    let accepting = position == depth;
+                    nodes.push(BuildOrderNodeSpec {
+                        edge_start: edges.len() as u32,
+                        edge_count: u32::from(!accepting),
+                        depth: position as u8,
+                        accepting,
+                    });
+                    if !accepting {
+                        edges.push(BuildOrderGraph::edge(
+                            nodes.len() as u32,
+                            0,
+                            word[position],
+                            RotationState::Zero,
+                            0,
+                            0,
+                            0,
+                        ));
+                    }
+                }
+            }
+            let graph = BuildOrderGraph::from_topological_parts(nodes, edges, 0, 0, false).unwrap();
+            kinds.canonicalize(&graph).unwrap()
+        }
+
+        #[test]
+        fn full_multiset_certifies_every_small_multiset_permutation_without_bitmaps() {
+            use PieceKind::{I, L, O, T};
+            let control = ExecutionControl::default();
+            for pieces in [
+                vec![I],
+                vec![I, I],
+                vec![I, O, T],
+                vec![I, I, O, T],
+                vec![I, I, O, O, T],
+                vec![I, I, O, T, T, L],
+            ] {
+                let paths = permutations(pieces.len());
+                let paths = paths.iter().map(Vec::as_slice).collect::<Vec<_>>();
+                let mut kinds = PieceOrderLanguageCache::default();
+                let root = relation(&mut kinds, &pieces, &paths);
+                let expected: BTreeSet<Vec<u8>> = paths
+                    .iter()
+                    .map(|path| {
+                        path.iter()
+                            .map(|&index| piece_code(pieces[index]))
+                            .collect()
+                    })
+                    .collect();
+                let mut full = enabled();
+                assert_eq!(
+                    lazy_words(&mut full, &kinds, root | KIND_SOURCE_TAG),
+                    expected
+                );
+                for word in &expected {
+                    assert_eq!(
+                        full.full_multiset_membership(
+                            1,
+                            pieces.len() as u8,
+                            &[root],
+                            &known_supply(word, 0, false),
+                            &kinds,
+                            &control,
+                        )
+                        .unwrap(),
+                        Some(true)
+                    );
+                }
+                let metrics = full.full_multiset_metrics();
+                assert_eq!(metrics[0], expected.len());
+                assert_eq!(metrics[1], 1, "the frozen root list is read once");
+                assert_eq!(metrics[4], expected.len());
+                assert!(metrics[3] > 0 && metrics[3] <= metrics[2]);
+                assert!(metrics[5] > 0 && metrics[5] <= full.metrics()[4]);
+                assert_eq!(full.word_bitmap_metrics(), [0; 9]);
+                assert_eq!(full.word_bitmap_retained_bytes(), 0);
+                assert!(full.peak_bytes() >= full.retained_bytes());
+            }
+        }
+
+        #[test]
+        fn full_multiset_missing_first_kind_and_nfa_union_only_full_keep_the_old_dp() {
+            use PieceKind::{I, O, T};
+            let control = ExecutionControl::default();
+            let mut kinds = PieceOrderLanguageCache::default();
+            let fixed = relation(&mut kinds, &[I, O], &[&[0, 1]]);
+            let mut full = enabled();
+            let query = known_supply(&[1, 2], 0, false);
+            assert_eq!(
+                full.full_multiset_membership(1, 2, &[fixed], &query, &kinds, &control)
+                    .unwrap(),
+                None,
+                "an I-first witness cannot prove the required O-first block"
+            );
+            assert!(reference_known_membership(&kinds, &[fixed], query));
+
+            let nfa = independent_words(
+                &mut kinds,
+                &[
+                    &[I, O, T],
+                    &[I, T, O],
+                    &[O, I, T],
+                    &[O, T, I],
+                    &[T, I, O],
+                    &[T, O, I],
+                ],
+            );
+            assert_eq!(kinds.edges_for_piece(nfa, 1).unwrap().len(), 2);
+            let expected = BTreeSet::from([
+                vec![1, 2, 3],
+                vec![1, 3, 2],
+                vec![2, 1, 3],
+                vec![2, 3, 1],
+                vec![3, 1, 2],
+                vec![3, 2, 1],
+            ]);
+            assert_eq!(
+                lazy_words(&mut full, &kinds, nfa | KIND_SOURCE_TAG),
+                expected
+            );
+            for word in &expected {
+                let query = known_supply(word, 0, false);
+                assert_eq!(
+                    full.full_multiset_membership(2, 3, &[nfa], &query, &kinds, &control)
+                        .unwrap(),
+                    None,
+                    "same-kind non-Full children can jointly cover all permutations"
+                );
+                assert!(reference_known_membership(&kinds, &[nfa], query));
+            }
+            // The ordinary exact bitmap may prove what the sufficient test
+            // leaves open. Private Full bits must not leak into its M key.
+            assert_eq!(
+                full.word_bitmap_membership(
+                    3,
+                    &[nfa],
+                    &known_supply(&[3, 2, 1], 0, false),
+                    &kinds,
+                    &control,
+                )
+                .unwrap(),
+                Some(true)
+            );
+        }
+
+        #[test]
+        fn full_multiset_known_hold_eof_and_group_reuse_preserve_exact_counts() {
+            use PieceKind::{I, O};
+            let control = ExecutionControl::default();
+            let mut kinds = PieceOrderLanguageCache::default();
+            let roots = [
+                relation(&mut kinds, &[I, O], &[&[0, 1]]),
+                relation(&mut kinds, &[I, O], &[&[0, 1], &[1, 0]]),
+            ];
+            let mut full = enabled();
+            for query in [
+                known_supply(&[2, 1], 0, false),
+                known_supply(&[2, 1], 3, true),
+                known_supply(&[2, 3], 1, true),
+                known_supply(&[2, 2], 1, true),
+                known_supply(&[3, 1, 2], 0, true),
+            ] {
+                assert!(reference_known_membership(&kinds, &roots, query));
+                assert_eq!(
+                    full.full_multiset_membership(7, 2, &roots, &query, &kinds, &control)
+                        .unwrap(),
+                    Some(true)
+                );
+            }
+            let before = full.full_multiset_metrics();
+            let groups = full.multiset_group_metrics();
+            for query in [
+                known_supply(&[2], 1, true),        // No EOF held-only release.
+                known_supply(&[2, 2], 0, false),    // Available M does not fit.
+                known_supply(&[1, 2], 1, false),    // Forbidden Hold keeps old path.
+                known_supply(&[3, 1, 2], 0, false), // Broader than strict query.
+            ] {
+                assert_eq!(
+                    full.full_multiset_membership(7, 2, &roots, &query, &kinds, &control)
+                        .unwrap(),
+                    None
+                );
+            }
+            let filtered = full
+                .intern_for_supply(7, 2, &roots, [1, 1, 0, 0, 0, 0, 0], &kinds, &control)
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                lazy_words(&mut full, &kinds, filtered),
+                BTreeSet::from([vec![1, 2], vec![2, 1]])
+            );
+            assert_eq!(full.multiset_group_metrics()[0], groups[0]);
+            assert_eq!(full.multiset_group_metrics()[1], groups[1]);
+            assert_eq!(full.full_multiset_metrics()[1..4], before[1..4]);
+            assert_eq!(before[1], roots.len());
+            assert_eq!(full.word_bitmap_metrics(), [0; 9]);
+        }
+
+        #[test]
+        fn full_multiset_unknown_roots_allow_positive_witness_but_not_a_false_certificate() {
+            use PieceKind::{I, O, T};
+            let control = ExecutionControl::default();
+            let mut kinds = PieceOrderLanguageCache::default();
+            let mixed = independent_words(&mut kinds, &[&[I, O], &[O, I], &[I, T]]);
+            let full_root = relation(&mut kinds, &[I, O], &[&[0, 1], &[1, 0]]);
+            let query = known_supply(&[2, 1], 0, false);
+            let mut full = enabled();
+            assert_eq!(
+                full.full_multiset_membership(1, 2, &[mixed], &query, &kinds, &control)
+                    .unwrap(),
+                None,
+                "a nonuniform NFA cannot acquire a uniform Full certificate"
+            );
+            assert_eq!(
+                full.full_multiset_membership(2, 2, &[mixed, full_root], &query, &kinds, &control)
+                    .unwrap(),
+                Some(true)
+            );
+            let mut malformed = enabled();
+            assert!(matches!(
+                malformed.full_multiset_membership(
+                    1,
+                    2,
+                    &[full_root, u32::MAX],
+                    &query,
+                    &kinds,
+                    &control,
+                ),
+                Err(WasmExactSearchError::InvalidProblem(
+                    "wasm_observation_suffix_language_missing"
+                ))
+            ));
+            assert_eq!(malformed.full_multiset_metrics()[4], 0);
+        }
+
+        #[test]
+        fn full_multiset_optional_bounds_and_disabled_modes_preserve_the_language() {
+            use PieceKind::{I, O};
+            let control = ExecutionControl::default();
+            let mut kinds = PieceOrderLanguageCache::default();
+            let root = relation(&mut kinds, &[I, O], &[&[0, 1], &[1, 0]]);
+            let query = known_supply(&[2, 1], 0, false);
+            for (full_enabled, groups_enabled) in [(false, true), (true, false)] {
+                let mut disabled = arena();
+                disabled.set_full_multiset_enabled(full_enabled);
+                disabled.set_multiset_grouping_enabled(groups_enabled);
+                assert_eq!(
+                    disabled
+                        .full_multiset_membership(1, 2, &[root], &query, &kinds, &control)
+                        .unwrap(),
+                    None
+                );
+                assert_eq!(disabled.full_multiset_metrics(), [0; 6]);
+            }
+            let mut bounded = KindUnionArena::new(
+                KindUnionResources {
+                    nodes: 0,
+                    edges: 0,
+                    members: 1,
+                    work: 0,
+                },
+                KindUnionResources {
+                    members: 1,
+                    ..resources()
+                },
+            )
+            .unwrap();
+            bounded.set_multiset_grouping_enabled(true);
+            bounded.set_full_multiset_enabled(true);
+            assert_eq!(
+                bounded
+                    .full_multiset_membership(1, 2, &[root], &query, &kinds, &control)
+                    .unwrap(),
+                None,
+                "an optional group cannot exceed the existing shared member cap"
+            );
+            assert_eq!(bounded.multiset_group_metrics()[0], 0);
+            assert_eq!(bounded.full_multiset_metrics()[1], 0);
+            let filtered = bounded
+                .intern_for_supply(1, 2, &[root], [1, 1, 0, 0, 0, 0, 0], &kinds, &control)
+                .unwrap()
+                .unwrap();
+            assert_eq!(filtered, root | KIND_SOURCE_TAG);
+            assert_eq!(
+                lazy_words(&mut bounded, &kinds, filtered),
+                BTreeSet::from([vec![1, 2], vec![2, 1]])
+            );
+            assert!(bounded.peak_bytes() >= bounded.retained_bytes());
+            assert!(bounded.full_multiset_metrics()[5] <= bounded.metrics()[4]);
+        }
+
+        #[test]
+        fn full_multiset_work_owner_hot_validation_and_cancellation_fail_closed() {
+            use PieceKind::{I, O};
+            let control = ExecutionControl::default();
+            let mut kinds = PieceOrderLanguageCache::default();
+            let root = relation(&mut kinds, &[I, O], &[&[0, 1], &[1, 0]]);
+            let query = known_supply(&[2, 1], 0, false);
+            let mut limited = KindUnionArena::new(
+                KindUnionResources {
+                    nodes: 0,
+                    edges: 0,
+                    members: 0,
+                    work: 9,
+                },
+                KindUnionResources {
+                    work: 10,
+                    ..resources()
+                },
+            )
+            .unwrap();
+            limited.set_multiset_grouping_enabled(true);
+            limited.set_full_multiset_enabled(true);
+            assert!(matches!(
+                limited.full_multiset_membership(1, 2, &[root], &query, &kinds, &control),
+                Err(WasmExactSearchError::InvalidProblem(
+                    "wasm_observation_physical_work_limit"
+                ))
+            ));
+            assert_eq!(limited.metrics()[4], 1);
+            assert_eq!(limited.full_multiset_metrics()[5], 1);
+            assert!(matches!(
+                limited.full_multiset_membership(1, 2, &[root], &query, &kinds, &control),
+                Err(WasmExactSearchError::InvalidProblem(
+                    "wasm_observation_kind_union_failed"
+                ))
+            ));
+
+            let mut hot = enabled();
+            assert_eq!(
+                hot.full_multiset_membership(1, 2, &[root], &query, &kinds, &control)
+                    .unwrap(),
+                Some(true)
+            );
+            let before = hot.metrics();
+            let cancelled = ExecutionControl::default();
+            cancelled.cancellation.handle().cancel();
+            assert!(matches!(
+                hot.full_multiset_membership(1, 2, &[root], &query, &kinds, &cancelled),
+                Err(WasmExactSearchError::Cancelled)
+            ));
+            assert_eq!(hot.metrics(), before);
+
+            let mut wrong_owner = enabled();
+            wrong_owner
+                .full_multiset_membership(1, 2, &[root], &query, &kinds, &control)
+                .unwrap();
+            let mut other = PieceOrderLanguageCache::default();
+            let other_root = relation(&mut other, &[I, O], &[&[0, 1], &[1, 0]]);
+            assert!(matches!(
+                wrong_owner.full_multiset_membership(1, 2, &[other_root], &query, &other, &control),
+                Err(WasmExactSearchError::InvalidProblem(
+                    "wasm_observation_suffix_arena_changed"
+                ))
+            ));
+
+            let mut invalid_query = enabled();
+            invalid_query
+                .full_multiset_membership(1, 2, &[root], &query, &kinds, &control)
+                .unwrap();
+            assert!(matches!(
+                invalid_query.full_multiset_membership(
+                    1,
+                    2,
+                    &[root],
+                    &known_supply(&[0, 2], 0, false),
+                    &kinds,
+                    &control
+                ),
+                Err(WasmExactSearchError::InvalidProblem(
+                    "wasm_observation_known_supply_invalid"
+                ))
+            ));
+            let mut changed = enabled();
+            changed
+                .full_multiset_membership(1, 2, &[root], &query, &kinds, &control)
+                .unwrap();
+            assert!(matches!(
+                changed.full_multiset_membership(1, 2, &[root, root], &query, &kinds, &control),
+                Err(WasmExactSearchError::InvalidProblem(
+                    "wasm_observation_board_supply_roots_changed"
+                ))
+            ));
+        }
     }
 
     #[test]

@@ -2,12 +2,16 @@
 
 작성일: 2026-11-22. 작업 브랜치: `codex/see7-quotient-pruning-20261122`.
 
-**q21까지의 현재 판단:** 실제 8-lock의 완료 비교는 전체 원본 coverage가 같지만,
-10/11-lock 완주는 아직 확인하지 못했다. q21은 8-lock cone/class의 별도 ABBA와
-통합 관측 166개 검증을 마쳤다. 큰 exact cone cache는 10-lock에서 관리 비용이
-절약한 등록 비용을 초과했고, boundary batch와 첫 word bitmap도 work 한도를
-해결하지 못했다. §3.41–3.43에 완료·실패·메모리 계측을 구분해 기록한다.
-q22는 이 실제 비용을 줄이는 구조 변경이며 그 자체를 완주 증거로 간주하지 않는다.
+**q23까지의 현재 판단:** 실제 8-lock의 완료 비교는 전체 원본 coverage가 같다.
+q22의 cone 3은 완료했지만 bitmap은 이 fixture에서 더 비쌌다. q23 공유 생산자는
+관측 179개와 증분 importer 5개, 총 **184개**의 서로 다른 focused 검증과 release를
+마쳤다. 같은 바이너리의 shared 0/1 ABBA는 평균 **4.0258714005초 →
+3.9106416619999997초**, 비율 **0.971377690185114**였으며 각 모드 두 표본의
+기술 통계로 한정한다. q23 10-lock의 group 0/1은 모두 등록·freeze 뒤 정책의
+공통 64M work 상한으로 미완료 종료했다. **11-lock q23은 생성 중 8M suffix 참조
+상한으로 미완료 종료했다. 10/11-lock 완주는 아직 확인하지 못했다.**
+§3.44–3.50에 검증·완료·실패를 구분한다. q24 ordered policy class와 q25 Full
+multiset 인증은 후속 구현 중이며 아직 실행 결과로 채택하지 않는다.
 
 아래 앞부분은 각 구현 단계의 이력이다. 후속 결과는 번호를 이어 추가하며,
 최종 판단에는 같은 binary·같은 계약의 완료 비교만 사용한다.
@@ -74,6 +78,8 @@ q17 `7108df03b50df28c8a04eae7dd71f1e2f22dd76d`는 정확히 계산한 incumbent�
 - [x] 수정 파일: kind-union group index·연결 소비자와 이 문서, 구현 내용: q16 `86aa5b8e255c53636bfacc21a04c4efa706c2759`의 관측 129개·release build를 완료했다. 8-lock의 work 감소와 총시간 개선 미관측, P7P4의 부분 정책 평가 후 work-limit 실패를 기록하고 group 기본 0을 유지했다.
 - [x] 수정 파일: 독립 관측 비교기와 이 문서, 구현 내용: q17 v14 branch-bound 축·네 필수 계측을 지원하는 비교 출력 v13의 컴파일, 기존 q16 backward comparison 및 실제 q17 ABBA 완료·동등성 gate를 통과했다.
 - [x] 수정 파일: 관측 정책 branch-bound·연결 소비자와 이 문서, 구현 내용: q17 `7108df03b50df28c8a04eae7dd71f1e2f22dd76d`의 관측 135개·release 및 8-lock ABBA를 완료했다. B18 논증·유한 회귀·실제 비용 감소를 구분하며 P7P4의 group 0/1 정책 work-limit 실패를 함께 기록했다.
+- [x] 수정 파일: q22/q23 producer·소비자와 이 문서, 구현 내용: q22의 cone/bitmap 별도 8-lock ABBA와 q23 공유 생산자의 8-lock ABBA를 완료하고 전체 원본 coverage·확률·완료 gate의 동등성을 확인했다. q23의 관측 179개·증분 importer 5개 focused 검증, release, 원래 resource 상한 및 실제 memory receipt를 기록했다.
+- [x] 수정 파일: 이 문서, 구현 내용: q23 P7P4 group 0/1의 전체 456,459개 등록·freeze 후 정책 work-limit 실패를 기록했다. 초기 관측 일부의 완료 수를 전체 완료로 표시하지 않고 실패시간 비율을 만들지 않았다.
 - [ ] 수정 파일: 후속 producer·소비자와 이 문서, 구현 내용: 원래 계약의 10/11-lock 완주를 달성한다. q15의 별도 source filter는 q14 실측에 적용되지 않았다.
 - [ ] 수정 파일: 물리 관측 relation producer와 소비자, 구현 내용: 전체 P7P4 see-7을 정확한 원래 공급·관측 계약으로 완주한다.
 - [x] 수정 파일: `placement_graph_bench.rs`, 구현 내용: P7P4 Improved 반복 실행을 완료하고 같은 바이너리·CPU의 Current 3/4회차와 Improved 1/2회차를 같은 ABBA block 안에서 비교했다.
@@ -108,6 +114,8 @@ q17 `7108df03b50df28c8a04eae7dd71f1e2f22dd76d`는 정확히 계산한 incumbent�
 | q18 | `3d460d4a2c1ae44193142ec1762ebd4e1d877378` | 완료 H cone 재사용; 관측 141개·release 및 8-lock ABBA 완료, 총시간 개선 미관측; P7P4 policy work-limit, 11-lock 모든 worker 완료 뒤 중앙 node-limit 및 producer work 71,396,217 |
 | q19/q20 통합 | `13d539b`, 후속 class 정렬 개선 `d6df081` | 완료 H 집합 class와 실제 공개 공급 bitmap; 관측 161개 통합 검증, 실제 성능은 q21 binary로 계측 |
 | q21 | `2d99de404e567d7e83eaed321d447bcc3e66a9cd` | 중간 T exact cone까지 확장; 관측 166개·release, 8-lock cone/class 별도 ABBA 완료; bitmap 1의 8-lock 실패 및 P7P4 class 0/1의 서로 다른 단계 work-limit |
+| q22 | `8f63f0cdbd1323de6eb454f4e4bc9b08accdc25f` | typed 경계 remap·완료 unordered roots·cone 3·target-M/board bitmap; 관측 176개·release, 8-lock cone/bitmap 두 ABBA 완료·동등성 확인, P7P4는 정책 work-limit |
+| q23 | `055427a8381a25e38646013b57eb150758b44b8e` | request 소유 공유 producer·worker별 증분 kind importer; 관측 179개·importer 5개 및 release 완료, 8-lock shared ABBA 완료·동등성 확인, P7P4 group 0/1 정책 work-limit; 11-lock 생성 중 8M suffix 참조 상한 |
 
 같은 비교 표 안의 가지치기 arm은 같은 바이너리를 사용했다. microbenchmark와 전체 oracle은 서로 다른 소스·바이너리의 결과이므로 양쪽 시간을 더하거나 서로의 상대 속도로 해석하지 않는다.
 
@@ -132,6 +140,8 @@ q17 `7108df03b50df28c8a04eae7dd71f1e2f22dd76d`는 정확히 계산한 incumbent�
 | `bin/quotient17-observation` | `72ee31e173eb559e3c454bcae604f742812b88844ae676b6981a935f9ada0798` |
 | `bin/quotient18-observation` | `9ae331d323e9216661b4933082fb039ac118ef747e02c43b9569ffc0835a9610` |
 | `bin/quotient21-observation` | `f1578b9a749461c18ec5b27a256a708957ad48099ed0a56c75ff6895f76e5b3d` |
+| `bin/quotient22-observation` | `9cf6702d030d27b463f780f05a7b67f4e4c6bdea62e26d517f80727519402197` |
+| `bin/quotient23-observation` | `edb5a6f789143c087a79fd81eb05b2abc4668850a7009f36f8dd34f251ec73fd` |
 | q2 microbenchmark test binary | `38b06b750387b03e81fc7aeb9eba5d403d6cf1766bb9c57ce8c1709627e7b110` |
 
 일반 검색은 native Rust CPU 제품 경로, `WorkerPolicy::Auto`, `use_all_logical_processors=true`를 사용했다. 보고된 CPU hard/affinity/available limit와 실제 `workers_used`, `parallel_active_workers`는 모두 9다. tablebase·conditioned reachability·exact legal-board 가속은 요청에서 비활성화했다.
@@ -1430,9 +1440,124 @@ reset·destination identity·취소/부분 실패의 5개 회귀를 포함한다
 read-only peer 검토도 완료했지만, 그 검토와 유한 회귀를 전칭 증명으로 대체하지 않는다.
 Default/no-PC에서 사용되지 않는 getter cfg와 reexport 경계도 정리했다.
 
+위 두 필터의 서로 다른 검증은 총 **184개**이며, 관측 필터 자체를 184개로
+표시하지 않는다. 고정 source는 **`055427a8381a25e38646013b57eb150758b44b8e`**,
+release는 **1분 50초**, receipt **`1795344715295821966-5`**, child exit 0이다.
+보관 `bin/quotient23-observation`의 SHA-256은
+`edb5a6f789143c087a79fd81eb05b2abc4668850a7009f36f8dd34f251ec73fd`다.
+
 후속 비교기는 입력 v18/출력 v17/18축으로 확장했다. 실제 q22 bitmap ABBA를 다시
 읽은 `quotient22-eight-bitmap-comparison-v17.json`은 validation/equivalent 모두 true다.
-공유 모드의 실제 성능·10/11-lock 완료 여부는 고정 binary 실행으로 별도 확인한다.
+실제 v18 shared ABBA의 완료 결과는 다음 절에 기록한다. 10-lock은 그다음 절의
+미완료이고, 11-lock은 이 문서 갱신 시점에 실행 중이다.
+
+### 3.48 q23 실제 8-lock: 공유 생산자 ABBA 완료
+
+같은 q23 바이너리의 `eight visible-7`에서 shared를 **0a, 1a, 1b, 0b** 순서로
+실행했다. 네 arm 모두 groups 1·cone 3·boundary classes 1·bitmap 0·kick 2·
+prefix mask 0·branch-bound 1이며, 나머지 축도 §7.18의 값으로 고정했다.
+자동 9 workers와 원래 9-draw 공급, 두 projection=false를 유지했다.
+
+| Arm | 실행시간, 초 | Engine CPU peak, B | 감독 sampled RSS peak, B | Receipt |
+| --- | ---: | ---: | ---: | --- |
+| Shared 0a | 4.210744704 | 225,943,115 | 249,503,744 | `1795345040560004429-8` |
+| Shared 1a | 3.880813512 | 185,808,107 | 131,825,664 | `1795345044826552491-22` |
+| Shared 1b | 3.940469812 | 185,807,879 | 129,671,168 | `1795345048752977603-36` |
+| Shared 0b | 3.840998097 | 225,672,287 | 160,133,120 | `1795345052723794761-49` |
+
+`quotient23-eight-shared-comparison.json`의 validation/equivalent는 모두 true다.
+Rust comparator의 평균은 **4.0258714005초 → 3.9106416619999997초**, 비율은
+**0.971377690185114**, 표본은 각 두 개다. 이 block에서 평균 시간과 engine peak가
+낮았다는 관측이며 안정적인 개선율·p95를 주장하지 않는다. 첫 off의 RSS와 시간이
+두 번째 off보다 높았다는 차이도 표에서 그대로 보존한다. 모든 receipt는 child
+exit 0, pressure events 0, kernel peak/감독 종료 원인 null이다. Engine의 논리적
+payload peak와 감독의 sampled process-group RSS는 서로 다른 측정량이다.
+
+네 실행 모두 원래 **211,234 / 211,680**, 확률 **0.9978930461073318**,
+coverage SHA **`24d3271c4b4af592b97186ce2a0b542c032b4b98c7e93fcb8774a9a687ba9797`**다.
+원래 coverage·probability·packing의 완료 gate와 BuildUp 0도 유지했다.
+Geometry 후보 27,987개, accepted/board 후보 2,597개, 최종 1,930 nodes /
+3,679 edges / 18,872 roots는 같았다. Candidate-set digest는 미계산이므로 후보
+개수 확인을 전체 후보 집합의 해시 동등성이나 전칭 증명으로 표현하지 않는다.
+
+Shared 1a의 request snapshot은 registrations **2,597**, lock entries **2,598**,
+pending groups **1,850**, pending root references **18,941**, final classes **1,826**,
+finalization work **64,296**, retained **1,554,240B**, peak **7,458,548B**다.
+이 값은 공유 request 한 개의 값이며 worker snapshot 아홉 개를 합산하지 않는다.
+Finalization work는 board work의 부분량이다. 첫 off/on의 board work는
+**752,023 → 186,459**, kind-union work는 둘 다 **8,664,991**이었다.
+두 번째 on/off의 board work는 186,472 / 752,029로 worker 입력 분배의 작은 차이가
+남는다. 실제 policy states와 action checks에도 작은 차이가 있지만 comparator는
+표현·평가 진단값과 원래 coverage·확률 계약을 구분한다.
+
+첫 off/on의 source 단계는 0.074962283 / 0.034808557초, freeze는
+0.000265921 / 0.0003779초, policy는 4.010217763 / 3.730627271초였다.
+공유 등록의 실제 작업·보유량 감소를 기록하되, 작은 전체시간 차이를 source 단계
+단독의 인과 효과로 단정하지 않는다. 원본은 `quotient23-eight-shared{0a,1a,1b,0b}`의
+JSON·stderr와 위 receipt다.
+
+### 3.49 q23 실제 10-lock: 공유 등록 완료 후 정책 work 상한
+
+`p7p4 visible-7`에서 shared 1을 고정하고 groups 0, 1 순서로 실행했다.
+두 실행 모두 **456,459개** 후보의 생산·공유 등록·class 확정·freeze를 마쳤으나
+정책 kind-union work가 기존 합계 **64,000,000**에 도달해 거절됐다.
+완료된 확률·coverage 결과는 없으며 두 실패 종료시간의 비율을 계산하지 않는다.
+
+| 항목 | Groups 0 | Groups 1 |
+| --- | ---: | ---: |
+| 실패 종료시간, 초 | 34.711053326 | 39.884379112 |
+| Policy 전 base work | 41,417,099 | 41,437,597 |
+| 추가 kind work | 22,582,901 | 22,562,403 |
+| Policy 시간, 초 | 3.661776938 | 8.117402269 |
+| 완료 초기 관측 / 5,040 | 4 | 13 |
+| 감독 sampled RSS peak, B | 807,550,976 | 919,941,120 |
+| Receipt | `1795345070698631191-6` | `1795345105458313661-19` |
+
+최종 graph는 두 실행 모두 **374,840 nodes / 1,683,722 edges / 3,227,517 roots**다.
+고유 H 보드 **402,256개**를 **249,528개 class**로 만들었고 재사용은 **152,728회**,
+finalization work는 **14,812,983**이었다. Source 단계는 group 0/1 각각
+1.358445372 / 1.352971373초, freeze는 0.312315557 / 0.287742707초다.
+같은 구조에서 group 1의 완료 초기 관측 수가 더 많았지만, 일부 관측의 진척을
+전체 성공률이나 완료 성능으로 바꾸어 해석하지 않는다. 입력 분배·cone 재사용 때문에
+base work가 소폭 다르며 고정 shard 차감식으로 공유 효과를 계산하지 않는다.
+
+두 receipt는 child exit 1, pressure events 0, kernel peak/감독 종료 원인 null이다.
+이는 product의 work-limit 거절이며 600초 timeout 또는 OOM 기록이 아니다.
+원본은 `quotient23-p7p4-shared1-groups{0,1}`의 JSON·stderr다.
+후속 `quotient23-eleven-shared1-groups1`은 이 갱신 시점에 실행 중이다. 완료 여부와
+최종 단계·resource 계측은 최종 artifact가 나온 뒤 별도로 기록한다.
+
+### 3.50 q23 실제 11-lock: 공유 생성 중 suffix 참조 상한
+
+`quotient23-eleven-shared1-groups1`은 같은 q23 바이너리, shared 1·group 1·cone 3·
+class 1·bitmap 0, Auto 9 workers 및 기존 자원 한도로 실행했다. **355.943417559초**에
+미완료 종료했다. 최초 원인은 공유 등록의 `wasm_observation_physical_union_limit`이며,
+peer 중단을 거쳐 공개 최종 오류는 `wasm_observation_shared_producer_failed`다.
+최초 원인과 최종 전파 오류를 구분한다.
+
+| 중단 시 진단 | 값 |
+| --- | ---: |
+| 완료된 후보 등록 | 1,285,619 |
+| 실제 pre-H physical nodes | 962,289 |
+| 실제 물리 간선 | 4,737,867 |
+| Pending H board groups | 1,311,519 |
+| 보유 suffix root 참조 | **8,000,000** |
+| 누적 physical work | 47,272,836 |
+| Prefix 방문 / edge 시도 | 19,929,165 / 10,575,288 |
+| 공유 owner 보유 / peak bytes | 727,059,740 / 797,625,924 |
+| 감독 sampled RSS | 984,788,992 bytes |
+
+Receipt는 `1795345150022203304-5-runtime.json`, 감독 duration은 356,004ms다.
+실행 exit는 1이며 `kernel_memory_peak`와 `supervisor_termination_reason`은 null이다.
+이 결과를 OOM, timeout 또는 완료 검색시간으로 해석하지 않는다. H finalization과
+정책 평가는 실행하지 못했으며 최종 coverage와 확률은 없다.
+
+이 실행은 q18의 worker별 work 합산과 다른 단일 공유 owner 알고리즘이다. 따라서
+q18의 71,396,217 하한을 이 실행에 그대로 대입하거나, 중단 work 47,272,836을 완성된
+생산 work로 보고하지 않는다. 확인된 사실은 **완료 전에 현재 root-list 표현이 8M
+참조에 도달했다**는 것이다. q24/q25의 후처리·정책 개선은 이 생성 단계의 제한을
+그 자체로 해결하지 않는다. 11-lock을 위해서는 생산 중에도 유효한 개별 suffix 언어
+동치·포함 증거 또는 더 작은 정확한 표현과 그 work/peak 계약이 추가로 필요하다.
 
 ## 4. 유한 microbenchmark: 생성비용과 downstream 작업
 
@@ -1954,7 +2079,7 @@ _local/artifacts/see7-quotient-pruning-20261122/bin/compare-observation \
 
 P7P4 두 실행은 같은 q17 바이너리의 `p7p4 visible-7`에서 `CLEARRA_STRICT_GLOBAL_KICK_PRUNE=2`, `CLEARRA_OBSERVATION_PREFIX_MASK=0`, `CLEARRA_OBSERVATION_BRANCH_BOUND=1`을 고정하고 `CLEARRA_OBSERVATION_MULTISET_GROUPS`를 0, 1 순서로 실행했다. 나머지 공급·board·kind·boundary·edge·collection·suffix·source 존재성/filter 설정은 위 8-lock 명령과 같다. 두 결과는 §3.35의 work-limit 실패이므로 완료 평균·비율 비교에 넣지 않는다.
 
-### 7.17 q18/q21 및 후속 q22의 추가 계약
+### 7.17 q18/q21/q22의 추가 계약
 
 q18의 입력 v15는 `prefix_cones_mode=0/1`과 H 계측 다섯 개를 추가했다.
 q21 입력 v16은 cone 2, `boundary_classes_mode=0/1`, `word_bitmap_mode=0/1`,
@@ -1979,7 +2104,8 @@ schema/source SHA/binary SHA/CPU/공급·projection·확률·완료·원래 cove
 다른 축은 고정되어야 하며 실패 종료시간은 계속 제외한다. Rustc 컴파일 뒤 기존
 q21 cone 네 arm의 backward comparison인
 `quotient21-eight-cone-comparison-v16.json`은 validation/equivalent 모두 true다.
-아직 실행하지 않은 v17의 성능을 이 backward 검증으로 대신하지 않는다.
+실제 v17의 두 ABBA 및 P7P4 실행은 §3.45–3.46에 별도로 기록했다.
+Backward 검증을 새 schema의 성능 근거로 대신하지 않는다.
 
 q18/q21의 실제 실행은 §7.16의 전체 설정을 고정하고 다음 축을 명시적으로 추가했다.
 q18에는 후속 schema에만 있는 class/bitmap 축을 결과에 임의로 추정해 넣지 않는다.
@@ -1988,13 +2114,90 @@ q18에는 후속 schema에만 있는 class/bitmap 축을 결과에 임의로 추
 | --- | --- | --- |
 | `bin/quotient18-observation` | `CLEARRA_OBSERVATION_PREFIX_CONES=0/1` | eight cone ABBA; P7P4/eleven은 cone 1 |
 | `bin/quotient21-observation` | prefix cones 1/2, boundary classes 0/1, word bitmap 0/1 | §3.41의 별도 ABBA, §3.42 첫 bitmap 실패, §3.43의 P7P4 두 실패 |
+| `bin/quotient22-observation` | cone 2/3 또는 bitmap 0/1, 8-lock은 classes 0 | §3.45의 별도 ABBA; P7P4의 classes/bitmap/groups 대조는 §3.46 |
 
 각 축의 환경 변수는 `CLEARRA_OBSERVATION_PREFIX_CONES`,
 `CLEARRA_OBSERVATION_BOUNDARY_CLASSES`, `CLEARRA_OBSERVATION_WORD_BITMAP`이다.
 공통 `CLEARRA_STRICT_GLOBAL_KICK_PRUNE=2`, `CLEARRA_OBSERVATION_PREFIX_MASK=0`,
 `CLEARRA_OBSERVATION_BRANCH_BOUND=1`은 q18 이후에도 명시했다. 실행 wrapper는
 동일한 `benchmark-search`·600초 감독, `visible-7` 인자, 원래 materialized 공급과
-자동 9 workers를 사용한다. q22의 보관 SHA와 실제 모드·완료 상태는 실행 후 기록한다.
+자동 9 workers를 사용한다. q22의 보관 SHA는 §2와 §3.44에 기록했다.
+
+### 7.18 q23 공유 생산자의 재현 형식과 비교 계약
+
+입력 **v18**은 `shared_producer_mode=0|1`과
+`observation_shared_producer_` 접두어의 registrations, lock_entries,
+pending_groups, pending_root_refs, finalized_classes, finalization_work,
+retained_bytes, peak_bytes 여덟 unsigned 정수 계측을 추가한다. 비교 출력은
+**v17**, 비교 축은 **18개**다. 이전 입력 v2–v17의 shared 축은 `legacy`이며
+다른 schema를 같은 비교 그룹으로 합치지 않는다. 실제 q22 backward comparison과
+q23 v18 완료 비교를 모두 수행했다.
+
+Shared 1은 `local-search-ab`의 실제 native parallel 요청에서만 선택된다.
+Fresh source에 대한 typed plan, source existence/filter 1, board 1,
+boundary suffix 1, edge closure 2, suffix import 1, boundary classes 1 및
+`1 ≤ H ≤ 5`, `H < 전체 lock 수`가 필요하다. Mode의 제품 기본은 **0**이다.
+모든 canonical worker 분기의 완료를 확인한 뒤에만 pending H root 집합을
+확정하며 미완료·취소·오류 owner의 부분 결과를 확률로 내보내지 않는다.
+원래 physical cells와 place/clear 검증은 class remap 전에 유지한다.
+
+공유 graph/kind/staging는 request 소유량으로 한 번만 계상하고 worker별 source,
+scratch, 증분 importer map은 private 소유량에 남는다. Worker 종료 때 찍은
+공유 snapshot은 서로 겹치므로 합산하지 않는다. Importer의 기존 구조 계측은
+kind compilation/import domain이며 physical 64M에 이중 가산하지 않는다.
+새 등록·lock·class 확정의 실제 작업은 기존 physical work 상한에 포함되고,
+8M root member 한도와 node/work 상한을 그대로 유지한다. 이미 수행한 work를
+환급하지 않으며, class 재사용으로 실제 폐기한 root 참조만 보유량에서 제외한다.
+
+완료된 shared 1에서는 registrations==accepted candidates==board candidates,
+lock entries≥registrations, classes≤pending groups, retained≤peak,
+finalization work≤board work를 검사한다. 활동이 있는 실제 fixture의 groups,
+roots, classes, finalization work, peak는 양수여야 한다. 원래 coverage SHA·
+cardinality·확률·완료·BuildUp 0·source/binary SHA·CPU 계약도 그대로 검사한다.
+단일 shared 0→1 pair의 후보 개수 검사는 count 진단이며 미계산 candidate-set
+digest를 대신하지 않는다. 시간 비율은 같은 계약의 완료된 입력에만 계산한다.
+
+실제 8-lock ABBA는 아래 설정에서 `CLEARRA_OBSERVATION_SHARED_PRODUCER`만
+**0, 1, 1, 0**으로 바꿨다. 과거 q17의 groups 0이나 q22의 classes 0을 그대로
+이어받지 않도록 q23의 모든 축을 명시한다.
+
+```sh
+clearra-manage runtime run --producer benchmark --profile benchmark-search --timeout 600 -- \
+  env CLEARRA_STRICT_GLOBAL_KICK_PRUNE=2 \
+  CLEARRA_OBSERVATION_BOARD_QUOTIENT=1 \
+  CLEARRA_OBSERVATION_KIND_UNION=1 \
+  CLEARRA_OBSERVATION_SOURCE_PREFIX=1 \
+  CLEARRA_OBSERVATION_BOUNDARY_SUFFIX=1 \
+  CLEARRA_OBSERVATION_EDGE_CLOSURE=2 \
+  CLEARRA_OBSERVATION_COLLECT_FULL=1 \
+  CLEARRA_OBSERVATION_SUPPLY_MULTISET=1 \
+  CLEARRA_OBSERVATION_PREFIX_MASK=0 \
+  CLEARRA_OBSERVATION_SUFFIX_IMPORT=1 \
+  CLEARRA_OBSERVATION_PRE_REVEAL_MEMO=0 \
+  CLEARRA_OBSERVATION_SOURCE_EXISTENCE=1 \
+  CLEARRA_OBSERVATION_SOURCE_FILTER=1 \
+  CLEARRA_OBSERVATION_MULTISET_GROUPS=1 \
+  CLEARRA_OBSERVATION_BRANCH_BOUND=1 \
+  CLEARRA_OBSERVATION_PREFIX_CONES=3 \
+  CLEARRA_OBSERVATION_BOUNDARY_CLASSES=1 \
+  CLEARRA_OBSERVATION_WORD_BITMAP=0 \
+  CLEARRA_OBSERVATION_SHARED_PRODUCER=1 \
+  _local/artifacts/see7-quotient-pruning-20261122/bin/quotient23-observation eight visible-7
+```
+
+완료된 네 arm의 실제 비교 명령은 다음과 같다.
+
+```sh
+_local/artifacts/see7-quotient-pruning-20261122/bin/compare-observation \
+  _local/artifacts/see7-quotient-pruning-20261122/quotient23-eight-shared0a.json \
+  _local/artifacts/see7-quotient-pruning-20261122/quotient23-eight-shared1a.json \
+  _local/artifacts/see7-quotient-pruning-20261122/quotient23-eight-shared1b.json \
+  _local/artifacts/see7-quotient-pruning-20261122/quotient23-eight-shared0b.json
+```
+
+P7P4 두 실행은 같은 설정의 `p7p4 visible-7`에서 shared 1을 고정하고 groups를
+0, 1로 바꿨다. §3.49의 미완료 자료이므로 위 완료 평균에 넣지 않는다.
+11-lock은 같은 설정의 `eleven visible-7`, groups 1로 실행 중이다.
 
 ## 8. 후속 결과와 남은 계약
 
@@ -2041,6 +2244,10 @@ q18에는 후속 schema에만 있는 class/bitmap 축을 결과에 임의로 추
 - [x] 수정 파일: 독립 관측 비교기 소스와 이 문서, 구현 내용: v15 prefix-cones 축·다섯 필수 계측을 추가하고 실제 q18 8-lock ABBA의 완료·원본 coverage 동등성을 확인했다. 총시간 개선 미관측, P7P4 정책 work-limit, 11-lock 중앙 node-limit과 모든 worker의 71,396,217 work를 함께 기록했다.
 - [x] 수정 파일: q19/q20/q21 producer·소비자와 이 문서, 구현 내용: q21 관측 166개 통합 검증과 release를 마쳤고 실제 8-lock cone/class 두 ABBA를 별도 비교했다. Bitmap의 8-lock work-limit과 cone/class의 P7P4 비용 악화를 생략하지 않았으며 실패시간을 속도 개선으로 해석하지 않았다.
 - [x] 수정 파일: 독립 관측 비교기 소스, 구현 내용: 입력 v17/출력 v16 및 17축 계약을 추가하고 q21 backward comparison을 통과했다. Target-M query와 Full certificate의 활동 gate를 기존 v16과 구분한다.
+- [x] 수정 파일: q22 producer·소비자와 이 문서, 구현 내용: 관측 176개·release 및 실제 8-lock cone/bitmap 두 ABBA를 완료하고 원래 coverage를 보존했다. Bitmap 비용 악화와 P7P4 class/bitmap/groups 각 경로의 정책 work-limit을 §3.44–3.46에 기록했다.
+- [x] 수정 파일: q23 공유 producer·증분 importer·native 연결과 이 문서, 구현 내용: 서로 다른 관측 179개·importer 5개 검증과 release를 완료했다. 공유 request와 private worker 소유량, 완료 authority, 원래 8M/64M 상한을 유지하며 source/binary SHA와 receipt를 §3.47에 기록했다.
+- [x] 수정 파일: 독립 관측 비교기와 이 문서, 구현 내용: 입력 v18/출력 v17/18축의 q23 8-lock shared ABBA에서 전체 원본 coverage·확률·완료 gate를 통과했다. 작은 평균 차이와 각 표본의 engine/RSS peak, candidate digest 미계산 경계를 §3.48에 기록했다.
+- [x] 수정 파일: 이 문서, 구현 내용: q23 P7P4 group 0/1의 등록·freeze 완료 뒤 정책 work-limit과 초기 관측 4/5,040·13/5,040의 진척을 §3.49에 기록했다. 11-lock의 생성 중 8M suffix 참조 거절·최초 원인·실제 owner 진단은 §3.50에 기록했다. 실패시간 비율을 만들지 않았다.
 - [ ] 수정 파일: 후속 관측 producer·소비자와 이 문서, 구현 내용: 원래 공급·관측 계약의 10/11-lock 완주를 달성한다. q17의 완료된 8-lock 비용 감소·focused 검증과 전체 10/11-lock 완주는 구분한다. 관측된 producer·정책 병목을 함께 다루며 full family가 없는 raw residual의 임의 병합을 허용하지 않는다. 미완료를 정상 확률 0으로 바꾸지 않는다.
 - [x] 수정 파일: `queue_observation_policy.rs` 및 관련 physical view, 구현 내용: 실제 공급행동·kind·cells로 공통 deterministic physical tie 계약을 구현했다. 기존 raw child ID의 우연적인 동률 선택과 정확히 같은 selected-ID subset을 보장한다는 주장과, 정책 값·합법적인 성공 행동 집합을 보존한다는 주장을 구분한다. q3 전체 실행의 성공 근거로 선행 간주하지 않는다.
 

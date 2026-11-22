@@ -6,7 +6,7 @@
 허용 경로에 대한 보존 증명을 담는다. 실제 실행·commit·receipt·실패 원인은
 [측정 보고서](see7-pruning-measurements-2026-11-22.md)에 구분해 기록한다.
 
-q21까지 실제 8-lock/9-draw see-7의 각 완료 비교에서 원래 211,680개 큐 ID 중
+q23까지 실제 8-lock/9-draw see-7의 각 완료 비교에서 원래 211,680개 큐 ID 중
 211,234개의 성공 결과가 일치했다. q17의 같은 binary
 ABBA에서는 기존 조합의 평균 9.7012302315초가 상계 가지치기 후
 3.9884741035초로 줄었다. 이것은 두 표본씩의 기술 통계이며 전체 최적화의 곱셈
@@ -25,6 +25,14 @@ q21의 큰 exact cone cache는 실제 경로 등록을 줄였지만 cache 성장
 첫 suffix bitmap 구현은 8-lock 정책 607/5,040개만 처리하고 같은 한도에 도달했다.
 q22는 이 실측에 따라 중간 T만 exact cache에 보관하고, 경계의 중복 순회·정렬과
 target 공급 bitmap의 반복 구성을 줄인다. 구현 및 실행 상태는 측정 보고서를 따른다.
+
+q23의 요청 단위 공유 등록은 10-lock에서 모든 456,459개 후보를 처리하고 완료 H
+class와 freeze를 만들었으나 정책 work 한도로 미완료다. 11-lock은 1,285,619개 후보
+등록 뒤 **8,000,000 suffix 참조** 한도에서 생성 중 거절됐다. 이 시점의 실제 pre-H
+physical node는 962,289개, pending H group은 1,311,519개, physical work는
+47,272,836이다. 전체 생성이 완료되지 않았으므로 이 값은 최종 비용이 아니다.
+후속 q24/q25는 정책 의미 class와 Full 충분조건을 구현 중이며, 생성 단계의 이 한도를
+해결했다는 주장은 하지 않는다. §B23/B24와 측정 보고서 §3.50을 함께 따른다.
 
 유한 회귀는 구현 실수를 찾는 근거이고 이 문서의 전칭 증명을 대신하지 않는다.
 조합론적 상태 수, 완료 시간, 실패까지의 시간, 관측 RSS 및 제품 기본값을 서로
@@ -2162,6 +2170,81 @@ arena·scratch·증분 map과 그 성장 overlap은 각 worker에 남긴다. 확
 coordinator workspace로 이전한 뒤 공유 snapshot을 다시 더하지 않는다. 취소, peer
 abort, poisoned lock, 잘못된 owner와 부분 family는 실패를 유지하고, 새 class의
 정상 결과로 바꾸지 않는다. 최초 원인 진단과 실패 시 peak도 보존한다.
+
+### B23. q24: 실제 행동 순서를 보존하는 정책 의미 class
+
+현재 구현 중인 추가 실험은 **완료된 H-only family의 CoverageSummary**에 한정한다.
+실제 board, four-cell mask, child와 physical/revealed 권한은 그대로 보관한다. 새 class는
+값 memo와 중복 선택지에만 쓰며 물리 검증기에 다른 board나 가짜 cells를 전달하지 않는다.
+
+H의 잎은 B20의 정확한 root-set class로 둔다. 같은 종류의 물리 간선을 실제 cells
+오름차순으로 읽고, child class가 같은 반복에서는 첫 간선만 남긴다. 깊이가 감소하는
+DAG의 역깊이 순서로 다음 signature를 만든다.
+
+\[
+\Sigma(v)=\bigl(r(v),\operatorname{type}(v),\operatorname{accepting}(v),
+   [C(u_{p,1}),\ldots,C(u_{p,k_p})]_{p=1}^{7}\bigr).
+\]
+
+종류별 배열은 class 번호의 정렬 순서가 아니라 **원래 실제 cells 순서의 최초 등장**이다.
+hash는 후보를 찾는 데만 쓰고 정확한 전체 signature 비교가 같을 때만 memo class를
+공유한다. node ID의 생성 순서가 위상 순서라고 가정하지 않는다.
+
+**정리 B23.** 동일 signature의 두 노드에서 동일한 원래 observation, Hold와 cursor로
+시작하면 정책 값과 선택된 원래 pattern ID 집합이 같다. H에서는 같은 종류 언어와
+실제 reveal 권한이 같은 성공 존재 여부를 준다. 공개 뒤의 결과는 해당 원래 정보집합
+전부 또는 공집합이다. pre-H에서는 같은 SupplyAction이 같은 종류·공급 상태로 가고,
+signature의 같은 위치가 동치 child로 간다. 원래 observation trie의 reveal 분할은
+언어 class와 독립적으로 같다. 깊이 귀납에 의해 각 분할의 값과 ID 집합이 같으므로
+각 행동의 값도 같고, 같은 순서의 동률 규칙이 같은 위치를 고른다. □
+
+같은 종류에서 동일 child class로 가는 뒤의 간선은 앞의 간선과 같은 값·ID 결과를
+가지면서 동률 우선순위만 낮다. 비인접 반복도 첫 간선만 남길 수 있다. 최초의 합법적인
+zero 행동은 보존하며 서로 다른 SupplyAction은 합치지 않는다. 서로 다른 child class를
+class 번호로 재정렬하는 것은 허용하지 않는다. 두 child가 같은 개수의 서로 다른 ID
+집합을 성공시키면 순서 변경만으로 최종 coverage bitset이 달라질 수 있기 때문이다.
+
+`collect_selected`는 현재 **실제 노드**에서 원래 첫 대응 간선을 다시 선택한다.
+`collect_full`을 꺼도 위 귀납은 성립한다. 조기 reveal 후에도 H 전의 raw physical
+graph를 유지하는 B8 범위가 필요하며, 중간 suffix alias를 허용하는 다른 모드에 이
+signature를 그대로 적용하지 않는다. replay, finesse, CountAll과 후보별 witness는
+이 class의 권한에 포함되지 않는다.
+
+추가 node map, 선택지 index, depth 작업공간과 interner의 보유량·성장 overlap을 계상한다.
+새 선택지 참조는 기존 root/union member 상한에 합산하고 모든 추가 방문·hash·정확 비교와
+초기화를 기존 누적 work에 청구한다. 이미 수행된 생산 work를 환불하지 않는다. 이 후처리
+축약은 생산 단계 자체가 상한을 넘는 경우를 해결한 것으로 보고할 수 없다.
+
+### B24. q25 설계: multiset의 모든 단어를 포함한다는 충분조건
+
+전체 bitmap을 만들기 전에 얻을 수 있는 더 싼 **양성 증거**를 검토한다. B11의 uniform
+multiset certificate를 가진 root v의 multiset을 M이라 하고, `Perm(M)`을 M의 모든 서로
+다른 종류 순열이라고 하자. terminal의 빈 언어 단어는 Full이다. 비종료 v에서 M에 남은
+각 종류 p마다 `M−e_p`에 대해 Full인 p-child가 하나 이상 있으면 v를 Full로 인증한다.
+
+\[
+\forall p\;(M_p>0\Rightarrow
+ \exists (p,u)\in E(v):K(u)=\operatorname{Perm}(M-e_p))
+ \quad\Longrightarrow\quad K(v)=\operatorname{Perm}(M).
+\]
+
+모든 순열은 첫 종류 p와 나머지 순열로 유일하게 분해되므로 오른쪽 포함이 성립하고,
+uniform certificate가 반대 포함을 준다. uniform 검증은 여전히 **모든 NFA 간선**을
+읽는다. 같은 종류의 여러 불완전 child를 합쳐야만 Full이 되는 경우에는 이 충분조건이
+실패할 수 있다. 따라서 실패는 불가능 판정이 아니라 기존 평가로의 fallback이다.
+
+실제 KnownSupplyQuery에서 남은 draw 길이가 r 이상이고, 인증된 M이 실제 available
+개수 A의 부분 multiset이면 B21b의 Hold 보조정리로 공급이 허용하는 r-lock 단어가 적어도
+하나 존재한다. Full은 그 모든 단어를 포함하므로 성공을 반환할 수 있다. 실제로 관측하지
+않은 미래, r보다 짧은 queue에서 EOF의 held release를 가정한 경우, 다른 terminal target
+또는 다른 projection 계약에는 이 증거를 쓰지 않는다. 단순 `M≤A`만으로 기존 공급
+자동자를 대신하지 않는다.
+
+이 증거는 기존 uniform certificate 계산의 child 순회에 합칠 수 있다. 다만 추가
+child-Full 검사, 종류 mask와 cache 조회는 실제 비용이므로 기존 work에 포함해야 한다.
+개별 query에서 전체 root를 다시 훑는 비용도 피해야 한다. 기존 multiset group 구축에서
+같은 M의 Full witness를 저장하고 실제 공급의 가능한 M key만 조회하는 구현을 우선
+검토한다. **구현·계측 전의 설계이며 성능 개선이나 10·11-lock 완주를 뜻하지 않는다.**
 
 ## 6. 후보 D: 관측 trie를 만들기 전에 공급 미래를 factor
 

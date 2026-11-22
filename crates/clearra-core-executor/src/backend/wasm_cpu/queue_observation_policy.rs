@@ -371,6 +371,8 @@ pub(super) struct QueueObservationMetrics {
     pub word_bitmap: [usize; 9],
     pub word_bitmap_board: [usize; 6],
     pub shared_producer: [usize; 8],
+    pub ordered_classes: [usize; 8],
+    pub full_multiset: [usize; 6],
     pub prefix_masks: [usize; 6],
     pub suffix_import: [usize; 13],
     pub source_existence: [usize; 6],
@@ -421,6 +423,8 @@ impl Default for QueueObservationMetrics {
             word_bitmap: [0; 9],
             word_bitmap_board: [0; 6],
             shared_producer: [0; 8],
+            ordered_classes: [0; 8],
+            full_multiset: [0; 6],
             prefix_masks: [0; 6],
             suffix_import: [0; 13],
             source_existence: [0; 6],
@@ -1608,6 +1612,8 @@ impl QueueObservationPolicyEvaluator {
                 word_bitmap: [0; 9],
                 word_bitmap_board: [0; 6],
                 shared_producer: [0; 8],
+                ordered_classes: [0; 8],
+                full_multiset: [0; 6],
                 prefix_masks: [0; 6],
                 suffix_import: [0; 13],
                 source_existence: [0; 6],
@@ -1761,6 +1767,11 @@ impl QueueObservationPolicyEvaluator {
     #[cfg(test)]
     fn set_branch_bound_enabled(&mut self, enabled: bool) {
         self.branch_bound_enabled = enabled;
+    }
+
+    #[cfg(all(test, feature = "placement-dependency-pc"))]
+    pub(in crate::backend::wasm_cpu) fn set_collect_full_for_test(&mut self, enabled: bool) {
+        self.collect_full = enabled;
     }
 
     fn solve<G: ObservationPieceLanguage>(

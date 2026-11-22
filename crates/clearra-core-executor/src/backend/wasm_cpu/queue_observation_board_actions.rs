@@ -54,6 +54,10 @@ mod completed_boundary_quotient;
 #[path = "queue_observation_shared_producer.rs"]
 pub(in crate::backend::wasm_cpu) mod shared_producer;
 
+#[path = "queue_observation_ordered_policy_quotient.rs"]
+mod ordered_policy_quotient;
+use ordered_policy_quotient::OrderedPolicyQuotient;
+
 const REVEALED_BOARD_TAG: u32 = 1 << 30;
 const KIND_TAG: u32 = KIND_SOURCE_TAG;
 const KIND_UNION_TAG: u32 = 1 << 29;
@@ -106,6 +110,7 @@ pub(in crate::backend::wasm_cpu) struct BoardObservationPlan {
     prefix_cones_exact: bool,
     prefix_cones_ancestors_only: bool,
     boundary_classes_enabled: bool,
+    ordered_classes_enabled: bool,
     edge_closure: EdgeClosureMode,
     #[cfg(any(test, feature = "local-search-ab"))]
     prefix_masks_enabled: bool,
@@ -162,6 +167,7 @@ impl BoardObservationPlan {
             prefix_cones_exact: cone_mode >= 2,
             prefix_cones_ancestors_only: cone_mode == 3,
             boundary_classes_enabled: boundary_classes_enabled()?,
+            ordered_classes_enabled: ordered_classes_enabled()?,
             edge_closure: edge_closure_mode()?,
             #[cfg(any(test, feature = "local-search-ab"))]
             prefix_masks_enabled: prefix_masks_enabled()?,
@@ -603,6 +609,8 @@ pub(in crate::backend::wasm_cpu) struct BoardActionFamily {
     frozen: bool,
     producer_closed: bool,
     boundary_class_metrics: [usize; 7],
+    ordered_quotient: Option<OrderedPolicyQuotient>,
+    ordered_class_metrics: [usize; 8],
     failed: bool,
     kind_arena: Option<Arc<()>>,
     closure_locks: [Vec<ClosureLock>; 7],
@@ -647,6 +655,8 @@ impl BoardActionFamily {
             frozen: false,
             producer_closed: false,
             boundary_class_metrics: [0; 7],
+            ordered_quotient: None,
+            ordered_class_metrics: [0; 8],
             failed: false,
             kind_arena: None,
             closure_locks: std::array::from_fn(|_| Vec::new()),
@@ -718,7 +728,11 @@ impl BoardActionFamily {
             + self
                 .pending_boundaries
                 .as_ref()
-                .map_or(0, PendingBoundaries::retained_bytes);
+                .map_or(0, PendingBoundaries::retained_bytes)
+            + self
+                .ordered_quotient
+                .as_ref()
+                .map_or(0, OrderedPolicyQuotient::retained_bytes);
         #[cfg(any(test, feature = "local-search-ab"))]
         let base = base
             + self.prefix_masks.capacity() * core::mem::size_of::<PrefixMaskCache>()
@@ -766,6 +780,10 @@ impl BoardActionFamily {
 
     pub(in crate::backend::wasm_cpu) fn boundary_class_metrics(&self) -> [usize; 7] {
         self.boundary_class_metrics
+    }
+
+    pub(in crate::backend::wasm_cpu) fn ordered_class_metrics(&self) -> [usize; 8] {
+        self.ordered_class_metrics
     }
 
     pub(in crate::backend::wasm_cpu) fn fail_completed_boundary_batch(&mut self) {
@@ -2331,6 +2349,10 @@ impl BoardActionFamily {
         if self.failed {
             return Err(invalid("wasm_observation_board_family_failed"));
         }
+        if self.plan.ordered_classes_enabled && !self.plan.boundary_classes_selected() {
+            self.failed = true;
+            return Err(invalid("wasm_observation_ordered_class_scope_invalid"));
+        }
         if self
             .kind_arena
             .as_ref()
@@ -2349,12 +2371,21 @@ impl BoardActionFamily {
             self.failed = true;
             return Err(error);
         }
+        if self.plan.ordered_classes_enabled {
+            self.prepare_ordered_policy_quotient(control)?;
+        }
         self.kind_arena = Some(Arc::clone(kinds.arena_identity()));
         let mut union = KindUnionArena::new(
             KindUnionResources {
                 nodes: self.metrics.nodes,
                 edges: self.metrics.edges,
-                members: self.metrics.suffix_roots,
+                // Retained original edge-index choices are extra u32
+                // references. Identity slices need no additional member.
+                members: self.metrics.suffix_roots.saturating_add(
+                    self.ordered_quotient
+                        .as_ref()
+                        .map_or(0, OrderedPolicyQuotient::member_count),
+                ),
                 work: self.metrics.work,
             },
             KindUnionResources {
@@ -2365,7 +2396,19 @@ impl BoardActionFamily {
             },
         )?;
         let supply_multiset_enabled = supply_multiset_enabled()? && union_enabled;
-        union.set_multiset_grouping_enabled(multiset_groups_enabled()? && supply_multiset_enabled);
+        let groups_enabled = multiset_groups_enabled()? && supply_multiset_enabled;
+        union.set_multiset_grouping_enabled(groups_enabled);
+        let full_multiset_enabled = full_multiset_enabled()?;
+        if full_multiset_enabled
+            && (!groups_enabled
+                || !self.plan.fresh_bag_observation
+                || !self.plan.source_filter
+                || !self.plan.boundary_suffixes_only
+                || !(1..=6).contains(&(self.plan.total_depth - self.plan.hidden_horizon)))
+        {
+            return Err(invalid("wasm_observation_full_multiset_scope_invalid"));
+        }
+        union.set_full_multiset_enabled(full_multiset_enabled);
         let mut revealed = Vec::new();
         if union_enabled {
             revealed
@@ -2382,6 +2425,7 @@ impl BoardActionFamily {
             // representation. Supply filtering specializes only lazy unions.
             supply_multiset_enabled,
             word_bitmap_enabled: word_bitmap_enabled()?,
+            full_multiset_enabled,
             union: RefCell::new(RevealedKindUnion {
                 arena: union,
                 revealed,
@@ -2463,7 +2507,7 @@ impl BoardActionFamily {
                     depths[depth][1] += node.edges.len();
                     depths[depth][2] += node.suffixes.len();
                 }
-                eprintln!("clearra_observation_board_work_limit metrics={:?} closure={:?} prefix_cones={:?} depths_nodes_edges_roots={depths:?} attempted_steps={steps} retained_bytes={} peak_bytes={}", self.metrics, self.closure_metrics, self.prefix_cone_metrics, self.retained_bytes(), self.peak_bytes);
+                eprintln!("clearra_observation_board_work_limit metrics={:?} closure={:?} prefix_cones={:?} ordered_classes={:?} depths_nodes_edges_roots={depths:?} attempted_steps={steps} retained_bytes={} peak_bytes={}", self.metrics, self.closure_metrics, self.prefix_cone_metrics, self.ordered_class_metrics, self.retained_bytes(), self.peak_bytes);
             }
             return Err(invalid("wasm_observation_physical_work_limit"));
         };
@@ -2591,6 +2635,17 @@ fn boundary_classes_enabled() -> Result<bool, WasmExactSearchError> {
     }
 }
 
+fn ordered_classes_enabled() -> Result<bool, WasmExactSearchError> {
+    #[cfg(feature = "local-search-ab")]
+    match std::env::var("CLEARRA_OBSERVATION_ORDERED_CLASSES") {
+        Ok(mode) if mode == "0" => return Ok(false),
+        Ok(mode) if mode == "1" => return Ok(true),
+        Err(std::env::VarError::NotPresent) => (),
+        _ => return Err(invalid("wasm_observation_ordered_class_mode_invalid")),
+    }
+    Ok(false)
+}
+
 fn prefix_cone_mode() -> Result<u8, WasmExactSearchError> {
     #[cfg(feature = "local-search-ab")]
     {
@@ -2699,6 +2754,19 @@ fn word_bitmap_enabled() -> Result<bool, WasmExactSearchError> {
     Ok(false)
 }
 
+fn full_multiset_enabled() -> Result<bool, WasmExactSearchError> {
+    #[cfg(feature = "local-search-ab")]
+    {
+        match std::env::var("CLEARRA_OBSERVATION_FULL_MULTISET") {
+            Ok(value) if value == "0" => return Ok(false),
+            Ok(value) if value == "1" => return Ok(true),
+            Err(std::env::VarError::NotPresent) => {}
+            _ => return Err(invalid("wasm_observation_full_multiset_mode_invalid")),
+        }
+    }
+    Ok(false)
+}
+
 fn is_kind_union(node: u32) -> bool {
     node & (KIND_TAG | REVEALED_BOARD_TAG | KIND_UNION_TAG) == KIND_UNION_TAG
 }
@@ -2725,6 +2793,7 @@ pub(in crate::backend::wasm_cpu) struct BoardActionLanguageView<'a> {
     union_enabled: bool,
     supply_multiset_enabled: bool,
     word_bitmap_enabled: bool,
+    full_multiset_enabled: bool,
     union: RefCell<RevealedKindUnion>,
 }
 
@@ -2753,6 +2822,10 @@ impl BoardActionLanguageView<'_> {
         self.union.borrow().arena.word_bitmap_board_metrics()
     }
 
+    pub(in crate::backend::wasm_cpu) fn full_multiset_metrics(&self) -> [usize; 6] {
+        self.union.borrow().arena.full_multiset_metrics()
+    }
+
     pub(in crate::backend::wasm_cpu) fn edge_closure_metrics(&self) -> [usize; 5] {
         self.owner.closure_metrics
     }
@@ -2771,6 +2844,10 @@ impl BoardActionLanguageView<'_> {
 
     pub(in crate::backend::wasm_cpu) fn boundary_class_metrics(&self) -> [usize; 7] {
         self.owner.boundary_class_metrics()
+    }
+
+    pub(in crate::backend::wasm_cpu) fn ordered_class_metrics(&self) -> [usize; 8] {
+        self.owner.ordered_class_metrics()
     }
 
     pub(in crate::backend::wasm_cpu) fn retained_bytes(&self) -> usize {
@@ -2837,6 +2914,8 @@ impl ObservationPieceLanguage for BoardActionLanguageView<'_> {
         let board = self.board_node(node)?;
         Some(if node & REVEALED_BOARD_TAG != 0 {
             0
+        } else if let Some(quotient) = &self.owner.ordered_quotient {
+            quotient.edge_count(node)?
         } else {
             board.edges.len()
         })
@@ -2858,8 +2937,22 @@ impl ObservationPieceLanguage for BoardActionLanguageView<'_> {
         if node & REVEALED_BOARD_TAG != 0 {
             return None;
         }
+        let index = match &self.owner.ordered_quotient {
+            Some(quotient) => quotient.original_edge_index(node, index)?,
+            None => index,
+        };
         let edge = self.board_node(node)?.edges.get(index)?;
         Some((edge.piece, edge.child))
+    }
+
+    fn memo_class(&self, node: u32) -> Option<u32> {
+        self.node(node)?;
+        if node & (REVEALED_BOARD_TAG | KIND_TAG | KIND_UNION_TAG) == 0 {
+            if let Some(quotient) = &self.owner.ordered_quotient {
+                return quotient.representative(node);
+            }
+        }
+        Some(node)
     }
 
     fn has_physical_actions(&self, node: u32) -> bool {
@@ -2876,6 +2969,10 @@ impl ObservationPieceLanguage for BoardActionLanguageView<'_> {
         if !self.has_physical_actions(node) {
             return None;
         }
+        let index = match &self.owner.ordered_quotient {
+            Some(quotient) => quotient.original_edge_index(node, index)?,
+            None => index,
+        };
         Some(self.board_node(node)?.edges.get(index)?.cells)
     }
 
@@ -2984,7 +3081,7 @@ impl ObservationPieceLanguage for BoardActionLanguageView<'_> {
     }
 
     fn supports_revealed_word_membership(&self, node: u32) -> bool {
-        self.word_bitmap_enabled
+        (self.word_bitmap_enabled || self.full_multiset_enabled)
             && self.union_enabled
             && self.owner.plan.fresh_bag_observation
             && self.owner.plan.source_filter
@@ -3018,17 +3115,34 @@ impl ObservationPieceLanguage for BoardActionLanguageView<'_> {
         // This frozen view pins both the board/class ID and its exact unique
         // root set for the arena lifetime. Root order is not part of that
         // identity; the evaluator alone grants actual-observed supply access.
-        self.union
-            .borrow_mut()
-            .arena
-            .word_bitmap_membership_for_board(
+        let mut union = self.union.borrow_mut();
+        if self.full_multiset_enabled {
+            match union.arena.full_multiset_membership(
                 node & !REVEALED_BOARD_TAG,
                 board.remaining(),
                 roots,
                 query,
                 self.kinds,
                 control,
-            )
+            )? {
+                Some(true) => return Ok(Some(true)),
+                Some(false) => {
+                    return Err(invalid("wasm_observation_full_multiset_negative_invalid"));
+                }
+                None => {}
+            }
+        }
+        if !self.word_bitmap_enabled {
+            return Ok(None);
+        }
+        union.arena.word_bitmap_membership_for_board(
+            node & !REVEALED_BOARD_TAG,
+            board.remaining(),
+            roots,
+            query,
+            self.kinds,
+            control,
+        )
     }
 
     fn fully_revealed_node_with_supply(

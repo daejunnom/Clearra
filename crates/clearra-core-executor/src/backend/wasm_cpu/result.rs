@@ -957,6 +957,8 @@ pub(crate) struct WasmExactSearchSession {
     observation_word_bitmap: [usize; 9],
     observation_word_bitmap_board: [usize; 6],
     observation_shared_producer: [usize; 8],
+    observation_ordered_classes: [usize; 8],
+    observation_full_multiset: [usize; 6],
     observation_prefix_masks: [usize; 6],
     observation_pre_reveal: [usize; 6],
     observation_suffix_import: [usize; 13],
@@ -1880,6 +1882,8 @@ impl WasmExactSearchSession {
             observation_word_bitmap: [0; 9],
             observation_word_bitmap_board: [0; 6],
             observation_shared_producer: [0; 8],
+            observation_ordered_classes: [0; 8],
+            observation_full_multiset: [0; 6],
             observation_prefix_masks: [0; 6],
             observation_pre_reveal: [0; 6],
             observation_suffix_import: [0; 13],
@@ -4796,6 +4800,8 @@ impl WasmExactSearchSession {
                         self.observation_word_bitmap = metrics.word_bitmap;
                         self.observation_word_bitmap_board = metrics.word_bitmap_board;
                         self.observation_shared_producer = metrics.shared_producer;
+                        self.observation_ordered_classes = metrics.ordered_classes;
+                        self.observation_full_multiset = metrics.full_multiset;
                         self.observation_prefix_masks = metrics.prefix_masks;
                         self.observation_suffix_import = metrics.suffix_import;
                         self.observation_source_existence = metrics.source_existence;
@@ -6402,6 +6408,8 @@ impl WasmExactSearchSession {
                     + self.observation_word_bitmap.len()
                     + self.observation_word_bitmap_board.len()
                     + self.observation_shared_producer.len()
+                    + self.observation_ordered_classes.len()
+                    + self.observation_full_multiset.len()
                     + self.observation_prefix_masks.len()
                     + self.observation_pre_reveal.len()
                     + self.observation_suffix_import.len()
@@ -6596,6 +6604,34 @@ impl WasmExactSearchSession {
         ]
         .into_iter()
         .zip(self.observation_shared_producer)
+        {
+            fields.push(field(name, value));
+        }
+        for (name, value) in [
+            "observation_ordered_class_physical_nodes",
+            "observation_ordered_class_classes",
+            "observation_ordered_class_reuses",
+            "observation_ordered_class_raw_edges",
+            "observation_ordered_class_retained_choices",
+            "observation_ordered_class_removed_choices",
+            "observation_ordered_class_work",
+            "observation_ordered_class_peak_bytes",
+        ]
+        .into_iter()
+        .zip(self.observation_ordered_classes)
+        {
+            fields.push(field(name, value));
+        }
+        for (name, value) in [
+            "observation_full_multiset_queries",
+            "observation_full_multiset_root_checks",
+            "observation_full_multiset_certificate_nodes",
+            "observation_full_multiset_full_certificates",
+            "observation_full_multiset_positive_hits",
+            "observation_full_multiset_additional_work",
+        ]
+        .into_iter()
+        .zip(self.observation_full_multiset)
         {
             fields.push(field(name, value));
         }
