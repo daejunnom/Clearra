@@ -3158,32 +3158,9 @@ fn reverse_lock_reachable_large_with_proven_exit_words<
     scratch.queue.push(target_index as u16);
 
     let mut queue_cursor = 0usize;
+    let mut next_anchor_check = 32usize;
     while queue_cursor < scratch.queue.len() {
-        // Preserve the complete scalar path for short queries. The
-        // larger representation is prepared only once useful work remains
-        // after this many processed poses; it never restarts from the target.
-        if ALLOW_ANCHOR
-            && queue_cursor == 32
-            && anchor_planes::hybrid_reverse_enabled()
-            && anchor_plane_trace_compatible()
-        {
-            if let Some(request) = request {
-                if let Some(ordered) = request.ordered(template) {
-                    if let Some(result) = anchor_planes::finish_reverse_search(
-                        template,
-                        request.piece,
-                        board,
-                        &ordered,
-                        &scratch.queue,
-                        queue_cursor,
-                    ) {
-                        return result.search;
-                    }
-                }
-            }
-        }
         let current = usize::from(scratch.queue[queue_cursor]);
-        queue_cursor += 1;
         if template.is_sky_seed(current)
             || (USE_PROVEN_EXITS
                 && proven_exit_words
@@ -3192,9 +3169,42 @@ fn reverse_lock_reachable_large_with_proven_exit_words<
         {
             return ReverseReachabilityResult {
                 reachable: true,
-                visited_state_count: queue_cursor,
+                visited_state_count: queue_cursor + 1,
             };
         }
+        // Preserve short and sparse scalar queries. The current non-seed is
+        // still pending here: advancing the cursor would lose its expansion.
+        // Sparse checkpoints are reconsidered only after twice as many pops.
+        if ALLOW_ANCHOR
+            && queue_cursor == next_anchor_check
+            && anchor_planes::hybrid_reverse_enabled()
+            && anchor_plane_trace_compatible()
+        {
+            // A real adapter/kernel refusal is permanent for this query.
+            // Only a cheap sparse-frontier refusal schedules another check.
+            next_anchor_check = usize::MAX;
+            match anchor_planes::reverse_frontier_is_dense(template, &scratch.queue, queue_cursor) {
+                Some(false) => next_anchor_check = queue_cursor.saturating_mul(2),
+                Some(true) => {
+                    if let Some(request) = request {
+                        if let Some(ordered) = request.ordered(template) {
+                            if let Some(result) = anchor_planes::finish_reverse_search(
+                                template,
+                                request.piece,
+                                board,
+                                &ordered,
+                                &scratch.queue,
+                                queue_cursor,
+                            ) {
+                                return result.search;
+                            }
+                        }
+                    }
+                }
+                None => {}
+            }
+        }
+        queue_cursor += 1;
 
         for &source in &template.reverse_translation_sources[current] {
             if source == INVALID_STATE_INDEX {

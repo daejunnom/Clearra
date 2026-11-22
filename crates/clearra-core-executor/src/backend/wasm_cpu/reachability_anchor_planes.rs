@@ -31,7 +31,7 @@ const MAX_TOTAL_KICKS: usize = 256;
 // Keep the source dispatch separate from unrelated local-search-ab features.
 // The isolated default-feature comparison must qualify this before promotion.
 const FULL_FORWARD_DEFAULT: bool = false;
-const HYBRID_REVERSE_DEFAULT: bool = false;
+const HYBRID_REVERSE_DEFAULT: bool = true;
 
 #[cfg(test)]
 thread_local! {
@@ -287,6 +287,67 @@ pub(super) fn finish_reverse_search(
         }
         _ => None,
     }
+}
+
+/// Decide whether the pending scalar suffix is dense enough to prepare planes.
+/// This is an implementation admission rule, not a reachability predicate.
+/// `None` keeps an unsupported domain on the scalar path; `Some(false)` may be
+/// reconsidered at a later scalar checkpoint without constructing an adapter.
+///
+/// For P pending poses in R rotations, W words per rotation and a selected
+/// stack capacity C, require P >= max(8, 4 W R, 2 C). C is the word-buffer
+/// capacity, not the processed prefix length. Encoding that prefix still costs
+/// work if admitted; this density rule does not bound all subsequent work.
+pub(super) fn reverse_frontier_is_dense(
+    template: &ReachabilityTemplate,
+    discovered: &[u16],
+    processed: usize,
+) -> Option<bool> {
+    let pending = discovered.get(processed..)?;
+    if pending.len() < 8 {
+        return Some(false);
+    }
+    let width = usize::from(template.width);
+    let height = usize::from(template.height);
+    let ceiling = usize::try_from(template.ceiling).ok()?;
+    if !(1..=MAX_WIDTH).contains(&width) || !(1..=6).contains(&height) || ceiling < height {
+        return None;
+    }
+    let anchor_count = width.checked_mul(ceiling.checked_add(1)?)?;
+    let state_count = anchor_count.checked_mul(ROTATIONS)?;
+    if template.state_masks.len() != state_count
+        || template.sky_seed_words.len() != state_count.div_ceil(WORD_BITS)
+    {
+        return None;
+    }
+    let plane_words = anchor_count.div_ceil(WORD_BITS);
+    let plane_capacity_words = match plane_words {
+        1..=2 => 2,
+        3..=8 => 8,
+        9..=MAX_WORDS => MAX_WORDS,
+        _ => return None,
+    };
+    let setup_minimum = 8.max(2 * plane_capacity_words);
+    if pending.len() < setup_minimum.max(4 * plane_words) {
+        return Some(false);
+    }
+    // The actual scalar queue contains only valid unique template indices.
+    // Above the four-rotation threshold, reading it cannot change admission.
+    if pending.len() >= setup_minimum.max(4 * plane_words * ROTATIONS) {
+        return Some(true);
+    }
+    let mut rotations = 0_u8;
+    for &state in pending {
+        let rotation = usize::from(state) / anchor_count;
+        if rotation >= ROTATIONS {
+            return None;
+        }
+        rotations |= 1 << rotation;
+        if pending.len() < 4 * plane_words * rotations.count_ones() as usize {
+            return Some(false);
+        }
+    }
+    Some(true)
 }
 
 fn anchor_geometry(
@@ -966,11 +1027,12 @@ mod tests {
         ordered: &OrderedKicks<'_>,
         request: AnchorMovementRequest<'_>,
         expected: [u64; ROTATIONS],
-    ) -> (usize, usize) {
+    ) -> (usize, usize, usize) {
         let mut scalar_scratch = ReachabilityScratch::default();
         let mut hybrid_scratch = ReachabilityScratch::default();
         let mut negatives = 0;
         let mut handed_off = 0;
+        let mut checkpoint_exits = 0;
         for rotation in RotationState::ALL {
             for y in 0..template.height as i8 {
                 for x in 0..template.width as i8 {
@@ -1025,10 +1087,12 @@ mod tests {
                         hybrid.reachable, expected,
                         "hybrid reverse {piece:?}/{rotation:?} ({x},{y}), board {board:#018x}"
                     );
-                    if scalar.visited_state_count <= 32 {
+                    if scalar.visited_state_count <= 33 {
                         assert_eq!(hybrid.visited_state_count, scalar.visited_state_count);
                         assert_eq!(hybrid_scratch.queue, scalar_scratch.queue);
                     }
+                    checkpoint_exits +=
+                        usize::from(scalar.reachable && scalar.visited_state_count == 33);
                     if !expected {
                         negatives += 1;
                         assert_eq!(
@@ -1042,7 +1106,7 @@ mod tests {
                 }
             }
         }
-        (negatives, handed_off)
+        (negatives, handed_off, checkpoint_exits)
     }
 
     #[test]
@@ -1056,6 +1120,7 @@ mod tests {
         ];
         let mut negatives = 0;
         let mut handed_off = 0;
+        let mut checkpoint_exits = 0;
         with_mode(true, || {
             crate::backend::wasm_cpu::placement_dependency::with_mode(false, || {
                 for profile in PROFILES {
@@ -1069,7 +1134,7 @@ mod tests {
                                 10, 6, board, piece, authority,
                             )
                             .unwrap();
-                            let (closed, continued) = assert_reverse_family(
+                            let (closed, continued, immediate) = assert_reverse_family(
                                 &template,
                                 piece,
                                 board,
@@ -1083,6 +1148,7 @@ mod tests {
                             );
                             negatives += closed;
                             handed_off += continued;
+                            checkpoint_exits += immediate;
                         }
                     }
                 }
@@ -1091,8 +1157,92 @@ mod tests {
         assert!(negatives > 0, "the fixtures include exact closed negatives");
         assert!(
             handed_off > 0,
-            "the actual 32-pose product handoff was exercised"
+            "an actual dense product handoff was exercised"
         );
+        assert!(
+            checkpoint_exits > 0,
+            "an immediate sky exit at the first handoff checkpoint was exercised"
+        );
+    }
+
+    #[test]
+    fn anchor_planes_density_uses_pending_rotations_and_selected_word_capacity() {
+        // Empty ordered lists keep these normalized geometry fixtures finite
+        // without introducing a profile-specific movement assumption.
+        let ordered: [&[(i16, i16)]; TRANSITIONS] = [&[]; TRANSITIONS];
+        for (ceiling, plane_words, plane_capacity_words) in
+            [(6, 2_usize, 2_usize), (12, 3, 8), (51, 9, 64)]
+        {
+            let template = ReachabilityTemplate::compile_normalized(
+                10,
+                6,
+                PieceKind::O,
+                false,
+                ceiling,
+                ordered,
+            );
+            let anchor_count = 10 * (ceiling as usize + 1);
+            assert_eq!(anchor_count.div_ceil(WORD_BITS), plane_words);
+            let valid = |rotation: usize, count: usize| {
+                (0..anchor_count)
+                    .filter(move |&anchor| anchor % 10 < 9)
+                    .take(count)
+                    .map(move |anchor| (rotation * anchor_count + anchor) as u16)
+            };
+            // C is the selected fixed word-array capacity, not this prefix.
+            let mut discovered: Vec<_> = (0..anchor_count)
+                .rev()
+                .filter(|&anchor| anchor % 10 < 9)
+                .take(40)
+                .map(|anchor| (3 * anchor_count + anchor) as u16)
+                .collect();
+            let processed = discovered.len();
+            assert_eq!(
+                reverse_frontier_is_dense(&template, &discovered, processed),
+                Some(false),
+                "an exhausted suffix has no work to transfer"
+            );
+            let minimum = 8_usize.max(2 * plane_capacity_words).max(4 * plane_words);
+            discovered.extend(valid(0, minimum - 1));
+            assert_eq!(
+                reverse_frontier_is_dense(&template, &discovered, processed),
+                Some(false)
+            );
+            discovered.extend(valid(0, minimum).skip(minimum - 1));
+            assert_eq!(
+                reverse_frontier_is_dense(&template, &discovered, processed),
+                Some(true),
+                "one pending rotation, {plane_words} words, capacity {plane_capacity_words}"
+            );
+            // The same P must account for every rotation in the pending
+            // suffix, without counting the already processed rotation above.
+            discovered.truncate(processed);
+            for rotation in 0..ROTATIONS {
+                discovered.extend(valid(rotation, minimum / ROTATIONS));
+            }
+            assert_eq!(
+                reverse_frontier_is_dense(&template, &discovered, processed),
+                Some(false),
+                "spreading the same pending count across four planes is sparse"
+            );
+            discovered.truncate(processed);
+            for rotation in 0..ROTATIONS {
+                discovered.extend(valid(rotation, 4 * plane_words));
+            }
+            assert_eq!(
+                reverse_frontier_is_dense(&template, &discovered, processed),
+                Some(true)
+            );
+        }
+        let template =
+            ReachabilityTemplate::compile_normalized(10, 6, PieceKind::O, false, 518, ordered);
+        let pending: Vec<_> = (0..40)
+            .filter(|state| state % 10 < 9)
+            .take(32)
+            .map(|state| state as u16)
+            .collect();
+        assert_eq!(reverse_frontier_is_dense(&template, &pending, 0), None);
+        assert_eq!(reverse_frontier_is_dense(&template, &pending, 33), None);
     }
 
     #[test]
