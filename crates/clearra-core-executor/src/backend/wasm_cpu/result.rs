@@ -10,6 +10,7 @@ use clearra_core_domain::{
     execution_cancellation::ExecutionControl,
     objective::objective_kind::ObjectiveKind,
     solution::normalized_tiling_solution::{
+        normalized_tiling_solution_set_hash_from_sorted_canonical_strings,
         normalized_tiling_solution_set_hash_from_sorted_standard_board64_identities,
         NormalizedTilingSolutionKey, PiecePlacementMask, StandardBoard64TilingIdentity,
         NORMALIZED_TILING_SOLUTION_KEY_ALGORITHM, NORMALIZED_TILING_SOLUTION_SET_HASH_ALGORITHM,
@@ -2499,7 +2500,7 @@ impl WasmExactSearchSession {
             // incoming allocation in place, using the result's normal Ord
             // and Eq, and transfer it directly to the terminal projection.
             let mut identities = core::mem::take(&mut outcome.buildable_identities);
-            identities.sort_unstable();
+            super::terminal_parallel::sort_identities(&mut identities, outcome.workers_used);
             identities.dedup();
             Some(identities)
         } else {
@@ -5641,35 +5642,32 @@ impl WasmExactSearchSession {
                 "minimum-cover-not-materialized"
             };
         }
-        let normalized_hash = if !solution_set_materialized {
-            "not-calculated".to_owned()
-        } else {
-            tiling_solution_store.as_ref().map_or_else(
-                || {
-                    normalized_tiling_solution_set_hash_from_sorted_standard_board64_identities(
-                        &identities,
-                    )
-                },
-                |store| store.normalized_hash().to_owned(),
-            )
-        };
         let normalized_keys = if solution_set_materialized && include_normalized_keys {
-            let mut keys = Vec::new();
-            keys.try_reserve_exact(identities.len()).map_err(|_| {
-                WasmExactSearchError::InvalidProblem(
-                    "wasm_result_normalized_key_storage_unavailable",
-                )
-            })?;
-            keys.extend(
-                identities
-                    .iter()
-                    .copied()
-                    .map(NormalizedTilingSolutionKey::from_standard_board64_identity)
-                    .map(NormalizedTilingSolutionKey::into_string),
-            );
-            keys
+            // Parent-authorized and explicit-budget assembly retains its
+            // established serial memory admission. Otherwise the terminal
+            // stage reuses at most the search's admitted active worker count.
+            let workers = if self.problem.backend_request().max_memory_mib().is_none()
+                && !matches!(
+                    self.problem_retention,
+                    SearchProblemRetention::ParentAuthorizedSharedInput { .. }
+                ) {
+                self.workers_used
+            } else {
+                1
+            };
+            super::terminal_parallel::canonical_keys(&identities, workers)?
         } else {
             Vec::new()
+        };
+        let normalized_hash = if !solution_set_materialized {
+            "not-calculated".to_owned()
+        } else if let Some(store) = &tiling_solution_store {
+            // A page does not replace the complete canonical family hash.
+            store.normalized_hash().to_owned()
+        } else if include_normalized_keys {
+            normalized_tiling_solution_set_hash_from_sorted_canonical_strings(&normalized_keys)
+        } else {
+            normalized_tiling_solution_set_hash_from_sorted_standard_board64_identities(&identities)
         };
         let solution_probabilities_requested =
             !tiling_only && self.problem.solution_probability_policy().requested();

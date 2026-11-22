@@ -9,6 +9,7 @@ pub mod diagnostics;
 pub mod gpu;
 pub mod memory;
 pub mod native;
+pub mod native_thread_affinity;
 pub mod packing;
 mod packing_candidate_batch;
 pub mod packing_problem;

@@ -1664,23 +1664,6 @@ function wrapRawModule(
   return module;
 }
 
-const yieldToRuntimeHost = createRuntimeHostYield();
-
-function createRuntimeHostYield(): () => Promise<void> {
-  const channel = new MessageChannel();
-  const nodePort1 = channel.port1 as MessagePort & { unref?: () => void };
-  const nodePort2 = channel.port2 as MessagePort & { unref?: () => void };
-  const pending: Array<() => void> = [];
-  channel.port1.onmessage = () => pending.shift()?.();
-  nodePort1.unref?.();
-  nodePort2.unref?.();
-  return () =>
-    new Promise<void>((resolve) => {
-      pending.push(resolve);
-      channel.port2.postMessage(undefined);
-    });
-}
-
 function readAvailableCandidateFamilyCount(raw: ClearraRawWasmExports): string {
   let value = 0n;
   for (let word = 3; word >= 0; word -= 1) {

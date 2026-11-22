@@ -4,7 +4,14 @@ mod aggregate_execution_budget;
 mod dense_pattern_preflight;
 mod durable_delegation_journal;
 mod execution_admission;
+#[cfg(all(feature = "parallel", not(target_family = "wasm")))]
+mod scoped_thread_memory;
 mod shared_execution_resource_authority;
+
+#[cfg(all(feature = "parallel", not(target_family = "wasm")))]
+pub(crate) use scoped_thread_memory::{
+    try_acquire_scoped_thread_memory, SCOPED_THREAD_STACK_BYTES,
+};
 
 #[cfg(all(feature = "parallel", not(target_family = "wasm")))]
 pub(crate) use aggregate_execution_budget::SharedExecutionMemoryBudget;

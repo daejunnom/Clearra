@@ -465,6 +465,23 @@ pub fn normalized_tiling_solution_set_hash_from_sorted_standard_board64_identiti
     )
 }
 
+/// Hashes keys already serialized from a sorted, deduplicated identity set.
+///
+/// This shares the identity-set hash contract (`cts1`), including the NUL
+/// delimiter, without serializing each identity a second time. The caller must
+/// preserve canonical key order and spelling; this function does not validate
+/// externally supplied strings.
+pub fn normalized_tiling_solution_set_hash_from_sorted_canonical_strings(
+    keys: &[String],
+) -> String {
+    let mut hasher = StableFnv64::default();
+    for key in keys {
+        hasher.write(key.as_bytes());
+        hasher.write(&[0]);
+    }
+    format!("cts1:{:016x}", hasher.finish())
+}
+
 pub fn normalized_tiling_solution_set_hash_from_sorted_standard_board64_identity_iter(
     identities: impl IntoIterator<Item = StandardBoard64TilingIdentity>,
 ) -> String {

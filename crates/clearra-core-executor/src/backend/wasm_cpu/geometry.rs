@@ -61,6 +61,10 @@ mod row_order_tests;
 #[path = "geometry_row_order_count_tests.rs"]
 mod row_order_count_tests;
 
+#[cfg(all(feature = "parallel", not(target_family = "wasm")))]
+#[path = "geometry_family_preparation.rs"]
+mod family_preparation;
+
 #[cfg(test)]
 #[path = "geometry_prefix_pruning_tests.rs"]
 mod prefix_pruning_tests;
@@ -2712,6 +2716,25 @@ impl FamilyEnumerator {
         } else {
             family.path_count(root_family)
         };
+        (
+            Self::from_shared_completed_family(
+                targets,
+                Arc::new(family),
+                root_family,
+                target_depth,
+                candidate_count,
+            ),
+            candidate_count,
+        )
+    }
+
+    fn from_shared_completed_family(
+        targets: Arc<[TargetGroup]>,
+        family: Arc<GeometrySolutionFamily>,
+        root_family: u32,
+        target_depth: u8,
+        #[allow(unused_variables)] candidate_count: Option<u128>,
+    ) -> Self {
         let mut tasks = Vec::new();
         if root_family != FAMILY_INVALID {
             tasks.push(TraversalTask {
@@ -2724,27 +2747,24 @@ impl FamilyEnumerator {
                 prefix_row_order_mask: ROW_ORDER_ALL,
             });
         }
-        (
-            Self {
-                targets,
-                family: Arc::new(family),
-                tasks,
-                active_task: None,
-                rows: [0; MAX_BOARD64_PIECES],
-                target_depth,
-                retained_limit_bytes: None,
-                physical_prefix_pruning: false,
-                source_prefix_request: None,
-                row_order_attempted: false,
-                row_order_builder: None,
-                row_order_table: None,
-                prefix_profile: PhysicalPrefixProfile::default(),
-                source_prefix_profile: SourcePrefixProfile::default(),
-                #[cfg(feature = "parallel")]
-                candidate_count,
-            },
+        Self {
+            targets,
+            family,
+            tasks,
+            active_task: None,
+            rows: [0; MAX_BOARD64_PIECES],
+            target_depth,
+            retained_limit_bytes: None,
+            physical_prefix_pruning: false,
+            source_prefix_request: None,
+            row_order_attempted: false,
+            row_order_builder: None,
+            row_order_table: None,
+            prefix_profile: PhysicalPrefixProfile::default(),
+            source_prefix_profile: SourcePrefixProfile::default(),
+            #[cfg(feature = "parallel")]
             candidate_count,
-        )
+        }
     }
 
     fn try_new_bounded(
@@ -2911,14 +2931,20 @@ impl FamilyEnumerator {
         loop {
             // Pure geometry keeps an unbounded specialization without
             // prefix checks or a per-node work quantum/counter.
-            let advance = if self.physical_prefix_pruning {
-                self.next_candidate_step_impl::<true, false>(
+            let advance = if self.physical_prefix_pruning && self.source_prefix_request.is_some() {
+                self.next_candidate_step_impl::<true, true, false>(
+                    catalog,
+                    allow_stack_growth,
+                    usize::MAX,
+                )
+            } else if self.physical_prefix_pruning {
+                self.next_candidate_step_impl::<true, false, false>(
                     catalog,
                     allow_stack_growth,
                     usize::MAX,
                 )
             } else {
-                self.next_candidate_step_impl::<false, false>(
+                self.next_candidate_step_impl::<false, false, false>(
                     catalog,
                     allow_stack_growth,
                     usize::MAX,
@@ -2942,14 +2968,31 @@ impl FamilyEnumerator {
         allow_stack_growth: bool,
         work_budget: usize,
     ) -> Result<FamilyEnumerationAdvance, ()> {
-        if self.physical_prefix_pruning {
-            self.next_candidate_step_impl::<true, true>(catalog, allow_stack_growth, work_budget)
+        if self.physical_prefix_pruning && self.source_prefix_request.is_some() {
+            self.next_candidate_step_impl::<true, true, true>(
+                catalog,
+                allow_stack_growth,
+                work_budget,
+            )
+        } else if self.physical_prefix_pruning {
+            self.next_candidate_step_impl::<true, false, true>(
+                catalog,
+                allow_stack_growth,
+                work_budget,
+            )
         } else {
-            self.next_candidate_step_impl::<false, true>(catalog, allow_stack_growth, work_budget)
+            self.next_candidate_step_impl::<false, false, true>(
+                catalog,
+                allow_stack_growth,
+                work_budget,
+            )
         }
     }
 
-    fn next_candidate_step_impl<const PHYSICAL: bool, const YIELD: bool>(
+    // Source pruning is qualified for the full-15 source at the request boundary.
+    // Its Option checks and per-Append bookkeeping must not remain in the
+    // ordinary small-family traversal, even when physical pruning is enabled.
+    fn next_candidate_step_impl<const PHYSICAL: bool, const SOURCE: bool, const YIELD: bool>(
         &mut self,
         catalog: &GeometryCatalog,
         allow_stack_growth: bool,
@@ -3024,8 +3067,7 @@ impl FamilyEnumerator {
                 if task.family == FAMILY_INVALID {
                     break;
                 }
-                if PHYSICAL && self.source_prefix_request.is_some() && !task.source_prefix_verified
-                {
+                if SOURCE && !task.source_prefix_verified {
                     // These are checkpoint depths, never a candidate or work
                     // limit. Frozen seeds at any depth are checked as well.
                     // A failure discards this task AND its continuations, while
@@ -3064,7 +3106,7 @@ impl FamilyEnumerator {
                         self.rows[task.depth as usize] = node.row_id;
                         task.depth += 1;
                         task.family = node.left;
-                        if PHYSICAL {
+                        if SOURCE {
                             task.source_prefix_verified = false;
                         }
                         if use_row_order {
@@ -5134,12 +5176,31 @@ impl GeometrySearch {
             if control.is_cancelled() {
                 return Err(WasmExactSearchError::Cancelled);
             }
-            // Keep family construction separate from its first path-count
-            // table. The latter is reused by splitting, exactly as before.
-            let stage = SearchStageSpan::begin(ExecutorSearchStage::WasmGeometryPathCount);
+            // Both tables read the same frozen family. Large native requests
+            // may overlap these independent passes using one extra thread;
+            // small, bounded and wasm preparation retains the serial route.
             let compiler = self.compiler.take().expect("completed geometry compiler");
-            let node_count = compiler.family.node_count();
-            let (mut enumerator, root_count) = compiler.into_enumerator(Some(&mut path_counts));
+            #[cfg(not(target_family = "wasm"))]
+            let overlap =
+                self.physical_prefix_pruning && compiler.can_overlap_preparation(requested_workers);
+            #[cfg(target_family = "wasm")]
+            let overlap = false;
+            let (mut enumerator, root_count) = if overlap {
+                #[cfg(not(target_family = "wasm"))]
+                {
+                    let prepared = compiler.into_overlapped_enumerator(catalog, control)?;
+                    path_counts = prepared.path_counts;
+                    (prepared.enumerator, prepared.candidate_count)
+                }
+                #[cfg(target_family = "wasm")]
+                unreachable!("native family preparation is disabled on wasm")
+            } else {
+                let stage = SearchStageSpan::begin(ExecutorSearchStage::WasmGeometryPathCount);
+                let node_count = compiler.family.node_count();
+                let prepared = compiler.into_enumerator(Some(&mut path_counts));
+                stage.finish(u64::from(node_count));
+                prepared
+            };
             self.candidate_family_count = root_count;
             if self.physical_prefix_pruning {
                 enumerator.enable_physical_prefix_pruning();
@@ -5148,7 +5209,6 @@ impl GeometrySearch {
                 }
             }
             self.enumerator = Some(enumerator);
-            stage.finish(u64::from(node_count));
             if control.is_cancelled() {
                 return Err(WasmExactSearchError::Cancelled);
             }

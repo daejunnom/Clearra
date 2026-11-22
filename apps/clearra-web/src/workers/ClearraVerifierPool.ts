@@ -126,7 +126,9 @@ const VERIFIER_REQUEST_STALL_TIMEOUT_MS = 0;
 const VERIFIER_FINISH_STALL_TIMEOUT_MS = 0;
 const VERIFIER_WATCHDOG_MAX_SCAN_INTERVAL_MS = 1_000;
 const MERGE_HOST_QUANTUM_MS = 8;
+const STARTUP_HOST_QUANTUM_MS = 8;
 const yieldMergerToHost = createWorkerHostYield('timer');
+const yieldStartupToHost = createWorkerHostYield('timer');
 
 export type ClearraVerifierPoolOptions = {
   initializationTimeoutMs?: number;
@@ -223,7 +225,7 @@ class VerifierClient {
     private readonly workerFactory: VerifierWorkerFactory,
     private readonly requestStallTimeoutMs: number,
     private readonly finishStallTimeoutMs: number,
-    private readonly delegationAuthority: Promise<DurableDelegationAuthority>,
+    private readonly delegationAuthority: () => Promise<DurableDelegationAuthority>,
     private readonly coordinatorId: string,
     private readonly clientId: string,
     private readonly jobId: string,
@@ -848,7 +850,7 @@ class VerifierClient {
     payload: string | ArrayBuffer,
     memoryBytes: number
   ): Promise<ActiveDelegation> {
-    const authority = await this.delegationAuthority;
+    const authority = await this.delegationAuthority();
     const payloadSha256 = await this.transportProfile.measure('payload_hash', operation, () => sha256Hex(payload));
     this.requireWorker(worker);
     const requestSha256 = this.rootRequestSha256 ?? payloadSha256;
@@ -1124,12 +1126,13 @@ export class ClearraVerifierPool {
     generation: number;
     retiredClients: Set<VerifierClient>;
   } | null = null;
+  private initializingClients: { generation: number; promise: Promise<void> } | null = null;
   private active = false;
   private issuanceClosed = true;
   private failure: Error | null = null;
   private readonly jobId = uniqueDelegationUuid();
   private readonly bootId = uniqueDelegationUuid();
-  private readonly delegationAuthority: Promise<DurableDelegationAuthority>;
+  private delegationAuthority: Promise<DurableDelegationAuthority> | undefined;
   private readonly coordinatorId = `unverified-local-build:${this.bootId}`;
   private nextClientId = 1;
 
@@ -1141,10 +1144,9 @@ export class ClearraVerifierPool {
     private readonly workerFactory: VerifierWorkerFactory = createVerifierWorker,
     options: ClearraVerifierPoolOptions = {}
   ) {
-    this.delegationAuthority = Promise.resolve(
-      options.delegationAuthority ??
-        createBrowserDelegationAuthority(() => Date.now(), this.jobId)
-    );
+    this.delegationAuthority = options.delegationAuthority === undefined
+      ? undefined
+      : Promise.resolve(options.delegationAuthority);
     this.initializationTimeoutMs = positiveTimeout(
       options.initializationTimeoutMs,
       VERIFIER_INITIALIZATION_TIMEOUT_MS
@@ -1171,16 +1173,13 @@ export class ClearraVerifierPool {
     if (this.active) return;
     const generation = ++this.generation;
     try {
-      while (this.clients.length < size) {
-        this.clients.push(this.createClient());
-      }
       // Prewarm expresses a readiness floor, not an execution lease. Preserve
       // already-warm clients after a larger job; initialize still trims to its
       // exact admitted size, and cancellation releases the whole cache.
-      await Promise.all(
-        this.clients.map((client) =>
-          client.prewarm(compiledModule, lifecycleOwnerId, hostCapabilities)
-        )
+      await this.startClientsProgressively(
+        Math.max(size, this.clients.length),
+        generation,
+        (client) => client.prewarm(compiledModule, lifecycleOwnerId, hostCapabilities)
       );
       if (generation !== this.generation) return;
     } catch (error) {
@@ -1217,12 +1216,9 @@ export class ClearraVerifierPool {
     try {
       if (size < 1) throw new Error('distributed verifier pool requires a worker');
       while (this.clients.length > size) this.clients.pop()?.dispose();
-      while (this.clients.length < size) {
-        this.clients.push(this.createClient());
-      }
       const relation = conditionedPack && size <= conditionedPack.maximumPeers ? conditionedPack : null;
       const captureWasmStages = this.verifierCoreProfile !== null && executionKind === 'geometry-verifier';
-      const initializations = this.clients.map(async (client) => {
+      const initializations = this.startClientsProgressively(size, generation, async (client) => {
         const initializationTask = withTimeout(
           client.initialize(
             initialization,
@@ -1256,7 +1252,12 @@ export class ClearraVerifierPool {
           throw error;
         }
       });
-      await Promise.all(initializations);
+      this.initializingClients = { generation, promise: initializations };
+      try {
+        await initializations;
+      } finally {
+        if (this.initializingClients?.generation === generation) this.initializingClients = null;
+      }
       if (this.isReadySubsetFinalization(generation)) return;
       this.assertActive(generation);
     } catch (error) {
@@ -1348,6 +1349,11 @@ export class ClearraVerifierPool {
     await this.waitForIdle();
     this.assertActive(generation);
     if (options.readySubset) await this.retainReadySubset(generation);
+    else if (this.initializingClients?.generation === generation) {
+      // Ordinary finish retains its full-pool contract. Only the explicit
+      // producer-terminal ready-subset path may retire unstarted siblings.
+      await this.initializingClients.promise;
+    }
     this.assertActive(generation);
     const finished = await Promise.all(
       this.clients.map(async (client) => {
@@ -1493,6 +1499,7 @@ export class ClearraVerifierPool {
     this.failure = null;
     this.generation++;
     this.readySubsetFinalization = null;
+    this.initializingClients = null;
     for (const client of this.clients) client.terminate();
     this.clients = [];
     this.inFlight.clear();
@@ -1523,8 +1530,9 @@ export class ClearraVerifierPool {
       throw new Error('distributed verifier pool completed without a ready worker');
     }
     const retiredClients = this.clients.filter((client) => !client.isReady());
-    if (retiredClients.length === 0) return;
-
+    // This also closes creation when the producer finishes during a startup
+    // yield, before all requested clients even exist. No work was issued to
+    // those absent workers, so terminal drain must not wait for their startup.
     this.readySubsetFinalization = {
       generation,
       retiredClients: new Set(retiredClients)
@@ -1621,6 +1629,7 @@ export class ClearraVerifierPool {
     this.issuanceClosed = true;
     this.generation++;
     this.readySubsetFinalization = null;
+    this.initializingClients = null;
     for (const client of this.clients) client.terminate();
     this.clients = [];
     this.inFlight.clear();
@@ -1635,13 +1644,61 @@ export class ClearraVerifierPool {
       this.workerFactory,
       this.requestStallTimeoutMs,
       this.finishStallTimeoutMs,
-      this.delegationAuthority,
+      () => this.getDelegationAuthority(),
       this.coordinatorId,
       String(this.nextClientId++),
       this.jobId,
       this.transportProfile,
       (error) => { if (this.active) this.fail(error); }
     );
+  }
+
+  private getDelegationAuthority(): Promise<DurableDelegationAuthority> {
+    // Module import and speculative WASM prewarm do not delegate work. Open
+    // the durable journal only when a real executable needs its first permit;
+    // all clients still share the same recovery and fencing authority.
+    return this.delegationAuthority ??= createBrowserDelegationAuthority(() => Date.now(), this.jobId);
+  }
+
+  private async startClientsProgressively(
+    size: number,
+    generation: number,
+    start: (client: VerifierClient) => Promise<void>
+  ): Promise<void> {
+    const pending: Promise<void>[] = [];
+    let failed = false;
+    let failureSignal: Promise<never> | undefined;
+    let rejectFailure: ((error: unknown) => void) | undefined;
+    let quantumStarted = performance.now();
+    for (let index = 0; index < size; index += 1) {
+      if (generation !== this.generation || this.isReadySubsetFinalization(generation) || failed) break;
+      let client = this.clients[index];
+      if (!client) {
+        client = this.createClient();
+        this.clients.push(client);
+      }
+      // Start loading this client before constructing its siblings. Long
+      // creation runs then admit readiness, journal and producer callbacks;
+      // short runs incur no additional host turn.
+      const initializing = start(client);
+      pending.push(initializing);
+      // Observe rejections before yielding. Promise.all reports asynchronous
+      // startup failures; the caller also closes the pool if a constructor
+      // throws before we reach that join.
+      void initializing.catch((error) => {
+        failed = true;
+        rejectFailure?.(error);
+      });
+      if (index + 1 < size && performance.now() - quantumStarted >= STARTUP_HOST_QUANTUM_MS) {
+        failureSignal ??= new Promise<never>((_resolve, reject) => { rejectFailure = reject; });
+        // An initializer failure still closes the pool immediately, even if
+        // the host continuation is delayed. It cannot be retired afterward
+        // as an ordinary never-ready sibling by a quick producer finish.
+        await Promise.race([yieldStartupToHost(), failureSignal]);
+        quantumStarted = performance.now();
+      }
+    }
+    await Promise.all(pending);
   }
 
   private wakeNextWaiter() {

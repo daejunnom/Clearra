@@ -682,6 +682,228 @@ assert.equal(
   'producer completion retires only the verifier that never became ready'
 );
 
+class StartupVerifierWorker extends ProgressiveInitializationVerifierWorker {
+  prewarmPostCount = 0;
+  constructor() { super(true); }
+  override postMessage(message: WorkerMessage) {
+    if (message.type === 'prewarm') this.prewarmPostCount += 1;
+    super.postMessage(message);
+  }
+}
+
+function holdStartupTurns() {
+  let now = 0;
+  const turns: Array<() => void> = [];
+  const nativeTimeout = globalThis.setTimeout;
+  const clock = mock.method(performance, 'now', () => now);
+  const timer = mock.method(globalThis, 'setTimeout', ((callback: () => void, delay?: number) => {
+    if (delay === 0) {
+      turns.push(callback);
+      return 0;
+    }
+    return nativeTimeout(callback, delay);
+  }) as typeof setTimeout);
+  return {
+    turns,
+    spend: (milliseconds: number) => { now += milliseconds; },
+    release: () => { assert.ok(turns.length > 0); turns.shift()!(); },
+    restore: () => {
+      timer.mock.restore();
+      clock.mock.restore();
+      for (const turn of turns.splice(0)) turn();
+    }
+  };
+}
+
+{
+  const startup = holdStartupTurns();
+  const workers: StartupVerifierWorker[] = [];
+  const pool = new ClearraVerifierPool(() => {
+    assert.ok(workers.every(worker => worker.prewarmPostCount === 1),
+      'each existing worker begins loading before the next worker is constructed');
+    const worker = new StartupVerifierWorker();
+    workers.push(worker);
+    return worker as unknown as Worker;
+  });
+  try {
+    const initialization = pool.initialize(new ArrayBuffer(0), 3, undefined, 'cheap-startup');
+    assert.equal(workers.length, 3);
+    assert.equal(startup.turns.length, 0, 'a cheap startup adds no host turn');
+    await bounded('cheap startup completes', initialization);
+    assert.equal(await bounded('ordinary startup finishes all workers', pool.finish(() => undefined)), 3);
+    assert.equal(startup.turns.length, 0);
+  } finally { pool.cancel(); startup.restore(); }
+}
+
+{
+  const startup = holdStartupTurns();
+  const workers: StartupVerifierWorker[] = [];
+  const pool = new ClearraVerifierPool(() => {
+    const worker = new StartupVerifierWorker();
+    workers.push(worker);
+    startup.spend(9);
+    return worker as unknown as Worker;
+  });
+  try {
+    const initialization = pool.initialize(new ArrayBuffer(0), 4, undefined, 'startup-terminal-subset');
+    assert.equal(workers.length, 1, 'long startup yields before constructing the remaining workers');
+    assert.equal(workers[0].prewarmPostCount, 1);
+    await bounded('ready worker executes before siblings are constructed', pool.enqueue(Uint8Array.of(6).buffer, () => undefined));
+    await bounded('first worker commits before startup resumes', pool.waitForIdle());
+    assert.equal(workers[0].consumePostCount, 1);
+    assert.equal(pool.progressSnapshot().workerCount, 4);
+    assert.equal(await bounded('short producer finishes without uncreated workers', pool.finish(() => undefined, { readySubset: true })), 1);
+    startup.release();
+    await bounded('closed startup settles', initialization);
+    assert.equal(workers.length, 1, 'terminal ready-subset closure forbids later worker creation');
+    assert.equal(workers[0].terminated, false);
+  } finally { pool.cancel(); startup.restore(); }
+}
+
+{
+  const startup = holdStartupTurns();
+  const workers: StartupVerifierWorker[] = [];
+  const pool = new ClearraVerifierPool(() => {
+    const worker = new StartupVerifierWorker();
+    workers.push(worker);
+    startup.spend(9);
+    return worker as unknown as Worker;
+  });
+  try {
+    const initialization = pool.initialize(new ArrayBuffer(0), 2, undefined, 'ordinary-startup-finish');
+    let finished = false;
+    const finishing = pool.finish(() => undefined).then(count => { finished = true; return count; });
+    await Promise.resolve();
+    assert.equal(finished, false, 'ordinary finish keeps the full requested pool contract');
+    startup.release();
+    await bounded('ordinary initialization creates its remaining worker', initialization);
+    assert.equal(await bounded('ordinary finish waits for all initialized workers', finishing), 2);
+  } finally { pool.cancel(); startup.restore(); }
+}
+
+for (const replacement of [false, true]) {
+  const startup = holdStartupTurns();
+  const workers: StartupVerifierWorker[] = [];
+  const pool = new ClearraVerifierPool(() => {
+    const worker = new StartupVerifierWorker();
+    workers.push(worker);
+    startup.spend(9);
+    return worker as unknown as Worker;
+  });
+  try {
+    const initialization = pool.initialize(new ArrayBuffer(0), 4, undefined, 'cancelled-startup');
+    pool.cancel();
+    if (replacement) await bounded('replacement starts while old startup is yielded',
+      pool.initialize(new ArrayBuffer(0), 1, undefined, 'replacement-startup'));
+    startup.release();
+    await bounded('stale cancelled startup settles', initialization);
+    assert.equal(workers.length, replacement ? 2 : 1);
+    assert.equal(workers[0].terminated, true);
+    if (replacement) {
+      assert.equal(workers[1].terminated, false);
+      await bounded('replacement accepts its own work', pool.enqueue(Uint8Array.of(8).buffer, () => undefined));
+      assert.equal(await bounded('replacement remains usable', pool.finish(() => undefined)), 1);
+    }
+  } finally { pool.cancel(); startup.restore(); }
+}
+
+{
+  class HeldStartupVerifierWorker extends ProgressiveInitializationVerifierWorker {
+    readonly initializePosted = signal();
+    constructor() { super(false); }
+    override postMessage(message: WorkerMessage) {
+      if (message.type === 'initialize') this.initializePosted.resolve();
+      super.postMessage(message);
+    }
+  }
+  const startup = holdStartupTurns();
+  const workers: ProgressiveInitializationVerifierWorker[] = [];
+  const held = new HeldStartupVerifierWorker();
+  const pool = new ClearraVerifierPool(() => {
+    const worker = workers.length === 0 ? new StartupVerifierWorker() : held;
+    workers.push(worker);
+    if (workers.length === 2) startup.spend(9);
+    return worker as unknown as Worker;
+  });
+  try {
+    const initialization = pool.initialize(new ArrayBuffer(0), 4, undefined, 'startup-initializer-failure');
+    const rejected = assert.rejects(initialization, /synthetic yielded initializer failure/);
+    await bounded('the ready worker runs while the sibling initializer is pending',
+      pool.enqueue(Uint8Array.of(3).buffer, () => undefined));
+    await bounded('failing sibling owns a pending initialization', held.initializePosted.promise);
+    held.onerror?.({ message: 'synthetic yielded initializer failure' } as ErrorEvent);
+    await bounded('initializer failure interrupts the held startup yield', rejected);
+    assert.equal(startup.turns.length, 1, 'failure closes the pool before the host continuation runs');
+    await assert.rejects(pool.finish(() => undefined, { readySubset: true }), /synthetic yielded initializer failure/);
+    assert.equal(workers.length, 2);
+    assert.ok(workers.every(worker => worker.terminated));
+  } finally { pool.cancel(); startup.restore(); }
+}
+
+{
+  const startup = holdStartupTurns();
+  const workers: StartupVerifierWorker[] = [];
+  const pool = new ClearraVerifierPool(() => {
+    const worker = new StartupVerifierWorker();
+    workers.push(worker);
+    startup.spend(9);
+    return worker as unknown as Worker;
+  });
+  try {
+    const warming = pool.prewarm(4, undefined, 'warm-startup-handoff');
+    assert.equal(workers.length, 1);
+    await bounded('foreground joins its own prewarm without unused sibling startup',
+      pool.initialize(new ArrayBuffer(0), 1, undefined, 'warm-startup-handoff'));
+    startup.release();
+    await bounded('stale speculative creation stops', warming);
+    assert.equal(workers.length, 1);
+    assert.equal(workers[0].prewarmPostCount, 1, 'foreground reuses the same in-flight prewarm');
+    assert.equal(await bounded('warm foreground finishes', pool.finish(() => undefined)), 1);
+  } finally { pool.cancel(); startup.restore(); }
+}
+
+{
+  const startup = holdStartupTurns();
+  const workers: StartupVerifierWorker[] = [];
+  let constructions = 0;
+  const pool = new ClearraVerifierPool(() => {
+    if (++constructions === 2) throw new Error('synthetic worker constructor failure');
+    const worker = new StartupVerifierWorker();
+    workers.push(worker);
+    return worker as unknown as Worker;
+  });
+  try {
+    await assert.rejects(bounded('partial startup constructor failure closes the pool',
+      pool.initialize(new ArrayBuffer(0), 4)), /synthetic worker constructor failure/);
+    assert.equal(constructions, 2);
+    assert.equal(workers[0].prewarmPostCount, 1);
+    assert.equal(workers[0].terminated, true);
+    await assert.rejects(pool.enqueue(new ArrayBuffer(0), () => undefined), /synthetic worker constructor failure/);
+  } finally { pool.cancel(); startup.restore(); }
+}
+
+{
+  const previousIndexedDb = Object.getOwnPropertyDescriptor(globalThis, 'indexedDB');
+  let journalOpens = 0;
+  Object.defineProperty(globalThis, 'indexedDB', {
+    configurable: true,
+    value: { open() { journalOpens += 1; throw new Error('synthetic journal open failure'); } }
+  });
+  const pool = new ClearraVerifierPool(() => new StartupVerifierWorker() as unknown as Worker);
+  try {
+    assert.equal(journalOpens, 0, 'an idle pool does not open an IndexedDB journal');
+    await bounded('speculative prewarm needs no journal', pool.prewarm(2, undefined, 'lazy-journal'));
+    assert.equal(journalOpens, 0);
+    await assert.rejects(bounded('first actual delegation still enforces durable journal recovery',
+      pool.initialize(new ArrayBuffer(0), 2, undefined, 'lazy-journal')), /synthetic journal open failure/);
+    assert.equal(journalOpens, 1, 'all actual clients share one recovery promise');
+  } finally {
+    pool.cancel();
+    if (previousIndexedDb) Object.defineProperty(globalThis, 'indexedDB', previousIndexedDb);
+    else Reflect.deleteProperty(globalThis, 'indexedDB');
+  }
+}
+
 {
   const journal = new MemoryDelegationJournal();
   const authority = await DurableDelegationAuthority.recover(journal);

@@ -64,6 +64,20 @@ impl ResourceLeaseRequest {
         }
     }
 
+    /// Reserves additional memory under the same authority without granting
+    /// compute units. The caller must retain its existing compute authority
+    /// while performing work covered by this reservation.
+    pub const fn memory_only(memory_bytes: u64) -> Option<Self> {
+        if memory_bytes == 0 {
+            None
+        } else {
+            Some(Self {
+                compute_units: 0,
+                memory_bytes,
+            })
+        }
+    }
+
     const fn fits(self, capacity: ResourceLeaseCapacity) -> bool {
         self.compute_units <= capacity.compute_units && self.memory_bytes <= capacity.memory_bytes
     }
@@ -618,6 +632,162 @@ mod tests {
 
     fn request(compute_units: u32, memory_bytes: u64) -> ResourceLeaseRequest {
         ResourceLeaseRequest::new(compute_units, memory_bytes).expect("request")
+    }
+
+    #[test]
+    fn memory_only_preserves_constructor_and_shared_capacity_contracts() {
+        const MEMORY: Option<ResourceLeaseRequest> = ResourceLeaseRequest::memory_only(600);
+        assert_eq!(ResourceLeaseRequest::memory_only(0), None);
+        assert_eq!(ResourceLeaseRequest::new(0, 0), None);
+        assert_eq!(ResourceLeaseRequest::new(0, 600), None);
+        assert_eq!(ResourceLeaseRequest::new(0, u64::MAX), None);
+        let memory = MEMORY.expect("nonempty memory-only reservation");
+        assert_eq!(memory.compute_units, 0);
+        assert_eq!(memory.memory_bytes, 600);
+
+        let authority = SharedResourceLeaseAuthority::new(capacity(4, 1_000));
+        let compute = authority
+            .try_acquire(owner(1), request(4, 200))
+            .expect("search owns every compute unit");
+        let mut scratch = authority
+            .try_acquire(owner(2), memory)
+            .expect("memory reservation does not reacquire compute");
+        assert_eq!(scratch.token().grant(), memory);
+        assert_eq!(authority.available(), capacity(0, 200));
+
+        let contention = authority
+            .try_acquire(
+                owner(3),
+                ResourceLeaseRequest::memory_only(201).expect("nonempty reservation"),
+            )
+            .expect_err("fits the authority but exceeds its available memory");
+        assert_eq!(
+            contention.availability().state(),
+            ExecutionAvailabilityState::Deferred
+        );
+        assert_eq!(
+            contention.availability().reason(),
+            Some(ExecutionAvailabilityReason::SharedResourceContention)
+        );
+        let exhausted = authority
+            .try_acquire(
+                owner(4),
+                ResourceLeaseRequest::memory_only(1_001).expect("nonempty reservation"),
+            )
+            .expect_err("exceeds the same authority's total memory");
+        assert_eq!(
+            exhausted.availability().state(),
+            ExecutionAvailabilityState::Exhausted
+        );
+        assert_eq!(
+            exhausted.availability().reason(),
+            Some(ExecutionAvailabilityReason::MemoryBudgetExceeded)
+        );
+        assert_eq!(authority.available(), capacity(0, 200));
+        scratch.release().expect("scratch release");
+        assert_eq!(authority.available(), capacity(0, 800));
+        drop(compute);
+        assert_eq!(authority.available(), capacity(4, 1_000));
+    }
+
+    #[test]
+    fn memory_only_children_keep_parent_credit_until_the_last_drop() {
+        let authority = SharedResourceLeaseAuthority::new(capacity(4, 1_000));
+        let compute = authority
+            .try_acquire(owner(1), request(4, 0))
+            .expect("independent compute owner");
+        let mut parent = authority
+            .try_acquire(
+                owner(2),
+                ResourceLeaseRequest::memory_only(800).expect("parent memory"),
+            )
+            .expect("memory parent");
+        let first = parent
+            .try_child(
+                owner(3),
+                ResourceLeaseRequest::memory_only(300).expect("first child memory"),
+            )
+            .expect("first child");
+        let second = parent
+            .try_child(
+                owner(4),
+                ResourceLeaseRequest::memory_only(500).expect("second child memory"),
+            )
+            .expect("second child");
+        assert_eq!(first.token().grant().compute_units, 0);
+        assert_eq!(second.token().grant().compute_units, 0);
+        let blocked = parent
+            .try_child(
+                owner(5),
+                ResourceLeaseRequest::memory_only(1).expect("additional child memory"),
+            )
+            .expect_err("delegation cannot exceed the parent's remaining memory");
+        assert_eq!(
+            blocked.availability().state(),
+            ExecutionAvailabilityState::Deferred
+        );
+        let no_compute = parent
+            .try_child(owner(6), request(1, 0))
+            .expect_err("memory authority cannot mint compute credit");
+        assert_eq!(
+            no_compute.availability().reason(),
+            Some(ExecutionAvailabilityReason::ComputeBudgetExceeded)
+        );
+        assert_eq!(
+            parent.release(),
+            Err(ResourceLeaseReleaseError::ChildrenActive)
+        );
+        assert_eq!(authority.available(), capacity(0, 200));
+
+        // Dropped parents retain their whole grant until every child returns;
+        // freeing one child cannot lend its bytes to an unrelated owner early.
+        drop(parent);
+        drop(first);
+        assert_eq!(authority.available(), capacity(0, 200));
+        drop(second);
+        assert_eq!(authority.available(), capacity(0, 1_000));
+        drop(compute);
+        assert_eq!(authority.available(), capacity(4, 1_000));
+    }
+
+    #[test]
+    fn memory_only_maximum_and_epoch_overflow_leave_accounting_checked() {
+        let memory = ResourceLeaseRequest::memory_only(u64::MAX).expect("maximum memory request");
+        let authority = SharedResourceLeaseAuthority::new(capacity(1, u64::MAX));
+        let compute = authority
+            .try_acquire(owner(1), request(1, 0))
+            .expect("compute owner");
+        let scratch = authority
+            .try_acquire(owner(2), memory)
+            .expect("exact capacity fits without addition overflow");
+        assert_eq!(authority.available(), capacity(0, 0));
+        let contention = authority
+            .try_acquire(
+                owner(3),
+                ResourceLeaseRequest::memory_only(1).expect("one byte"),
+            )
+            .expect_err("capacity check precedes retained-byte addition");
+        assert_eq!(
+            contention.availability().state(),
+            ExecutionAvailabilityState::Deferred
+        );
+        drop(scratch);
+        drop(compute);
+        assert_eq!(authority.available(), capacity(1, u64::MAX));
+
+        let exhausted_epoch = SharedResourceLeaseAuthority::with_identity_and_epoch(
+            capacity(1, u64::MAX),
+            77,
+            u64::MAX,
+        );
+        let error = exhausted_epoch
+            .try_acquire(owner(4), memory)
+            .expect_err("memory-only requests still require a fresh epoch");
+        assert_eq!(
+            error.availability().state(),
+            ExecutionAvailabilityState::Unavailable
+        );
+        assert_eq!(exhausted_epoch.available(), capacity(1, u64::MAX));
     }
 
     #[test]

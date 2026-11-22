@@ -108,6 +108,11 @@ impl GeometrySolutionFamily {
         self.refused_retained_bytes
     }
 
+    #[cfg(all(feature = "parallel", not(target_family = "wasm")))]
+    pub(super) const fn retained_limit_bytes(&self) -> Option<u128> {
+        self.retained_limit_bytes
+    }
+
     /// Inventory aliases preserve interned node IDs and traversal order only
     /// while this unbounded owner retains its original active interner.
     pub(super) const fn unbounded_interning_active(&self) -> bool {

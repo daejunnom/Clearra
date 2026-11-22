@@ -8,6 +8,8 @@ use factorized_source::{FactorizedSourceLayout, FullDrawBlockLayout};
 mod factorized_tests;
 #[cfg(test)]
 mod first_draw_block_tests;
+#[cfg(test)]
+mod supply_reuse_tests;
 
 use crate::resource::ExecutionMemoryBound;
 
@@ -46,6 +48,18 @@ const CANCELLATION_POLL_MASK: u32 = 0xff;
 const STANDARD_PIECE_COUNT: usize = PieceKind::STANDARD_TETROMINOES.len();
 const STANDARD_BAG_MASK_COUNT: usize = 1 << STANDARD_PIECE_COUNT;
 const CURSOR_TRANSITION_UNAVAILABLE: u8 = u8::MAX;
+
+#[inline]
+fn reuse_supply_draws() -> bool {
+    #[cfg(test)]
+    {
+        supply_reuse_tests::reuse_supply_draws()
+    }
+    #[cfg(not(test))]
+    {
+        true
+    }
+}
 
 #[cfg(any(test, feature = "local-search-ab"))]
 const UNION_MEMO_LIMIT_INVALID: &str = "wasm_standard_bag_union_memo_entry_limit_invalid";
@@ -403,6 +417,8 @@ impl StandardBagCursorTransitions {
         source: SourceState,
         piece_index: usize,
     ) -> Result<Option<SourceState>, WasmExactSearchError> {
+        #[cfg(test)]
+        supply_reuse_tests::record_cursor_advance();
         let source = self.validate_source(source)?;
         if piece_index >= STANDARD_PIECE_COUNT {
             return Err(WasmExactSearchError::InvalidProblem(
@@ -1801,6 +1817,29 @@ impl StandardBagCoverage {
         }
     }
 
+    fn stored_step_after_current(
+        &self,
+        after_current: SourceState,
+        current_code: u8,
+        desired_index: usize,
+    ) -> Result<CompactSupplyStep, WasmExactSearchError> {
+        // The enclosing Current branch has already certified its first draw.
+        // Store consumes one more draw from that same cursor and retains the
+        // original current piece. This uses the existing table across atom and
+        // bag boundaries, including the certified single projected complement.
+        let next_source = self
+            .tables
+            .cursor_transitions
+            .advance(after_current, desired_index)?
+            .ok_or(WasmExactSearchError::InvalidProblem(
+                "wasm_standard_bag_store_transition_missing",
+            ))?;
+        Ok(CompactSupplyStep {
+            next_source,
+            next_hold_code: current_code,
+        })
+    }
+
     fn solve(
         &mut self,
         language: &PieceOrderLanguageCache,
@@ -1893,9 +1932,14 @@ impl StandardBagCoverage {
                         return Ok(ACCEPT);
                     }
                 }
-                let held_piece = PieceKind::STANDARD_TETROMINOES[usize::from(hold_code - 1)];
-                let swap_step = self
-                    .matching_supply_step(
+                let swap_step = if reuse_supply_draws() {
+                    CompactSupplyStep {
+                        next_source: current_step.next_source,
+                        next_hold_code: lookahead_code,
+                    }
+                } else {
+                    let held_piece = PieceKind::STANDARD_TETROMINOES[usize::from(hold_code - 1)];
+                    self.matching_supply_step(
                         source,
                         hold_code,
                         held_piece,
@@ -1904,7 +1948,8 @@ impl StandardBagCoverage {
                     )?
                     .ok_or(WasmExactSearchError::InvalidProblem(
                         "wasm_standard_bag_swap_transition_missing",
-                    ))?;
+                    ))?
+                };
                 let swap_source = swap_step.next_source;
                 for edge in held_edges.iter().copied() {
                     self.edge_check_count = self.edge_check_count.saturating_add(1);
@@ -2013,9 +2058,17 @@ impl StandardBagCoverage {
             // edge with exactly the same next cursor, bag remainder and hold.
             // CountAll still traverses both actions in CoverageProductEvaluator.
             if self.hold_enabled && hold_code != 0 && hold_code != current_code {
-                let held_piece = PieceKind::STANDARD_TETROMINOES[usize::from(hold_code - 1)];
-                let swap_step = self
-                    .matching_supply_step(
+                let swap_step = if reuse_supply_draws() {
+                    // Current and Swap consume the same original queue draw.
+                    // Only the held kind differs; the source cursor is already
+                    // certified by current_step, independently of its edges.
+                    CompactSupplyStep {
+                        next_source: current_step.next_source,
+                        next_hold_code: current_code,
+                    }
+                } else {
+                    let held_piece = PieceKind::STANDARD_TETROMINOES[usize::from(hold_code - 1)];
+                    self.matching_supply_step(
                         source,
                         hold_code,
                         held_piece,
@@ -2024,7 +2077,8 @@ impl StandardBagCoverage {
                     )?
                     .ok_or(WasmExactSearchError::InvalidProblem(
                         "wasm_standard_bag_swap_transition_missing",
-                    ))?;
+                    ))?
+                };
                 let swap_source = swap_step.next_source;
                 let held_edges = language.edges_for_piece(language_node, hold_code).ok_or(
                     WasmExactSearchError::InvalidProblem("wasm_piece_language_node_out_of_range"),
@@ -2058,20 +2112,37 @@ impl StandardBagCoverage {
                         .ok_or(WasmExactSearchError::InvalidProblem(
                             "wasm_piece_language_node_out_of_range",
                         ))?;
+                    let stored_step = if reuse_supply_draws() && !desired_edges.is_empty() {
+                        // Every same-kind language edge consumes the same
+                        // second source draw. Reuse it without merging their
+                        // distinct language children or changing union order.
+                        Some(self.stored_step_after_current(
+                            next_source,
+                            current_code,
+                            desired_index,
+                        )?)
+                    } else {
+                        None
+                    };
                     for edge in desired_edges.iter().copied() {
                         self.edge_check_count = self.edge_check_count.saturating_add(1);
-                        let desired_piece = PieceKind::STANDARD_TETROMINOES[desired_index];
-                        let store_step = self
-                            .matching_supply_step(
+                        let store_step = if let Some(step) = stored_step {
+                            step
+                        } else {
+                            let desired_piece = PieceKind::STANDARD_TETROMINOES[desired_index];
+                            self.matching_supply_step(
                                 source,
                                 hold_code,
                                 desired_piece,
                                 SupplyBranchKind::StoreCurrent,
                                 current_piece,
                             )?
-                            .ok_or(WasmExactSearchError::InvalidProblem(
-                                "wasm_standard_bag_store_transition_missing",
-                            ))?;
+                            .ok_or(
+                                WasmExactSearchError::InvalidProblem(
+                                    "wasm_standard_bag_store_transition_missing",
+                                ),
+                            )?
+                        };
                         let after_next = store_step.next_source;
                         let next = self.solve(
                             language,
@@ -2111,8 +2182,10 @@ impl StandardBagCoverage {
                     .ok_or(WasmExactSearchError::InvalidProblem(
                         "wasm_piece_language_node_out_of_range",
                     ))?;
-                let store_step = self
-                    .matching_supply_step(
+                let store_step = if reuse_supply_draws() {
+                    self.stored_step_after_current(next_source, current_code, lookahead_index)?
+                } else {
+                    self.matching_supply_step(
                         source,
                         hold_code,
                         lookahead_piece,
@@ -2121,7 +2194,8 @@ impl StandardBagCoverage {
                     )?
                     .ok_or(WasmExactSearchError::InvalidProblem(
                         "wasm_standard_bag_store_transition_missing",
-                    ))?;
+                    ))?
+                };
                 let after_lookahead = store_step.next_source;
                 for edge in lookahead_edges.iter().copied() {
                     self.edge_check_count = self.edge_check_count.saturating_add(1);

@@ -152,6 +152,7 @@ mod symbolic_prefix_parallel;
     )
 ))]
 mod symbolic_prefix_subsumption;
+mod terminal_parallel;
 #[cfg(all(
     feature = "local-search-ab",
     feature = "parallel",

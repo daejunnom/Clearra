@@ -437,6 +437,7 @@ impl CoverageProductEvaluator {
         let mut count_complete = true;
         let mut active_states = 0usize;
         let mut edge_checks = 0usize;
+        let reuse_supply_steps = reuse_supply_steps();
 
         for word_index in 0..pattern_index.word_count() {
             self.poll_cancellation(control)?;
@@ -546,7 +547,8 @@ impl CoverageProductEvaluator {
                             )?;
                         }
                         let use_current = active
-                            & pattern_index.piece_word_with_projected_standard_bag_lookahead(
+                            & source_piece_word(
+                                pattern_index,
                                 queue_position,
                                 desired_piece,
                                 word_index,
@@ -568,19 +570,28 @@ impl CoverageProductEvaluator {
 
                         if hold_code != 0 && hold_code == desired_piece {
                             for current_piece in 1..=7 {
+                                // With equal current and held kinds, Current
+                                // already activated this exact child/cursor/
+                                // held state for these original queue bits.
+                                // Boolean union is idempotent; CountAll still
+                                // owns both labeled execution histories.
+                                if reuse_supply_steps && !count_paths && current_piece == hold_code
+                                {
+                                    continue;
+                                }
                                 if finesse_guard.is_some_and(|guard| {
                                     !guard.current_piece_can_spawn(node_index, current_piece)
                                 }) {
                                     continue;
                                 }
                                 let swap_bits = active
-                                    & pattern_index
-                                        .piece_word_with_projected_standard_bag_lookahead(
-                                            queue_position,
-                                            current_piece,
-                                            word_index,
-                                            projects_standard_bag_lookahead,
-                                        );
+                                    & source_piece_word(
+                                        pattern_index,
+                                        queue_position,
+                                        current_piece,
+                                        word_index,
+                                        projects_standard_bag_lookahead,
+                                    );
                                 self.activate_transition(
                                     edge.to,
                                     extra_draw,
@@ -593,27 +604,51 @@ impl CoverageProductEvaluator {
                                 )?;
                             }
                         } else if hold_code == 0 && extra_draw == 0 {
+                            // All Store branches for this edge require the
+                            // same next-position piece. Factor that bitmap
+                            // intersection before selecting the held current
+                            // kind; source order and physical edges stay put.
+                            let stored_source_bits = if reuse_supply_steps {
+                                active
+                                    & source_piece_word(
+                                        pattern_index,
+                                        queue_position.saturating_add(1),
+                                        desired_piece,
+                                        word_index,
+                                        projects_standard_bag_lookahead,
+                                    )
+                            } else {
+                                active
+                            };
+                            if stored_source_bits == 0 {
+                                continue;
+                            }
                             for current_piece in 1..=7 {
                                 if finesse_guard.is_some_and(|guard| {
                                     !guard.current_piece_can_spawn(node_index, current_piece)
                                 }) {
                                     continue;
                                 }
-                                let store_bits = active
-                                    & pattern_index
-                                        .piece_word_with_projected_standard_bag_lookahead(
+                                let desired_bits = if reuse_supply_steps {
+                                    stored_source_bits
+                                } else {
+                                    active
+                                        & source_piece_word(
+                                            pattern_index,
                                             queue_position.saturating_add(1),
                                             desired_piece,
                                             word_index,
                                             projects_standard_bag_lookahead,
                                         )
-                                    & pattern_index
-                                        .piece_word_with_projected_standard_bag_lookahead(
-                                            queue_position,
-                                            current_piece,
-                                            word_index,
-                                            projects_standard_bag_lookahead,
-                                        );
+                                };
+                                let store_bits = desired_bits
+                                    & source_piece_word(
+                                        pattern_index,
+                                        queue_position,
+                                        current_piece,
+                                        word_index,
+                                        projects_standard_bag_lookahead,
+                                    );
                                 self.activate_transition(
                                     edge.to,
                                     1,
@@ -829,6 +864,8 @@ impl CoverageProductEvaluator {
         count_paths: bool,
         count_complete: &mut bool,
     ) -> Result<(), WasmExactSearchError> {
+        #[cfg(test)]
+        supply_reuse_tests::record_transition_activation(bits);
         if bits == 0 {
             return Ok(());
         }
@@ -968,6 +1005,40 @@ const fn piece_from_code(code: u8) -> Option<PieceKind> {
         _ => None,
     }
 }
+
+#[inline]
+fn reuse_supply_steps() -> bool {
+    #[cfg(test)]
+    {
+        supply_reuse_tests::reuse_supply_steps()
+    }
+    #[cfg(not(test))]
+    {
+        true
+    }
+}
+
+#[inline]
+fn source_piece_word(
+    pattern_index: &PatternPiecePositionIndex,
+    queue_position: usize,
+    piece_code: u8,
+    word_index: usize,
+    projects_standard_bag_lookahead: bool,
+) -> u64 {
+    #[cfg(test)]
+    supply_reuse_tests::record_position_word_read();
+    pattern_index.piece_word_with_projected_standard_bag_lookahead(
+        queue_position,
+        piece_code,
+        word_index,
+        projects_standard_bag_lookahead,
+    )
+}
+
+#[cfg(test)]
+#[path = "coverage_product_supply_reuse_tests.rs"]
+mod supply_reuse_tests;
 
 #[cfg(test)]
 #[path = "coverage_product_semiring_contract_tests.rs"]
