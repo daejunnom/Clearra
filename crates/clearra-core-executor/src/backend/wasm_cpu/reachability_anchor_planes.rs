@@ -31,7 +31,7 @@ const MAX_TOTAL_KICKS: usize = 256;
 // Keep the source dispatch separate from unrelated local-search-ab features.
 // The isolated default-feature comparison must qualify this before promotion.
 const FULL_FORWARD_DEFAULT: bool = false;
-const HYBRID_REVERSE_DEFAULT: bool = true;
+const HYBRID_REVERSE_DEFAULT: bool = false;
 
 #[cfg(test)]
 thread_local! {
