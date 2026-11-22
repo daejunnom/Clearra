@@ -177,6 +177,102 @@ fn family_work_reduction_preserves_fixed_and_bounded_families() {
     }
 }
 
+#[test]
+fn construction_index_release_handoff_preserves_order_and_mutable_owner_boundaries() {
+    fn collect(enumerator: &mut FamilyEnumerator, catalog: &GeometryCatalog) -> CandidateSequence {
+        let mut candidates = Vec::new();
+        while let Some(candidate) = enumerator.next_candidate(catalog).unwrap() {
+            candidates.push((
+                candidate.target_index,
+                candidate.identity,
+                candidate.row_ids().to_vec(),
+            ));
+        }
+        candidates
+    }
+
+    fn digests(candidates: &CandidateSequence) -> (u64, u64) {
+        candidates
+            .iter()
+            .fold((0, 0), |(ordered, unordered), (_, identity, _)| {
+                let hash = identity.bucket_hash();
+                (
+                    mix_digest(ordered, hash),
+                    super::super::mix_order_independent_candidate_digest(unordered, hash),
+                )
+            })
+    }
+
+    for (initial, fixed_i) in [(0x3c0f_03c0f, false), (0xc030_0c03, true)] {
+        let (catalog, mut search) = fixture(4, initial, fixed_i);
+        let mut optimized = search.compiler.take().unwrap();
+        let mut reference =
+            FamilyCompiler::new(catalog.required_cells(), Arc::clone(&optimized.targets));
+        compile::<true>(&mut optimized, &catalog);
+        compile::<true>(&mut reference, &catalog);
+        let root = reference.root_family;
+        let depth = reference.target_depth;
+        let targets = Arc::clone(&reference.targets);
+        let original_retained = reference.family.retained_bytes();
+        let expected_counts = reference.family.path_count_table().unwrap();
+        let expected_nodes = (2..reference.family.node_count() + 2)
+            .map(|reference_id| reference.family.node(reference_id).unwrap())
+            .collect::<Vec<_>>();
+
+        // Completion state remains mutable and keeps exact interning reuse.
+        let mut state = reference.into_completion_state();
+        assert!(state.family.unbounded_interning_active());
+        assert_eq!(state.family.retained_bytes(), original_retained);
+        let (append_id, append) = (2..state.family.node_count() + 2)
+            .map(|reference_id| (reference_id, state.family.node(reference_id).unwrap()))
+            .find(|(_, node)| node.kind == FamilyNodeKind::Append)
+            .unwrap();
+        assert_eq!(
+            state.family.append(append.row_id, append.left),
+            Some(append_id)
+        );
+
+        // The bounded constructor and temporary snapshot-style view keep
+        // that construction index intact rather than taking the terminal path.
+        let mut reference =
+            FamilyEnumerator::try_new_bounded(targets, state.family, root, depth, u128::MAX)
+                .unwrap();
+        assert!(reference.family.unbounded_interning_active());
+        assert_eq!(reference.family.retained_bytes(), original_retained);
+
+        let mut path_counts = None;
+        let (mut optimized, count) = optimized.into_enumerator(Some(&mut path_counts));
+        assert!(!optimized.family.unbounded_interning_active());
+        assert_eq!(optimized.tasks[0].family, root);
+        assert_eq!(count, Some(expected_counts[root as usize]));
+        assert_eq!(path_counts, Some(expected_counts));
+        assert_eq!(
+            (2..optimized.family.node_count() + 2)
+                .map(|reference_id| optimized.family.node(reference_id).unwrap())
+                .collect::<Vec<_>>(),
+            expected_nodes,
+        );
+        let expected = collect(&mut reference, &catalog);
+        let actual = collect(&mut optimized, &catalog);
+        assert!(!actual.is_empty());
+        assert_eq!(actual, expected);
+        assert_eq!(digests(&actual), digests(&expected));
+
+        let mut reference_family = Arc::try_unwrap(reference.family).unwrap();
+        assert!(reference_family.unbounded_interning_active());
+        let released = reference_family.release_construction_index();
+        assert!(released > 0);
+        assert_eq!(
+            optimized.family.retained_bytes() + released,
+            original_retained
+        );
+        assert_eq!(
+            optimized.family.retained_bytes(),
+            reference_family.retained_bytes()
+        );
+    }
+}
+
 #[cfg(feature = "parallel")]
 fn collect_prepared(
     prepared: ParallelGeometryPreparation,

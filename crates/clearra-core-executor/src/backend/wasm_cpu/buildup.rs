@@ -13,6 +13,9 @@ pub mod generic_board64_search;
     )
 ))]
 mod placement_dependency;
+#[cfg(all(test, not(target_family = "wasm"), target_pointer_width = "64"))]
+#[path = "source_prefix_graph_tests.rs"]
+mod source_prefix_graph_tests;
 pub use compact_snapshot::{
     CompactBuildUpEdge, CompactBuildUpNode, CompactBuildUpSnapshot, CompactBuildUpSnapshotError,
     CompactBuildUpTransitionMode, RustCompactBuildUpWorkspace,
@@ -6265,6 +6268,18 @@ impl BuildOrderGraph {
         let all_placed = projection.all_placed;
         let share_piece_edges =
             piece_language_projection_only && matches!(completion, BuildCompletion::ClearToEmpty);
+        // This removes only prefixes with no possible original source queue.
+        // Physical graph exports and scoring request all operation edges
+        // (piece_language_projection_only=false) and retain the full graph.
+        // The ordinary representative still comes from the exact original-
+        // queue product below; surviving edges keep their relative order.
+        let source_prefix = (piece_language_projection_only
+            && completion == BuildCompletion::ClearToEmpty
+            && reachability_mode == BuildReachabilityMode::Existing)
+            .then(|| {
+                super::source_prefix::FullDrawSourcePrefix::compile(problem, catalog, candidate)
+            })
+            .flatten();
         let materialize_graph = matches!(representation, BuildPassRepresentation::Graph);
         #[cfg(any(test, all(feature = "local-search-ab", feature = "parallel")))]
         debug_assert!(
@@ -6389,6 +6404,9 @@ impl BuildOrderGraph {
                         .realization_feasibility
                         .permitted_operation_mask(proof, subset)
                 });
+            if let Some(prefix) = &source_prefix {
+                permitted_operations &= prefix.permitted_operations(subset as u16);
+            }
             while permitted_operations != 0 {
                 let operation_index = permitted_operations.trailing_zeros() as usize;
                 permitted_operations &= permitted_operations - 1;

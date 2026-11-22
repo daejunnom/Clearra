@@ -97,9 +97,45 @@ pub(super) struct PhysicalPrefixProfile {
         test
     ))]
     pub(super) pruned_subtrees: u64,
+    #[cfg(any(
+        feature = "search-stage-profiling",
+        feature = "wasm-stage-profiling",
+        test
+    ))]
+    pub(super) row_order_pruned_subtrees: u64,
+    #[cfg(any(
+        feature = "search-stage-profiling",
+        feature = "wasm-stage-profiling",
+        test
+    ))]
+    pub(super) emitted_candidates: u64,
 }
 
 impl PhysicalPrefixProfile {
+    #[inline]
+    pub(super) fn record_row_order_prune(&mut self) {
+        #[cfg(any(
+            feature = "search-stage-profiling",
+            feature = "wasm-stage-profiling",
+            test
+        ))]
+        {
+            self.row_order_pruned_subtrees = self.row_order_pruned_subtrees.saturating_add(1);
+        }
+    }
+
+    #[inline]
+    pub(super) fn record_emitted_candidate(&mut self) {
+        #[cfg(any(
+            feature = "search-stage-profiling",
+            feature = "wasm-stage-profiling",
+            test
+        ))]
+        {
+            self.emitted_candidates = self.emitted_candidates.saturating_add(1);
+        }
+    }
+
     pub(super) fn stalls(&mut self, catalog: &GeometryCatalog, rows: &[u32]) -> bool {
         #[cfg(any(
             feature = "search-stage-profiling",
@@ -144,6 +180,14 @@ impl Drop for PhysicalPrefixProfile {
         SearchStageSpan::record_exact_work(
             ExecutorSearchStage::WasmGeometryPrefixPrunedSubtrees,
             self.pruned_subtrees,
+        );
+        SearchStageSpan::record_exact_work(
+            ExecutorSearchStage::WasmGeometryRowOrderPrunedSubtrees,
+            self.row_order_pruned_subtrees,
+        );
+        SearchStageSpan::record_exact_work(
+            ExecutorSearchStage::WasmGeometryEmittedCandidates,
+            self.emitted_candidates,
         );
     }
 }

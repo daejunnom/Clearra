@@ -9,6 +9,9 @@ use clearra_supply::queue::fixed_sequence::FixedSequence;
 use super::super::realization_feasibility::RealizationFeasibilityWorkspace;
 use super::*;
 
+#[path = "geometry_row_order_runtime_tests.rs"]
+mod row_order_runtime_tests;
+
 type Sequence = Vec<(u32, StandardBoard64TilingIdentity, Vec<u32>)>;
 
 fn candidate_record(
@@ -342,6 +345,9 @@ fn physical_prefix_negative_traversal_yields_before_any_leaf_without_generation_
     search.enumerator = Some(enumerator);
     search.candidate_family_count = raw_count;
     search.enable_physical_prefix_pruning();
+    // Exercise the supported fallback when the optional whole-family
+    // row-order table was unavailable; it must still yield during dead walks.
+    search.enumerator.as_mut().unwrap().row_order_attempted = true;
     assert!(matches!(search.advance(&catalog), GeometryAdvance::Pending));
     assert!(search.enumerator.as_ref().unwrap().active_task.is_some());
     // The outer owner can observe cancellation/resource pressure here even

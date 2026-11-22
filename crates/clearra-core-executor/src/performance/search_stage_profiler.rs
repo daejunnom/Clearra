@@ -104,6 +104,7 @@ pub(crate) enum ExecutorSearchStage {
     WasmParallelGeometryCompileAndSplit,
     WasmGeometryTargetPreparation,
     WasmGeometryFamilyCompile,
+    WasmGeometryConstructionIndexRelease,
     WasmGeometryPathCount,
     WasmGeometryTaskSplit,
     WasmGeometryResidualLookup,
@@ -117,6 +118,9 @@ pub(crate) enum ExecutorSearchStage {
     WasmGeometrySupportRows,
     WasmGeometryPrefixClosure,
     WasmGeometryPrefixPrunedSubtrees,
+    WasmGeometryRowOrderPrepare,
+    WasmGeometryRowOrderPrunedSubtrees,
+    WasmGeometryEmittedCandidates,
     WasmGeometryAdvance,
     WasmCandidateProjection,
     WasmCandidateFeasibility,
@@ -236,6 +240,7 @@ impl ExecutorSearchStage {
         Self::WasmParallelGeometryCompileAndSplit,
         Self::WasmGeometryTargetPreparation,
         Self::WasmGeometryFamilyCompile,
+        Self::WasmGeometryConstructionIndexRelease,
         Self::WasmGeometryPathCount,
         Self::WasmGeometryTaskSplit,
         Self::WasmGeometryResidualLookup,
@@ -249,6 +254,9 @@ impl ExecutorSearchStage {
         Self::WasmGeometrySupportRows,
         Self::WasmGeometryPrefixClosure,
         Self::WasmGeometryPrefixPrunedSubtrees,
+        Self::WasmGeometryRowOrderPrepare,
+        Self::WasmGeometryRowOrderPrunedSubtrees,
+        Self::WasmGeometryEmittedCandidates,
         Self::WasmGeometryAdvance,
         Self::WasmCandidateProjection,
         Self::WasmCandidateFeasibility,
@@ -361,6 +369,9 @@ impl ExecutorSearchStage {
             Self::WasmParallelGeometryCompileAndSplit => "wasm.geometry.parallel_compile_and_split",
             Self::WasmGeometryTargetPreparation => "wasm.geometry.target_preparation",
             Self::WasmGeometryFamilyCompile => "wasm.geometry.family_compile",
+            Self::WasmGeometryConstructionIndexRelease => {
+                "wasm.geometry.construction_index_release"
+            }
             Self::WasmGeometryPathCount => "wasm.geometry.path_count",
             Self::WasmGeometryTaskSplit => "wasm.geometry.task_split",
             Self::WasmGeometryResidualLookup => "wasm.geometry.residual_lookup",
@@ -374,6 +385,9 @@ impl ExecutorSearchStage {
             Self::WasmGeometrySupportRows => "wasm.geometry.support_rows",
             Self::WasmGeometryPrefixClosure => "wasm.geometry.prefix_closure",
             Self::WasmGeometryPrefixPrunedSubtrees => "wasm.geometry.prefix_pruned_subtrees",
+            Self::WasmGeometryRowOrderPrepare => "wasm.geometry.row_order_prepare",
+            Self::WasmGeometryRowOrderPrunedSubtrees => "wasm.geometry.row_order_pruned_subtrees",
+            Self::WasmGeometryEmittedCandidates => "wasm.geometry.emitted_candidates",
             Self::WasmGeometryAdvance => "wasm.geometry.advance",
             Self::WasmCandidateProjection => "wasm.candidate.projection",
             Self::WasmCandidateFeasibility => "wasm.candidate.feasibility",
@@ -799,6 +813,17 @@ impl ExecutorSearchProfileSession {
         Self::stage_rows(totals)
     }
 
+    /// A non-consuming diagnostic snapshot of this thread's finished spans.
+    /// Running spans and other workers are excluded. Reading a checkpoint
+    /// neither resets counters nor grants completion to the search.
+    pub fn snapshot_current_thread() -> Option<Vec<ExecutorSearchProfileStage>> {
+        ACTIVE_PROFILE.with(|slot| {
+            slot.borrow()
+                .as_ref()
+                .map(|profile| Self::stage_rows(profile.totals))
+        })
+    }
+
     /// Return the submitting thread and pooled worker aggregates separately.
     /// The submitting thread may also run a native worker. Neither list is
     /// exclusive wall time: different spans can overlap or be nested.
@@ -874,6 +899,34 @@ mod tests {
             .iter()
             .find(|stage| stage.name == STAGE.name())
             .expect("fixed stage")
+    }
+
+    #[test]
+    fn diagnostic_snapshot_preserves_active_profile_and_terminal_totals() {
+        assert!(ExecutorSearchProfileSession::snapshot_current_thread().is_none());
+        let session = ExecutorSearchProfileSession::start().unwrap();
+        SearchStageSpan::record_exact_work(ExecutorSearchStage::WasmGeometrySupportRows, 7);
+        let snapshot = ExecutorSearchProfileSession::snapshot_current_thread().unwrap();
+        assert_eq!(
+            snapshot
+                .iter()
+                .find(|row| row.name == "wasm.geometry.support_rows")
+                .unwrap()
+                .work_item_count,
+            7,
+        );
+        SearchStageSpan::record_exact_work(ExecutorSearchStage::WasmGeometrySupportRows, 11);
+        let snapshot = ExecutorSearchProfileSession::snapshot_current_thread().unwrap();
+        assert_eq!(
+            snapshot
+                .iter()
+                .find(|row| row.name == "wasm.geometry.support_rows")
+                .unwrap()
+                .work_item_count,
+            18,
+        );
+        assert_eq!(session.finish(), snapshot);
+        assert!(ExecutorSearchProfileSession::snapshot_current_thread().is_none());
     }
 
     #[test]

@@ -84,6 +84,15 @@ impl GeometrySolutionFamily {
         !self.interning_disabled && self.retained_limit_bytes.is_none()
     }
 
+    /// Release construction-only lookup storage at the consumed, unbounded
+    /// compiler-to-enumerator boundary. This does not change any node or ID.
+    /// Mutable completion-oracle owners and bounded handoffs retain it.
+    pub(super) fn release_construction_index(&mut self) -> usize {
+        let released = self.intern_slots.capacity() * core::mem::size_of::<u32>();
+        self.disable_interning();
+        released
+    }
+
     pub fn append(&mut self, row_id: u32, suffix: u32) -> Option<u32> {
         if suffix == FAMILY_INVALID {
             return Some(FAMILY_INVALID);
@@ -524,6 +533,58 @@ mod tests {
                 + chunk_bytes
                 + family.intern_slots.capacity() * core::mem::size_of::<u32>()
         );
+    }
+
+    #[test]
+    fn construction_index_release_preserves_node_ids_counts_and_exact_retained_bytes() {
+        let mut family = GeometrySolutionFamily::new();
+        let mut first = FAMILY_INVALID;
+        let mut last = FAMILY_INVALID;
+        for row in 0..super::FAMILY_INTERN_MIN_CAPACITY as u32 {
+            last = family.append(row, FAMILY_EMPTY).unwrap();
+            if first == FAMILY_INVALID {
+                first = last;
+            }
+        }
+        let choices = family.union(first, last).unwrap();
+        let root = family.product(choices, choices).unwrap();
+        let nodes = (2..family.node_count() + 2)
+            .map(|reference| family.node(reference).unwrap())
+            .collect::<Vec<_>>();
+        let counts = family.path_count_table().unwrap();
+        let chunks = family
+            .chunks
+            .iter()
+            .map(|chunk| (chunk.as_ptr(), chunk.len(), chunk.capacity()))
+            .collect::<Vec<_>>();
+        let retained = family.retained_bytes();
+        let index_bytes = family.intern_slots.capacity() * core::mem::size_of::<u32>();
+        assert!(index_bytes > 0 && family.unbounded_interning_active());
+        assert_eq!(counts[root as usize], 4);
+
+        assert_eq!(family.release_construction_index(), index_bytes);
+        assert!(!family.unbounded_interning_active());
+        assert_eq!(family.intern_slots.capacity(), 0);
+        assert_eq!(family.intern_count, 0);
+        assert_eq!(family.retained_bytes(), retained - index_bytes);
+        assert_actual_retained_capacity(&family);
+        assert_eq!(family.path_count_table(), Some(counts));
+        assert_eq!(
+            (2..family.node_count() + 2)
+                .map(|reference| family.node(reference).unwrap())
+                .collect::<Vec<_>>(),
+            nodes,
+        );
+        assert_eq!(
+            family
+                .chunks
+                .iter()
+                .map(|chunk| (chunk.as_ptr(), chunk.len(), chunk.capacity()))
+                .collect::<Vec<_>>(),
+            chunks,
+        );
+        assert_eq!(family.release_construction_index(), 0);
+        assert_eq!(family.retained_bytes(), retained - index_bytes);
     }
 
     #[test]

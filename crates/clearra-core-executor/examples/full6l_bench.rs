@@ -623,11 +623,13 @@ impl PhaseClock {
 
 struct DiagnosticProgress {
     last: Mutex<(&'static str, Instant)>,
+    started: Instant,
 }
 impl DiagnosticProgress {
     fn new() -> Self {
         Self {
             last: Mutex::new(("", Instant::now())),
+            started: Instant::now(),
         }
     }
 }
@@ -639,6 +641,29 @@ impl ProgressSink for DiagnosticProgress {
                     "full6l_bench product_progress stage={} completed={} total={:?}",
                     progress.stage, progress.completed, progress.total
                 );
+                #[allow(unused_mut)]
+                let mut checkpoint = json!({
+                    "stage": progress.stage,
+                    "completed": progress.completed,
+                    "total": progress.total,
+                    "seconds": self.started.elapsed().as_secs_f64(),
+                    "complete": false,
+                    "process_memory": process_memory(),
+                });
+                #[cfg(all(feature = "wasm-stage-profiling", not(target_family = "wasm")))]
+                if let Some(stages) = ExecutorSearchProfileSession::snapshot_current_thread() {
+                    checkpoint["current_thread_profile"] = json!(stages
+                        .into_iter()
+                        .filter(|stage| stage.invocation_count != 0 || stage.work_item_count != 0)
+                        .map(|stage| json!({
+                            "name": stage.name,
+                            "duration_ns": stage.duration_ns,
+                            "invocation_count": stage.invocation_count,
+                            "work_item_count": stage.work_item_count,
+                        }))
+                        .collect::<Vec<_>>());
+                }
+                eprintln!("full6l_bench checkpoint={checkpoint}");
                 *last = (progress.stage, Instant::now());
             }
         }

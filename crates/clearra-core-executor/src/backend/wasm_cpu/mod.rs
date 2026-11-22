@@ -97,6 +97,7 @@ mod setup_parallel_wire;
 mod setup_partial_build;
 mod setup_representative;
 mod setup_suffix_coverage;
+mod source_prefix;
 mod standard_bag_coverage;
 mod standard_bag_product_memo;
 #[cfg(test)]

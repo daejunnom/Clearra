@@ -41,6 +41,14 @@ mod inventory_tests;
 mod prefix_pruning;
 use prefix_pruning::PhysicalPrefixProfile;
 
+#[path = "geometry_row_order.rs"]
+mod row_order;
+use row_order::{FamilyRowOrderBuilder, FamilyRowOrderTable, RowOrderBuildAdvance, ROW_ORDER_ALL};
+
+#[cfg(test)]
+#[path = "geometry_row_order_tests.rs"]
+mod row_order_tests;
+
 #[cfg(test)]
 #[path = "geometry_prefix_pruning_tests.rs"]
 mod prefix_pruning_tests;
@@ -55,6 +63,7 @@ const UNION_LEVEL_COUNT: usize = 32;
 const AVAILABLE_ROW_CACHE_MAX_ROWS: usize = 8 * 1024 * 1024;
 const TARGET_PATTERN_SCAN_WORK_BUDGET: usize = 8_192;
 const PHYSICAL_PREFIX_ENUMERATION_WORK_QUANTUM: usize = 1_024;
+const ROW_ORDER_PREPARATION_WORK_QUANTUM: usize = 4_096;
 
 #[cfg(any(feature = "local-search-ab", test))]
 fn incremental_domain_enabled() -> bool {
@@ -1886,9 +1895,16 @@ impl FamilyCompiler {
     }
 
     fn into_enumerator(
-        self,
+        mut self,
         parallel_counts: Option<&mut Option<Vec<u128>>>,
     ) -> (FamilyEnumerator, Option<u128>) {
+        // The consumed compiler will never append or intern another node.
+        // Free its index before path-count scratch is allocated. Temporary
+        // enumerator views of mutable completion state do not use this path.
+        let stage =
+            SearchStageSpan::begin(ExecutorSearchStage::WasmGeometryConstructionIndexRelease);
+        let released = self.family.release_construction_index();
+        stage.finish(released as u64);
         FamilyEnumerator::from_completed_family(
             self.targets,
             self.family,
@@ -2528,6 +2544,7 @@ struct TraversalTask {
     depth: u8,
     continuation_count: u8,
     prefix_verified: bool,
+    prefix_row_order_mask: u32,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -2549,6 +2566,9 @@ struct FamilyEnumerator {
     target_depth: u8,
     retained_limit_bytes: Option<u128>,
     physical_prefix_pruning: bool,
+    row_order_attempted: bool,
+    row_order_builder: Option<FamilyRowOrderBuilder>,
+    row_order_table: Option<Arc<FamilyRowOrderTable>>,
     prefix_profile: PhysicalPrefixProfile,
     #[cfg(feature = "parallel")]
     candidate_count: Option<u128>,
@@ -2566,11 +2586,84 @@ impl FamilyEnumerator {
             return;
         }
         self.physical_prefix_pruning = true;
+        self.invalidate_prefix_verification();
+    }
+
+    fn invalidate_prefix_verification(&mut self) {
         for task in &mut self.tasks {
             task.prefix_verified = task.depth == 0;
+            task.prefix_row_order_mask = ROW_ORDER_ALL;
         }
         if let Some(task) = self.active_task.as_mut() {
             task.prefix_verified = task.depth == 0;
+            task.prefix_row_order_mask = ROW_ORDER_ALL;
+        }
+    }
+
+    fn needs_row_order_preparation(&self) -> bool {
+        self.physical_prefix_pruning
+            && (!self.row_order_attempted || self.row_order_builder.is_some())
+    }
+
+    /// The optional proof table is prepared cooperatively. Failure to admit
+    /// its storage or authenticate its domain keeps the existing closure.
+    /// Returning false asks the caller to yield and poll cancellation; it
+    /// never changes the complete geometric domain or its raw path count.
+    fn prepare_row_order_step(
+        &mut self,
+        catalog: &GeometryCatalog,
+        retained_limit_bytes: Option<u128>,
+        work_quantum: usize,
+    ) -> bool {
+        if !self.needs_row_order_preparation() {
+            return true;
+        }
+        let stage = SearchStageSpan::begin(ExecutorSearchStage::WasmGeometryRowOrderPrepare);
+        if self.row_order_builder.is_none() {
+            self.row_order_attempted = true;
+            let additional = match retained_limit_bytes {
+                Some(limit) => match limit.checked_sub(self.retained_bytes() as u128) {
+                    Some(additional) => Some(additional),
+                    None => return true,
+                },
+                None => None,
+            };
+            self.row_order_builder =
+                FamilyRowOrderBuilder::try_new(catalog, &self.family, additional);
+            if self.row_order_builder.is_none() {
+                return true;
+            }
+        }
+        if retained_limit_bytes.is_some_and(|limit| {
+            (self.retained_bytes() as u128)
+                .checked_add(FamilyRowOrderTable::owner_bytes() as u128)
+                .is_none_or(|required| required > limit)
+        }) {
+            self.row_order_builder = None;
+            return true;
+        }
+        let builder = self
+            .row_order_builder
+            .as_mut()
+            .expect("row-order builder exists");
+        let before = builder.completed_nodes();
+        let advance = builder.advance(&self.family, work_quantum);
+        stage.finish(builder.completed_nodes().saturating_sub(before) as u64);
+        match advance {
+            RowOrderBuildAdvance::Pending => false,
+            RowOrderBuildAdvance::Unavailable => {
+                self.row_order_builder = None;
+                true
+            }
+            RowOrderBuildAdvance::Complete => {
+                self.row_order_table = self
+                    .row_order_builder
+                    .take()
+                    .and_then(FamilyRowOrderBuilder::finish)
+                    .map(Arc::new);
+                self.invalidate_prefix_verification();
+                true
+            }
         }
     }
 
@@ -2603,6 +2696,7 @@ impl FamilyEnumerator {
                 depth: 0,
                 continuation_count: 0,
                 prefix_verified: true,
+                prefix_row_order_mask: ROW_ORDER_ALL,
             });
         }
         (
@@ -2615,6 +2709,9 @@ impl FamilyEnumerator {
                 target_depth,
                 retained_limit_bytes: None,
                 physical_prefix_pruning: false,
+                row_order_attempted: false,
+                row_order_builder: None,
+                row_order_table: None,
                 prefix_profile: PhysicalPrefixProfile::default(),
                 #[cfg(feature = "parallel")]
                 candidate_count,
@@ -2649,6 +2746,7 @@ impl FamilyEnumerator {
                 depth: 0,
                 continuation_count: 0,
                 prefix_verified: true,
+                prefix_row_order_mask: ROW_ORDER_ALL,
             });
         }
         let enumerator = Self {
@@ -2660,6 +2758,9 @@ impl FamilyEnumerator {
             target_depth,
             retained_limit_bytes: Some(retained_limit_bytes),
             physical_prefix_pruning: false,
+            row_order_attempted: false,
+            row_order_builder: None,
+            row_order_table: None,
             prefix_profile: PhysicalPrefixProfile::default(),
             #[cfg(feature = "parallel")]
             candidate_count: None,
@@ -2686,7 +2787,7 @@ impl FamilyEnumerator {
         path_counts: Vec<u128>,
         preserve_traversal_order: bool,
     ) -> Result<(Vec<Self>, usize), Self> {
-        if self.tasks.len() != 1 || self.active_task.is_some() {
+        if self.tasks.len() != 1 || self.active_task.is_some() || self.row_order_builder.is_some() {
             return Err(self);
         }
         let task = self.tasks[0];
@@ -2728,7 +2829,11 @@ impl FamilyEnumerator {
         // The table is only dispatch scratch; do not carry it into the
         // enumerators, the shared family, or worker memory accounting.
         drop(path_counts);
-        let shared_family_bytes = self.family.retained_bytes();
+        let shared_family_bytes = self.family.retained_bytes()
+            + self
+                .row_order_table
+                .as_ref()
+                .map_or(0, |table| table.retained_bytes());
         let mut enumerators = Vec::new();
         if enumerators.try_reserve_exact(seeds.len()).is_err() {
             return Err(self);
@@ -2748,6 +2853,9 @@ impl FamilyEnumerator {
                 target_depth: self.target_depth,
                 retained_limit_bytes: None,
                 physical_prefix_pruning: self.physical_prefix_pruning,
+                row_order_attempted: self.row_order_attempted,
+                row_order_builder: None,
+                row_order_table: self.row_order_table.as_ref().map(Arc::clone),
                 prefix_profile: PhysicalPrefixProfile::default(),
                 #[cfg(feature = "parallel")]
                 candidate_count: Some(seed.weight),
@@ -2769,7 +2877,22 @@ impl FamilyEnumerator {
         allow_stack_growth: bool,
     ) -> Result<Option<GeometryCandidate>, ()> {
         loop {
-            match self.next_candidate_step(catalog, allow_stack_growth, usize::MAX)? {
+            // Pure geometry keeps an unbounded specialization without
+            // prefix checks or a per-node work quantum/counter.
+            let advance = if self.physical_prefix_pruning {
+                self.next_candidate_step_impl::<true, false>(
+                    catalog,
+                    allow_stack_growth,
+                    usize::MAX,
+                )
+            } else {
+                self.next_candidate_step_impl::<false, false>(
+                    catalog,
+                    allow_stack_growth,
+                    usize::MAX,
+                )
+            };
+            match advance? {
                 FamilyEnumerationAdvance::Pending => {}
                 FamilyEnumerationAdvance::Candidate(candidate) => return Ok(Some(candidate)),
                 FamilyEnumerationAdvance::Complete => return Ok(None),
@@ -2787,15 +2910,75 @@ impl FamilyEnumerator {
         allow_stack_growth: bool,
         work_budget: usize,
     ) -> Result<FamilyEnumerationAdvance, ()> {
+        if self.physical_prefix_pruning {
+            self.next_candidate_step_impl::<true, true>(catalog, allow_stack_growth, work_budget)
+        } else {
+            self.next_candidate_step_impl::<false, true>(catalog, allow_stack_growth, work_budget)
+        }
+    }
+
+    fn next_candidate_step_impl<const PHYSICAL: bool, const YIELD: bool>(
+        &mut self,
+        catalog: &GeometryCatalog,
+        allow_stack_growth: bool,
+        work_budget: usize,
+    ) -> Result<FamilyEnumerationAdvance, ()> {
         let mut work = 0usize;
+        if PHYSICAL
+            && self
+                .row_order_table
+                .as_ref()
+                .is_some_and(|table| !table.matches(catalog, &self.family))
+        {
+            // A foreign/unsupported table is unavailable, never a zero
+            // proof. Revalidate saved prefixes with the original closure.
+            self.row_order_table = None;
+            self.invalidate_prefix_verification();
+        }
+        let mut use_row_order = PHYSICAL && self.row_order_table.is_some();
         while let Some(mut task) = self.active_task.take().or_else(|| self.tasks.pop()) {
             loop {
-                if work >= work_budget.max(1) {
-                    self.active_task = Some(task);
-                    return Ok(FamilyEnumerationAdvance::Pending);
+                if YIELD {
+                    if work >= work_budget.max(1) {
+                        self.active_task = Some(task);
+                        return Ok(FamilyEnumerationAdvance::Pending);
+                    }
+                    work = work.saturating_add(1);
                 }
-                work = work.saturating_add(1);
-                if self.physical_prefix_pruning && !task.prefix_verified {
+                if use_row_order {
+                    if !task.prefix_verified {
+                        if let Some(mask) = self.row_order_table.as_ref().and_then(|table| {
+                            table.selected_mask(&self.rows[..usize::from(task.depth)])
+                        }) {
+                            task.prefix_row_order_mask = mask;
+                            task.prefix_verified = true;
+                        } else {
+                            self.row_order_table = None;
+                            use_row_order = false;
+                            continue;
+                        }
+                    }
+                    let possible = self.row_order_table.as_ref().and_then(|table| {
+                        table.task_mask(
+                            task.prefix_row_order_mask,
+                            task.family,
+                            &task.continuations[..usize::from(task.continuation_count)],
+                        )
+                    });
+                    match possible {
+                        Some(0) => {
+                            self.prefix_profile.record_row_order_prune();
+                            break;
+                        }
+                        Some(_) => {}
+                        None => {
+                            self.row_order_table = None;
+                            use_row_order = false;
+                            task.prefix_verified = false;
+                            continue;
+                        }
+                    }
+                } else if PHYSICAL && !task.prefix_verified {
                     // This also validates frozen parallel-seed prefixes,
                     // including a seed already positioned at FAMILY_EMPTY.
                     if self
@@ -2818,10 +3001,9 @@ impl FamilyEnumerator {
                     if task.depth != self.target_depth {
                         return Err(());
                     }
-                    return self
-                        .candidate(catalog, task.depth)
-                        .map(FamilyEnumerationAdvance::Candidate)
-                        .ok_or(());
+                    let candidate = self.candidate(catalog, task.depth).ok_or(())?;
+                    self.prefix_profile.record_emitted_candidate();
+                    return Ok(FamilyEnumerationAdvance::Candidate(candidate));
                 }
 
                 let node = self.family.node(task.family).ok_or(())?;
@@ -2835,7 +3017,19 @@ impl FamilyEnumerator {
                         self.rows[task.depth as usize] = node.row_id;
                         task.depth += 1;
                         task.family = node.left;
-                        if self.physical_prefix_pruning {
+                        if use_row_order {
+                            if let Some(mask) = self
+                                .row_order_table
+                                .as_ref()
+                                .and_then(|table| table.row_mask(node.row_id))
+                            {
+                                task.prefix_row_order_mask &= mask;
+                            } else {
+                                self.row_order_table = None;
+                                use_row_order = false;
+                                task.prefix_verified = false;
+                            }
+                        } else if PHYSICAL {
                             // A zero-requirement operation can be placed
                             // first in this optimistic system. Once it is
                             // placed, the previous verified closure is still
@@ -2854,8 +3048,6 @@ impl FamilyEnumerator {
                                 }
                             }
                             task.prefix_verified = true;
-                        } else {
-                            task.prefix_verified = false;
                         }
                     }
                     FamilyNodeKind::Union => {
@@ -2927,6 +3119,13 @@ impl FamilyEnumerator {
             + usize::from(Arc::strong_count(&self.family) == 1)
                 * (core::mem::size_of::<GeometrySolutionFamily>() + self.family.retained_bytes())
             + self.tasks.capacity() * core::mem::size_of::<TraversalTask>()
+            + self
+                .row_order_builder
+                .as_ref()
+                .map_or(0, FamilyRowOrderBuilder::retained_bytes)
+            + self.row_order_table.as_ref().map_or(0, |table| {
+                usize::from(Arc::strong_count(table) == 1) * table.retained_bytes()
+            })
     }
 }
 
@@ -4699,6 +4898,22 @@ impl GeometrySearch {
         let Some(enumerator) = self.enumerator.as_mut() else {
             return GeometryAdvance::Complete;
         };
+        if enumerator.needs_row_order_preparation() {
+            enumerator.prepare_row_order_step(
+                catalog,
+                internal_limit,
+                ROW_ORDER_PREPARATION_WORK_QUANTUM,
+            );
+            return if retained_limit_bytes
+                .is_some_and(|limit| self.retained_bytes() as u128 > limit)
+            {
+                GeometryAdvance::ResourceIncomplete("geometry_memory_capacity_exceeded")
+            } else {
+                // Even the final preparation quantum returns to the host
+                // before candidate traversal and cancellation-sensitive work.
+                GeometryAdvance::Pending
+            };
+        }
         let next = if self.physical_prefix_pruning {
             enumerator.next_candidate_step(catalog, true, PHYSICAL_PREFIX_ENUMERATION_WORK_QUANTUM)
         } else {
@@ -4833,6 +5048,45 @@ impl GeometrySearch {
             }
             self.enumerator = Some(enumerator);
             stage.finish(u64::from(node_count));
+            if control.is_cancelled() {
+                return Err(WasmExactSearchError::Cancelled);
+            }
+        }
+        if let Some(enumerator) = self.enumerator.as_mut() {
+            let mut preparation_steps = 0usize;
+            while enumerator.needs_row_order_preparation() {
+                if control.is_cancelled() {
+                    return Err(WasmExactSearchError::Cancelled);
+                }
+                enumerator.prepare_row_order_step(
+                    catalog,
+                    None,
+                    ROW_ORDER_PREPARATION_WORK_QUANTUM,
+                );
+                preparation_steps = preparation_steps.wrapping_add(1);
+                if preparation_steps == 1
+                    || preparation_steps & 63 == 0
+                    || !enumerator.needs_row_order_preparation()
+                {
+                    let completed = enumerator.row_order_builder.as_ref().map_or_else(
+                        || {
+                            if enumerator.row_order_table.is_some() {
+                                enumerator.family.node_count() as usize
+                            } else {
+                                0
+                            }
+                        },
+                        FamilyRowOrderBuilder::completed_nodes,
+                    );
+                    control.report_progress(
+                        "geometry-row-order",
+                        completed as u64,
+                        Some(u64::from(enumerator.family.node_count())),
+                    );
+                }
+            }
+            // Cancellation is a real terminal outcome, never optional-table
+            // unavailability or an exhausted family certificate.
             if control.is_cancelled() {
                 return Err(WasmExactSearchError::Cancelled);
             }

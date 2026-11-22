@@ -1024,6 +1024,65 @@ fn worker_storage(
     }
 }
 
+/// Opt-in profiling evidence that survives an external process termination.
+/// All counters are cumulative observations, never terminal count authority.
+#[cfg(all(
+    not(target_family = "wasm"),
+    any(feature = "search-stage-profiling", feature = "wasm-stage-profiling")
+))]
+fn report_worker_checkpoint(
+    branch: usize,
+    verified_candidates: usize,
+    workspace: &BuildUpWorkspace,
+    evaluator: &CoverageProductEvaluator,
+    aggregate: &WorkerAggregate,
+    candidate_digest: &CandidateDigestEvidence,
+) {
+    let Some(profile) = crate::performance::ExecutorSearchProfileSession::snapshot_current_thread()
+    else {
+        return;
+    };
+    let memory = workspace.memory_components();
+    let shared_bag = workspace.shared_standard_bag_request_retained_bytes();
+    let stages = profile
+        .into_iter()
+        .filter(|stage| stage.invocation_count != 0 || stage.work_item_count != 0)
+        .map(|stage| {
+            serde_json::json!({
+                "name": stage.name, "duration_ns": stage.duration_ns,
+                "invocation_count": stage.invocation_count,
+                "work_item_count": stage.work_item_count,
+            })
+        })
+        .collect::<Vec<_>>();
+    let checkpoint = serde_json::json!({
+        "schema": "clearra.worker-checkpoint.v1",
+        "complete": false,
+        "branch": branch,
+        "verified_candidates_in_branch": verified_candidates,
+        "retained_solution_identity_count_in_worker": aggregate.buildable_identities.len(),
+        "build_graph_nodes_in_worker": aggregate.total_build_nodes,
+        "coverage_product_states_in_worker": aggregate.coverage_product_states,
+        "reachability_states_in_worker": aggregate.total_reachability_states,
+        "local_source_coverage_complete": workspace.standard_bag_coverage_complete(),
+        "retained_capacity_bytes": {
+            "piece_language": memory.piece_language_bytes,
+            "standard_bag_private": memory.standard_bag_bytes.saturating_sub(shared_bag),
+            "standard_bag_shared_reference": shared_bag,
+            "reachability": memory.reachability_bytes,
+            "graph_projection": memory.graph_projection_bytes,
+            "other_workspace": memory.other_bytes,
+            "coverage_evaluator": evaluator.retained_bytes(),
+            "solution_identities": aggregate.buildable_identities.capacity()
+                * core::mem::size_of::<StandardBoard64TilingIdentity>(),
+            "candidate_digest": candidate_digest.retained_bytes(),
+        },
+        "current_thread_profile": stages,
+        "profile_contract": "cumulative finished spans on this thread; sampled nested timings; shared references are not private allocations",
+    });
+    eprintln!("clearra_worker_checkpoint={checkpoint}");
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_branch(
     problem: &SearchProblem,
@@ -1061,6 +1120,11 @@ fn run_branch(
     let solution_coverage_required = retains_solution_coverage_evidence(problem);
     #[cfg(any(feature = "search-stage-profiling", feature = "wasm-stage-profiling"))]
     let mut geometry_advance_calls = 0_usize;
+    #[cfg(all(
+        not(target_family = "wasm"),
+        any(feature = "search-stage-profiling", feature = "wasm-stage-profiling")
+    ))]
+    let mut last_diagnostic_checkpoint = std::time::Instant::now();
     loop {
         if control.is_cancelled() {
             queue.abort();
@@ -1074,6 +1138,21 @@ fn run_branch(
         #[cfg(any(feature = "search-stage-profiling", feature = "wasm-stage-profiling"))]
         let geometry_profile_scale = {
             geometry_advance_calls = geometry_advance_calls.saturating_add(1);
+            #[cfg(not(target_family = "wasm"))]
+            if geometry_advance_calls & 0xff == 0
+                && control.progress_sink.is_some()
+                && last_diagnostic_checkpoint.elapsed() >= std::time::Duration::from_secs(10)
+            {
+                report_worker_checkpoint(
+                    task.canonical_index,
+                    local_ordinal,
+                    workspace,
+                    evaluator,
+                    aggregate,
+                    &candidate_digest,
+                );
+                last_diagnostic_checkpoint = std::time::Instant::now();
+            }
             profile_sample_scale(geometry_advance_calls)
         };
         #[cfg(not(any(feature = "search-stage-profiling", feature = "wasm-stage-profiling")))]

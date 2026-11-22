@@ -211,9 +211,21 @@ fn full6l_physical_prefix_pruning_matches_harness_and_rejects_other_contracts() 
 
 #[test]
 fn physical_prefix_pruning_preserves_exhaustive_serial_and_parallel_results() {
+    assert_square_piece_prefix_parity(4);
+}
+
+#[test]
+fn physical_row_order_preserves_exhaustive_six_o_serial_and_parallel_results() {
+    assert_square_piece_prefix_parity(6);
+}
+
+fn assert_square_piece_prefix_parity(height: u16) {
     fn execute(problem: &SearchProblem, workers: usize, filtered: bool) -> CoreExecutionResult {
         let mut session = WasmExactSearchSession::new(problem).unwrap();
         assert!(!session.physical_prefix_pruning_active);
+        #[cfg(any(feature = "search-stage-profiling", feature = "wasm-stage-profiling"))]
+        let profile = (filtered && session.catalog.height() == 6)
+            .then(|| crate::ExecutorSearchProfileSession::start().expect("row-order profile"));
         if filtered {
             // This tiny fixture deliberately lies outside the Full6L product
             // gate, but exercises the same enumerator and result integration.
@@ -221,34 +233,57 @@ fn physical_prefix_pruning_preserves_exhaustive_serial_and_parallel_results() {
             session.physical_prefix_pruning_active = true;
         }
         let control = ExecutionControl::default();
-        if workers > 1 {
-            return session
+        let result = if workers > 1 {
+            session
                 .execute_parallel_with_identity_storage(workers, &control, true)
                 .unwrap()
-                .expect("the four-O family has multiple parallel branches");
-        }
-        loop {
-            match session.advance(64, &control).unwrap() {
-                ExactSearchAdvance::Pending => {}
-                ExactSearchAdvance::Completed(result) => return result,
-                ExactSearchAdvance::Cancelled => panic!("the control is not cancelled"),
+                .expect("the square-piece family has multiple parallel branches")
+        } else {
+            loop {
+                match session.advance(64, &control).unwrap() {
+                    ExactSearchAdvance::Pending => {}
+                    ExactSearchAdvance::Completed(result) => break result,
+                    ExactSearchAdvance::Cancelled => panic!("the control is not cancelled"),
+                }
             }
+        };
+        #[cfg(any(feature = "search-stage-profiling", feature = "wasm-stage-profiling"))]
+        if let Some(profile) = profile {
+            let stages = profile.finish();
+            for stage_name in [
+                "wasm.geometry.row_order_prepare",
+                "wasm.geometry.row_order_pruned_subtrees",
+            ] {
+                assert!(
+                    stages
+                        .iter()
+                        .any(|stage| { stage.name == stage_name && stage.work_item_count > 0 }),
+                    "{stage_name} must run with {workers} workers",
+                );
+            }
+            // Preparation alone can also report a failed optional attempt.
+            // A table-only prune proves this exercised the ready 24-order
+            // table in each execution, rather than the closure fallback.
         }
+        result
     }
 
-    // The initial six rightmost cells in each row embed an empty 4x4 field
-    // in the standard ten-column product board. O skeletons with interleaved
-    // original rows include dependency cycles, alongside physical solutions.
+    // The six initially filled rightmost cells per row leave a four-column
+    // rectangle. Height four exercises the closure fallback; height six
+    // admits the 24-order table. Interleaved O rows include dependency cycles
+    // alongside physical solutions in both finite candidate families.
+    let pieces = usize::from(height);
+    let initial = (0..height).fold(0_u64, |mask, row| mask | (0x3f0_u64 << (10 * row)));
     let problem = ProblemCompiler::compile_scenario_pc(
         &PcScenarioQuery::new(
-            PcScenarioBoard::standard_10(4, 0xfc3f_0fc3_f0),
-            PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::O; 4])),
-            PieceWindow::new(4),
+            PcScenarioBoard::standard_10(height, initial),
+            PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::O; pieces])),
+            PieceWindow::new(pieces),
         )
         .with_rule(srs_plus())
         .with_allow_hold(false)
-        .with_exact_pieces(Some(4))
-        .with_supply_window_size(SupplyWindowSize::new(4))
+        .with_exact_pieces(Some(pieces))
+        .with_supply_window_size(SupplyWindowSize::new(pieces))
         .with_count_policy(PcCountPolicy::CountUnique)
         .with_solution_probability_policy(PcSolutionProbabilityPolicy::Omit)
         .with_queue_observation_policy(QueueObservationPolicy::FullQueueOracle)
@@ -265,7 +300,7 @@ fn physical_prefix_pruning_preserves_exhaustive_serial_and_parallel_results() {
     let reference = execute(&problem, 1, false);
     assert!(!reference.normalized_solution_identities().is_empty());
     assert_eq!(reference.coverage_pattern_words(), &[1]);
-    assert_eq!(reference.path_steps().len(), 4);
+    assert_eq!(reference.path_steps().len(), pieces);
     let raw_family: u128 = reference
         .field("geometry_candidate_family_count")
         .unwrap()
