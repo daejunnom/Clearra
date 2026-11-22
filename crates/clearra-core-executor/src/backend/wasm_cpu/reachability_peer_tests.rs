@@ -143,7 +143,7 @@ fn fixture(
         min_x: 0,
         max_x: 9,
         min_y: if sky { height as i8 } else { 0 },
-        max_y: template.ceiling,
+        max_y: i8::try_from(template.ceiling).unwrap(),
     };
     // The open sky fixture needs one canonical occupancy condition. A list
     // of independently derived overlapping conditions is NOT a pack cover.

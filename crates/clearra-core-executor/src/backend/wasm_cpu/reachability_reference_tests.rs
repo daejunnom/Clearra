@@ -559,7 +559,7 @@ fn whole_pose_domain_local_relation_has_no_unchecked_exit() {
             min_x: 0,
             max_x: 9,
             min_y: 0,
-            max_y: template.ceiling,
+            max_y: i8::try_from(template.ceiling).unwrap(),
         };
         let local = derive_exact_conditioned_local_relation(
             10,

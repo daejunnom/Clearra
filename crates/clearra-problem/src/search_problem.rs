@@ -694,7 +694,6 @@ mod model {
 mod pc_placement_dependency {
     use clearra_core_domain::objective::objective_kind::ObjectiveKind;
     use clearra_pc_graph::request::RequestedSearchBackend;
-    use clearra_rules::kicks::KickTableProfileId;
     use clearra_supply::{bag::BagState, QueueObservationPolicy};
 
     use crate::goal::SearchGoal;
@@ -738,16 +737,10 @@ mod pc_placement_dependency {
                 || !matches!(self.search_goal(), SearchGoal::ClearToEmpty)
                 || self.initial_board().width() != 10
                 || self.initial_board().has_extended_occupancy()
-                || !(1..=4).contains(&self.visible_height())
-                || !(1..=4).contains(&self.compact_pc_geometry_height())
+                || !(1..=6).contains(&self.visible_height())
+                || !(1..=6).contains(&self.compact_pc_geometry_height())
                 || self.scenario.setup_query().is_some()
                 || self.scenario.build_query().is_some()
-                || self.scenario.core_query().verified_kick_profile().is_some()
-                || self.rule_profile.verified_kick_profile().is_some()
-                || !matches!(
-                    self.kick_profile().profile_id(),
-                    KickTableProfileId::SrsPlus | KickTableProfileId::Jstris180
-                )
                 || !matches!(
                     self.objective().kind(),
                     ObjectiveKind::All | ObjectiveKind::Unique
@@ -781,7 +774,7 @@ mod pc_placement_dependency {
             let required = (all_cells & !initial).count_ones() as usize;
             if initial & !all_cells != 0
                 || !required.is_multiple_of(4)
-                || !(1..=10).contains(&(required / 4))
+                || !(1..=11).contains(&(required / 4))
                 || self.compact_pc_proven_empty_family_depth().is_some()
                 || self.compact_pc_has_unqualified_capped_family()
             {
@@ -1429,7 +1422,6 @@ mod retained_capacity {
                         .clone()
                         .with_requested_backend(RequestedSearchBackend::Gpu),
                 ),
-                base.clone().with_rule(srs()),
                 base.clone().with_objective(ObjectivePolicy::all()),
                 base.clone()
                     .with_queue(PcQueueInput::fixed_sequence(FixedSequence::new(vec![
@@ -1449,6 +1441,11 @@ mod retained_capacity {
                 assert!(!problem.pc_placement_dependency_eligible(), "{query:?}");
                 assert!(problem.checked_pc_family_pointee_retained_bytes().is_none());
             }
+
+            let quarter_turns =
+                ProblemCompiler::compile_opening_pc(&base.clone().with_rule(srs())).unwrap();
+            assert!(quarter_turns.pc_placement_dependency_eligible());
+            assert!(quarter_turns.pc_placement_dependency_requested());
 
             let ready = ProblemCompiler::compile_opening_pc(&base).unwrap();
             assert!(!ready

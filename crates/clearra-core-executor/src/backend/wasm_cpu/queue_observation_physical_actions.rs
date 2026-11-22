@@ -6,6 +6,10 @@
 //! a physical lock until hidden supply has been revealed. Input nodes have
 //! already been proved by the dependency relation; this owner performs no
 //! movement or BuildUp search.
+//!
+//! Product requests retain factored proofs and expand them on demand. The
+//! eager edge/node API remains an independent exact reference for tests;
+//! the narrow dead-code allowances below cover only that reference API.
 
 use std::{
     collections::{hash_map::DefaultHasher, HashMap},
@@ -16,6 +20,10 @@ use clearra_core_domain::{execution_cancellation::ExecutionControl, piece::piece
 
 use super::{piece_code, ObservationLanguageNode, ObservationPieceLanguage, WasmExactSearchError};
 
+#[cfg(feature = "placement-dependency-pc")]
+#[path = "queue_observation_factored_actions.rs"]
+mod factored;
+
 const NO_NODE: u32 = u32::MAX;
 const MAX_NODES: usize = 1_000_000;
 const MAX_EDGES: usize = 8_000_000;
@@ -23,12 +31,14 @@ const MAX_UNION_MEMBERS: usize = 8_000_000;
 const MAX_WORK: usize = 64_000_000;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[cfg_attr(not(test), allow(dead_code))]
 pub(in crate::backend::wasm_cpu) struct PhysicalActionEdge {
     piece: u8,
     cells: u64,
     child: u32,
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 impl PhysicalActionEdge {
     pub(in crate::backend::wasm_cpu) fn new(
         piece: PieceKind,
@@ -51,6 +61,7 @@ impl PhysicalActionEdge {
 }
 
 #[derive(Clone, Copy)]
+#[cfg_attr(not(test), allow(dead_code))]
 struct PhysicalNode {
     first_edge: u32,
     edge_count: u32,
@@ -69,14 +80,21 @@ pub(in crate::backend::wasm_cpu) struct PhysicalActionLanguage {
     hash_heads: HashMap<u64, u32>,
     roots: Vec<u32>,
     unions: HashMap<Vec<u32>, u32>,
+    #[cfg_attr(not(test), allow(dead_code))]
     union_members: usize,
+    #[cfg_attr(not(test), allow(dead_code))]
     work: usize,
+    #[cfg(feature = "placement-dependency-pc")]
+    factored: factored::FactoredActionRelations,
+    #[cfg(feature = "placement-dependency-pc")]
+    prefix_suffix_scratch: Vec<u32>,
 }
 
 impl PhysicalActionLanguage {
     /// Intern one already-proved concrete continuation. Callers retain their
     /// scratch vector. Two distinct physical locks of the same kind remain
     /// distinct edges, even when their continuation is identical.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(in crate::backend::wasm_cpu) fn intern_node(
         &mut self,
         remaining_depth: u8,
@@ -139,6 +157,7 @@ impl PhysicalActionLanguage {
         Ok(reference)
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(in crate::backend::wasm_cpu) fn insert_root(
         &mut self,
         root: u32,
@@ -156,15 +175,78 @@ impl PhysicalActionLanguage {
     }
 
     pub(in crate::backend::wasm_cpu) fn has_roots(&self) -> bool {
-        !self.roots.is_empty()
+        if !self.roots.is_empty() {
+            return true;
+        }
+        #[cfg(feature = "placement-dependency-pc")]
+        if self.factored.has_roots() {
+            return true;
+        }
+        false
     }
 
+    /// Retain one proof factor and its own geometry. Physical action nodes
+    /// are expanded only when the observation policy requests a derivative.
+    #[cfg(feature = "placement-dependency-pc")]
+    pub(in crate::backend::wasm_cpu) fn register_relation(
+        &mut self,
+        orders: crate::backend::wasm_cpu::symbolic_prefix_orders::SymbolicPrefixOrders,
+        hidden_horizon: u8,
+        control: &ExecutionControl,
+    ) -> Result<(), WasmExactSearchError> {
+        if !self.roots.is_empty() {
+            return Err(invalid("wasm_observation_eager_and_factored_owners_mixed"));
+        }
+        self.factored
+            .register(orders, &self.prefix_suffix_scratch, hidden_horizon, control)
+    }
+
+    #[cfg(feature = "placement-dependency-pc")]
+    pub(in crate::backend::wasm_cpu) fn prefix_suffix_scratch(&mut self) -> &mut Vec<u32> {
+        &mut self.prefix_suffix_scratch
+    }
+
+    #[cfg(feature = "placement-dependency-pc")]
+    pub(in crate::backend::wasm_cpu) fn merge_factored(
+        &mut self,
+        source: Self,
+        rebound: &[u32],
+        control: &ExecutionControl,
+    ) -> Result<(), WasmExactSearchError> {
+        if !self.roots.is_empty() || !source.roots.is_empty() {
+            return Err(invalid("wasm_observation_eager_and_factored_owners_mixed"));
+        }
+        self.factored.merge(source.factored, rebound, control)
+    }
+
+    /// `kinds` is the same pinned arena that produced every retained prefix
+    /// suffix ID. The view owns only demand-driven residual/edge memoization.
+    #[cfg(feature = "placement-dependency-pc")]
+    pub(in crate::backend::wasm_cpu) fn factored_view<'a>(
+        &'a self,
+        kinds: &'a crate::backend::wasm_cpu::piece_order_language::PieceOrderLanguageCache,
+        control: &ExecutionControl,
+    ) -> Result<Option<factored::FactoredPhysicalActionLanguageView<'a>>, WasmExactSearchError>
+    {
+        if !self.roots.is_empty() {
+            return Err(invalid("wasm_observation_eager_and_factored_owners_mixed"));
+        }
+        self.factored.view(kinds, control)
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(in crate::backend::wasm_cpu) fn view(
         &mut self,
         control: &ExecutionControl,
     ) -> Result<Option<PhysicalActionLanguageView<'_>>, WasmExactSearchError> {
         if control.is_cancelled() {
             return Err(WasmExactSearchError::Cancelled);
+        }
+        #[cfg(feature = "placement-dependency-pc")]
+        if self.factored.has_roots() {
+            return Err(invalid(
+                "wasm_observation_factored_owner_requires_suffix_arena",
+            ));
         }
         if self.roots.is_empty() {
             return Ok(None);
@@ -184,7 +266,7 @@ impl PhysicalActionLanguage {
     }
 
     pub(in crate::backend::wasm_cpu) fn retained_bytes(&self) -> usize {
-        self.nodes.capacity() * core::mem::size_of::<PhysicalNode>()
+        let bytes = self.nodes.capacity() * core::mem::size_of::<PhysicalNode>()
             + self.edges.capacity() * core::mem::size_of::<PhysicalActionEdge>()
             + self.hash_heads.capacity() * (core::mem::size_of::<(u64, u32)>() + 1)
             + self.roots.capacity() * core::mem::size_of::<u32>()
@@ -193,14 +275,21 @@ impl PhysicalActionLanguage {
                 .unions
                 .keys()
                 .map(|key| key.capacity() * core::mem::size_of::<u32>())
-                .sum::<usize>()
+                .sum::<usize>();
+        #[cfg(feature = "placement-dependency-pc")]
+        let bytes = bytes
+            .saturating_add(self.factored.retained_bytes())
+            .saturating_add(self.prefix_suffix_scratch.capacity() * core::mem::size_of::<u32>());
+        bytes
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     fn node_edges(&self, node: PhysicalNode) -> &[PhysicalActionEdge] {
         let first = node.first_edge as usize;
         &self.edges[first..first + node.edge_count as usize]
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     fn charge(
         &mut self,
         steps: usize,
@@ -217,6 +306,7 @@ impl PhysicalActionLanguage {
         Ok(())
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     fn union_sources(
         &mut self,
         mut sources: Vec<u32>,
@@ -297,6 +387,7 @@ impl PhysicalActionLanguage {
     }
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(in crate::backend::wasm_cpu) struct PhysicalActionLanguageView<'a> {
     owner: &'a PhysicalActionLanguage,
     root: u32,

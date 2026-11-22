@@ -875,6 +875,24 @@ pub(super) struct BuildUpMemoryComponents {
     pub other_bytes: usize,
 }
 
+/// A worker's exact physical proofs travel with the only kind-language arena
+/// in which their suffix IDs have meaning. The coordinator re-interns that
+/// arena once before combining any physical residuals or policy choices.
+#[cfg(all(feature = "parallel", feature = "placement-dependency-pc"))]
+pub(super) struct ObservationProducerShard {
+    physical: super::queue_observation_policy::PhysicalActionLanguage,
+    kinds: PieceOrderLanguageCache,
+}
+
+#[cfg(all(feature = "parallel", feature = "placement-dependency-pc"))]
+impl ObservationProducerShard {
+    pub(super) fn retained_bytes(&self) -> usize {
+        self.physical
+            .retained_bytes()
+            .saturating_add(self.kinds.retained_bytes())
+    }
+}
+
 #[derive(Default)]
 pub(super) struct BuildUpWorkspace {
     realization_feasibility: RealizationFeasibilityWorkspace,
@@ -1005,7 +1023,6 @@ impl BuildUpWorkspace {
         Ok(())
     }
 
-    #[cfg(not(target_family = "wasm"))]
     pub(super) fn bind_local_import(
         &mut self,
         authority: super::compact_kick_authority::CompactKickAuthority,
@@ -1269,6 +1286,30 @@ impl BuildUpWorkspace {
         Ok(())
     }
 
+    #[cfg(all(feature = "parallel", feature = "placement-dependency-pc"))]
+    pub(super) fn take_observation_producer_shard(&mut self) -> Option<ObservationProducerShard> {
+        self.dependency_observation
+            .has_roots()
+            .then(|| ObservationProducerShard {
+                physical: core::mem::take(&mut self.dependency_observation),
+                kinds: core::mem::take(&mut self.piece_order_languages),
+            })
+    }
+
+    #[cfg(all(feature = "parallel", feature = "placement-dependency-pc"))]
+    pub(super) fn merge_observation_producer_shard(
+        &mut self,
+        shard: ObservationProducerShard,
+        control: &ExecutionControl,
+    ) -> Result<(), WasmExactSearchError> {
+        if control.is_cancelled() {
+            return Err(WasmExactSearchError::Cancelled);
+        }
+        let rebound = self.piece_order_languages.import_node_map(&shard.kinds)?;
+        self.dependency_observation
+            .merge_factored(shard.physical, &rebound, control)
+    }
+
     pub fn evaluate_observation_language(
         &mut self,
         problem: &SearchProblem,
@@ -1307,14 +1348,43 @@ impl BuildUpWorkspace {
                     "wasm_observation_physical_and_kind_owners_mixed",
                 ));
             }
-            let language = self.dependency_observation.view(control)?.ok_or(
-                WasmExactSearchError::InvalidProblem("wasm_observation_physical_root_missing"),
-            )?;
+            let language = self
+                .dependency_observation
+                .factored_view(&self.piece_order_languages, control)?
+                .ok_or(WasmExactSearchError::InvalidProblem(
+                    "wasm_observation_physical_root_missing",
+                ))?;
             // The owner unions only identical physical locks. Different
             // locks of the same kind stay separate alternatives for the
             // evaluator's existing action-before-reveal recurrence.
-            // Its retained storage is already counted by this workspace.
-            return evaluator.evaluate(&language, control).map(Some);
+            let evaluation = evaluator.evaluate(&language, control);
+            #[cfg(feature = "local-search-ab")]
+            if evaluation.is_err() {
+                eprintln!(
+                    "clearra_observation_failure_metrics={:?}",
+                    language.metrics()
+                );
+            }
+            let mut result = evaluation?;
+            result.metrics.retained_bytes = result
+                .metrics
+                .retained_bytes
+                .saturating_add(language.retained_bytes());
+            let physical = language.metrics();
+            result.metrics.physical_actions = [
+                physical.candidate_factors,
+                physical.proof_factors,
+                physical.suffix_bindings,
+                physical.physical_nodes,
+                physical.revealed_nodes,
+                physical.edges,
+                physical.residual_members,
+                physical.physical_source_visits,
+                physical.kind_source_visits,
+                physical.revealed_source_visits,
+                physical.work,
+            ];
+            return Ok(Some(result));
         }
         let language = RootedPieceLanguageUnion::new(
             &self.piece_order_languages,
@@ -1376,7 +1446,11 @@ impl BuildUpWorkspace {
         if let Some(coverage) = self.standard_bag_coverage.as_mut() {
             coverage.flush_and_recycle_local_cache()?;
         }
-        if !self.observation_language_roots.is_empty() {
+        #[cfg(feature = "placement-dependency-pc")]
+        let physical_suffixes_pinned = self.dependency_observation.has_roots();
+        #[cfg(not(feature = "placement-dependency-pc"))]
+        let physical_suffixes_pinned = false;
+        if !self.observation_language_roots.is_empty() || physical_suffixes_pinned {
             self.piece_order_languages.clear_coverage_caches();
         } else {
             self.piece_order_languages.clear_retain_capacity();
@@ -1557,11 +1631,16 @@ pub(super) fn checked_candidate_verification_peak_upper_bound(
     } else {
         0
     };
-    let reachability_bytes = checked_reachability_retained_upper_bound(
-        catalog.width(),
-        catalog.height(),
-        problem.kick_profile().profile_id(),
-    )?;
+    let reachability_bytes =
+        if let Some(authority) = super::dependency_kick_authority(problem).ok()? {
+            authority.checked_reachability_peak_upper_bound_bytes()?
+        } else {
+            checked_reachability_retained_upper_bound(
+                catalog.width(),
+                catalog.height(),
+                problem.kick_profile().profile_id(),
+            )?
+        };
     let standard_bag_cursor_bytes =
         StandardBagCoverage::checked_cursor_transition_retained_bytes(universe)?;
     #[cfg(any(test, feature = "local-search-ab"))]
@@ -2177,8 +2256,7 @@ fn verify_candidate_for_completion_mode(
     if use_dependency {
         #[cfg(feature = "placement-dependency-pc")]
         {
-            if !use_builtin_rule
-                || !matches!(completion, BuildCompletion::ClearToEmpty)
+            if !matches!(completion, BuildCompletion::ClearToEmpty)
                 || finesse_requested
                 || finesse_spin_coverage_requested
                 || witness_mode.enabled()

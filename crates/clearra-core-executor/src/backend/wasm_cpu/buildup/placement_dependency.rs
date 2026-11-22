@@ -57,8 +57,8 @@ pub(super) fn validate_candidate_scope(
     target: &TargetGroup,
 ) -> Result<(), WasmExactSearchError> {
     if catalog.width() == 10
-        && (1..=4).contains(&catalog.height())
-        && (1..=10).contains(&candidate.row_ids().len())
+        && (1..=6).contains(&catalog.height())
+        && (1..=11).contains(&candidate.row_ids().len())
         && target.pattern_index.is_none()
     {
         Ok(())
@@ -243,6 +243,23 @@ fn evaluate_prefix_order(
         PrefixEvaluation::NativeExperiment => ExecutorSearchStage::StrictPrefixLanguage,
     };
     let language_span = SearchStageSpan::begin_scaled(language_stage, profile_scale);
+    #[cfg(feature = "placement-dependency-pc")]
+    let observation_requested = matches!(evaluation, PrefixEvaluation::Product { .. })
+        && problem
+            .queue_observation_policy()
+            .requires_observation_policy();
+    #[cfg(feature = "placement-dependency-pc")]
+    let language = if observation_requested {
+        orders.compile_product_language_with_residuals(
+            &mut workspace.piece_order_languages,
+            work,
+            workspace.dependency_observation.prefix_suffix_scratch(),
+        )
+    } else {
+        compile_language(&orders, &mut workspace.piece_order_languages, work)
+    }
+    .map_err(PrefixEvaluationError::Execution)?;
+    #[cfg(not(feature = "placement-dependency-pc"))]
     let language = compile_language(&orders, &mut workspace.piece_order_languages, work)
         .map_err(PrefixEvaluationError::Execution)?;
     language_span.finish(1);
@@ -284,20 +301,6 @@ fn evaluate_prefix_order(
     work.candidates_certified += 1;
     let result = certified_language_result(coverage);
     #[cfg(feature = "placement-dependency-pc")]
-    if matches!(evaluation, PrefixEvaluation::Product { .. })
-        && result.buildable
-        && problem
-            .queue_observation_policy()
-            .requires_observation_policy()
-    {
-        // An oracle-empty candidate cannot contribute to an observation
-        // policy for this exact universe. Reuse that completed composition
-        // before retaining its physical action language.
-        orders
-            .compile_observation_language(&mut workspace.dependency_observation, control)
-            .map_err(PrefixEvaluationError::Execution)?;
-    }
-    #[cfg(feature = "placement-dependency-pc")]
     let result = match evaluation {
         PrefixEvaluation::Product { retain_trace: true } if result.buildable => {
             let mut result = result;
@@ -323,5 +326,33 @@ fn evaluate_prefix_order(
         }
         _ => result,
     };
+    #[cfg(feature = "placement-dependency-pc")]
+    if observation_requested && result.buildable {
+        // Each nonterminal lock consumes at least one source token; the
+        // terminal held release cannot lead to another decision. Retain
+        // exact suffix IDs through the last possibly hidden lock depth.
+        // Earlier inference from the *original* source is owned by the
+        // observation evaluator, never by this successful-candidate filter.
+        let source_len = problem.supply().source_sequence_length();
+        let projected_last =
+            problem.supply().projects_standard_bag_lookahead() && source_len % 7 == 6;
+        let visible = problem
+            .queue_observation_policy()
+            .visible_piece_count()
+            .ok_or(PrefixEvaluationError::UnsupportedSupply)?;
+        let hidden = source_len
+            .saturating_add(usize::from(projected_last))
+            .saturating_sub(usize::from(problem.initial_hold().cursor()))
+            .saturating_sub(usize::from(visible));
+        let hidden = u8::try_from(hidden).map_err(|_| {
+            PrefixEvaluationError::Execution(WasmExactSearchError::InvalidProblem(
+                "wasm_observation_physical_depth_mismatch",
+            ))
+        })?;
+        workspace
+            .dependency_observation
+            .register_relation(orders, hidden, control)
+            .map_err(PrefixEvaluationError::Execution)?;
+    }
     Ok(result)
 }

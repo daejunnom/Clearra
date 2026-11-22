@@ -22,8 +22,8 @@ pub use local_relation::{
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 struct Pose {
     rotation: RotationState,
-    x: i8,
-    y: i8,
+    x: i16,
+    y: i16,
 }
 
 /// A concrete entry into the full physical board. A local relation may use
@@ -45,8 +45,16 @@ fn reference_center(piece: PieceKind, rotation: RotationState) -> (i8, i8) {
     }
 }
 
-fn reference_ceiling(height: u8, piece: PieceKind, profile: &KickTableProfile) -> i8 {
-    let mut downward_reach = 0_i8;
+// Explicit-entry and window queries retain their declared finite builtin
+// contract. They do not claim the all-sky last-entry reduction for a fixed
+// spawn. The all-sky oracle below deliberately uses the larger universal cap.
+fn reference_ceiling(height: u8, piece: PieceKind, profile: &KickTableProfile) -> i16 {
+    i16::from(height) + reference_vertical_bounds(piece, profile).0
+}
+
+fn reference_vertical_bounds(piece: PieceKind, profile: &KickTableProfile) -> (i16, i16) {
+    let mut downward_reach = 0_i16;
+    let mut upward_reach = 0_i16;
     for entry in profile.entries() {
         let transition = entry.transition();
         if transition.piece() != piece || (!profile.supports_180() && transition.is_180()) {
@@ -55,11 +63,12 @@ fn reference_ceiling(height: u8, piece: PieceKind, profile: &KickTableProfile) -
         let (_, from_y) = reference_center(piece, transition.from());
         let (_, to_y) = reference_center(piece, transition.to());
         for offset in entry.sequence().offsets() {
-            let delta_y = offset.dy() + from_y - to_y;
+            let delta_y = i16::from(offset.dy()) + i16::from(from_y) - i16::from(to_y);
             downward_reach = downward_reach.max(-delta_y);
+            upward_reach = upward_reach.max(delta_y);
         }
     }
-    height as i8 + downward_reach
+    (downward_reach, upward_reach)
 }
 
 type ShapeCells = [[(i8, i8); 4]; 4];
@@ -86,7 +95,15 @@ fn reference_locks(
     profile: &KickTableProfile,
     entries: Option<&[ReferenceReachabilityEntryPose]>,
 ) -> Option<[u64; 4]> {
-    let ceiling = reference_ceiling(height, piece, profile);
+    let ceiling = if entries.is_some() {
+        reference_ceiling(height, piece, profile)
+    } else {
+        // Independent raw-data derivation, not the production capability
+        // checker. H+D+U retains every earlier candidate at a low source or
+        // the last sky-to-low source, for every accepted ordered kick list.
+        let (downward, upward) = reference_vertical_bounds(piece, profile);
+        i16::from(height) + downward + upward
+    };
     let definition = standard_tetromino_registry()
         .get(piece)
         .expect("standard piece");
@@ -100,7 +117,7 @@ fn reference_locks(
     let mut queue = VecDeque::new();
     let mut enqueue = |pose: Pose, queue: &mut VecDeque<Pose>| {
         if pose.x >= 0
-            && pose.x < width as i8
+            && pose.x < i16::from(width)
             && pose.y >= 0
             && pose.y <= ceiling
             && placeable(width, height, board, &shapes, pose)
@@ -116,11 +133,11 @@ fn reference_locks(
         for entry in entries {
             let pose = Pose {
                 rotation: entry.rotation,
-                x: entry.x,
-                y: entry.y,
+                x: i16::from(entry.x),
+                y: i16::from(entry.y),
             };
             if pose.x < 0
-                || pose.x >= width as i8
+                || pose.x >= i16::from(width)
                 || pose.y < 0
                 || pose.y > ceiling
                 || !placeable(width, height, board, &shapes, pose)
@@ -131,8 +148,8 @@ fn reference_locks(
         }
     } else {
         for rotation in RotationState::ALL {
-            for y in height as i8..=ceiling {
-                for x in 0..width as i8 {
+            for y in i16::from(height)..=ceiling {
+                for x in 0..i16::from(width) {
                     enqueue(Pose { rotation, x, y }, &mut queue);
                 }
             }
@@ -145,7 +162,8 @@ fn reference_locks(
             y: pose.y - 1,
             ..pose
         };
-        if pose.y < height as i8 && (pose.y == 0 || !placeable(width, height, board, &shapes, down))
+        if pose.y < i16::from(height)
+            && (pose.y == 0 || !placeable(width, height, board, &shapes, down))
         {
             let anchor = pose.y as usize * width as usize + pose.x as usize;
             if anchor < 64 {
@@ -187,11 +205,11 @@ fn reference_locks(
             for offset in sequence.offsets() {
                 let target = Pose {
                     rotation: to,
-                    x: pose.x + offset.dx() + from_x - to_x,
-                    y: pose.y + offset.dy() + from_y - to_y,
+                    x: pose.x + i16::from(offset.dx()) + i16::from(from_x) - i16::from(to_x),
+                    y: pose.y + i16::from(offset.dy()) + i16::from(from_y) - i16::from(to_y),
                 };
                 if target.x >= 0
-                    && target.x < width as i8
+                    && target.x < i16::from(width)
                     && target.y >= 0
                     && target.y <= ceiling
                     && placeable(width, height, board, &shapes, target)

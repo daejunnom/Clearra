@@ -896,6 +896,7 @@ pub(crate) struct WasmExactSearchSession {
     coverage_product_states: usize,
     coverage_product_edge_checks: usize,
     observation_policy_states: usize,
+    observation_physical_actions: [usize; 11],
     observation_policy_action_checks: usize,
     observation_trie_nodes: usize,
     realization_feasibility_states: usize,
@@ -1747,12 +1748,16 @@ impl WasmExactSearchSession {
             .retains_pc_coverage_evidence();
         let order_independent_candidate_digest =
             super::uses_order_independent_pc_candidate_digest(problem.as_ref());
+        let mut buildup_workspace = BuildUpWorkspace::default();
+        if let Some(authority) = super::dependency_kick_authority(problem.as_ref())? {
+            buildup_workspace.bind_local_import(authority, &catalog)?;
+        }
         let session = Self {
             problem: Arc::clone(&problem),
             problem_retention,
             catalog,
             geometry,
-            buildup_workspace: BuildUpWorkspace::default(),
+            buildup_workspace,
             coverage_evaluator: CoverageProductEvaluator::default(),
             covered_patterns,
             coverage_rows: Vec::new(),
@@ -1791,6 +1796,7 @@ impl WasmExactSearchSession {
             coverage_product_states: 0,
             coverage_product_edge_checks: 0,
             observation_policy_states: 0,
+            observation_physical_actions: [0; 11],
             observation_policy_action_checks: 0,
             observation_trie_nodes: 0,
             realization_feasibility_states: 0,
@@ -2111,6 +2117,7 @@ impl WasmExactSearchSession {
             .problem
             .queue_observation_policy()
             .requires_observation_policy()
+            && !super::uses_pc_placement_dependency(&self.problem)
         {
             self.parallel_decision_reason =
                 "visible-seven-policy-requires-global-language-finalizer";
@@ -2160,6 +2167,11 @@ impl WasmExactSearchSession {
         let canonical_minimum_source_complete =
             self.validate_parallel_minimum_cover_source(&mut outcome)?;
         let catalog_payload_bytes = self.catalog.retained_bytes();
+        #[cfg(feature = "placement-dependency-pc")]
+        for shard in core::mem::take(&mut outcome.observation_producer_shards) {
+            self.buildup_workspace
+                .merge_observation_producer_shard(shard, &self.execution_control)?;
+        }
         #[cfg(any(test, feature = "local-search-ab"))]
         {
             self.parallel_handoff_payload = (self.problem.objective().kind()
@@ -3512,7 +3524,8 @@ impl WasmExactSearchSession {
             })?;
             self.ensure_session_memory_bound(future)?;
         }
-        let retain_representative_trace = !self.buildup_workspace.has_local_import()
+        let retain_representative_trace = (!self.buildup_workspace.has_local_import()
+            || super::uses_pc_placement_dependency(&self.problem))
             && self.problem.output_policy().retains_representative_trace()
             && self.representative_path.is_empty();
         let result = match verify_candidate(
@@ -4484,6 +4497,7 @@ impl WasmExactSearchSession {
                         let metrics = coverage.metrics;
                         self.covered_patterns = coverage.covered_patterns;
                         self.observation_policy_states = metrics.policy_states;
+                        self.observation_physical_actions = metrics.physical_actions;
                         self.observation_policy_action_checks = metrics.action_checks;
                         self.observation_trie_nodes = metrics.observation_nodes;
                         self.peak_cpu_bytes = self.peak_cpu_bytes.max(
@@ -6038,10 +6052,30 @@ impl WasmExactSearchSession {
             ),
         ];
         let mut fields = Vec::new();
-        fields.try_reserve_exact(field_values.len()).map_err(|_| {
-            WasmExactSearchError::InvalidProblem("wasm_result_field_storage_unavailable")
-        })?;
+        fields
+            .try_reserve_exact(field_values.len() + self.observation_physical_actions.len())
+            .map_err(|_| {
+                WasmExactSearchError::InvalidProblem("wasm_result_field_storage_unavailable")
+            })?;
         fields.extend(field_values);
+        for (name, value) in [
+            "observation_candidate_factors",
+            "observation_proof_factors",
+            "observation_suffix_bindings",
+            "observation_physical_nodes",
+            "observation_revealed_nodes",
+            "observation_physical_edges",
+            "observation_residual_members",
+            "observation_physical_source_visits",
+            "observation_kind_source_visits",
+            "observation_revealed_source_visits",
+            "observation_physical_work",
+        ]
+        .into_iter()
+        .zip(self.observation_physical_actions)
+        {
+            fields.push(field(name, value));
+        }
         if !include_normalized_keys
             && self
                 .problem
@@ -6097,6 +6131,10 @@ impl WasmExactSearchSession {
                     memory.buildup.other_bytes,
                 ),
                 field("worker_evaluator_retained_bytes", memory.evaluator_bytes),
+                field(
+                    "worker_observation_producer_retained_bytes",
+                    memory.observation_producer_bytes,
+                ),
                 field(
                     "worker_solution_identity_retained_bytes",
                     memory.solution_identity_bytes,

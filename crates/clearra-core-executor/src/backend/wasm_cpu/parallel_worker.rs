@@ -13,6 +13,8 @@ use clearra_problem::SearchProblem;
 
 use crate::performance::{profile_sample_scale, ExecutorSearchStage, SearchStageSpan};
 
+#[cfg(feature = "placement-dependency-pc")]
+use super::buildup::ObservationProducerShard;
 #[cfg(any(test, feature = "local-search-ab"))]
 use super::result::{capture_candidate_solution_coverage, SolutionCoverageCapture};
 use super::{
@@ -214,6 +216,10 @@ pub(super) struct WorkerMemoryComponents {
     pub solution_identity_bytes: usize,
     pub solution_coverage_bytes: usize,
     pub candidate_digest_bytes: usize,
+    /// Moved physical proofs and their matching kind arena. These have left
+    /// the workspace before its scratch snapshot and stay live for the
+    /// coordinator's single global observation-policy evaluation.
+    pub observation_producer_bytes: usize,
     /// Included in buildup.standard_bag_bytes, not an additional allocation.
     pub standard_bag_memo_payload_bytes: usize,
     /// Split memo/directory detail, also nested in buildup.standard_bag_bytes.
@@ -254,6 +260,7 @@ impl WorkerMemoryComponents {
         self.solution_identity_bytes
             .saturating_add(self.solution_coverage_bytes)
             .saturating_add(self.candidate_digest_bytes)
+            .saturating_add(self.observation_producer_bytes)
     }
 
     fn merge(&mut self, other: Self) {
@@ -287,6 +294,9 @@ impl WorkerMemoryComponents {
         self.candidate_digest_bytes = self
             .candidate_digest_bytes
             .saturating_add(other.candidate_digest_bytes);
+        self.observation_producer_bytes = self
+            .observation_producer_bytes
+            .saturating_add(other.observation_producer_bytes);
         self.standard_bag_memo_payload_bytes = self
             .standard_bag_memo_payload_bytes
             .saturating_add(other.standard_bag_memo_payload_bytes);
@@ -584,6 +594,8 @@ pub(super) struct ParallelWorkerResult {
     pub branches: Vec<BranchSearchOutcome>,
     pub aggregate: WorkerAggregate,
     pub candidate_count: usize,
+    #[cfg(feature = "placement-dependency-pc")]
+    pub observation_producer_shards: Vec<ObservationProducerShard>,
 }
 
 pub(super) struct SharedWorkerRequest {
@@ -807,6 +819,31 @@ fn run_branch_worker_inner(
     if let Some(experiment) = &shared_request.operation_masks {
         workspace.finish_operation_mask_worker(experiment)?;
     }
+    // Capture diagnostics before transferring the matching kind owner.
+    // Physical proofs are not worker policies: the coordinator must union
+    // their concrete actions and make one global choice before each reveal.
+    aggregate.piece_language_cache_hits = workspace.piece_language_coverage_hits();
+    aggregate.piece_language_cache_misses = workspace.piece_language_coverage_misses();
+    #[cfg(feature = "placement-dependency-pc")]
+    let mut observation_producer_shards = Vec::new();
+    #[cfg(feature = "placement-dependency-pc")]
+    if let Some(shard) = workspace.take_observation_producer_shard() {
+        observation_producer_shards
+            .try_reserve_exact(1)
+            .map_err(|_| {
+                WasmExactSearchError::InvalidProblem(
+                    "wasm_parallel_observation_producer_storage_unavailable",
+                )
+            })?;
+        observation_producer_shards.push(shard);
+    }
+    #[cfg(feature = "placement-dependency-pc")]
+    let observation_producer_bytes = observation_producer_shards.iter().fold(
+        observation_producer_shards.capacity() * core::mem::size_of::<ObservationProducerShard>(),
+        |bytes, shard| bytes.saturating_add(shard.retained_bytes()),
+    );
+    #[cfg(not(feature = "placement-dependency-pc"))]
+    let observation_producer_bytes = 0;
     aggregate.candidate_digest_retained_bytes = outcomes
         .iter()
         .map(|branch: &BranchSearchOutcome| branch.candidate_digest.retained_bytes())
@@ -837,6 +874,7 @@ fn run_branch_worker_inner(
                     })
             })),
         candidate_digest_bytes: aggregate.candidate_digest_retained_bytes,
+        observation_producer_bytes,
         standard_bag_memo_payload_bytes: workspace.standard_bag_memo_retained_payload_bytes(),
         standard_bag_memo: workspace.standard_bag_memo_accounting(),
         shared_standard_bag_request_bytes,
@@ -857,8 +895,6 @@ fn run_branch_worker_inner(
     }
     aggregate.worker_retained_bytes = aggregate.worker_memory_components.total_bytes();
     aggregate.standard_bag_memo_storage = workspace.standard_bag_memo_storage_label();
-    aggregate.piece_language_cache_hits = workspace.piece_language_coverage_hits();
-    aggregate.piece_language_cache_misses = workspace.piece_language_coverage_misses();
     aggregate.standard_bag_cache_hits = workspace.standard_bag_coverage_hits();
     aggregate.standard_bag_cache_misses = workspace.standard_bag_coverage_misses();
     aggregate.reachability_metrics = workspace.reachability_metrics();
@@ -873,6 +909,7 @@ fn run_branch_worker_inner(
             super::parallel_memory_peak::WorkerStorage {
                 solution_identity_bytes: aggregate.worker_memory_components.solution_identity_bytes,
                 branch_and_digest_bytes: branch_storage_bytes(&outcomes),
+                observation_producer_bytes,
                 ..Default::default()
             },
             true,
@@ -882,6 +919,8 @@ fn run_branch_worker_inner(
         branches: outcomes,
         aggregate,
         candidate_count: worker_candidate_count,
+        #[cfg(feature = "placement-dependency-pc")]
+        observation_producer_shards,
     })
 }
 
@@ -919,6 +958,7 @@ fn worker_storage(
         solution_identity_bytes: aggregate.buildable_identities.capacity()
             * core::mem::size_of::<StandardBoard64TilingIdentity>(),
         branch_and_digest_bytes,
+        observation_producer_bytes: 0,
     }
 }
 
@@ -1455,6 +1495,7 @@ mod tests {
             solution_identity_bytes: 700,
             solution_coverage_bytes: 800,
             candidate_digest_bytes: 900,
+            observation_producer_bytes: 1_000,
             // Nested memo payload must not be added to the total again.
             standard_bag_memo_payload_bytes: 144,
             standard_bag_memo: StandardBagMemoAccounting {
@@ -1482,7 +1523,7 @@ mod tests {
             max_exit_scratch_bytes: 2_100,
             returned_branch_slots_bytes: 512,
         };
-        assert_eq!(component.total_bytes(), 4500);
+        assert_eq!(component.total_bytes(), 5500);
         let mut total = WorkerAggregate::default();
         for _ in 0..11 {
             total
@@ -1494,11 +1535,12 @@ mod tests {
                 })
                 .expect("worker components");
         }
-        assert_eq!(total.worker_retained_bytes, 49_500);
+        assert_eq!(total.worker_retained_bytes, 60_500);
         let memory = total.worker_memory_components;
-        assert_eq!(memory.total_bytes(), 49_500);
+        assert_eq!(memory.total_bytes(), 60_500);
         assert_eq!(memory.private_scratch_bytes(), 23_100);
-        assert_eq!(memory.returned_payload_bytes(), 26_400);
+        assert_eq!(memory.returned_payload_bytes(), 37_400);
+        assert_eq!(memory.observation_producer_bytes, 11_000);
         assert_eq!(memory.exit_snapshot_count, 11);
         assert_eq!(memory.max_exit_scratch_bytes, 2_100);
         assert_eq!(memory.returned_branch_slots_bytes, 11 * 512);

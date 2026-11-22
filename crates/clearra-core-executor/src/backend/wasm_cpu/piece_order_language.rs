@@ -224,15 +224,11 @@ impl PieceOrderLanguageCache {
         })
     }
 
-    /// Imports worker-local roots by exact node/edge equality. A numeric root
-    /// is scoped to its source owner and must never be copied into another
-    /// cache without rebinding all child references first.
-    #[cfg(any(test, all(feature = "parallel", not(target_family = "wasm"))))]
-    pub fn import_roots(
-        &mut self,
-        source: &Self,
-        roots: &[u32],
-    ) -> Result<Vec<u32>, WasmExactSearchError> {
+    /// Imports one complete worker arena by exact node/edge equality and
+    /// returns its source-ID to destination-ID map. Factored policy shards
+    /// rebind all retained suffixes through this one shared import.
+    #[cfg(any(test, feature = "parallel"))]
+    pub fn import_node_map(&mut self, source: &Self) -> Result<Vec<u32>, WasmExactSearchError> {
         self.ensure_buckets();
         let mut rebound = Vec::new();
         rebound.try_reserve_exact(source.nodes.len()).map_err(|_| {
@@ -276,6 +272,18 @@ impl PieceOrderLanguageCache {
             }
             rebound.push(self.intern_node(node.accepting, depth)?);
         }
+        Ok(rebound)
+    }
+
+    /// A numeric root is scoped to its source owner and must never be copied
+    /// into another cache without rebinding all child references first.
+    #[cfg(any(test, all(feature = "parallel", not(target_family = "wasm"))))]
+    pub fn import_roots(
+        &mut self,
+        source: &Self,
+        roots: &[u32],
+    ) -> Result<Vec<u32>, WasmExactSearchError> {
+        let rebound = self.import_node_map(source)?;
         let mut imported = Vec::new();
         imported.try_reserve_exact(roots.len()).map_err(|_| {
             WasmExactSearchError::InvalidProblem("wasm_piece_language_import_storage_unavailable")
@@ -584,6 +592,7 @@ impl PieceOrderLanguageCache {
             active,
             inspected_edges,
             None,
+            None,
         )
     }
 
@@ -603,6 +612,29 @@ impl PieceOrderLanguageCache {
             active,
             inspected_edges,
             Some(0),
+            None,
+        )
+    }
+
+    /// Reuse the exact suffix classes already computed for every live
+    /// concrete prefix. The caller must keep this arena alive while retaining
+    /// those IDs; this is not a second language compilation.
+    #[cfg(feature = "placement-dependency-pc")]
+    pub(super) fn compile_product_closed_prefix_language_with_residuals(
+        &mut self,
+        pieces: &[PieceKind],
+        permitted_parents: &[[u64; super::symbolic_prefix_domain::MAX_PREFIX_WORDS]],
+        active: &[u64; super::symbolic_prefix_domain::MAX_PREFIX_WORDS],
+        inspected_edges: &mut usize,
+        residuals: &mut Vec<u32>,
+    ) -> Result<Option<u32>, WasmExactSearchError> {
+        self.compile_closed_prefix_language_with_mode(
+            pieces,
+            permitted_parents,
+            active,
+            inspected_edges,
+            Some(0),
+            Some(residuals),
         )
     }
 
@@ -636,12 +668,16 @@ impl PieceOrderLanguageCache {
         // None selects the process experiment mode; Some(0) forces the
         // reference, while a small positive bound tests exact fallback.
         _explicit_frontier_budget: Option<usize>,
+        mut residuals: Option<&mut Vec<u32>>,
     ) -> Result<Option<u32>, WasmExactSearchError> {
         use super::symbolic_prefix_domain::{PrefixDomain, MAX_PREFIX_WORDS};
 
         let invalid = || {
             WasmExactSearchError::InvalidProblem("wasm_symbolic_prefix_language_bound_inconsistent")
         };
+        if let Some(residuals) = residuals.as_mut() {
+            residuals.clear();
+        }
         let domain = PrefixDomain::new(pieces.len()).ok_or_else(invalid)?;
         if pieces.len() != permitted_parents.len() {
             return Err(invalid());
@@ -739,6 +775,14 @@ impl PieceOrderLanguageCache {
                 let depth = self.remaining_depth(accepting)?;
                 classes[subset] = self.intern_node(accepting, depth)?;
             }
+        }
+        if let Some(residuals) = residuals {
+            residuals.try_reserve_exact(full + 1).map_err(|_| {
+                WasmExactSearchError::InvalidProblem(
+                    "wasm_observation_dependency_storage_unavailable",
+                )
+            })?;
+            residuals.extend_from_slice(&classes[..=full]);
         }
         Ok(Some(classes[0]))
     }
@@ -1019,11 +1063,20 @@ impl PieceOrderLanguageCache {
             .get(edge_start + relative_start..edge_start + relative_end)
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "placement-dependency-pc"))]
     pub fn node_edge_count(&self, reference: u32) -> Option<usize> {
         self.nodes
             .get(reference as usize)
             .map(|node| usize::from(node.edge_count))
+    }
+
+    /// Direct immutable access for a known-source membership consumer. This
+    /// reads the existing exact suffix graph without constructing a union
+    /// automaton or allocating another edge representation.
+    #[cfg(any(test, feature = "placement-dependency-pc"))]
+    pub fn edge_at(&self, reference: u32, index: usize) -> Option<CanonicalPieceEdge> {
+        let node = self.nodes.get(reference as usize).copied()?;
+        self.node_edges(node).get(index).copied()
     }
 
     pub fn clear_coverage_caches(&mut self) {
@@ -1698,6 +1751,7 @@ mod tests {
                     &active,
                     &mut 0,
                     Some(budget),
+                    None,
                 )
                 .unwrap()
                 .unwrap();
@@ -1766,6 +1820,7 @@ mod tests {
                     &active,
                     &mut 0,
                     Some(budget),
+                    None,
                 )
                 .unwrap()
                 .unwrap();
@@ -1788,6 +1843,7 @@ mod tests {
                     &active,
                     &mut 0,
                     Some(256),
+                    None,
                 )
                 .unwrap()
                 .unwrap();

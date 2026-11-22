@@ -402,7 +402,7 @@ fn symbolic_prefix_matches_all_concrete_edges_and_words_without_buildup() {
             assert_eq!(refused.represented_prefixes, 0);
         }
     }
-    let eleven_os = [
+    let twelve_os = [
         (O, o),
         (O, o << 2),
         (O, o << 4),
@@ -414,8 +414,9 @@ fn symbolic_prefix_matches_all_concrete_edges_and_words_without_buildup() {
         (O, o << 26),
         (O, o << 28),
         (O, o << 40),
+        (O, o << 42),
     ];
-    let (catalog, candidate) = fixture(6, &eleven_os);
+    let (catalog, candidate) = fixture(6, &twelve_os);
     let mut work = SymbolicPrefixWork::default();
     assert!(matches!(
         SymbolicPrefixOrders::compile(

@@ -23,11 +23,15 @@ pub(crate) fn exact_local_relation(
         return None;
     }
     let template = ReachabilityTemplate::compile(width, height, piece, profile_id);
+    // Conditioned entry/exit records deliberately retain their public i8
+    // coordinate contract. This API accepts only templates fully representable
+    // by that contract; it must never return a clipped set of exits.
+    let _ = i8::try_from(template.ceiling).ok()?;
     if window.min_x < 0
         || window.max_x >= width as i8
         || window.min_x > window.max_x
         || window.min_y < 0
-        || window.max_y > template.ceiling
+        || i16::from(window.max_y) > template.ceiling
         || window.min_y > window.max_y
         || entries.len() > template.state_masks.len()
     {
@@ -39,7 +43,7 @@ pub(crate) fn exact_local_relation(
         let state = State {
             rotation: entry.rotation,
             x: entry.x,
-            y: entry.y,
+            y: i16::from(entry.y),
         };
         let index = state_index(width, template.ceiling, state)?;
         if !pose_inside_window(state, window)
@@ -67,7 +71,7 @@ pub(crate) fn exact_local_relation(
         cursor += 1;
         dependency_mask |= reached_source_dependency_mask(&template, source);
         let pose = state_from_index(width, template.ceiling, source);
-        if pose.y < height as i8 && grounded_index(&template, board, source) {
+        if pose.y < i16::from(height) && grounded_index(&template, board, source) {
             let anchor = pose.y as usize * width as usize + pose.x as usize;
             locks[pose.rotation.quarter_turns() as usize] |= 1_u64 << anchor;
         }
@@ -152,8 +156,8 @@ fn pose_key(pose: &ConditionedReachabilityEntryPose) -> (u8, i8, i8) {
 fn pose_inside_window(pose: State, window: ConditionedPoseWindow) -> bool {
     pose.x >= window.min_x
         && pose.x <= window.max_x
-        && pose.y >= window.min_y
-        && pose.y <= window.max_y
+        && pose.y >= i16::from(window.min_y)
+        && pose.y <= i16::from(window.max_y)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -188,7 +192,7 @@ fn push_local_successor(
         exits.push(ConditionedReachabilityEntryPose {
             rotation: pose.rotation,
             x: pose.x,
-            y: pose.y,
+            y: i8::try_from(pose.y).expect("admitted conditioned exit coordinate"),
         });
     }
 }

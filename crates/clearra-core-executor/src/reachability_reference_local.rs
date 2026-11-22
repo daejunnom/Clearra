@@ -49,7 +49,7 @@ pub fn reference_local_relation(
         || window.max_x >= width as i8
         || window.min_x > window.max_x
         || window.min_y < 0
-        || window.max_y > ceiling
+        || i16::from(window.max_y) > ceiling
         || window.min_y > window.max_y
     {
         return None;
@@ -69,8 +69,8 @@ pub fn reference_local_relation(
     for entry in entries {
         let pose = Pose {
             rotation: entry.rotation,
-            x: entry.x,
-            y: entry.y,
+            x: i16::from(entry.x),
+            y: i16::from(entry.y),
         };
         if !inside(pose, window) || !valid_pose(width, height, board, ceiling, &shapes, pose) {
             return None;
@@ -86,7 +86,7 @@ pub fn reference_local_relation(
             y: pose.y - 1,
             ..pose
         };
-        if pose.y < height as i8
+        if pose.y < i16::from(height)
             && (pose.y == 0 || !valid_pose(width, height, board, ceiling, &shapes, down))
         {
             let anchor = pose.y as usize * width as usize + pose.x as usize;
@@ -137,8 +137,8 @@ pub fn reference_local_relation(
             for offset in sequence.offsets() {
                 let target = Pose {
                     rotation: to,
-                    x: pose.x + offset.dx() + from_x - to_x,
-                    y: pose.y + offset.dy() + from_y - to_y,
+                    x: pose.x + i16::from(offset.dx()) + i16::from(from_x) - i16::from(to_x),
+                    y: pose.y + i16::from(offset.dy()) + i16::from(from_y) - i16::from(to_y),
                 };
                 if valid_pose(width, height, board, ceiling, &shapes, target) {
                     // First collision-free target wins even when it is outside
@@ -170,8 +170,8 @@ pub fn reference_local_relation(
         .into_iter()
         .map(|pose| ReferenceReachabilityEntryPose {
             rotation: pose.rotation,
-            x: pose.x,
-            y: pose.y,
+            x: i8::try_from(pose.x).expect("bounded builtin column"),
+            y: i8::try_from(pose.y).expect("bounded builtin ceiling"),
         })
         .collect();
     exits.sort_unstable_by_key(|pose| (pose.rotation.quarter_turns(), pose.x, pose.y));
@@ -204,7 +204,7 @@ pub fn reference_local_dependency_mask(
         || window.max_x >= width as i8
         || window.min_x > window.max_x
         || window.min_y < 0
-        || window.max_y > ceiling
+        || i16::from(window.max_y) > ceiling
         || window.min_y > window.max_y
     {
         return None;
@@ -220,7 +220,11 @@ pub fn reference_local_dependency_mask(
     for rotation in RotationState::ALL {
         for y in window.min_y..=window.max_y {
             for x in window.min_x..=window.max_x {
-                let source = Pose { rotation, x, y };
+                let source = Pose {
+                    rotation,
+                    x: i16::from(x),
+                    y: i16::from(y),
+                };
                 if let Some(source_mask) = source_collision_dependencies(
                     width, height, ceiling, piece, profile, &shapes, source,
                 ) {
@@ -235,7 +239,7 @@ pub fn reference_local_dependency_mask(
 fn source_collision_dependencies(
     width: u8,
     height: u8,
-    ceiling: i8,
+    ceiling: i16,
     piece: PieceKind,
     profile: &KickTableProfile,
     shapes: &ShapeCells,
@@ -278,8 +282,8 @@ fn source_collision_dependencies(
         for offset in sequence.offsets() {
             let candidate = Pose {
                 rotation: to,
-                x: source.x + offset.dx() + from_x - to_x,
-                y: source.y + offset.dy() + from_y - to_y,
+                x: source.x + i16::from(offset.dx()) + i16::from(from_x) - i16::from(to_x),
+                y: source.y + i16::from(offset.dy()) + i16::from(from_y) - i16::from(to_y),
             };
             mask |= physical_collision_mask(width, height, ceiling, shapes, candidate).unwrap_or(0);
         }
@@ -290,11 +294,11 @@ fn source_collision_dependencies(
 fn physical_collision_mask(
     width: u8,
     height: u8,
-    ceiling: i8,
+    ceiling: i16,
     shapes: &ShapeCells,
     pose: Pose,
 ) -> Option<u64> {
-    if pose.x < 0 || pose.x >= width as i8 || pose.y < 0 || pose.y > ceiling {
+    if pose.x < 0 || pose.x >= i16::from(width) || pose.y < 0 || pose.y > ceiling {
         return None;
     }
     let mut mask = 0_u64;
@@ -312,22 +316,22 @@ fn physical_collision_mask(
 }
 
 fn inside(pose: Pose, window: ConditionedPoseWindow) -> bool {
-    pose.x >= window.min_x
-        && pose.x <= window.max_x
-        && pose.y >= window.min_y
-        && pose.y <= window.max_y
+    pose.x >= i16::from(window.min_x)
+        && pose.x <= i16::from(window.max_x)
+        && pose.y >= i16::from(window.min_y)
+        && pose.y <= i16::from(window.max_y)
 }
 
 fn valid_pose(
     width: u8,
     height: u8,
     board: u64,
-    ceiling: i8,
+    ceiling: i16,
     shapes: &ShapeCells,
     pose: Pose,
 ) -> bool {
     pose.x >= 0
-        && pose.x < width as i8
+        && pose.x < i16::from(width)
         && pose.y >= 0
         && pose.y <= ceiling
         && placeable(width, height, board, shapes, pose)
@@ -338,7 +342,7 @@ fn accept_successor(
     width: u8,
     height: u8,
     board: u64,
-    ceiling: i8,
+    ceiling: i16,
     shapes: &ShapeCells,
     window: ConditionedPoseWindow,
     target: Pose,

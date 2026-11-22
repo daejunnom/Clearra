@@ -37,6 +37,7 @@ pub(super) struct WorkerStorage {
     pub evaluator_bytes: usize,
     pub solution_identity_bytes: usize,
     pub branch_and_digest_bytes: usize,
+    pub observation_producer_bytes: usize,
 }
 
 impl WorkerStorage {
@@ -51,6 +52,7 @@ impl WorkerStorage {
         self.evaluator_bytes += other.evaluator_bytes;
         self.solution_identity_bytes += other.solution_identity_bytes;
         self.branch_and_digest_bytes += other.branch_and_digest_bytes;
+        self.observation_producer_bytes += other.observation_producer_bytes;
     }
 
     fn json(self) -> Value {
@@ -65,6 +67,7 @@ impl WorkerStorage {
             "private_evaluator_bytes": self.evaluator_bytes,
             "returned_or_pending_solution_identities_bytes": self.solution_identity_bytes,
             "returned_or_pending_branch_slots_and_digest_bytes": self.branch_and_digest_bytes,
+            "returned_or_pending_observation_producer_bytes": self.observation_producer_bytes,
         })
     }
 }

@@ -13,7 +13,6 @@ pub use buildup::{
 };
 mod catalog;
 mod compact_exact_u64_map;
-#[cfg(not(target_family = "wasm"))]
 mod compact_kick_authority;
 #[cfg(test)]
 mod compact_pc2_completion_ledger;
@@ -54,6 +53,15 @@ mod kick_profiles;
 mod parallel_coverage;
 #[cfg(all(feature = "local-search-ab", feature = "parallel", target_os = "linux"))]
 mod parallel_memory_peak;
+#[cfg(all(
+    test,
+    feature = "parallel",
+    feature = "placement-dependency-pc",
+    not(target_family = "wasm")
+))]
+mod parallel_observation_tests;
+#[cfg(all(test, feature = "placement-dependency-pc"))]
+mod parametric_kick_consumer_tests;
 #[cfg(all(feature = "local-search-ab", feature = "parallel", target_os = "linux"))]
 pub use parallel_memory_peak::observe_native_pc_memory;
 #[cfg(feature = "parallel")]
@@ -375,6 +383,9 @@ fn packing_hold_projection(
 fn ensure_connected_kick_profile(
     problem: &clearra_problem::SearchProblem,
 ) -> Result<(), WasmExactSearchError> {
+    if dependency_kick_authority(problem)?.is_some() {
+        return Ok(());
+    }
     let Some(builtin) = kick_profiles::builtin_kick_profile(problem.kick_profile().profile_id())
     else {
         return Err(WasmExactSearchError::InvalidProblem(
@@ -392,6 +403,42 @@ fn ensure_connected_kick_profile(
         }
     }
     Ok(())
+}
+
+/// Bind a submitted table to the Boolean dependency contract by its complete
+/// ordered contents. A profile tag is never authority for an imported table.
+/// Other consumers retain their existing admission and evidence contracts.
+fn dependency_kick_authority(
+    problem: &clearra_problem::SearchProblem,
+) -> Result<Option<compact_kick_authority::CompactKickAuthority>, WasmExactSearchError> {
+    use compact_kick_authority::{CompactKickAdmission, CompactKickAuthority};
+
+    if !cfg!(feature = "placement-dependency-pc") || !problem.pc_placement_dependency_eligible() {
+        return Ok(None);
+    }
+    let rule = problem.rule_profile();
+    let Some(verified) = rule.verified_kick_profile() else {
+        return Ok(None);
+    };
+    let height = u8::try_from(problem.compact_pc_geometry_height()).map_err(|_| {
+        WasmExactSearchError::InvalidProblem("wasm_ordered_kick_height_out_of_range")
+    })?;
+    CompactKickAuthority::admit_profile(
+        u8::try_from(problem.initial_board().width()).map_err(|_| {
+            WasmExactSearchError::InvalidProblem("wasm_ordered_kick_width_out_of_range")
+        })?,
+        height,
+        rule.rule().id(),
+        verified,
+    )
+    .map(Some)
+    .map_err(|error| {
+        WasmExactSearchError::InvalidProblem(match error {
+            CompactKickAdmission::Unsupported => "wasm_ordered_kick_profile_unsupported",
+            CompactKickAdmission::IndexOrCoordinateOverflow => "wasm_ordered_kick_bounds_exceeded",
+            CompactKickAdmission::BudgetExceeded => "wasm_ordered_kick_compile_budget",
+        })
+    })
 }
 
 /// In a whole fixed no-hold Scenario only the submitted queue pieces can

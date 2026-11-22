@@ -34,6 +34,7 @@ use super::placement_conditions::AtomicRowProjection;
 
 const MAX_FRAMES: usize = 64;
 const CELL_PLANES: usize = 64;
+const _: () = assert!(MAX_PREFIX_WORDS <= u64::BITS as usize);
 #[cfg(any(
     test,
     all(
@@ -268,12 +269,20 @@ pub(super) enum SymbolicPrefixRefusal {
     Cancelled,
 }
 
-pub(super) struct SymbolicPrefixOrders {
+/// Exact operation-labelled relation, independent of a tiling's physical
+/// coordinates. Identical proofs can share their suffix classes while each
+/// candidate retains its own original-cell and line-clear frame authority.
+#[derive(Eq, Hash, PartialEq)]
+pub(super) struct ExactPrefixRelation {
     // A bit represents one executed subset, not a replay or duplicate pose.
     permitted_parents: [[u64; MAX_PREFIX_WORDS]; MAX_OPERATIONS],
     pieces: [PieceKind; MAX_OPERATIONS],
     operation_count: usize,
     active_prefixes: [u64; MAX_PREFIX_WORDS],
+}
+
+pub(super) struct SymbolicPrefixOrders {
+    relation: ExactPrefixRelation,
     // Retain the exact original-cell/frame owner used by the proof. The
     // policy adapter must not rebind a relation to a lookalike candidate.
     #[cfg(feature = "placement-dependency-pc")]
@@ -392,7 +401,7 @@ impl SymbolicPrefixOrders {
             SearchStageSpan::begin_scaled(ExecutorSearchStage::StrictPrefixUpper, profile_scale);
         let operation_count = candidate.row_ids().len();
         let domain = PrefixDomain::new(operation_count).ok_or(Unsupported)?;
-        if builtin_kick_profile(profile).is_none() {
+        if !workspace.has_local_import() && builtin_kick_profile(profile).is_none() {
             return Err(Unsupported);
         }
         let geometry =
@@ -652,10 +661,12 @@ impl SymbolicPrefixOrders {
             domain.live_from_start(&permitted_parents, &mut work.composition_words);
         closure_span.finish(1);
         Ok(Self {
-            permitted_parents,
-            pieces,
-            operation_count,
-            active_prefixes,
+            relation: ExactPrefixRelation {
+                permitted_parents,
+                pieces,
+                operation_count,
+                active_prefixes,
+            },
             #[cfg(feature = "placement-dependency-pc")]
             geometry,
             #[cfg(feature = "placement-dependency-pc")]
@@ -668,12 +679,14 @@ impl SymbolicPrefixOrders {
     #[cfg(test)]
     pub(super) fn local_edge_permission(&self, prefix: usize, operation: usize) -> Option<bool> {
         if self.complete_language_only
-            || operation >= self.operation_count
-            || prefix >= (1 << self.operation_count)
+            || operation >= self.relation.operation_count
+            || prefix >= (1 << self.relation.operation_count)
         {
             return None;
         }
-        Some(self.permitted_parents[operation][prefix / 64] & (1_u64 << (prefix % 64)) != 0)
+        Some(
+            self.relation.permitted_parents[operation][prefix / 64] & (1_u64 << (prefix % 64)) != 0,
+        )
     }
 
     #[cfg(any(
@@ -690,15 +703,16 @@ impl SymbolicPrefixOrders {
         work: &mut SymbolicPrefixWork,
     ) -> Result<Option<u32>, WasmExactSearchError> {
         work.language_states += self
+            .relation
             .active_prefixes
             .iter()
             .map(|word| u64::from(word.count_ones()))
             .sum::<u64>();
         let previous = cache.frontier_compilations();
         let language = cache.compile_closed_prefix_language(
-            &self.pieces[..self.operation_count],
-            &self.permitted_parents[..self.operation_count],
-            &self.active_prefixes,
+            &self.relation.pieces[..self.relation.operation_count],
+            &self.relation.permitted_parents[..self.relation.operation_count],
+            &self.relation.active_prefixes,
             &mut work.language_transitions,
         )?;
         work.frontier_compilations += cache.frontier_compilations().saturating_sub(previous) as u64;
@@ -712,11 +726,42 @@ impl SymbolicPrefixOrders {
         work: &mut SymbolicPrefixWork,
     ) -> Result<Option<u32>, WasmExactSearchError> {
         cache.compile_product_closed_prefix_language(
-            &self.pieces[..self.operation_count],
-            &self.permitted_parents[..self.operation_count],
-            &self.active_prefixes,
+            &self.relation.pieces[..self.relation.operation_count],
+            &self.relation.permitted_parents[..self.relation.operation_count],
+            &self.relation.active_prefixes,
             &mut work.language_transitions,
         )
+    }
+
+    #[cfg(feature = "placement-dependency-pc")]
+    pub(super) fn compile_product_language_with_residuals(
+        &self,
+        cache: &mut PieceOrderLanguageCache,
+        work: &mut SymbolicPrefixWork,
+        residuals: &mut Vec<u32>,
+    ) -> Result<Option<u32>, WasmExactSearchError> {
+        cache.compile_product_closed_prefix_language_with_residuals(
+            &self.relation.pieces[..self.relation.operation_count],
+            &self.relation.permitted_parents[..self.relation.operation_count],
+            &self.relation.active_prefixes,
+            &mut work.language_transitions,
+            residuals,
+        )
+    }
+
+    /// Transfer the complete proof rather than re-expanding every prefix into
+    /// a physical action DAG. The receiving owner keeps the geometry paired
+    /// with this exact relation; same-kind-only subsumption has no authority.
+    #[cfg(feature = "placement-dependency-pc")]
+    pub(super) fn into_observation_parts(
+        self,
+    ) -> Result<(ExactPrefixRelation, CandidateGeometry), WasmExactSearchError> {
+        if !self.physical_action_complete {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "wasm_observation_dependency_action_authority_missing",
+            ));
+        }
+        Ok((self.relation, self.geometry))
     }
 
     /// Compile the already-proved complete action relation for a policy that
@@ -724,7 +769,9 @@ impl SymbolicPrefixOrders {
     /// concrete operation IDs as the oracle language; it performs no BuildUp
     /// or movement search. Line clears change each action's physical cells,
     /// so keys come from this proof's own original-row projection.
+    /// Kept as the eager exact test reference for the factored product owner.
     #[cfg(feature = "placement-dependency-pc")]
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(super) fn compile_observation_language(
         &self,
         language: &mut super::queue_observation_policy::PhysicalActionLanguage,
@@ -740,7 +787,7 @@ impl SymbolicPrefixOrders {
                 "wasm_observation_dependency_action_authority_missing",
             ));
         }
-        if self.active_prefixes.iter().all(|&word| word == 0) {
+        if self.relation.active_prefixes.iter().all(|&word| word == 0) {
             return Ok(());
         }
         let invalid = || {
@@ -751,10 +798,18 @@ impl SymbolicPrefixOrders {
         let full = usize::from(self.terminal_prefix());
         let mut classes = [u32::MAX; MAX_PREFIX_WORDS * 64];
         let mut edges = Vec::new();
-        edges.try_reserve_exact(self.operation_count).map_err(|_| {
-            WasmExactSearchError::InvalidProblem("wasm_observation_dependency_storage_unavailable")
-        })?;
-        for (word, &active) in self.active_prefixes[..=full / 64].iter().enumerate().rev() {
+        edges
+            .try_reserve_exact(self.relation.operation_count)
+            .map_err(|_| {
+                WasmExactSearchError::InvalidProblem(
+                    "wasm_observation_dependency_storage_unavailable",
+                )
+            })?;
+        for (word, &active) in self.relation.active_prefixes[..=full / 64]
+            .iter()
+            .enumerate()
+            .rev()
+        {
             let mut uncompiled = active;
             while uncompiled != 0 {
                 if control.is_cancelled() {
@@ -785,7 +840,7 @@ impl SymbolicPrefixOrders {
                         child,
                     )?);
                 }
-                let remaining_depth = self.operation_count - prefix.count_ones() as usize;
+                let remaining_depth = self.relation.operation_count - prefix.count_ones() as usize;
                 classes[prefix] =
                     language.intern_node(remaining_depth as u8, &mut edges, control)?;
             }
@@ -799,7 +854,7 @@ impl SymbolicPrefixOrders {
 
     #[cfg(feature = "placement-dependency-pc")]
     pub(super) fn terminal_prefix(&self) -> u16 {
-        (1_u16 << self.operation_count) - 1
+        self.relation.terminal_prefix()
     }
 
     #[cfg(feature = "placement-dependency-pc")]
@@ -807,21 +862,76 @@ impl SymbolicPrefixOrders {
         &self,
         prefix: u16,
     ) -> impl Iterator<Item = (usize, PieceKind)> + '_ {
-        let prefix = usize::from(prefix);
-        let contains = |prefix: usize, words: &[u64; MAX_PREFIX_WORDS]| {
-            words[prefix / 64] & (1_u64 << (prefix % 64)) != 0
-        };
-        self.pieces[..self.operation_count]
-            .iter()
-            .copied()
-            .enumerate()
-            .filter(move |&(operation, _)| {
-                let added = 1_usize << operation;
-                prefix & added == 0
-                    && contains(prefix, &self.permitted_parents[operation])
-                    && contains(prefix | added, &self.active_prefixes)
-            })
+        self.relation.live_operations_after(prefix)
     }
+}
+
+#[cfg(feature = "placement-dependency-pc")]
+impl ExactPrefixRelation {
+    pub(super) fn operation_count(&self) -> usize {
+        self.operation_count
+    }
+
+    pub(super) fn pieces(&self) -> &[PieceKind] {
+        &self.pieces[..self.operation_count]
+    }
+
+    pub(super) fn parent_words(&self, operation: usize) -> &[u64] {
+        let words = (1_usize << self.operation_count).div_ceil(64);
+        &self.permitted_parents[operation][..words]
+    }
+
+    pub(super) fn active_words(&self) -> &[u64] {
+        let words = (1_usize << self.operation_count).div_ceil(64);
+        &self.active_prefixes[..words]
+    }
+
+    pub(super) fn terminal_prefix(&self) -> u16 {
+        (1_u16 << self.operation_count) - 1
+    }
+
+    pub(super) fn contains_prefix(&self, prefix: u16) -> bool {
+        let prefix = usize::from(prefix);
+        prefix <= usize::from(self.terminal_prefix())
+            && self.active_prefixes[prefix / 64] & (1_u64 << (prefix % 64)) != 0
+    }
+
+    pub(super) fn live_operations_after(
+        &self,
+        prefix: u16,
+    ) -> impl Iterator<Item = (usize, PieceKind)> + '_ {
+        live_operation_derivatives(
+            self.pieces(),
+            self.permitted_parents.as_flattened(),
+            MAX_PREFIX_WORDS,
+            self.active_words(),
+            prefix,
+        )
+    }
+}
+
+/// The same labelled derivative for transient padded proof words and their
+/// compact shared representation. Storage stride does not change semantics.
+#[cfg(feature = "placement-dependency-pc")]
+pub(super) fn live_operation_derivatives<'a>(
+    pieces: &'a [PieceKind],
+    parents: &'a [u64],
+    parent_stride: usize,
+    active: &'a [u64],
+    prefix: u16,
+) -> impl Iterator<Item = (usize, PieceKind)> + 'a {
+    let prefix = usize::from(prefix);
+    pieces
+        .iter()
+        .copied()
+        .enumerate()
+        .filter(move |&(operation, _)| {
+            let added = 1_usize << operation;
+            let child = prefix | added;
+            prefix & added == 0
+                && parents[operation * parent_stride + prefix / 64] & (1_u64 << (prefix % 64)) != 0
+                && active[child / 64] & (1_u64 << (child % 64)) != 0
+        })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1006,7 +1116,9 @@ impl UpperFrameGuards<'_> {
         work: &mut SymbolicPrefixWork,
     ) -> Result<(), SymbolicPrefixRefusal> {
         use SymbolicPrefixRefusal::{Cancelled, InconsistentProjection};
-        let mut words_by_frame = [0_u16; MAX_FRAMES];
+        // These bits identify 64-prefix words, not operation owners. Eleven
+        // operations need 32 such words, including indices above fifteen.
+        let mut words_by_frame = [0_u64; MAX_FRAMES];
         for (word, frames) in frames_by_word[..self.domain.word_count()]
             .iter_mut()
             .enumerate()
@@ -1017,7 +1129,7 @@ impl UpperFrameGuards<'_> {
             let active = self.domain.nonterminal_lanes(word);
             let active_frames = partition_active_frames(self.geometry, word, active, frames, work);
             for frame in set_bit_indices(active_frames) {
-                words_by_frame[frame] |= 1_u16 << word;
+                words_by_frame[frame] |= 1_u64 << word;
             }
         }
         for (frame, frame_words) in words_by_frame.into_iter().enumerate() {
@@ -1051,7 +1163,7 @@ impl UpperFrameGuards<'_> {
                 let operation_bit = 1_u16 << operation;
                 let applicable =
                     |word: usize| frames_by_word[word][frame] & !owner_lanes(operation_bit, word);
-                if !set_bit_indices(u64::from(frame_words)).any(|word| applicable(word) != 0) {
+                if !set_bit_indices(frame_words).any(|word| applicable(word) != 0) {
                     continue;
                 }
                 // CandidateGeometry proves original cells disjoint. For a
@@ -1084,7 +1196,7 @@ impl UpperFrameGuards<'_> {
                         blocking |= 1 << owner;
                     }
                 }
-                for word in set_bit_indices(u64::from(frame_words)) {
+                for word in set_bit_indices(frame_words) {
                     let lanes = applicable(word);
                     let grounded = if guard.static_ground {
                         lanes
@@ -1516,8 +1628,14 @@ mod tests {
         let baseline = run(&catalog, &mut work_a).unwrap();
         let cached =
             with_catalog_static_guards(Arc::clone(&table), || run(&catalog, &mut work_b)).unwrap();
-        assert_eq!(baseline.permitted_parents, cached.permitted_parents);
-        assert_eq!(baseline.active_prefixes, cached.active_prefixes);
+        assert_eq!(
+            baseline.relation.permitted_parents,
+            cached.relation.permitted_parents
+        );
+        assert_eq!(
+            baseline.relation.active_prefixes,
+            cached.relation.active_prefixes
+        );
         assert_eq!(work_a.harddrop_certificates, work_b.harddrop_certificates);
         assert_eq!(
             work_a.upper_remaining_unknown_edges,
@@ -1637,6 +1755,13 @@ mod tests {
             super::super::queue_observation_policy::PhysicalActionLanguage::default();
         assert!(matches!(
             orders.compile_observation_language(&mut physical_language, &control),
+            Err(WasmExactSearchError::InvalidProblem(
+                "wasm_observation_dependency_action_authority_missing"
+            )),
+        ));
+        assert!(!physical_language.has_roots());
+        assert!(matches!(
+            physical_language.register_relation(orders, 2, &control),
             Err(WasmExactSearchError::InvalidProblem(
                 "wasm_observation_dependency_action_authority_missing"
             )),

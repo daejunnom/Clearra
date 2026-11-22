@@ -30,7 +30,7 @@ const ROTATIONS: [RotationState; 4] = [
 const TRANSLATIONS: [(i16, i16); 3] = [(0, -1), (-1, 0), (1, 0)];
 type Cells = [[(i16, i16); 4]; 4];
 type Offset = (i16, i16);
-type InverseRotationEdge = (u16, u8, u8);
+type InverseRotationEdge = (u16, u8, u32);
 
 // Independent footprint-anchor offsets from the scalar geometry convention:
 // raw offset + source anchor offset − target anchor offset.
@@ -278,7 +278,7 @@ fn verify_template(
                         };
                         if targets.get(packed).copied() != Some(destination)
                             || original_indices.get(packed).copied()
-                                != Some(u8::try_from(original).map_err(|_| Rotation)?)
+                                != Some(u32::try_from(original).map_err(|_| Rotation)?)
                         {
                             return Err(Rotation);
                         }
@@ -297,7 +297,7 @@ fn verify_template(
                             expected_inv_rotations[usize::from(destination)].push((
                                 source,
                                 slot as u8,
-                                u8::try_from(packed).map_err(|_| InverseRotation)?,
+                                u32::try_from(packed).map_err(|_| InverseRotation)?,
                             ));
                         }
                         earlier_masks.push(target_mask);

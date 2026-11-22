@@ -16,6 +16,8 @@ use crate::{
     CorePathStep,
 };
 
+#[cfg(feature = "placement-dependency-pc")]
+use super::buildup::ObservationProducerShard;
 #[cfg(all(feature = "local-search-ab", target_os = "linux"))]
 use super::parallel_memory_peak::{self, CoordinatorStorage};
 #[cfg(any(test, feature = "local-search-ab"))]
@@ -86,6 +88,8 @@ pub(super) struct ParallelSearchOutcome {
     pub active_workers: usize,
     pub minimum_worker_candidates: usize,
     pub maximum_worker_candidates: usize,
+    #[cfg(feature = "placement-dependency-pc")]
+    pub observation_producer_shards: Vec<ObservationProducerShard>,
 }
 
 pub(super) fn execute_if_worthwhile(
@@ -509,11 +513,14 @@ fn execute_plan(
     let strict_prefix = super::symbolic_prefix_parallel::claim_strict_parallel_prefix()?;
     let shared_request = SharedWorkerRequest {
         standard_bag: shared_standard_bag,
-        reachability: Arc::new(SharedReachabilityTemplates::new(
-            catalog.width(),
-            catalog.height(),
-            problem.kick_profile().profile_id(),
-        )),
+        reachability: Arc::new(match super::dependency_kick_authority(&problem)? {
+            Some(authority) => SharedReachabilityTemplates::with_authority(authority),
+            None => SharedReachabilityTemplates::new(
+                catalog.width(),
+                catalog.height(),
+                problem.kick_profile().profile_id(),
+            ),
+        }),
         probability_row_budget: problem
             .pc_chance_evidence_policy()
             .retains_pc_probability_v2_evidence()
@@ -722,7 +729,23 @@ fn merge_results(
         count_complete: true,
         ..WorkerAggregate::default()
     };
+    #[cfg(feature = "placement-dependency-pc")]
+    let mut observation_producer_shards = Vec::new();
     for worker in worker_results {
+        #[cfg(feature = "placement-dependency-pc")]
+        {
+            observation_producer_shards
+                .try_reserve(worker.observation_producer_shards.len())
+                .map_err(|_| {
+                    WasmExactSearchError::InvalidProblem(
+                        "wasm_parallel_observation_producer_storage_unavailable",
+                    )
+                })?;
+            // Local kind IDs remain owned by their original arena until the
+            // coordinator explicitly imports and rebinds every suffix root.
+            // Never merge independently optimized worker policy bitsets.
+            observation_producer_shards.extend(worker.observation_producer_shards);
+        }
         branch_outcomes.extend(worker.branches);
         merged.merge(worker.aggregate)?;
     }
@@ -825,6 +848,8 @@ fn merge_results(
         active_workers,
         minimum_worker_candidates,
         maximum_worker_candidates,
+        #[cfg(feature = "placement-dependency-pc")]
+        observation_producer_shards,
     })
 }
 

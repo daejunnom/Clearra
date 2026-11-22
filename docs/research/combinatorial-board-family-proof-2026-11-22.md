@@ -365,9 +365,9 @@ D_i=\bigcup_{v:\;\Gamma\land\tau_{iv}\text{가 satisfiable}}D_v
 
 R2는 주어진 유한 graph에 대해 완결돼 있다. 실제 이동 계약에서 유한 template을 얻는 단계도 정확해야 전체 물리 결론을 말할 수 있다.
 
-현재 [ReachabilityTemplate](../../crates/clearra-core-executor/src/backend/wasm_cpu/reachability.rs)은 `ceiling=H+최대 정규화 하향 kick`을 쓰고, 유효한 `anchor_y≥H` 자세들을 모두 seed로 둔다. 이는 **all-sky entry** 계약이다. 특정 게임의 한 spawn 위치나 manipulation timer와 같다고 가정하지 않는다.
+이 절의 최초 검산 시점에는 [ReachabilityTemplate](../../crates/clearra-core-executor/src/backend/wasm_cpu/reachability.rs)이 `ceiling=H+최대 정규화 하향 kick`을 쓰고, 유효한 `anchor_y≥H` 자세들을 모두 seed로 두었다. 이는 **all-sky entry** 계약이다. 특정 게임의 한 spawn 위치나 manipulation timer와 같다고 가정하지 않는다. 현재 범용 compiler는 실제 목록이 아래 충분조건을 만족할 때에만 이 작은 경계를 사용하고, 그 외에는 [범용 상공 정리](parametric-kick-equivalence-2026-11-22.md)에 따라 `H+D+U`를 사용한다.
 
-단순히 “마지막으로 sky에서 내려온 source는 H+D 이하다”만 말해서는 부족하다. 잘린 **앞선 킥 후보**가 성공했을 수 있다면 later candidate를 잘못 활성화할 수 있기 때문이다. 검산기의 raw oracle도 같은 ceiling 규칙을 사용하므로 두 구현의 답이 같다는 사실만으로 이 의무를 대체하지 않는다. 다음 증명은 그 빈틈을 닫는다.
+단순히 “마지막으로 sky에서 내려온 source는 H+D 이하다”만 말해서는 부족하다. 잘린 **앞선 킥 후보**가 성공했을 수 있다면 later candidate를 잘못 활성화할 수 있기 때문이다. 최초 검산의 raw oracle도 같은 ceiling 규칙을 사용했으므로 당시 두 구현의 답이 같다는 사실만으로 이 의무를 대체하지 않는다. 다음 증명은 그 빈틈을 닫는다. 현재의 독립 all-sky raw oracle은 production의 축약 capability를 호출하지 않고 원본 오프셋에서 일반 경계 `H+D+U`를 직접 계산한다. 별도의 explicit-entry/window oracle은 자신의 기존 유한 진입 계약을 유지한다.
 
 ### 9.1 높이와 보드를 열거하지 않는 유한 조건
 

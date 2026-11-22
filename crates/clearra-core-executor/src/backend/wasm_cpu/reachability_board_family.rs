@@ -188,7 +188,7 @@ fn compile(
     for target in 0..count {
         let pose = state_from_index(template.width, template.ceiling, target);
         // Clipped sky masks are collision tests, not complete lock identities.
-        if pose.y >= template.height as i8
+        if pose.y >= i16::from(template.height)
             || template.state_masks[target] == INVALID_STATE_MASK
             || template.state_masks[target].count_ones() != 4
         {
@@ -598,7 +598,7 @@ mod tests {
         // to arbitrary profiles without its finite-table premises.
         // The first O candidate is always free in unbounded sky. Truncating
         // it allows a horizontal jump into a sealed, grounded cavity.
-        let kicks: &[(i8, i8)] = &[(0, 7), (4, 0)];
+        let kicks: &[(i16, i16)] = &[(0, 7), (4, 0)];
         let wall = (0..5).fold(0_u64, |board, y| board | (0b001100 << (6 * y)));
         let board = wall | (0b110000 << 12);
         let mut answers = Vec::new();
@@ -707,7 +707,7 @@ mod tests {
                         boards += 1;
                         for (target, &mask) in template.state_masks.iter().enumerate() {
                             let pose = state_from_index(4, template.ceiling, target);
-                            if mask == INVALID_STATE_MASK || mask.count_ones() != 4 || pose.y >= height as i8 {
+                            if mask == INVALID_STATE_MASK || mask.count_ones() != 4 || pose.y >= i16::from(height) {
                                 continue;
                             }
                             let anchor = pose.y as usize * 4 + pose.x as usize;

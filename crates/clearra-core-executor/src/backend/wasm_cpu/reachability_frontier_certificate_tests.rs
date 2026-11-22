@@ -148,8 +148,6 @@ struct FrontierCertificate<'a> {
     len: usize,
 }
 
-const _: () = assert!(core::mem::size_of::<FrontierCertificate<'_>>() <= 256);
-
 impl<'a> FrontierCertificate<'a> {
     fn derive(
         template: &'a ReachabilityTemplate,
@@ -201,7 +199,7 @@ impl<'a> FrontierCertificate<'a> {
         let state_count = template.state_masks.len();
         let rotation_count = state_count.checked_mul(3)?.checked_add(1)?;
         if template.width == 0
-            || template.ceiling < template.height as i8
+            || template.ceiling < i16::from(template.height)
             || state_count != 4 * usize::from(template.width) * (template.ceiling as usize + 1)
             || state_count > usize::from(INVALID_STATE_INDEX)
             || template.translation_targets.len() != state_count
@@ -219,7 +217,7 @@ impl<'a> FrontierCertificate<'a> {
             if *template.state_masks.get(usize::from(member))? == INVALID_STATE_MASK
                 || template.is_sky_seed(usize::from(member))
                 || state_from_index(template.width, template.ceiling, usize::from(member)).y
-                    >= template.height as i8
+                    >= i16::from(template.height)
                 || members[..index].contains(&member)
             {
                 return None;
@@ -300,7 +298,7 @@ impl<'a> FrontierCertificate<'a> {
                         FrontierClause::Rotation(ReverseRotationSource {
                             source: source_id,
                             slot: slot as u8,
-                            prior_target_count: u8::try_from(prior).ok()?,
+                            prior_target_count: u32::try_from(prior).ok()?,
                         }),
                         globally_impossible,
                     )?;
@@ -643,7 +641,7 @@ fn same_candidate_4l_certificate_answers() -> ([u8; 8], [bool; 8]) {
                     State {
                         rotation: lock.rotation,
                         x: lock.x,
-                        y: lock.lock_y,
+                        y: i16::from(lock.lock_y),
                     },
                 )
                 .expect("catalog lock is a valid physical pose");

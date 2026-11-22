@@ -14,9 +14,7 @@ use super::{
     INVALID_STATE_MASK,
 };
 
-const MAX_POSES: usize = 1024;
-const MAX_WORKLIST_POPS: usize = 8192;
-const MAX_ACTION_TERMS: usize = 131_072;
+const MAX_POSES: usize = u16::MAX as usize;
 const CANCELLATION_CHECK_INTERVAL: usize = 64;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -217,16 +215,15 @@ fn compile_with_cancel_check(
     }
 
     let mut worklist_pops = 0_usize;
-    let mut action_terms = 0;
+    let maximum_pops = state_count * lanes.count_ones() as usize;
+    let mut action_terms = 0_u64;
     let kick_slots = if template.allow_180 { 3 } else { 2 };
     while let Some(source) = queue.pop_front() {
         if worklist_pops.is_multiple_of(CANCELLATION_CHECK_INTERVAL) {
             check_cancellation(&mut should_cancel)?;
         }
-        if worklist_pops == MAX_WORKLIST_POPS {
-            return Ok(None);
-        }
         worklist_pops += 1;
+        debug_assert!(worklist_pops <= maximum_pops);
         work.worklist_pops += 1;
         let delta = core::mem::take(&mut states[source].pending_lanes);
         work.reached_pose_lanes += u64::from(delta.count_ones());
@@ -247,6 +244,9 @@ fn compile_with_cancel_check(
             let mut pending_choice = delta;
             for &target in &template.rotation_targets[begin..end] {
                 action_terms += 1;
+                if action_terms.is_multiple_of(CANCELLATION_CHECK_INTERVAL as u64) {
+                    check_cancellation(&mut should_cancel)?;
+                }
                 work.ordered_kick_terms += 1;
                 let target = usize::from(target);
                 let destinations = pending_choice & states[target].free_lanes;
@@ -259,10 +259,6 @@ fn compile_with_cancel_check(
                 }
             }
         }
-        if action_terms > MAX_ACTION_TERMS {
-            check_cancellation(&mut should_cancel)?;
-            return Ok(None);
-        }
     }
 
     let width = usize::from(template.width);
@@ -271,7 +267,8 @@ fn compile_with_cancel_check(
             check_cancellation(&mut should_cancel)?;
         }
         let pose = state_from_index(template.width, template.ceiling, index);
-        if pose.y >= template.height as i8 || template.state_masks[index] == INVALID_STATE_MASK {
+        if pose.y >= i16::from(template.height) || template.state_masks[index] == INVALID_STATE_MASK
+        {
             continue;
         }
         let down = template.translation_targets[index][0];
@@ -515,10 +512,7 @@ mod tests {
         let mid_work_poll = 1 + pose_polls + 2;
         assert!(mid_work_poll < polls);
         assert!(work.worklist_pops > CANCELLATION_CHECK_INTERVAL as u64);
-        for (cancel_on, expected_pops) in [
-            (mid_work_poll, CANCELLATION_CHECK_INTERVAL as u64),
-            (polls, work.worklist_pops),
-        ] {
+        for (cancel_on, terminal_poll) in [(mid_work_poll, false), (polls, true)] {
             let mut incomplete = PrefixPoseWork::default();
             let mut checkpoints = 0;
             assert!(matches!(
@@ -528,7 +522,16 @@ mod tests {
                 }),
                 Err(WasmExactSearchError::Cancelled)
             ));
-            assert_eq!(incomplete.worklist_pops, expected_pops);
+            if terminal_poll {
+                assert_eq!(incomplete.worklist_pops, work.worklist_pops);
+            } else {
+                // Long imported lists add cancellation points inside one
+                // pose's candidate scan. The relevant contract is that a
+                // cancelled partial fixpoint never publishes a relation,
+                // not that cancellation occurs after exactly 64 poses.
+                assert!(incomplete.worklist_pops > 0);
+                assert!(incomplete.worklist_pops < work.worklist_pops);
+            }
             assert_eq!(incomplete.attempted_relations, 1);
             assert_eq!(incomplete.completed_relations, 0);
         }

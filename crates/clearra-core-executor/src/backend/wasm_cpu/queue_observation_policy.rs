@@ -62,6 +62,45 @@ pub(super) trait ObservationPieceLanguage {
     fn edge_count(&self, node: u32) -> Option<usize>;
     fn edge(&self, node: u32, index: usize) -> Option<(u8, u32)>;
 
+    /// Materialize only actions that the current supply state can execute.
+    /// Existing edge indices must remain stable when another piece is prepared.
+    fn prepare_edges(
+        &self,
+        _node: u32,
+        _piece_mask: u8,
+        _control: &ExecutionControl,
+    ) -> Result<(), WasmExactSearchError> {
+        Ok(())
+    }
+
+    /// A consumer may call this only after the original observation domain
+    /// proves that every source value relevant to completion is determined. The returned
+    /// node preserves existential execution for that known source and hold.
+    fn fully_revealed_node(
+        &self,
+        node: u32,
+        _control: &ExecutionControl,
+    ) -> Result<u32, WasmExactSearchError> {
+        Ok(node)
+    }
+
+    /// Every accepting path has this depth. Variable-horizon consumers keep
+    /// the default and do not acquire the complete-coverage early exit.
+    fn fixed_horizon(&self) -> Option<u8> {
+        None
+    }
+
+    /// Exact existential roots of an already-authorized revealed union.
+    /// Direct roots have no further alternatives. Their node IDs must use a
+    /// disjoint namespace and the same immutable kind arena and horizon.
+    fn revealed_alternatives(
+        &self,
+        _node: u32,
+        _control: &ExecutionControl,
+    ) -> Result<Option<Vec<u32>>, WasmExactSearchError> {
+        Ok(None)
+    }
+
     fn memo_class(&self, node: u32) -> Option<u32> {
         self.node(node).map(|_| node)
     }
@@ -258,6 +297,7 @@ pub(super) struct QueueObservationMetrics {
     pub action_checks: usize,
     pub observation_nodes: usize,
     pub retained_bytes: usize,
+    pub physical_actions: [usize; 11],
     // Detailed memo diagnostics are consumed only by the native opt-in
     // `CLEARRA_SETUP_POLICY_DIAGNOSTICS` reporter.
     #[cfg(not(target_arch = "wasm32"))]
@@ -338,6 +378,10 @@ struct ObservationTrie {
     terminals: Vec<TerminalPattern>,
     initial_observations: Vec<u32>,
     future_classes: Vec<u32>,
+    deterministic_future_classes: Vec<bool>,
+    // Positive, bitwise-identical input weights admit exact count scores.
+    // This includes standard bags, whose actual weights are 1/N, not 1.
+    uniform_weight: Option<f64>,
     sequence_len: usize,
     materialized_sequence_len: usize,
     global_pattern_count: usize,
@@ -364,12 +408,16 @@ impl ObservationTrie {
             terminals: Vec::new(),
             initial_observations: Vec::new(),
             future_classes: Vec::new(),
+            deterministic_future_classes: Vec::new(),
+            uniform_weight: None,
             sequence_len: 0,
             materialized_sequence_len: pattern_index.sequence_len(),
             global_pattern_count: pattern_index.global_pattern_count(),
         };
         let mut sequence = Vec::new();
         let mut expected_len = None;
+        let mut first_weight = None;
+        let mut uniform_positive = true;
         for local_pattern_index in 0..pattern_index.local_pattern_count() {
             let global_pattern_index = pattern_index
                 .global_pattern_index(local_pattern_index)
@@ -390,6 +438,8 @@ impl ObservationTrie {
                 _ => {}
             }
             let weight = universe.weight_at(global_pattern_index).get();
+            let common = *first_weight.get_or_insert(weight);
+            uniform_positive &= weight > 0.0 && weight.to_bits() == common.to_bits();
             trie.insert(
                 &sequence,
                 u32::try_from(global_pattern_index).map_err(|_| {
@@ -399,6 +449,7 @@ impl ObservationTrie {
             )?;
         }
         trie.sequence_len = expected_len.unwrap_or(0);
+        trie.uniform_weight = first_weight.filter(|_| uniform_positive);
         if initial_cursor > trie.sequence_len {
             return Err(WasmExactSearchError::InvalidProblem(
                 "wasm_observation_initial_cursor_out_of_range",
@@ -431,6 +482,7 @@ impl ObservationTrie {
         })?;
         classes.resize(self.nodes.len(), NO_NODE);
         let mut interned = ExactHashMap::<ObservationFutureSignature, u32>::default();
+        let mut deterministic_classes = Vec::new();
         let mut work = 0_u32;
         for node_index in (0..self.nodes.len()).rev() {
             work = work.wrapping_add(1);
@@ -457,7 +509,11 @@ impl ObservationTrie {
             }
             let signature = ObservationFutureSignature {
                 children,
-                subtree_weight_bits: node.subtree_weight.to_bits(),
+                subtree_weight_bits: if self.uniform_weight.is_some() {
+                    f64::from(node.subtree_count).to_bits()
+                } else {
+                    node.subtree_weight.to_bits()
+                },
                 subtree_count: node.subtree_count,
             };
             let class = if let Some(class) = interned.get(&signature).copied() {
@@ -473,13 +529,48 @@ impl ObservationTrie {
                         "wasm_observation_future_class_storage_unavailable",
                     )
                 })?;
+                let mut branches = 0_usize;
+                let mut determined = true;
+                for child in children.iter().copied().filter(|child| *child != NO_NODE) {
+                    branches += 1;
+                    determined &= *deterministic_classes.get(child as usize).ok_or(
+                        WasmExactSearchError::InvalidProblem(
+                            "wasm_observation_future_class_not_topological",
+                        ),
+                    )?;
+                }
+                deterministic_classes.try_reserve(1).map_err(|_| {
+                    WasmExactSearchError::InvalidProblem(
+                        "wasm_observation_future_class_storage_unavailable",
+                    )
+                })?;
+                deterministic_classes.push(determined && branches <= 1);
                 interned.insert(signature, class);
                 class
             };
             classes[node_index] = class;
         }
         self.future_classes = classes;
+        self.deterministic_future_classes = deterministic_classes;
         Ok(())
+    }
+
+    /// This certificate comes from the original input information set, never
+    /// from the queues that happen to succeed for a candidate or action.
+    fn future_is_determined(&self, node: u32) -> Result<bool, WasmExactSearchError> {
+        let class =
+            *self
+                .future_classes
+                .get(node as usize)
+                .ok_or(WasmExactSearchError::InvalidProblem(
+                    "wasm_observation_future_class_missing",
+                ))?;
+        self.deterministic_future_classes
+            .get(class as usize)
+            .copied()
+            .ok_or(WasmExactSearchError::InvalidProblem(
+                "wasm_observation_future_class_missing",
+            ))
     }
 
     fn insert(
@@ -843,6 +934,7 @@ impl ObservationTrie {
             + self.terminals.capacity() * core::mem::size_of::<TerminalPattern>()
             + self.initial_observations.capacity() * core::mem::size_of::<u32>()
             + self.future_classes.capacity() * core::mem::size_of::<u32>()
+            + self.deterministic_future_classes.capacity() * core::mem::size_of::<bool>()
     }
 }
 
@@ -876,13 +968,15 @@ struct PolicyTransition {
 
 #[derive(Clone, Copy, Debug)]
 struct PolicyValue {
-    weight: f64,
+    // Uniform positive inputs use exact integer counts here. Other inputs
+    // retain the established weighted recurrence and summation order.
+    score: f64,
     pattern_count: u32,
 }
 
 impl PolicyValue {
     const REJECT: Self = Self {
-        weight: 0.0,
+        score: 0.0,
         pattern_count: 0,
     };
 }
@@ -1052,7 +1146,7 @@ impl QueueObservationPolicyEvaluator {
         self.shared_hits = 0;
         let root = language.root();
         let initial_observations = self.trie.initial_observations.clone();
-        let mut total_weight = 0.0;
+        let mut total_score = 0.0;
         let mut total_count = 0usize;
         for observation_node in initial_observations.iter().copied() {
             let state = PolicyState {
@@ -1064,7 +1158,7 @@ impl QueueObservationPolicyEvaluator {
                 hold_code: self.initial_hold_code,
             };
             let value = self.solve(language, state, control)?;
-            total_weight += value.weight;
+            total_score += value.score;
             total_count = total_count.saturating_add(value.pattern_count as usize);
         }
         for observation_node in initial_observations {
@@ -1093,7 +1187,10 @@ impl QueueObservationPolicyEvaluator {
         Ok(QueueObservationCoverage {
             covered_patterns,
             covered_pattern_count: total_count,
-            covered_weight: total_weight,
+            covered_weight: self
+                .trie
+                .uniform_weight
+                .map_or(total_score, |weight| total_count as f64 * weight),
             min_accepted_depth: (self.selected_min_depth != u8::MAX)
                 .then_some(self.selected_min_depth),
             max_accepted_depth: (self.selected_min_depth != u8::MAX)
@@ -1108,6 +1205,7 @@ impl QueueObservationPolicyEvaluator {
                 action_checks: self.action_checks,
                 observation_nodes: self.trie.nodes.len(),
                 retained_bytes: self.retained_bytes(),
+                physical_actions: [0; 11],
                 #[cfg(not(target_arch = "wasm32"))]
                 local_values: self.memo.len(),
                 #[cfg(not(target_arch = "wasm32"))]
@@ -1222,6 +1320,7 @@ impl QueueObservationPolicyEvaluator {
         control: &ExecutionControl,
     ) -> Result<PolicyValue, WasmExactSearchError> {
         self.poll_cancellation(control)?;
+        let state = self.observation_language_state(language, state, control)?;
         let memo_state = self.memo_state(language, state)?;
         let reusable = language.memo_reusable(state.language_node);
         if reusable {
@@ -1256,15 +1355,126 @@ impl QueueObservationPolicyEvaluator {
                 control,
             )?;
             let value = PolicyValue {
-                weight,
+                score: if self.trie.uniform_weight.is_some() {
+                    f64::from(pattern_count)
+                } else {
+                    weight
+                },
                 pattern_count,
             };
             self.insert_memo(memo_state, value, reusable)?;
             return Ok(value);
         }
-        let (best, _) = self.best_transition(language, state, control, true)?;
+        let best = match self.best_revealed_alternative(language, state, control)? {
+            Some((value, _)) => value,
+            None => self.best_transition(language, state, control, true)?.0,
+        };
         self.insert_memo(memo_state, best, reusable)?;
         Ok(best)
+    }
+
+    fn best_revealed_alternative<G: ObservationPieceLanguage>(
+        &mut self,
+        language: &G,
+        state: PolicyState,
+        control: &ExecutionControl,
+    ) -> Result<Option<(PolicyValue, Option<u32>)>, WasmExactSearchError> {
+        if self.trie.uniform_weight.is_none()
+            || language.fixed_horizon().is_none()
+            || self.terminal_supply_target.is_some()
+        {
+            return Ok(None);
+        }
+        let Some(alternatives) = language.revealed_alternatives(state.language_node, control)?
+        else {
+            return Ok(None);
+        };
+        let observed = self
+            .trie
+            .nodes
+            .get(state.observation_node as usize)
+            .copied()
+            .ok_or(WasmExactSearchError::InvalidProblem(
+                "wasm_observation_node_out_of_range",
+            ))?;
+        for alternative in alternatives {
+            if alternative == state.language_node {
+                return Err(WasmExactSearchError::InvalidProblem(
+                    "wasm_observation_alternative_cycle",
+                ));
+            }
+            let value = self.solve(
+                language,
+                PolicyState {
+                    language_node: alternative,
+                    ..state
+                },
+                control,
+            )?;
+            if value.pattern_count == 0 {
+                continue;
+            }
+            // All relevant draws are fixed throughout this original
+            // information set. A single root therefore accepts all IDs or
+            // none. A partial answer signals a broken certificate, not a
+            // sound reason to reject or prune any queue.
+            if value.pattern_count != observed.subtree_count {
+                return Err(WasmExactSearchError::InvalidProblem(
+                    "wasm_observation_revealed_membership_not_uniform",
+                ));
+            }
+            return Ok(Some((
+                PolicyValue {
+                    score: f64::from(observed.subtree_count),
+                    pattern_count: observed.subtree_count,
+                },
+                Some(alternative),
+            )));
+        }
+        Ok(Some((PolicyValue::REJECT, None)))
+    }
+
+    fn observation_language_state<G: ObservationPieceLanguage>(
+        &self,
+        language: &G,
+        mut state: PolicyState,
+        control: &ExecutionControl,
+    ) -> Result<PolicyState, WasmExactSearchError> {
+        // A fixed-depth Boolean suffix can read at most one source draw per
+        // lock, plus one when an initially empty hold is first filled. Keep
+        // the original observation/EOF state; only erase physical choices
+        // when all source values that can influence them are already known.
+        let relevant_draws_observed = self.terminal_supply_target.is_none()
+            && language.fixed_horizon().is_some_and(|horizon| {
+                let Some(node) = language.node(state.language_node) else {
+                    return false;
+                };
+                let Some(remaining) = horizon.checked_sub(node.depth) else {
+                    return false;
+                };
+                let extra =
+                    usize::from(self.hold_enabled && state.hold_code == 0 && remaining != 0);
+                let required_end = usize::from(state.source_cursor)
+                    .checked_add(usize::from(remaining))
+                    .and_then(|end| end.checked_add(extra));
+                required_end.is_some_and(|end| {
+                    self.trie
+                        .nodes
+                        .get(state.observation_node as usize)
+                        .is_some_and(|observed| {
+                            usize::from(observed.depth) >= end.min(self.trie.sequence_len)
+                        })
+                })
+            });
+        if self
+            .policy
+            .fully_observes_source(self.trie.sequence_len, usize::from(state.source_cursor))
+            || self.trie.future_is_determined(state.observation_node)?
+            || relevant_draws_observed
+        {
+            state.language_node = language.fully_revealed_node(state.language_node, control)?;
+        }
+        Ok(state)
     }
 
     fn best_transition<G: ObservationPieceLanguage>(
@@ -1282,11 +1492,23 @@ impl QueueObservationPolicyEvaluator {
                 "wasm_observation_queue_position_overflow",
             ))?;
         let next_piece = self.trie.piece_at(state.observation_node, next_position);
+        let mut piece_mask = current_piece.map_or(0_u8, |piece| 1 << (piece - 1));
+        if self.hold_enabled {
+            if (1..=7).contains(&state.hold_code) {
+                piece_mask |= 1 << (state.hold_code - 1);
+            } else if state.hold_code == 0 && current_piece.is_some() {
+                piece_mask |= next_piece.map_or(0, |piece| 1 << (piece - 1));
+            }
+        }
+        language.prepare_edges(state.language_node, piece_mask, control)?;
         let edge_count = language.edge_count(state.language_node).ok_or(
             WasmExactSearchError::InvalidProblem("wasm_observation_language_node_out_of_range"),
         )?;
         let mut best = PolicyValue::REJECT;
         let mut best_transition = None;
+        let complete_count_cutoff =
+            self.trie.uniform_weight.is_some() && language.fixed_horizon().is_some();
+        let observation = self.trie.nodes[state.observation_node as usize];
         for edge_index in 0..edge_count {
             let (desired_piece, child) = language.edge(state.language_node, edge_index).ok_or(
                 WasmExactSearchError::InvalidProblem("wasm_observation_language_edge_out_of_range"),
@@ -1370,6 +1592,13 @@ impl QueueObservationPolicyEvaluator {
                     control,
                     record_action_checks,
                 )?;
+            }
+            // Each reveal branch contains disjoint original pattern IDs.
+            // Covering the whole information set reaches its exact integer
+            // upper bound. The underlying language retains all other paths.
+            if complete_count_cutoff && best.pattern_count == observation.subtree_count {
+                best.score = f64::from(observation.subtree_count);
+                return Ok((best, best_transition));
             }
         }
         Ok((best, best_transition))
@@ -1515,7 +1744,7 @@ impl QueueObservationPolicyEvaluator {
         value: PolicyValue,
         reusable: bool,
     ) -> Result<(), WasmExactSearchError> {
-        if value.weight == 0.0 && value.pattern_count == 0 {
+        if value.score == 0.0 && value.pattern_count == 0 {
             let zero_scores = if reusable {
                 &mut self.shared_zero_scores
             } else {
@@ -1554,8 +1783,8 @@ impl QueueObservationPolicyEvaluator {
             self.action_checks = self.action_checks.saturating_add(1);
         }
         let value = self.transition_value(language, state, transition, control)?;
-        let better = value.weight.total_cmp(&best.weight).is_gt()
-            || (value.weight.total_cmp(&best.weight).is_eq()
+        let better = value.score.total_cmp(&best.score).is_gt()
+            || (value.score.total_cmp(&best.score).is_eq()
                 && (value.pattern_count > best.pattern_count
                     || (value.pattern_count == best.pattern_count
                         && best_transition.is_none_or(|current| transition < current))));
@@ -1606,7 +1835,7 @@ impl QueueObservationPolicyEvaluator {
             &mut observations,
             &mut observation_count,
         )?;
-        let mut weight = 0.0;
+        let mut score = 0.0;
         let mut pattern_count = 0_u32;
         for observation_node in observations[..observation_count].iter().copied() {
             let value = self.solve(
@@ -1619,11 +1848,13 @@ impl QueueObservationPolicyEvaluator {
                 },
                 control,
             )?;
-            weight += value.weight;
-            pattern_count = pattern_count.saturating_add(value.pattern_count);
+            score += value.score;
+            pattern_count = pattern_count.checked_add(value.pattern_count).ok_or(
+                WasmExactSearchError::InvalidProblem("wasm_observation_pattern_count_overflow"),
+            )?;
         }
         Ok(PolicyValue {
-            weight,
+            score,
             pattern_count,
         })
     }
@@ -1635,6 +1866,7 @@ impl QueueObservationPolicyEvaluator {
         control: &ExecutionControl,
     ) -> Result<(), WasmExactSearchError> {
         self.poll_cancellation(control)?;
+        let state = self.observation_language_state(language, state, control)?;
         let memo_state = self.memo_state(language, state)?;
         let reusable = language.memo_reusable(state.language_node);
         let memo = if reusable {
@@ -1670,6 +1902,22 @@ impl QueueObservationPolicyEvaluator {
                 &mut self.selected_patterns,
                 control,
             );
+        }
+        if value.pattern_count == 0 {
+            return Ok(());
+        }
+        if let Some((_, alternative)) = self.best_revealed_alternative(language, state, control)? {
+            return match alternative {
+                Some(language_node) => self.collect_selected(
+                    language,
+                    PolicyState {
+                        language_node,
+                        ..state
+                    },
+                    control,
+                ),
+                None => Ok(()),
+            };
         }
         let (_, Some(transition)) = self.best_transition(language, state, control, false)? else {
             return Ok(());
@@ -2360,5 +2608,206 @@ mod tests {
                 let consumed_bag_counts = ((state.0 >> 85) & ((1_u128 << 21) - 1)) as u32;
                 hold_code == super::TERMINAL_USED_HELD_CODE && consumed_bag_counts != 0
             }));
+    }
+
+    /// Distinct first edges are physical commitments even when their kinds
+    /// match. The alternate root is their exact complete kind-language union.
+    struct CommitmentProjectionLanguage {
+        physical: TestLanguage,
+        revealed: TestLanguage,
+        horizon: u8,
+        root_projections: std::cell::Cell<usize>,
+    }
+
+    impl CommitmentProjectionLanguage {
+        const REVEALED: u32 = 1 << 31;
+
+        fn new(sequences: &[Vec<PieceKind>]) -> Self {
+            let horizon = u8::try_from(sequences[0].len()).unwrap();
+            let mut physical = TestLanguage {
+                nodes: vec![TestLanguageNode::default()],
+            };
+            for sequence in sequences {
+                assert_eq!(sequence.len(), usize::from(horizon));
+                let mut node = 0;
+                for (index, &piece) in sequence.iter().enumerate() {
+                    let child = physical.nodes.len() as u32;
+                    physical.nodes.push(TestLanguageNode {
+                        accepting: index + 1 == sequence.len(),
+                        depth: (index + 1) as u8,
+                        edges: Vec::new(),
+                    });
+                    physical.nodes[node as usize]
+                        .edges
+                        .push((piece_code(piece), child));
+                    node = child;
+                }
+            }
+            Self {
+                physical,
+                revealed: TestLanguage::from_sequences(sequences),
+                horizon,
+                root_projections: std::cell::Cell::new(0),
+            }
+        }
+    }
+
+    impl ObservationPieceLanguage for CommitmentProjectionLanguage {
+        fn root(&self) -> u32 {
+            0
+        }
+
+        fn node(&self, node: u32) -> Option<ObservationLanguageNode> {
+            if node & Self::REVEALED == 0 {
+                self.physical.node(node)
+            } else {
+                self.revealed.node(node & !Self::REVEALED)
+            }
+        }
+
+        fn edge_count(&self, node: u32) -> Option<usize> {
+            if node & Self::REVEALED == 0 {
+                self.physical.edge_count(node)
+            } else {
+                self.revealed.edge_count(node & !Self::REVEALED)
+            }
+        }
+
+        fn edge(&self, node: u32, index: usize) -> Option<(u8, u32)> {
+            if node & Self::REVEALED == 0 {
+                self.physical.edge(node, index)
+            } else {
+                self.revealed
+                    .edge(node & !Self::REVEALED, index)
+                    .map(|(piece, child)| (piece, child | Self::REVEALED))
+            }
+        }
+
+        fn fixed_horizon(&self) -> Option<u8> {
+            Some(self.horizon)
+        }
+
+        fn fully_revealed_node(
+            &self,
+            node: u32,
+            _control: &ExecutionControl,
+        ) -> Result<u32, WasmExactSearchError> {
+            if node == 0 {
+                self.root_projections.set(self.root_projections.get() + 1);
+                Ok(Self::REVEALED)
+            } else {
+                Ok(node)
+            }
+        }
+    }
+
+    #[test]
+    fn relevant_draw_certificate_preserves_empty_hold_commitment_boundary() {
+        use PieceKind::{I, J, L, O, S, T, Z};
+
+        let universe = MaterializedPatternUniverse::from_sequences(
+            PatternUniverseId::new(795),
+            PatternWeightModelId::new(795),
+            vec![vec![I, O, T, S, Z, J, L, T], vec![I, O, T, S, Z, J, L, S]],
+            vec![ProbabilityValue::new(0.5).unwrap(); 2],
+            2,
+            true,
+            None,
+        )
+        .unwrap();
+        let index = PatternPiecePositionIndex::compile(&universe).unwrap();
+        let make_evaluator = || {
+            QueueObservationPolicyEvaluator::new(
+                &universe,
+                &index,
+                QueueObservationPolicy::VisibleSeven,
+                0,
+                None,
+                true,
+                false,
+                false,
+                None,
+            )
+            .unwrap()
+        };
+        let control = ExecutionControl::default();
+
+        // Seven locks can use eight draws: storing I must commit to one O
+        // placement before the final T/S is revealed. Neither queue has the
+        // multiplicity needed by the other complete trace.
+        let seven = CommitmentProjectionLanguage::new(&[
+            vec![O, T, S, Z, J, L, T],
+            vec![O, T, S, Z, J, L, S],
+        ]);
+        let coverage = make_evaluator().evaluate(&seven, &control).unwrap();
+        assert_eq!(seven.root_projections.get(), 0);
+        assert_eq!(coverage.covered_pattern_count, 1);
+        assert_eq!(coverage.covered_weight, 0.5);
+        assert_eq!(coverage.min_accepted_depth, Some(7));
+        assert_eq!(coverage.max_accepted_depth, Some(7));
+        let premature = make_evaluator()
+            .evaluate(&seven.revealed, &control)
+            .unwrap();
+        assert_eq!(premature.covered_pattern_count, 2);
+        assert_eq!(premature.covered_weight, 1.0);
+
+        // Six locks use at most seven draws. The same hidden eighth piece
+        // cannot affect either completion, so root projection is permitted.
+        let six =
+            CommitmentProjectionLanguage::new(&[vec![O, T, S, Z, J, L], vec![O, T, S, Z, J, L]]);
+        let coverage = make_evaluator().evaluate(&six, &control).unwrap();
+        assert!(six.root_projections.get() > 0);
+        assert_eq!(coverage.covered_pattern_count, 2);
+        assert_eq!(coverage.covered_weight, 1.0);
+        assert_eq!(coverage.min_accepted_depth, Some(6));
+        assert_eq!(coverage.max_accepted_depth, Some(6));
+    }
+
+    #[test]
+    fn adjacent_positive_weights_keep_the_weighted_commitment_choice() {
+        use PieceKind::{I, J, L, O, S, T, Z};
+
+        let lower = f64::from_bits(0.5_f64.to_bits() - 1);
+        let universe = MaterializedPatternUniverse::from_sequences(
+            PatternUniverseId::new(796),
+            PatternWeightModelId::new(796),
+            vec![vec![I, O, T, S, Z, J, L, T], vec![I, O, T, S, Z, J, L, S]],
+            vec![
+                ProbabilityValue::new(lower).unwrap(),
+                ProbabilityValue::new(0.5).unwrap(),
+            ],
+            2,
+            true,
+            None,
+        )
+        .unwrap();
+        let index = PatternPiecePositionIndex::compile(&universe).unwrap();
+        let language = CommitmentProjectionLanguage::new(&[
+            vec![O, T, S, Z, J, L, T],
+            vec![O, T, S, Z, J, L, S],
+        ]);
+        let mut evaluator = QueueObservationPolicyEvaluator::new(
+            &universe,
+            &index,
+            QueueObservationPolicy::VisibleSeven,
+            0,
+            None,
+            true,
+            false,
+            false,
+            None,
+        )
+        .unwrap();
+        assert!(evaluator.trie.uniform_weight.is_none());
+        let coverage = evaluator
+            .evaluate(&language, &ExecutionControl::default())
+            .unwrap();
+
+        // Equal-count choices must still prefer the larger actual weight.
+        // An epsilon-based uniform certificate would lose this distinction.
+        assert_eq!(coverage.covered_patterns.words(), &[2]);
+        assert_eq!(coverage.covered_pattern_count, 1);
+        assert_eq!(coverage.covered_weight, 0.5);
+        assert_eq!(language.root_projections.get(), 0);
     }
 }

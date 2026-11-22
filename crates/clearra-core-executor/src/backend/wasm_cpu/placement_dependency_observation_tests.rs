@@ -29,6 +29,7 @@ use crate::backend::wasm_cpu::{
     buildup::with_product_verifier_counts,
     catalog::GeometryCatalog,
     geometry::GeometryCandidate,
+    piece_order_language::PieceOrderLanguageCache,
     reachability::ReachabilityWorkspace,
     symbolic_prefix_orders::{SymbolicPrefixOrders, SymbolicPrefixWork},
     with_pc_placement_dependency_reference,
@@ -220,6 +221,28 @@ fn dependency_real_jstris_ten_lock_relation_preserves_sampled_see_seven_policy()
         .expect("exact physical action quotient");
     let view = physical.view(&control).unwrap().unwrap();
 
+    let factored_orders = SymbolicPrefixOrders::compile_product_with_workspace(
+        &catalog,
+        &candidate,
+        KickTableProfileId::Jstris180,
+        &control,
+        &mut ReachabilityWorkspace::default(),
+        &mut SymbolicPrefixWork::default(),
+        0,
+    )
+    .unwrap();
+    let mut factored = PhysicalActionLanguage::default();
+    let mut kinds = PieceOrderLanguageCache::default();
+    factored_orders
+        .compile_product_language_with_residuals(
+            &mut kinds,
+            &mut SymbolicPrefixWork::default(),
+            factored.prefix_suffix_scratch(),
+        )
+        .unwrap();
+    factored
+        .register_relation(factored_orders, 4, &control)
+        .unwrap();
     let suffix = [I, O, T, Z];
     let mut sequences = Vec::new();
     for a in 0..4 {
@@ -245,44 +268,79 @@ fn dependency_real_jstris_ten_lock_relation_preserves_sampled_see_seven_policy()
     let universe = MaterializedPatternUniverse::from_sequences(
         PatternUniverseId::new(74),
         PatternWeightModelId::new(74),
-        sequences,
+        sequences.clone(),
         weights,
         24,
         true,
         None,
     )
     .unwrap();
-    let index = PatternPiecePositionIndex::compile(&universe).unwrap();
-    for hold in [false, true] {
-        let evaluator = || {
-            QueueObservationPolicyEvaluator::new(
-                &universe,
-                &index,
-                QueueObservationPolicy::VisibleSeven,
-                0,
-                None,
-                hold,
-                true,
-                false,
-                None,
-            )
-            .unwrap()
-        };
-        let concrete = evaluator()
-            .evaluate(&ConcretePrefixPolicy(&orders), &control)
-            .unwrap();
-        let projected = evaluator().evaluate(&view, &control).unwrap();
-        assert!(
-            concrete.covered_pattern_count > 0,
-            "nonvacuous physical fixture"
-        );
-        assert_eq!(projected.covered_patterns, concrete.covered_patterns);
-        assert_eq!(
-            projected.covered_pattern_count,
-            concrete.covered_pattern_count
-        );
-        assert_eq!(projected.covered_weight, concrete.covered_weight);
-        assert_eq!(projected.min_accepted_depth, Some(10));
-        assert_eq!(projected.max_accepted_depth, Some(10));
+    let uniform_universe = MaterializedPatternUniverse::from_sequences(
+        PatternUniverseId::new(75),
+        PatternWeightModelId::new(75),
+        sequences,
+        vec![ProbabilityValue::new(1.0 / 24.0).unwrap(); 24],
+        24,
+        true,
+        None,
+    )
+    .unwrap();
+    for (uniform_weights, universe) in [(false, universe), (true, uniform_universe)] {
+        let index = PatternPiecePositionIndex::compile(&universe).unwrap();
+        let factored_view = factored.factored_view(&kinds, &control).unwrap().unwrap();
+        assert_eq!(factored_view.edge_count(factored_view.root()), Some(0));
+        for hold in [false, true] {
+            let evaluator = || {
+                QueueObservationPolicyEvaluator::new(
+                    &universe,
+                    &index,
+                    QueueObservationPolicy::VisibleSeven,
+                    0,
+                    None,
+                    hold,
+                    true,
+                    false,
+                    None,
+                )
+                .unwrap()
+            };
+            let concrete = evaluator()
+                .evaluate(&ConcretePrefixPolicy(&orders), &control)
+                .unwrap();
+            let projected = evaluator().evaluate(&view, &control).unwrap();
+            let lazy = evaluator().evaluate(&factored_view, &control).unwrap();
+            assert!(
+                concrete.covered_pattern_count > 0,
+                "nonvacuous physical fixture"
+            );
+            // Equal-weight policies may choose different optimal subsets;
+            // the powers-of-two case also fixes the selected pattern set.
+            if !uniform_weights {
+                assert_eq!(projected.covered_patterns, concrete.covered_patterns);
+                assert_eq!(lazy.covered_patterns, concrete.covered_patterns);
+            }
+            for result in [projected, lazy] {
+                assert_eq!(result.covered_pattern_count, concrete.covered_pattern_count);
+                if uniform_weights {
+                    // Integer counts are the exact uniform-mass certificate;
+                    // the optimized full-class result avoids repeated f64
+                    // addition and may differ only in summation rounding.
+                    let expected = result.covered_pattern_count as f64 / 24.0;
+                    assert!((result.covered_weight - expected).abs() <= f64::EPSILON * 48.0);
+                } else {
+                    assert_eq!(result.covered_weight, concrete.covered_weight);
+                }
+                assert_eq!(result.min_accepted_depth, Some(10));
+                assert_eq!(result.max_accepted_depth, Some(10));
+            }
+        }
+        if uniform_weights {
+            let metrics = factored_view.metrics();
+            assert_eq!(
+                metrics.kind_source_visits, 0,
+                "no revealed union descendants"
+            );
+            assert!(metrics.revealed_nodes <= metrics.physical_nodes);
+        }
     }
 }

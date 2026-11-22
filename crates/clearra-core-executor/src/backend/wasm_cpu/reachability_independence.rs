@@ -259,7 +259,15 @@ fn static_lock_dependency_mask_filtered(
     if y < 0 || y >= template.height as i8 {
         return None;
     }
-    let goal = state_index(template.width, template.ceiling, State { rotation, x, y })?;
+    let goal = state_index(
+        template.width,
+        template.ceiling,
+        State {
+            rotation,
+            x,
+            y: i16::from(y),
+        },
+    )?;
     if *template.state_masks.get(goal)? == INVALID_STATE_MASK {
         return None;
     }
@@ -360,7 +368,7 @@ fn validate_forward_template(template: &ReachabilityTemplate) -> Option<(usize, 
         || template.width > i8::MAX as u8
         || template.height == 0
         || cells > u64::BITS as usize
-        || template.ceiling < template.height as i8
+        || template.ceiling < i16::from(template.height)
     {
         return None;
     }

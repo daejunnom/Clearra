@@ -281,7 +281,7 @@ pub(super) fn last_kick_lock_interval<const RETAIN_GUARD: bool>(
         let source = usize::from(edge.source);
         let transition = source * 3 + usize::from(edge.slot);
         let first = template.rotation_target_offsets[transition] as usize;
-        let chosen = first + usize::from(edge.prior_target_count);
+        let chosen = first + edge.prior_target_count as usize;
         if usize::from(template.rotation_targets[chosen]) != target {
             continue;
         }
@@ -345,7 +345,7 @@ fn straight_descent_clear_mask<const RETAIN_GUARD: bool>(
 ) -> Option<u64> {
     let source_pose = state_from_index(template.width, template.ceiling, source);
     let seed_pose = State {
-        y: source_pose.y.max(template.height as i8),
+        y: source_pose.y.max(i16::from(template.height)),
         ..source_pose
     };
     let mut pose = state_index(template.width, template.ceiling, seed_pose)?;
@@ -740,7 +740,7 @@ mod tests {
             State {
                 rotation: lock.rotation,
                 x: lock.x,
-                y: lock.lock_y,
+                y: i16::from(lock.lock_y),
             },
         )
         .unwrap() as u16;

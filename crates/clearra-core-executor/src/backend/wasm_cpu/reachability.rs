@@ -100,7 +100,7 @@ use symbolic_target::ReverseScratch;
 
 use super::{
     catalog::{GeometryCatalog, InstantiatedRealization},
-    kick_profiles::builtin_kick_profile,
+    kick_profiles::{builtin_kick_profile, normalized_kick_delta_wide, KickSkyBounds},
     mix_digest, piece_index,
 };
 
@@ -194,26 +194,69 @@ const _: () = assert!(
         && REACHABILITY_CACHE_CAPACITY % REACHABILITY_PAYLOADS_PER_CHUNK == 0
 );
 
-/// Conservative retained-storage ceiling for every reachability allocation
-/// that exact scoring can make for one connected Board64 catalog.  The bound
-/// is derived from the actual built-in kick profile: each compiled rotation
-/// transition can emit no more targets than its kick-offset sequence, and all
-/// other template tables are linear in the catalog's finite pose state count.
+/// Conservative owned-storage bound, including template compilation scratch,
+/// for one connected Board64 catalog. Imported content must use the authority
+/// overload rather than estimate a table from its display profile ID.
 pub(super) fn checked_reachability_retained_upper_bound(
     width: u8,
     height: u8,
     profile_id: KickTableProfileId,
 ) -> Option<u128> {
-    const STANDARD_PIECES: [PieceKind; 7] = [
-        PieceKind::I,
-        PieceKind::O,
-        PieceKind::T,
-        PieceKind::S,
-        PieceKind::Z,
-        PieceKind::J,
-        PieceKind::L,
-    ];
     let profile = builtin_kick_profile(profile_id)?;
+    checked_reachability_storage_upper_bound(width, height, |piece| {
+        let ceiling = source_ceiling(height, piece, profile.supports_180(), profile);
+        let mut maximum_candidates = 0_u128;
+        for from in RotationState::ALL {
+            let mut candidates = 0_u128;
+            for (slot, to) in [
+                from.clockwise(),
+                from.counter_clockwise(),
+                from.rotated_180(),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                if slot == 2 && !profile.supports_180() {
+                    continue;
+                }
+                candidates = candidates.checked_add(
+                    profile
+                        .sequence_for(KickTransition::new(piece, from, to))
+                        .map_or(0, |sequence| sequence.offsets().len() as u128),
+                )?;
+            }
+            maximum_candidates = maximum_candidates.max(candidates);
+        }
+        Some((ceiling, maximum_candidates))
+    })
+}
+
+pub(super) fn checked_authority_reachability_storage_upper_bound(
+    authority: &super::compact_kick_authority::CompactKickAuthority,
+) -> Option<u128> {
+    let (width, height) = authority.dimensions();
+    checked_reachability_storage_upper_bound(width, height, |piece| {
+        let table = authority.piece(piece);
+        let mut maximum_candidates = 0_u128;
+        for orientation in table.ordered.chunks_exact(3) {
+            let candidates = orientation.iter().try_fold(0_u128, |count, sequence| {
+                count.checked_add(sequence.len() as u128)
+            })?;
+            maximum_candidates = maximum_candidates.max(candidates);
+        }
+        Some((table.ceiling, maximum_candidates))
+    })?
+    .checked_add(authority.retained_bytes() as u128)
+}
+
+fn checked_reachability_storage_upper_bound(
+    width: u8,
+    height: u8,
+    mut piece_bounds: impl FnMut(PieceKind) -> Option<(i16, u128)>,
+) -> Option<u128> {
+    if !(1..=10).contains(&width) || !(1..=6).contains(&height) {
+        return None;
+    }
     let mut bytes = 0_u128;
     #[cfg(any(test, feature = "local-search-ab"))]
     if super::placement_dependency::enabled() {
@@ -236,59 +279,59 @@ pub(super) fn checked_reachability_retained_upper_bound(
         )?;
     }
     let mut maximum_scratch_states = 0_u128;
-    for piece in STANDARD_PIECES {
-        let ceiling = source_ceiling(height, piece, profile.supports_180(), profile);
-        let vertical_states = u128::from(u8::try_from(ceiling).ok()?).checked_add(1)?;
+    for piece in PieceKind::STANDARD_TETROMINOES {
+        let (ceiling, maximum_rotation_targets_per_state) = piece_bounds(piece)?;
+        let vertical_states = u128::try_from(ceiling).ok()?.checked_add(1)?;
         let state_count = 4_u128
             .checked_mul(vertical_states)?
             .checked_mul(u128::from(width))?;
         maximum_scratch_states = maximum_scratch_states.max(state_count);
-        let mut maximum_rotation_targets_per_state = 0_u128;
-        for from in RotationState::ALL {
-            let mut from_targets = 0_u128;
-            for (slot, to) in [
-                from.clockwise(),
-                from.counter_clockwise(),
-                from.rotated_180(),
-            ]
-            .into_iter()
-            .enumerate()
-            {
-                if slot == 2 && !profile.supports_180() {
-                    continue;
-                }
-                from_targets = from_targets.checked_add(
-                    profile
-                        .sequence_for(KickTransition::new(piece, from, to))
-                        .map_or(0_u128, |sequence| sequence.offsets().len() as u128),
-                )?;
-            }
-            maximum_rotation_targets_per_state =
-                maximum_rotation_targets_per_state.max(from_targets);
-        }
         let rotation_target_count = state_count.checked_mul(maximum_rotation_targets_per_state)?;
         let state_linear_bytes = state_count.checked_mul(
             (core::mem::size_of::<u64>()
                 + core::mem::size_of::<[u16; 3]>() * 2
-                + core::mem::size_of::<u16>()) as u128,
+                + core::mem::size_of::<u16>() * 2
+                + core::mem::size_of::<ConditionedReachabilityEntryPose>()) as u128,
         )?;
         let state_word_bytes = state_count
             .checked_add(63)?
             .checked_div(64)?
             .checked_mul(core::mem::size_of::<u64>() as u128)?;
+        // Forward offsets: 3*n+1; reverse offsets: n+1; the concurrently
+        // retained reverse cursor: n+1. Summing each piece's cursor is a
+        // conservative peak even though pieces compile one at a time.
         let offset_bytes = state_count
-            .checked_add(1)?
-            .checked_mul((core::mem::size_of::<u32>() * 2) as u128)?;
-        let rotation_bytes = rotation_target_count.checked_mul(
-            (core::mem::size_of::<u16>()
-                + core::mem::size_of::<u8>()
-                + core::mem::size_of::<ReverseRotationSource>()) as u128,
-        )?;
+            .checked_mul(5)?
+            .checked_add(3)?
+            .checked_mul(core::mem::size_of::<u32>() as u128)?;
+        // The two push-grown forward vectors can retain geometric capacity;
+        // inverse sources are allocated once at their final logical length.
+        let forward_capacity = if rotation_target_count == 0 {
+            0
+        } else {
+            rotation_target_count.checked_mul(2)?.max(4)
+        };
+        let rotation_bytes = forward_capacity
+            .checked_mul((core::mem::size_of::<u16>() + core::mem::size_of::<u32>()) as u128)?
+            .checked_add(
+                rotation_target_count
+                    .checked_mul(core::mem::size_of::<ReverseRotationSource>() as u128)?,
+            )?;
+        let compile_deltas = maximum_rotation_targets_per_state
+            .checked_mul(8)?
+            .checked_add(12 * 4)?
+            .checked_mul(core::mem::size_of::<(i16, i16)>() as u128)?
+            .checked_add((12 * core::mem::size_of::<Vec<(i16, i16)>>()) as u128)?;
         bytes = bytes
             .checked_add(state_linear_bytes)?
             .checked_add(state_word_bytes)?
             .checked_add(offset_bytes)?
-            .checked_add(rotation_bytes)?;
+            .checked_add(rotation_bytes)?
+            .checked_add(compile_deltas)?
+            .checked_add(
+                (core::mem::size_of::<ReachabilityTemplate>() + 2 * core::mem::size_of::<usize>())
+                    as u128,
+            )?;
     }
 
     let cache_entry_bytes = (core::mem::size_of::<ReachabilityCacheKey>()
@@ -306,10 +349,26 @@ pub(super) fn checked_reachability_retained_upper_bound(
             .checked_mul(core::mem::size_of::<Option<PreparedRelationWindows>>() as u128)?,
     )?;
 
-    // Scratch is shared across templates and only needs the largest pose
-    // state count. The queue and generation table each retain one u16.
-    bytes
-        .checked_add(maximum_scratch_states.checked_mul((core::mem::size_of::<u16>() * 2) as u128)?)
+    // Scratch is shared across templates. Account for retained growth in
+    // both the scalar queue/generation table and the exact lane reverse owner.
+    bytes = bytes.checked_add(
+        maximum_scratch_states.checked_mul((core::mem::size_of::<u16>() * 4) as u128)?,
+    )?;
+    #[cfg(any(
+        test,
+        feature = "placement-dependency-pc",
+        all(
+            feature = "local-search-ab",
+            feature = "parallel",
+            not(target_family = "wasm")
+        )
+    ))]
+    {
+        bytes = bytes.checked_add(ReverseScratch::checked_retained_upper_bound(
+            maximum_scratch_states,
+        )?)?;
+    }
+    bytes.checked_add(core::mem::size_of::<ReachabilityWorkspace>() as u128)
 }
 
 #[derive(Clone, Copy, Default)]
@@ -652,7 +711,6 @@ pub(super) struct ReachabilityMetrics {
 /// stage. Templates are immutable after first use; mutable scratch and cache
 /// never escape the query session.
 pub(super) struct ReachabilityWorkspace {
-    #[cfg(not(target_family = "wasm"))]
     local_import: Option<super::compact_kick_authority::CompactKickAuthority>,
     #[cfg(any(test, feature = "local-search-ab"))]
     placement_dependencies: dependency_cache::PlacementDependencyCache,
@@ -738,7 +796,6 @@ fn conditioned_context_frame_capacity(height: u8) -> Option<u128> {
 impl Default for ReachabilityWorkspace {
     fn default() -> Self {
         Self {
-            #[cfg(not(target_family = "wasm"))]
             local_import: None,
             #[cfg(any(test, feature = "local-search-ab"))]
             placement_dependencies: dependency_cache::PlacementDependencyCache::default(),
@@ -773,7 +830,6 @@ impl Default for ReachabilityWorkspace {
 }
 
 impl ReachabilityWorkspace {
-    #[cfg(not(target_family = "wasm"))]
     pub(super) fn bind_local_import(
         &mut self,
         authority: super::compact_kick_authority::CompactKickAuthority,
@@ -793,14 +849,7 @@ impl ReachabilityWorkspace {
     }
 
     pub(super) fn has_local_import(&self) -> bool {
-        #[cfg(not(target_family = "wasm"))]
-        {
-            self.local_import.is_some()
-        }
-        #[cfg(target_family = "wasm")]
-        {
-            false
-        }
+        self.local_import.is_some()
     }
 
     #[cfg(any(feature = "parallel", test))]
@@ -813,6 +862,10 @@ impl ReachabilityWorkspace {
             || self.has_local_import()
         {
             return Err("wasm_shared_reachability_request_already_initialized");
+        }
+        self.local_import = templates.authority.clone();
+        if let Some(authority) = &self.local_import {
+            self.kick_profile_id = authority.profile_id();
         }
         self.shared_templates = Some(templates);
         Ok(())
@@ -1099,7 +1152,7 @@ impl ReachabilityWorkspace {
         let state = State {
             rotation: realization.rotation,
             x: realization.x,
-            y: realization.lock_y,
+            y: i16::from(realization.lock_y),
         };
         let target = state_index(template.width, template.ceiling, state)?;
         if template.state_masks[target] != realization.lock_mask {
@@ -1223,7 +1276,7 @@ impl ReachabilityWorkspace {
         let state = State {
             rotation: realization.rotation,
             x: realization.x,
-            y: realization.lock_y,
+            y: i16::from(realization.lock_y),
         };
         let target = state_index(template.width, template.ceiling, state)?;
         (template.state_masks[target] == realization.lock_mask).then_some((template, target))
@@ -1465,11 +1518,15 @@ impl ReachabilityWorkspace {
                             contexts: [Err(crate::legal_board::ProviderStatus::Miss); 3],
                             count: 0,
                         };
-                        if let Some((windows, count)) = solver_local_relation_windows(
-                            catalog.width(),
-                            catalog.height(),
-                            template.ceiling,
-                        ) {
+                        if let Some((windows, count)) =
+                            i8::try_from(template.ceiling).ok().and_then(|ceiling| {
+                                solver_local_relation_windows(
+                                    catalog.width(),
+                                    catalog.height(),
+                                    ceiling,
+                                )
+                            })
+                        {
                             prepared.count = count;
                             for (slot, window) in windows.into_iter().take(count).enumerate() {
                                 prepared.contexts[slot] = conditioned.prepare_context(
@@ -1847,13 +1904,18 @@ impl ReachabilityWorkspace {
             + self.static_influence_cache.retained_bytes();
         #[cfg(not(any(test, feature = "local-search-ab")))]
         let prototype_bytes = 0;
-        #[cfg(not(target_family = "wasm"))]
-        let import_bytes = self.local_import.as_ref().map_or(
-            0,
-            super::compact_kick_authority::CompactKickAuthority::retained_bytes,
-        );
-        #[cfg(target_family = "wasm")]
-        let import_bytes = 0;
+        let import_bytes = self.local_import.as_ref().map_or(0, |authority| {
+            let shared = self
+                .shared_templates
+                .as_ref()
+                .and_then(|owner| owner.authority.as_ref())
+                == Some(authority);
+            if include_shared || !shared {
+                authority.retained_bytes()
+            } else {
+                0
+            }
+        });
         #[cfg(any(
             test,
             feature = "placement-dependency-pc",
@@ -1983,17 +2045,21 @@ impl ReachabilityWorkspace {
         let index = piece_index(piece);
         let profile_id = self.kick_profile_id;
         self.templates[index].get_or_insert_with(|| {
-            #[cfg(not(target_family = "wasm"))]
+            if let Some(shared) = &self.shared_templates {
+                if shared.matches(
+                    catalog.width(),
+                    catalog.height(),
+                    profile_id,
+                    self.local_import.as_ref(),
+                ) {
+                    return shared.template(piece);
+                }
+            }
             if let Some(authority) = &self.local_import {
                 // Only the immutable catalog used to bind this workspace
                 // reaches the local ordered-profile path.
                 assert_eq!(authority.dimensions(), dimensions);
                 return Arc::new(ReachabilityTemplate::compile_authority(authority, piece));
-            }
-            if let Some(shared) = &self.shared_templates {
-                if shared.matches(catalog.width(), catalog.height(), profile_id) {
-                    return shared.template(piece);
-                }
             }
             // A reused workspace may change dimensions/profile. Never borrow
             // a stale compiled rule; preserve the exact local path instead.
@@ -2062,9 +2128,14 @@ pub(crate) fn exact_entry_lock_anchors(
 
 fn canonical_sky_entry_poses(
     width: u8,
-    ceiling: i8,
+    ceiling: i16,
     sky_seeds: &[u16],
 ) -> Vec<ConditionedReachabilityEntryPose> {
+    // Conditioned packs have their own narrow, declared-entry contract.
+    // An arbitrary imported table never acquires a partial seed projection.
+    if ceiling > i16::from(i8::MAX) {
+        return Vec::new();
+    }
     let mut poses = sky_seeds
         .iter()
         .map(|&index| {
@@ -2072,7 +2143,7 @@ fn canonical_sky_entry_poses(
             ConditionedReachabilityEntryPose {
                 rotation: pose.rotation,
                 x: pose.x,
-                y: pose.y,
+                y: i8::try_from(pose.y).expect("checked conditioned sky extent"),
             }
         })
         .collect::<Vec<_>>();
@@ -2091,7 +2162,7 @@ pub(crate) fn exact_solver_local_relation_spawn_entries(
     }
     let template = ReachabilityTemplate::compile(10, height, piece, profile_id);
     Some((
-        template.ceiling,
+        i8::try_from(template.ceiling).ok()?,
         canonical_sky_entry_poses(template.width, template.ceiling, &template.sky_seeds),
     ))
 }
@@ -2113,6 +2184,7 @@ pub(super) struct SharedReachabilityTemplates {
     width: u8,
     height: u8,
     profile: KickTableProfileId,
+    authority: Option<super::compact_kick_authority::CompactKickAuthority>,
     templates: [OnceLock<Arc<ReachabilityTemplate>>; 7],
 }
 
@@ -2123,16 +2195,41 @@ impl SharedReachabilityTemplates {
             width,
             height,
             profile,
+            authority: None,
             templates: std::array::from_fn(|_| OnceLock::new()),
         }
     }
 
-    fn matches(&self, width: u8, height: u8, profile: KickTableProfileId) -> bool {
-        self.width == width && self.height == height && self.profile == profile
+    #[cfg(any(feature = "parallel", test))]
+    pub fn with_authority(authority: super::compact_kick_authority::CompactKickAuthority) -> Self {
+        let (width, height) = authority.dimensions();
+        Self {
+            width,
+            height,
+            profile: authority.profile_id(),
+            authority: Some(authority),
+            templates: std::array::from_fn(|_| OnceLock::new()),
+        }
+    }
+
+    fn matches(
+        &self,
+        width: u8,
+        height: u8,
+        profile: KickTableProfileId,
+        authority: Option<&super::compact_kick_authority::CompactKickAuthority>,
+    ) -> bool {
+        self.width == width
+            && self.height == height
+            && self.profile == profile
+            && self.authority.as_ref() == authority
     }
 
     fn template(&self, piece: PieceKind) -> Arc<ReachabilityTemplate> {
         Arc::clone(self.templates[piece_index(piece)].get_or_init(|| {
+            if let Some(authority) = &self.authority {
+                return Arc::new(ReachabilityTemplate::compile_authority(authority, piece));
+            }
             Arc::new(ReachabilityTemplate::compile(
                 self.width,
                 self.height,
@@ -2146,6 +2243,10 @@ impl SharedReachabilityTemplates {
     pub fn retained_bytes(&self) -> usize {
         core::mem::size_of::<Self>()
             + 2 * core::mem::size_of::<usize>()
+            + self
+                .authority
+                .as_ref()
+                .map_or(0, |authority| authority.retained_bytes())
             + self
                 .templates
                 .iter()
@@ -2162,7 +2263,7 @@ impl SharedReachabilityTemplates {
 pub(super) struct ReachabilityTemplate {
     width: u8,
     height: u8,
-    ceiling: i8,
+    ceiling: i16,
     allow_180: bool,
     state_masks: Vec<u64>,
     translation_targets: Vec<[u16; 3]>,
@@ -2172,7 +2273,7 @@ pub(super) struct ReachabilityTemplate {
     sky_seed_words: Vec<u64>,
     rotation_target_offsets: Vec<u32>,
     rotation_targets: Vec<u16>,
-    rotation_kick_indices: Vec<u8>,
+    rotation_kick_indices: Vec<u32>,
     reverse_rotation_offsets: Vec<u32>,
     reverse_rotation_sources: Vec<ReverseRotationSource>,
     // Impossible on every occupancy, removed once from the reverse index.
@@ -2189,10 +2290,10 @@ pub(super) struct ReachabilityTemplate {
 struct ReverseRotationSource {
     source: u16,
     slot: u8,
-    prior_target_count: u8,
+    prior_target_count: u32,
 }
 
-const _: () = assert!(core::mem::size_of::<ReverseRotationSource>() == 4);
+const _: () = assert!(core::mem::size_of::<ReverseRotationSource>() == 8);
 
 impl ReachabilityTemplate {
     pub fn compile(
@@ -2204,8 +2305,7 @@ impl ReachabilityTemplate {
         let profile = builtin_kick_profile(profile_id)
             .expect("WASM reachability only compiles connected exact kick profiles");
         let allow_180 = profile.supports_180();
-        let ceiling = source_ceiling(height, piece, allow_180, profile);
-        let mut kick_deltas: [Vec<(i8, i8)>; 12] = std::array::from_fn(|_| Vec::new());
+        let mut kick_deltas: [Vec<(i16, i16)>; 12] = std::array::from_fn(|_| Vec::new());
         for from in RotationState::ALL {
             let targets = [
                 from.clockwise(),
@@ -2219,22 +2319,16 @@ impl ReachabilityTemplate {
                 let index = rotation_transition_index(from, slot);
                 if let Some(sequence) = profile.sequence_for(KickTransition::new(piece, from, to)) {
                     kick_deltas[index].extend(sequence.offsets().iter().map(|offset| {
-                        normalized_kick_delta(piece, from, to, offset.dx(), offset.dy())
+                        normalized_kick_delta_wide(piece, from, to, offset.dx(), offset.dy())
                     }));
                 }
             }
         }
-        Self::compile_normalized(
-            width,
-            height,
-            piece,
-            allow_180,
-            ceiling,
-            kick_deltas.each_ref().map(Vec::as_slice),
-        )
+        let ordered = kick_deltas.each_ref().map(Vec::as_slice);
+        let ceiling = KickSkyBounds::for_ordered_deltas(ordered).source_ceiling(height);
+        Self::compile_normalized(width, height, piece, allow_180, ceiling, ordered)
     }
 
-    #[cfg(not(target_family = "wasm"))]
     pub(super) fn compile_authority(
         authority: &super::compact_kick_authority::CompactKickAuthority,
         piece: PieceKind,
@@ -2255,8 +2349,8 @@ impl ReachabilityTemplate {
         height: u8,
         piece: PieceKind,
         allow_180: bool,
-        ceiling: i8,
-        kick_deltas: [&[(i8, i8)]; 12],
+        ceiling: i16,
+        kick_deltas: [&[(i16, i16)]; 12],
     ) -> Self {
         let state_count = 4 * (ceiling as usize + 1) * width as usize;
         let definition = standard_tetromino_registry()
@@ -2354,7 +2448,7 @@ impl ReachabilityTemplate {
             + self.sky_seed_words.capacity() * core::mem::size_of::<u64>()
             + self.rotation_target_offsets.capacity() * core::mem::size_of::<u32>()
             + self.rotation_targets.capacity() * core::mem::size_of::<u16>()
-            + self.rotation_kick_indices.capacity() * core::mem::size_of::<u8>()
+            + self.rotation_kick_indices.capacity() * core::mem::size_of::<u32>()
             + self.reverse_rotation_offsets.capacity() * core::mem::size_of::<u32>()
             + self.reverse_rotation_sources.capacity()
                 * core::mem::size_of::<ReverseRotationSource>()
@@ -2369,7 +2463,7 @@ impl ReachabilityTemplate {
 struct State {
     rotation: RotationState,
     x: i8,
-    y: i8,
+    y: i16,
 }
 
 #[derive(Clone, Copy)]
@@ -2440,7 +2534,7 @@ fn search_reachable_locks_from_entries_for_desired(
             State {
                 rotation: entry.rotation,
                 x: entry.x,
-                y: entry.y,
+                y: i16::from(entry.y),
             },
         )?;
         if template.state_masks[index] == INVALID_STATE_MASK
@@ -2457,7 +2551,7 @@ fn search_reachable_locks_from_entries_for_desired(
             State {
                 rotation: entry.rotation,
                 x: entry.x,
-                y: entry.y,
+                y: i16::from(entry.y),
             },
         )
         .expect("entry poses were validated above") as u16
@@ -2508,13 +2602,13 @@ fn search_reachable_locks_from_seed_iter(
         let state_index = usize::from(scratch.queue[queue_cursor]);
         let state = state_from_index(width, ceiling, state_index);
         queue_cursor += 1;
-        if state.y < height as i8 && grounded_index(template, board, state_index) {
+        if state.y < i16::from(height) && grounded_index(template, board, state_index) {
             let anchor = state.y as usize * width as usize + state.x as usize;
             locks.anchors[state.rotation.quarter_turns() as usize] |= 1_u64 << anchor;
             let desired_reached = match desired {
                 Some(DesiredLocks::All(wanted)) => locks.contains_all(wanted),
                 Some(DesiredLocks::Any(wanted)) => {
-                    wanted.contains(width, state.rotation, state.x, state.y)
+                    wanted.contains(width, state.rotation, state.x, state.y as i8)
                 }
                 None => false,
             };
@@ -2592,8 +2686,8 @@ pub(super) fn optimistic_reachable_poses(
         let index = usize::from(queue[cursor]);
         cursor += 1;
         let state = state_from_index(template.width, template.ceiling, index);
-        if state.y < template.height as i8 {
-            poses.insert(template.width, state.rotation, state.x, state.y);
+        if state.y < i16::from(template.height) {
+            poses.insert(template.width, state.rotation, state.x, state.y as i8);
         }
 
         for &target in &template.translation_targets[index] {
@@ -2644,7 +2738,11 @@ fn reverse_lock_reachable(
     y: i8,
     scratch: &mut ReachabilityScratch,
 ) -> ReverseReachabilityResult {
-    let target = State { rotation, x, y };
+    let target = State {
+        rotation,
+        x,
+        y: i16::from(y),
+    };
     let Some(target_index) = state_index(template.width, template.ceiling, target) else {
         return ReverseReachabilityResult::default();
     };
@@ -2704,7 +2802,7 @@ fn reverse_lock_reachable_via_proven_exits(
             State {
                 rotation: exit.rotation,
                 x: exit.x,
-                y: exit.y,
+                y: i16::from(exit.y),
             },
         )?;
         if template.state_masks[index] == INVALID_STATE_MASK
@@ -2714,7 +2812,15 @@ fn reverse_lock_reachable_via_proven_exits(
         }
         words[index / 64] |= 1_u64 << (index % 64);
     }
-    let target = state_index(template.width, template.ceiling, State { rotation, x, y })?;
+    let target = state_index(
+        template.width,
+        template.ceiling,
+        State {
+            rotation,
+            x,
+            y: i16::from(y),
+        },
+    )?;
     if template.state_masks[target] == INVALID_STATE_MASK
         || board & template.state_masks[target] != 0
         || !grounded_index(template, board, target)
@@ -2817,7 +2923,11 @@ fn preferred_scoring_lock_evidence<const LEGACY_T_SPIN: bool>(
     y: i8,
     scratch: &mut ReachabilityScratch,
 ) -> Option<ScoringLockEvidence> {
-    let target = State { rotation, x, y };
+    let target = State {
+        rotation,
+        x,
+        y: i16::from(y),
+    };
     let target_index = state_index(template.width, template.ceiling, target)?;
     if template.state_masks[target_index] == INVALID_STATE_MASK
         || board & template.state_masks[target_index] != 0
@@ -2828,7 +2938,7 @@ fn preferred_scoring_lock_evidence<const LEGACY_T_SPIN: bool>(
 
     let start = template.reverse_rotation_offsets[target_index] as usize;
     let end = template.reverse_rotation_offsets[target_index + 1] as usize;
-    let mut best = None::<((bool, bool, u8), ScoringLockEvidence)>;
+    let mut best = None::<((bool, bool, u32), ScoringLockEvidence)>;
     for source in &template.reverse_rotation_sources[start..end] {
         if !reverse_rotation_is_first_success(template, board, *source) {
             continue;
@@ -2841,7 +2951,7 @@ fn preferred_scoring_lock_evidence<const LEGACY_T_SPIN: bool>(
         }
         let transition = source_index * 3 + usize::from(source.slot);
         let target_offset = template.rotation_target_offsets[transition] as usize
-            + usize::from(source.prior_target_count);
+            + source.prior_target_count as usize;
         let kick_index = template.rotation_kick_indices[target_offset];
         let is_quarter_turn = source.slot < 2;
         let rank = if LEGACY_T_SPIN {
@@ -2873,11 +2983,11 @@ fn preferred_scoring_lock_evidence<const LEGACY_T_SPIN: bool>(
         let evidence = ScoringLockEvidence::rotation(
             predecessor.rotation,
             request,
-            kick_index,
+            u8::try_from(kick_index).ok()?,
             target.x - predecessor.x,
-            target.y - predecessor.y,
+            i8::try_from(target.y - predecessor.y).ok()?,
             predecessor.x,
-            predecessor.y,
+            i8::try_from(predecessor.y).ok()?,
         );
         best = Some((rank, evidence));
     }
@@ -2969,9 +3079,15 @@ impl DocumentReachabilityEngine {
         let template = self.templates[piece_slot].get_or_insert_with(|| {
             ReachabilityTemplate::compile(self.width, self.height, piece, self.profile_id)
         });
-        let Some(target_index) =
-            state_index(template.width, template.ceiling, State { rotation, x, y })
-        else {
+        let Some(target_index) = state_index(
+            template.width,
+            template.ceiling,
+            State {
+                rotation,
+                x,
+                y: i16::from(y),
+            },
+        ) else {
             return DocumentLockReachability {
                 valid_target: false,
                 reachable: false,
@@ -3015,9 +3131,15 @@ fn scoring_lock_is_immobile(
     x: i8,
     y: i8,
 ) -> bool {
-    let Some(target_index) =
-        state_index(template.width, template.ceiling, State { rotation, x, y })
-    else {
+    let Some(target_index) = state_index(
+        template.width,
+        template.ceiling,
+        State {
+            rotation,
+            x,
+            y: i16::from(y),
+        },
+    ) else {
         return false;
     };
     let translations_blocked = template.translation_targets[target_index]
@@ -3032,7 +3154,7 @@ fn scoring_lock_is_immobile(
         State {
             rotation,
             x,
-            y: y.saturating_add(1),
+            y: i16::from(y) + 1,
         },
     )
     .is_none_or(|target| {
@@ -3058,7 +3180,7 @@ fn reverse_rotation_prior_targets(
 ) -> &[u16] {
     let transition = usize::from(source.source) * 3 + usize::from(source.slot);
     let prior_start = template.rotation_target_offsets[transition] as usize;
-    let prior_end = prior_start + usize::from(source.prior_target_count);
+    let prior_end = prior_start + source.prior_target_count as usize;
     &template.rotation_targets[prior_start..prior_end]
 }
 
@@ -3083,7 +3205,7 @@ fn push_index_if_placeable(
     }
 }
 
-fn state_index(width: u8, ceiling: i8, state: State) -> Option<usize> {
+fn state_index(width: u8, ceiling: i16, state: State) -> Option<usize> {
     if state.x < 0 || state.y < 0 || state.x >= width as i8 || state.y > ceiling {
         return None;
     }
@@ -3121,7 +3243,7 @@ fn first_successful_kick(
 fn compile_translation_targets_and_seeds(
     width: u8,
     height: u8,
-    ceiling: i8,
+    ceiling: i16,
     state_masks: &[u64],
 ) -> (Vec<[u16; 3]>, Vec<u16>) {
     let mut translations = Vec::with_capacity(state_masks.len());
@@ -3153,7 +3275,7 @@ fn compile_translation_targets_and_seeds(
             targets[slot] = u16::try_from(target).unwrap_or(INVALID_STATE_INDEX);
         }
         translations.push(targets);
-        if state.y >= height as i8 && state_masks[source] != INVALID_STATE_MASK {
+        if state.y >= i16::from(height) && state_masks[source] != INVALID_STATE_MASK {
             if let Ok(source) = u16::try_from(source) {
                 seeds.push(source);
             }
@@ -3191,10 +3313,10 @@ fn compile_reverse_translation_sources(forward: &[[u16; 3]]) -> Vec<[u16; 3]> {
 
 fn compile_rotation_targets(
     width: u8,
-    ceiling: i8,
+    ceiling: i16,
     state_masks: &[u64],
-    kick_deltas: &[&[(i8, i8)]; 12],
-) -> (Vec<u32>, Vec<u16>, Vec<u8>) {
+    kick_deltas: &[&[(i16, i16)]; 12],
+) -> (Vec<u32>, Vec<u16>, Vec<u32>) {
     let mut offsets = Vec::with_capacity(state_masks.len() * 3 + 1);
     let mut targets = Vec::new();
     let mut kick_indices = Vec::new();
@@ -3209,9 +3331,13 @@ fn compile_rotation_targets(
         for (slot, to) in rotations.into_iter().enumerate() {
             let transition = rotation_transition_index(state.rotation, slot);
             for (kick_index, &(dx, dy)) in kick_deltas[transition].iter().enumerate() {
+                let column = i16::from(state.x) + dx;
+                if !(0..i16::from(width)).contains(&column) {
+                    continue;
+                }
                 let candidate = State {
                     rotation: to,
-                    x: state.x + dx,
+                    x: column as i8,
                     y: state.y + dy,
                 };
                 let Some(target) = state_index(width, ceiling, candidate) else {
@@ -3224,7 +3350,7 @@ fn compile_rotation_targets(
                     continue;
                 };
                 targets.push(target);
-                kick_indices.push(u8::try_from(kick_index).unwrap_or(u8::MAX));
+                kick_indices.push(u32::try_from(kick_index).expect("admitted kick ordinal"));
             }
             offsets.push(targets.len() as u32);
         }
@@ -3292,17 +3418,14 @@ fn compile_reverse_rotation_sources(
     for transition in 0..state_count * 3 {
         let start = forward_offsets[transition] as usize;
         let end = forward_offsets[transition + 1] as usize;
-        let Ok(source) = u16::try_from(transition / 3) else {
-            continue;
-        };
+        let source = u16::try_from(transition / 3).expect("admitted template pose index");
         let slot = (transition % 3) as u8;
         for (prior_target_count, &target) in forward_targets[start..end].iter().enumerate() {
             if !retained(transition, start + prior_target_count) {
                 continue;
             }
-            let Ok(prior_target_count) = u8::try_from(prior_target_count) else {
-                continue;
-            };
+            let prior_target_count = u32::try_from(prior_target_count)
+                .expect("admitted complete ordered candidate prefix");
             let target = usize::from(target);
             let cursor = cursors[target] as usize;
             sources[cursor] = ReverseRotationSource {
@@ -3380,7 +3503,7 @@ fn global_kick_pruning_enabled() -> bool {
     true
 }
 
-fn state_from_index(width: u8, ceiling: i8, index: usize) -> State {
+fn state_from_index(width: u8, ceiling: i16, index: usize) -> State {
     let rotation_stride = (ceiling as usize + 1) * width as usize;
     let rotation = RotationState::from_quarter_turns((index / rotation_stride) as u8)
         .expect("compiled reachability rotation is valid");
@@ -3388,7 +3511,7 @@ fn state_from_index(width: u8, ceiling: i8, index: usize) -> State {
     State {
         rotation,
         x: (remainder % width as usize) as i8,
-        y: (remainder / width as usize) as i8,
+        y: (remainder / width as usize) as i16,
     }
 }
 
@@ -3396,29 +3519,35 @@ fn rotation_transition_index(from: RotationState, transition_slot: usize) -> usi
     from.quarter_turns() as usize * 3 + transition_slot
 }
 
-fn source_ceiling(height: u8, piece: PieceKind, allow_180: bool, profile: &KickTableProfile) -> i8 {
-    let maximum_downward = profile
-        .entries()
-        .iter()
-        .filter(|entry| entry.transition().piece() == piece)
-        .filter(|entry| allow_180 || !entry.transition().is_180())
-        .flat_map(|entry| {
-            entry.sequence().offsets().iter().map(move |offset| {
-                normalized_kick_delta(
-                    piece,
-                    entry.transition().from(),
-                    entry.transition().to(),
-                    offset.dx(),
-                    offset.dy(),
-                )
-                .1
-            })
-        })
-        .filter(|dy| *dy < 0)
-        .map(|dy| -dy)
-        .max()
-        .unwrap_or(0);
-    height.saturating_add(maximum_downward as u8) as i8
+fn source_ceiling(
+    height: u8,
+    piece: PieceKind,
+    allow_180: bool,
+    profile: &KickTableProfile,
+) -> i16 {
+    let mut ordered: [Vec<(i16, i16)>; 12] = std::array::from_fn(|_| Vec::new());
+    for from in RotationState::ALL {
+        for (slot, to) in [
+            from.clockwise(),
+            from.counter_clockwise(),
+            from.rotated_180(),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            if slot == 2 && !allow_180 {
+                continue;
+            }
+            if let Some(sequence) = profile.sequence_for(KickTransition::new(piece, from, to)) {
+                ordered[rotation_transition_index(from, slot)].extend(
+                    sequence.offsets().iter().map(|offset| {
+                        normalized_kick_delta_wide(piece, from, to, offset.dx(), offset.dy())
+                    }),
+                );
+            }
+        }
+    }
+    KickSkyBounds::for_ordered_deltas(ordered.each_ref().map(Vec::as_slice)).source_ceiling(height)
 }
 
 #[cfg(test)]
@@ -3901,7 +4030,7 @@ mod tests {
             min_x: 0,
             max_x: 9,
             min_y: 4,
-            max_y: template.ceiling,
+            max_y: i8::try_from(template.ceiling).unwrap(),
         };
         let entries = super::canonical_sky_entry_poses(10, template.ceiling, &template.sky_seeds);
         let relation =
@@ -3995,7 +4124,7 @@ mod tests {
                                 min_x: 0,
                                 max_x: 9,
                                 min_y: (height / 2) as i8,
-                                max_y: template.ceiling,
+                                max_y: i8::try_from(template.ceiling).unwrap(),
                             },
                             &entries,
                         )
@@ -4049,7 +4178,10 @@ mod tests {
         };
         for (board, exits) in [
             (0, vec![entry(-1, 1)]),
-            (0, vec![entry(4, template.ceiling + 1)]),
+            (
+                0,
+                vec![entry(4, i8::try_from(template.ceiling + 1).unwrap())],
+            ),
             (1_u64 << 14, vec![entry(4, 1)]),
             (0, Vec::new()),
         ] {
@@ -4082,7 +4214,7 @@ mod tests {
                 min_x: 0,
                 max_x: 9,
                 min_y: 4,
-                max_y: template.ceiling,
+                max_y: i8::try_from(template.ceiling).unwrap(),
             },
             &entries,
         )
@@ -4217,7 +4349,7 @@ mod tests {
             min_x: 0,
             max_x: 9,
             min_y: 4,
-            max_y: template.ceiling,
+            max_y: i8::try_from(template.ceiling).unwrap(),
         };
         let mut entries = template
             .sky_seeds
@@ -4227,7 +4359,7 @@ mod tests {
                 ConditionedReachabilityEntryPose {
                     rotation: state.rotation,
                     x: state.x,
-                    y: state.y,
+                    y: i8::try_from(state.y).unwrap(),
                 }
             })
             .collect::<Vec<_>>();
@@ -4348,7 +4480,7 @@ mod tests {
                         min_x: 0,
                         max_x: 9,
                         min_y: height as i8,
-                        max_y: template.ceiling,
+                        max_y: i8::try_from(template.ceiling).unwrap(),
                     };
                     let mut entries = template
                         .sky_seeds
@@ -4358,7 +4490,7 @@ mod tests {
                             ConditionedReachabilityEntryPose {
                                 rotation: state.rotation,
                                 x: state.x,
-                                y: state.y,
+                                y: i8::try_from(state.y).unwrap(),
                             }
                         })
                         .collect::<Vec<_>>();
@@ -4447,7 +4579,7 @@ mod tests {
             min_x: 0,
             max_x: 9,
             min_y: 0,
-            max_y: template.ceiling,
+            max_y: i8::try_from(template.ceiling).unwrap(),
         };
         let mut entries = template
             .sky_seeds
@@ -4457,7 +4589,7 @@ mod tests {
                 ConditionedReachabilityEntryPose {
                     rotation: state.rotation,
                     x: state.x,
-                    y: state.y,
+                    y: i8::try_from(state.y).unwrap(),
                 }
             })
             .collect::<Vec<_>>();
@@ -4501,7 +4633,7 @@ mod tests {
             min_x: 0,
             max_x: 9,
             min_y: 2,
-            max_y: template.ceiling,
+            max_y: i8::try_from(template.ceiling).unwrap(),
         };
         let mut entries = template
             .sky_seeds
@@ -4511,7 +4643,7 @@ mod tests {
                 ConditionedReachabilityEntryPose {
                     rotation: state.rotation,
                     x: state.x,
-                    y: state.y,
+                    y: i8::try_from(state.y).unwrap(),
                 }
             })
             .collect::<Vec<_>>();
@@ -4564,7 +4696,7 @@ mod tests {
                 let source = State {
                     rotation: from,
                     x: SOURCE_X,
-                    y: SOURCE_Y,
+                    y: i16::from(SOURCE_Y),
                 };
                 let source_index = state_index(WIDTH, template.ceiling, source)
                     .expect("interior source state is compiled");
@@ -4595,7 +4727,7 @@ mod tests {
                             State {
                                 rotation: to,
                                 x: SOURCE_X + dx,
-                                y: SOURCE_Y + dy,
+                                y: i16::from(SOURCE_Y) + i16::from(dy),
                             }
                         })
                         .collect::<Vec<_>>();
@@ -4607,7 +4739,7 @@ mod tests {
                     assert_eq!(
                         template.rotation_kick_indices[start..end],
                         (0..sequence.offsets().len())
-                            .map(|index| index as u8)
+                            .map(|index| index as u32)
                             .collect::<Vec<_>>(),
                         "{piece:?} {from:?}->{to:?} kick order"
                     );
@@ -4689,7 +4821,7 @@ mod tests {
         }
         let start = template.reverse_rotation_offsets[target_index] as usize;
         let end = template.reverse_rotation_offsets[target_index + 1] as usize;
-        let mut best = None::<((bool, bool, u8), clearra_replay::ScoringLockEvidence)>;
+        let mut best = None::<((bool, bool, u32), clearra_replay::ScoringLockEvidence)>;
         let mut tied = false;
         for source in &template.reverse_rotation_sources[start..end] {
             let source_index = usize::from(source.source);
@@ -4703,7 +4835,7 @@ mod tests {
             }
             let transition = source_index * 3 + usize::from(source.slot);
             let offset = template.rotation_target_offsets[transition] as usize
-                + usize::from(source.prior_target_count);
+                + source.prior_target_count as usize;
             let kick = template.rotation_kick_indices[offset];
             let quarter_turn = source.slot < 2;
             let rank = if LEGACY_T_SPIN {
@@ -4726,11 +4858,11 @@ mod tests {
                     clearra_replay::ScoringLockEvidence::rotation(
                         predecessor.rotation,
                         request,
-                        kick,
+                        u8::try_from(kick).expect("builtin kick ordinal"),
                         target.x - predecessor.x,
-                        target.y - predecessor.y,
+                        i8::try_from(target.y - predecessor.y).expect("builtin kick delta"),
                         predecessor.x,
-                        predecessor.y,
+                        i8::try_from(predecessor.y).expect("builtin sky source"),
                     ),
                 ));
             }
@@ -4756,7 +4888,11 @@ mod tests {
                 for rotation in RotationState::ALL {
                     for x in 0..5 {
                         for y in 0..4 {
-                            let target = State { rotation, x, y };
+                            let target = State {
+                                rotation,
+                                x,
+                                y: i16::from(y),
+                            };
                             for (index, legacy) in [false, true].into_iter().enumerate() {
                                 let reference_before = reference_scratch.generation;
                                 let before = scratch.generation;

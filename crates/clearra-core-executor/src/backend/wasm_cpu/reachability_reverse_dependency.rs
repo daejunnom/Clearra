@@ -37,7 +37,7 @@ pub(super) fn reverse_lock_dependency_mask(
         || template.width > i8::MAX as u8
         || template.height == 0
         || cells > u64::BITS as usize
-        || template.ceiling < template.height as i8
+        || template.ceiling < i16::from(template.height)
     {
         return None;
     }
@@ -59,8 +59,15 @@ pub(super) fn reverse_lock_dependency_mask(
     } else {
         (1_u64 << cells) - 1
     };
-    let Some(target) = state_index(template.width, template.ceiling, State { rotation, x, y })
-    else {
+    let Some(target) = state_index(
+        template.width,
+        template.ceiling,
+        State {
+            rotation,
+            x,
+            y: i16::from(y),
+        },
+    ) else {
         // The standard query rejects this target before reading any board bit.
         return (!result.reachable && result.visited_state_count == 0).then_some(0);
     };
@@ -122,7 +129,7 @@ pub(super) fn reverse_lock_dependency_mask(
                 usize::try_from(*template.rotation_target_offsets.get(transition)?).ok()?;
             let transition_end =
                 usize::try_from(*template.rotation_target_offsets.get(transition + 1)?).ok()?;
-            let prior_end = prior_start.checked_add(usize::from(source.prior_target_count))?;
+            let prior_end = prior_start.checked_add(source.prior_target_count as usize)?;
             if prior_end >= transition_end
                 || usize::from(*template.rotation_targets.get(prior_end)?) != current
             {
@@ -198,7 +205,11 @@ mod tests {
                 for rotation in RotationState::ALL {
                     for y in 0..HEIGHT as i8 {
                         for x in 0..WIDTH as i8 {
-                            let target = State { rotation, x, y };
+                            let target = State {
+                                rotation,
+                                x,
+                                y: i16::from(y),
+                            };
                             let index = state_index(WIDTH, template.ceiling, target).unwrap();
                             if template.state_masks[index] == INVALID_STATE_MASK {
                                 continue;
@@ -230,7 +241,7 @@ mod tests {
                         board,
                         target.rotation,
                         target.x,
-                        target.y,
+                        i8::try_from(target.y).unwrap(),
                         &mut scratch,
                     );
                     let expected = contains(oracle, WIDTH, target);
@@ -252,7 +263,7 @@ mod tests {
                         &template,
                         target.rotation,
                         target.x,
-                        target.y,
+                        i8::try_from(target.y).unwrap(),
                         &scratch,
                         &result,
                     )
@@ -347,7 +358,7 @@ mod tests {
                         State {
                             rotation: RotationState::Zero,
                             x,
-                            y
+                            y: i16::from(y),
                         }
                     ));
                 }
@@ -398,7 +409,7 @@ mod tests {
                 board,
                 target.rotation,
                 target.x,
-                target.y,
+                i8::try_from(target.y).unwrap(),
                 &mut scratch,
             );
             assert_eq!(result.reachable, expected);
@@ -406,7 +417,7 @@ mod tests {
                 &template,
                 target.rotation,
                 target.x,
-                target.y,
+                i8::try_from(target.y).unwrap(),
                 &scratch,
                 &result,
             )
