@@ -4,7 +4,7 @@ use clearra_i18n::LanguageId;
 use clearra_output::model::RenderFieldValue;
 use clearra_pc_graph::request::{
     OpeningPcSearchQuery, PcExecutionPolicy, PcQueueInput, PcScenarioBoard, PcScenarioQuery,
-    PieceWindow, RequestedSearchBackend,
+    PieceWindow,
 };
 use clearra_supply::queue::fixed_sequence::FixedSequence;
 
@@ -236,21 +236,18 @@ mod case_diagnostic_error_prevents_execution {
 }
 
 mod case_warning_allows_execution {
+    use clearra_supply::queue::observed_queue::ObservedQueue;
+
     use super::*;
 
     #[test]
     fn warning_allows_execution() {
         let query = PcScenarioQuery::new(
             PcScenarioBoard::standard_10(1, 0x3f0),
-            PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::I])),
+            PcQueueInput::observed(ObservedQueue::new(vec![PieceKind::I])),
             PieceWindow::new(1),
         )
-        .with_exact_pieces(Some(1))
-        .with_execution_policy(
-            PcExecutionPolicy::mvp_default()
-                .with_backend(RequestedSearchBackend::Gpu)
-                .with_allow_backend_fallback(true),
-        );
+        .with_exact_pieces(Some(1));
 
         let response = AppContext::default().run(AppRequest::new(AppCommand::Scenario(
             ScenarioAppCommand::new(query),
@@ -258,9 +255,16 @@ mod case_warning_allows_execution {
 
         assert_eq!(response.status(), AppStatus::Success);
         assert!(!response.diagnostics().has_errors());
-        assert!(!response.diagnostics().validation().is_empty());
-        assert!(response.render_model().is_some());
-        assert!(response.backend_report().fallback_used());
+        assert!(response
+            .diagnostics()
+            .validation()
+            .contains_code(DiagnosticCode::WSupplyAmbiguousObservedWindow));
+        let Some(AppRenderModel::Scenario(result)) = response.render_model() else {
+            panic!("a supply warning must preserve the executed scenario result");
+        };
+        assert!(result.solution_found());
+        assert!(response.resource_report().solver_executed());
+        assert!(!response.backend_report().fallback_used());
         assert_eq!(response.backend_report().backend_selected(), "wasm-cpu");
     }
 }

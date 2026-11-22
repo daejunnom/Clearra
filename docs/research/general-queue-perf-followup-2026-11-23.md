@@ -17,7 +17,8 @@ GitHub `codex/full6l-p1p7p7-20261122`의 `92dc86b0`와 이전 로컬 작업공�
 `a39988f2901b8d842da5e2665fc4923391e1d032`다. 검증 때의 로컬 commit
 `662a02e0`를 동일 tree인 원격 기준 위에 재배치했고, 원격 기록에서도 그 tree를
 다시 확인했다. 소스 내용과 검증 실행파일은 바뀌지 않았다. 후속 문서 기록 이후의
-FFI 파일 경계와 데스크톱 잠금 파일 정리는 아래 8절에서 별도로 구분한다.
+FFI 파일 경계, 데스크톱 잠금 파일, 전체 CI에서 발견한 계약·fixture 정리는 아래
+8절에서 별도로 구분한다.
 
 옛 작업공간의 미커밋 자료도 읽기 전용으로 확인했다. 큰 WebGPU 제거·생성 한도
 정리는 현재 구현에 계승되어 있었고, 미연결 `extended_build_symbolic.rs` 초안은
@@ -356,3 +357,65 @@ SHA-256을 사용하므로 단순 mtime이나 원격 브랜치 갱신이 원인�
 metadata 시도도 Tauri 독립 의존성의 registry `serde_json`이 없어 해석 전에 막혔으므로
 stale lock 오류를 직접 재현했다고 기록하지 않는다. 수정된 잠금 파일과 실행 명령은
 후속 정확한 커밋의 Windows DesktopHost 및 transaction seal 결과로 확인한다.
+
+### 8.1. 전체 Rust 검증에서 확인한 계약과 fixture
+
+최초 후보의 RustExact는 app 483 passed / 5 failed / 2 ignored, core executor
+1414 passed / 2 failed / 19 ignored였다. 실패를 다음과 같이 구분하여 수정했다.
+
+- `rust_legacy_cover.rs`의 진입 guard가 `BuildCoverageLimits`의 **0 = 무제한**
+  계약과 달리 0 budget을 거부했다. 양수 pattern limit을 넘을 때만 거부하도록
+  수정하고, assignment limit 0 거부를 제거했다. 빈 원본 축, 범위 밖 selected
+  ordinal, 명시적인 유한 pattern cap의 거부는 유지한다. 각각의 0 sentinel을
+  독립 확인하고 유한 assignment budget 소진 시 incomplete 결과를 완전한
+  coverage로 발행하지 못하는 회귀 검증을 추가했다. 기존 app 실패 4개가 이
+  guard의 영향을 받았다.
+- `warning_allows_execution`은 제거된 GPU fallback을 성공 경로로 기대했다.
+  현재 CPU 경로의 observed-supply 경고로 fixture를 바꾸고, 정확한 경고 코드,
+  실제 solver 실행·성공 결과, fallback 미사용까지 확인한다.
+- Truncated original-axis fixture는 retained 원본에 witness가 없는데도
+  `covers_any_pattern=true`를 기대했다. 완전한 원본 축의 dense/symbolic 양성
+  대조군을 추가하고 truncated 축의 false·0·no witness·empty bits를 확인한다.
+  제품 구현을 수정한 것이 아니라 기존 retained-axis 계약에 기대값을 맞췄다.
+- Full6 pruning gate fixture가 여러 search session의 compute/memory lease를
+  동시에 보유하여 4 CPU CI에서 admission을 소진했다. 불변 catalog만 공유하고
+  각 session의 수명을 개별 scope로 제한했다. 모든 gate assertion과
+  `expanded_nodes == 0` 검증은 유지하며, 제품의 자원 admission을 완화하지 않았다.
+
+두 core 실패는 이전 소스로 재현했다. 수정 후 각 정확한 테스트가 통과했으며,
+Full6 gate fixture는 CPU 2개로 제한해도 통과했다. 이는 session 구성 검증으로,
+거대한 family를 생성하거나 Full6 탐색을 재실행하지 않는다.
+
+App 수정은 `cargo check --locked --offline -p clearra-app --tests`를 통과했다.
+로컬 native-C libtest 빌드는 `clearra_core` 정적 archive 부재로 링크하지 못했고,
+default app 전체 libtest 빌드는 codegen 중 SIGKILL로 끝났다. 두 경우 모두 테스트
+실행 결과로 계산하지 않는다. 동일한 전체 libtest를 재시도하지 않고 production
+library와 공개 API를 사용하는 좁은 기능 검증으로 로컬 확인 범위를 한정했다.
+첫 default-only library는 native worker pool이 없는 feature 조합이어서 계산 전
+거부됐다. 실제 native Rust 제품과 같은 `parallel` feature의 production library에
+연결한 공개 API 검증은 **4 passed / 0 failed / 0 ignored**였다. Observed-supply
+경고 후 실행, 양수 original ordinal, 기존 빈 packing 결과, 전체 original 축과
+무제한 budget·유한 cap 거부를 확인했다. 이는 기능 검증이며 소입력 성능 표본이
+아니다. 전체 native-C libtest와 같다고 간주하지 않고 후속 CI에 맡긴다.
+
+정확한 library·harness source SHA-256·실행 인자는 `app-public-api-parallel-command.json`,
+결과는 `app-public-api-parallel-functional.log`에 있다. Production library 빌드
+receipt는 `1795382097353591410-5`, 공개 API 실행은 `1795382208652246596-5`,
+unit source 타입 검사는 `1795381871870845074-5`다. 실패한 앞선 시도의 로그와
+receipt도 보존했으며 결과 수치에서 제외했다. 담당 파일의 rustfmt와 전체 diff
+whitespace 검사도 통과했다.
+
+### 8.2. 최초 후보의 최종 결과와 후속 검증 범위
+
+최초 run `45068762194`, attempt 1은 source SHA `a03a4b9b`에서 **실행 job
+6개 성공 / 3개 실패**로 종료했다. Source, adversarial, sanitizer, Linux native
+readback, WASM·Chromium, product E2E가 통과했고, no-product-debt, desktop-host,
+rust-exact가 위 이유로 실패했다. Focused job 4개의 skipped는 full gate 선택에
+따른 정상 분기다. 이 실패 run은 취소하거나 재실행하지 않았다.
+
+수정 후 새 커밋의 전체 Candidate Preflight 결과는 해당 exact SHA의 별도 run으로
+확인한다. 성능 수치는 계속 1절에 명시한 제품 tree와 실행파일에 귀속되며 후속
+계약·fixture 수정 커밋의 성능 측정으로 재명명하지 않는다. Chromium 기능 검증
+통과는 실제 지연 감소율이나 브라우저 peak memory 측정 결과를 의미하지 않는다.
+원본 CI 응답·실패 로그와 로컬 회귀 근거는
+`_local/artifacts/candidate-preflight-45068762194/`에 보존했다.

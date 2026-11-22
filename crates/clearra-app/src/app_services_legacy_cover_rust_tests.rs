@@ -177,6 +177,75 @@ fn rust_legacy_cover_complete_observed_keeps_all_original_ordinals() {
 }
 
 #[test]
+fn rust_legacy_cover_product_preserves_unbounded_budgets_and_finite_pattern_caps() {
+    let _resource = crate::execution_resource_test_support::execution_resource_test_guard();
+    let piece_count = PieceKind::STANDARD_TETROMINOES.len();
+    let pattern_count = piece_count * piece_count;
+    let template_query = one_horizontal_i(pattern_count, 0);
+    let query_with_limits = |limits| {
+        BuildCoverageQuery::new(
+            template_query.template().clone(),
+            template_query.domains().to_vec(),
+            Vec::new(),
+            pattern_count,
+            limits,
+        )
+    };
+    for limits in [
+        BuildCoverageLimits::new(0, pattern_count),
+        BuildCoverageLimits::new(2, 0),
+    ] {
+        let query = query_with_limits(limits);
+        let product = clearra_core_executor::CoreExecutor::execute_build_coverage_with_control(
+            &compile(&query),
+            &query,
+            &ExecutionControl::default(),
+        )
+        .expect("each zero budget independently leaves its generation dimension unbounded");
+        assert_eq!(
+            product.usize_field("max_assignments"),
+            Some(limits.max_assignments())
+        );
+        assert_eq!(
+            product.usize_field("max_patterns"),
+            Some(limits.max_patterns())
+        );
+        assert_eq!(product.usize_field("pattern_count"), Some(pattern_count));
+        assert_eq!(
+            product.usize_field("union_covered_patterns"),
+            Some(piece_count)
+        );
+        assert_eq!(product.bool_field("probability_complete"), Some(true));
+    }
+
+    let limited = one_horizontal_i(pattern_count, pattern_count - 1);
+    let error = clearra_core_executor::CoreExecutor::execute_build_coverage_with_control(
+        &compile(&limited),
+        &limited,
+        &ExecutionControl::default(),
+    )
+    .expect_err("an explicit finite cap must still reject a larger requested ordinal scope");
+    assert_eq!(
+        error,
+        clearra_core_executor::CoreExecutionError::Cover("invalid_legacy_cover_scope".to_owned())
+    );
+
+    let assignment_limited = query_with_limits(BuildCoverageLimits::new(1, 0));
+    let error = clearra_core_executor::CoreExecutor::execute_build_coverage_with_control(
+        &compile(&assignment_limited),
+        &assignment_limited,
+        &ExecutionControl::default(),
+    )
+    .expect_err("an exhausted finite assignment budget cannot publish complete coverage");
+    assert_eq!(
+        error,
+        clearra_core_executor::CoreExecutionError::Cover(
+            "Coverage(ConcreteAssignmentSearchIncomplete)".to_owned()
+        )
+    );
+}
+
+#[test]
 fn rust_legacy_cover_complete_observed_rejects_partial_denominators_and_cancellation() {
     let count = PieceKind::STANDARD_TETROMINOES.len().pow(2);
     // First input requests only a prefix even though the available source is

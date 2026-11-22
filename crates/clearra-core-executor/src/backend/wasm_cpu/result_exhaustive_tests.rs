@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use clearra_core_domain::{
     execution_cancellation::ExecutionControl, pc::pc_target::PcTarget, piece::piece_kind::PieceKind,
 };
@@ -153,11 +155,24 @@ fn full6l_physical_prefix_pruning_matches_harness_and_rejects_other_contracts() 
 
     // Construction checks the actual product gate without compiling or
     // traversing the enormous Full6L candidate family.
-    let session = WasmExactSearchSession::new(&problem).unwrap();
-    assert!(session.physical_prefix_pruning_active);
-    assert!(session.geometry.physical_prefix_pruning_enabled());
-    assert!(session.geometry.source_prefix_pruning_enabled());
-    assert_eq!(session.geometry.expanded_nodes(), 0);
+    // Each constructor owns compute and memory leases. Keep only the immutable
+    // catalog between checks so this fixture needs one admitted session at a time.
+    let catalog = {
+        let session = WasmExactSearchSession::new(&problem).unwrap();
+        assert!(session.physical_prefix_pruning_active);
+        assert!(session.geometry.physical_prefix_pruning_enabled());
+        assert!(session.geometry.source_prefix_pruning_enabled());
+        assert_eq!(session.geometry.expanded_nodes(), 0);
+
+        let mut single_target = GeometrySearch::new_for_verifier_target(
+            session.catalog.required_cells(),
+            session.geometry.compiling_target(0).unwrap(),
+        );
+        single_target.enable_physical_prefix_pruning();
+        single_target.enable_full_draw_source_prefix_pruning(&problem);
+        assert!(!single_target.source_prefix_pruning_enabled());
+        Arc::clone(&session.catalog)
+    };
 
     // Numeric trace retention is an upper bound on the ordinary representative,
     // not an execution-family evidence request. Both exact accelerators retain
@@ -221,19 +236,13 @@ fn full6l_physical_prefix_pruning_matches_harness_and_rejects_other_contracts() 
     assert_eq!(opening.replay_trace_policy().retained_trace_limit(), 64);
     assert!(opening.backend_request().exact_legal_board_enabled());
     assert!(opening.backend_request().conditioned_reachability_enabled());
-    let opening_session = WasmExactSearchSession::new(&opening).unwrap();
-    assert!(opening_session.physical_prefix_pruning_active);
-    assert!(opening_session.geometry.physical_prefix_pruning_enabled());
-    assert!(opening_session.geometry.source_prefix_pruning_enabled());
-    assert_eq!(opening_session.geometry.expanded_nodes(), 0);
-
-    let mut single_target = GeometrySearch::new_for_verifier_target(
-        session.catalog.required_cells(),
-        session.geometry.compiling_target(0).unwrap(),
-    );
-    single_target.enable_physical_prefix_pruning();
-    single_target.enable_full_draw_source_prefix_pruning(&problem);
-    assert!(!single_target.source_prefix_pruning_enabled());
+    {
+        let opening_session = WasmExactSearchSession::new(&opening).unwrap();
+        assert!(opening_session.physical_prefix_pruning_active);
+        assert!(opening_session.geometry.physical_prefix_pruning_enabled());
+        assert!(opening_session.geometry.source_prefix_pruning_enabled());
+        assert_eq!(opening_session.geometry.expanded_nodes(), 0);
+    }
 
     let explicit_query = full6l_query(PcQueueInput::fixed_sequence(FixedSequence::new(vec![
         PieceKind::I,
@@ -302,18 +311,16 @@ fn full6l_physical_prefix_pruning_matches_harness_and_rejects_other_contracts() 
         ),
     ] {
         assert!(
-            !super::full6l_physical_prefix_pruning_eligible(&other, &session.catalog),
+            !super::full6l_physical_prefix_pruning_eligible(&other, &catalog),
             "{contract}",
         );
     }
-    let external = WasmExactSearchSession::new_external_geometry(&problem).unwrap();
-    assert!(!external.physical_prefix_pruning_active);
-    assert!(!external.geometry.source_prefix_pruning_enabled());
-    assert!(!external.geometry.physical_prefix_pruning_enabled());
-    let external_opening = WasmExactSearchSession::new_external_geometry(&opening).unwrap();
-    assert!(!external_opening.physical_prefix_pruning_active);
-    assert!(!external_opening.geometry.source_prefix_pruning_enabled());
-    assert!(!external_opening.geometry.physical_prefix_pruning_enabled());
+    for external_problem in [&problem, &opening] {
+        let external = WasmExactSearchSession::new_external_geometry(external_problem).unwrap();
+        assert!(!external.physical_prefix_pruning_active);
+        assert!(!external.geometry.source_prefix_pruning_enabled());
+        assert!(!external.geometry.physical_prefix_pruning_enabled());
+    }
 }
 
 #[test]

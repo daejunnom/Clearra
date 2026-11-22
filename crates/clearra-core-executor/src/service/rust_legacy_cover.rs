@@ -256,9 +256,10 @@ pub(crate) fn execute(
     {
         return Err(unavailable("rust_legacy_cover_authority_mismatch"));
     }
+    // Zero leaves either generation budget unbounded; only an explicit
+    // positive pattern limit can reject the requested ordinal scope.
     if pattern_count == 0
-        || pattern_count > limits.max_patterns()
-        || limits.max_assignments() == 0
+        || (limits.max_patterns() != 0 && pattern_count > limits.max_patterns())
         || selected.is_some_and(|ordinal| ordinal >= pattern_count)
     {
         return Err(CoreExecutionError::Cover(

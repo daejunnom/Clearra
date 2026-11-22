@@ -390,17 +390,34 @@ fn extended_standard_bag_gate_rejects_truncated_and_factorized_original_axes() {
         .unwrap()
     );
 
-    // A nonempty full-bag DD is not proof that its truncated original prefix
-    // has a witness. This is the concrete reason for the complete-axis gate.
+    // The graph has witnesses in the complete original axis, all outside the
+    // retained prefix. Every coverage summary must use the retained originals.
     let graph = word_graph(&[T, O]);
+    let complete_bits = dense_coverage(&complete, &graph);
+    assert!(!complete_bits.is_empty());
     assert!(dense_coverage(&truncated, &graph).is_empty());
     let mut language = PieceOrderLanguageCache::default();
     let root = language.canonicalize(&graph).unwrap();
+    let mut complete_coverage = standard_coverage(&complete);
+    let complete_result = complete_coverage
+        .cover_language(&language, root, &ExecutionControl::default())
+        .unwrap();
+    assert!(complete_result.covers_any_pattern);
+    assert_eq!(
+        complete_result.covered_pattern_count,
+        complete_bits.count_ones() as usize,
+    );
+    assert_eq!(
+        complete_coverage
+            .materialize_root(complete_result.root)
+            .unwrap(),
+        complete_bits,
+    );
     let mut coverage = standard_coverage(&truncated);
     let outside_prefix = coverage
         .cover_language(&language, root, &ExecutionControl::default())
         .unwrap();
-    assert!(outside_prefix.covers_any_pattern);
+    assert!(!outside_prefix.covers_any_pattern);
     assert_eq!(outside_prefix.covered_pattern_count, 0);
     assert_eq!(outside_prefix.witness_pattern_id, None);
     assert!(coverage
