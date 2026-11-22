@@ -3428,7 +3428,10 @@ pub(super) fn verify_candidate_for_completion(
     spin_coverage_requested: bool,
     control: &ExecutionControl,
 ) -> Result<CandidateBuildResult, WasmExactSearchError> {
-    verify_candidate_for_completion_mode(
+    #[cfg(any(feature = "search-stage-profiling", feature = "wasm-stage-profiling"))]
+    let reachability_sample =
+        (profile_scale != 0).then(|| CandidateReachabilitySample::capture(workspace));
+    let result = verify_candidate_for_completion_mode(
         problem,
         catalog,
         candidate,
@@ -3442,7 +3445,12 @@ pub(super) fn verify_candidate_for_completion(
         false,
         spin_coverage_requested,
         control,
-    )
+    );
+    #[cfg(any(feature = "search-stage-profiling", feature = "wasm-stage-profiling"))]
+    if let Some(sample) = reachability_sample {
+        sample.finish(workspace, profile_scale);
+    }
+    result
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3460,7 +3468,10 @@ pub(super) fn verify_candidate_for_completion_with_finesse(
     spin_coverage_requested: bool,
     control: &ExecutionControl,
 ) -> Result<CandidateBuildResult, WasmExactSearchError> {
-    verify_candidate_for_completion_mode(
+    #[cfg(any(feature = "search-stage-profiling", feature = "wasm-stage-profiling"))]
+    let reachability_sample =
+        (profile_scale != 0).then(|| CandidateReachabilitySample::capture(workspace));
+    let result = verify_candidate_for_completion_mode(
         problem,
         catalog,
         candidate,
@@ -3474,7 +3485,84 @@ pub(super) fn verify_candidate_for_completion_with_finesse(
         true,
         spin_coverage_requested,
         control,
-    )
+    );
+    #[cfg(any(feature = "search-stage-profiling", feature = "wasm-stage-profiling"))]
+    if let Some(sample) = reachability_sample {
+        sample.finish(workspace, profile_scale);
+    }
+    result
+}
+
+/// Read existing worker counters only at the existing candidate sample points.
+/// These are weighted work estimates, not exact whole-search totals. No timer,
+/// allocation, or per-lock profiler call is added to the movement hot path.
+#[cfg(any(feature = "search-stage-profiling", feature = "wasm-stage-profiling"))]
+struct CandidateReachabilitySample {
+    metrics: super::reachability::ReachabilityMetrics,
+    generated_states: usize,
+}
+
+#[cfg(any(feature = "search-stage-profiling", feature = "wasm-stage-profiling"))]
+impl CandidateReachabilitySample {
+    fn capture(workspace: &BuildUpWorkspace) -> Self {
+        Self {
+            metrics: workspace.reachability.metrics(),
+            generated_states: workspace.reachability.generated_state_count(),
+        }
+    }
+
+    fn finish(self, workspace: &BuildUpWorkspace, scale: u64) {
+        let after = workspace.reachability.metrics();
+        for (stage, before, after) in [
+            (
+                ExecutorSearchStage::WasmReachabilityLockQueries,
+                self.metrics.lock_queries,
+                after.lock_queries,
+            ),
+            (
+                ExecutorSearchStage::WasmReachabilityHarddropQueries,
+                self.metrics.harddrop_queries,
+                after.harddrop_queries,
+            ),
+            (
+                ExecutorSearchStage::WasmReachabilityHarddropHits,
+                self.metrics.harddrop_hits,
+                after.harddrop_hits,
+            ),
+            (
+                ExecutorSearchStage::WasmReachabilityCacheReachableHits,
+                self.metrics.cache_reachable_hits,
+                after.cache_reachable_hits,
+            ),
+            (
+                ExecutorSearchStage::WasmReachabilityCacheUnreachableHits,
+                self.metrics.cache_unreachable_hits,
+                after.cache_unreachable_hits,
+            ),
+            (
+                ExecutorSearchStage::WasmReachabilityCacheKeyMisses,
+                self.metrics.cache_key_misses,
+                after.cache_key_misses,
+            ),
+            (
+                ExecutorSearchStage::WasmReachabilityPartialSearches,
+                self.metrics.partial_searches,
+                after.partial_searches,
+            ),
+            (
+                ExecutorSearchStage::WasmReachabilityExhaustiveSearches,
+                self.metrics.exhaustive_searches,
+                after.exhaustive_searches,
+            ),
+            (
+                ExecutorSearchStage::WasmReachabilityGeneratedStates,
+                self.generated_states,
+                workspace.reachability.generated_state_count(),
+            ),
+        ] {
+            SearchStageSpan::record_sampled_work(stage, after.saturating_sub(before) as u64, scale);
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

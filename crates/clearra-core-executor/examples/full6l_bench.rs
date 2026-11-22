@@ -1,14 +1,16 @@
-//! Native Rust PC diagnostics for the complete finite P1P7P7 source.
+//! Native Rust PC diagnostics for complete finite P1P7P7 and OP7P7 sources.
 //!
 //! Build with `--release --features parallel,wasm-stage-profiling`
 //! and compile-time `CLEARRA_SOURCE_COMMIT`. Full runs require clearra-manage's
 //! benchmark-search profile. `--small` is a one-I executable-contract check.
-//! The diagnostic deadline starts before source preparation; cancellation does
-//! not turn partial work into a complete probability or solution-set result.
+//! The legacy diagnostic deadline starts before source preparation. The optional
+//! post-preparation deadline starts only after the frozen family tables are ready.
+//! Cancellation never turns partial work into a complete product result.
 
 use clearra_core_domain::{
     execution_cancellation::{
-        ExecutionCancellationToken, ExecutionControl, ExecutionProgress, ProgressSink,
+        ExecutionCancellationHandle, ExecutionCancellationToken, ExecutionControl,
+        ExecutionProgress, ProgressSink,
     },
     piece::piece_kind::PieceKind,
     runtime_cpu_capacity::CpuCapacity,
@@ -42,10 +44,12 @@ use std::{
 };
 
 const FULL_PATTERN_COUNT: usize = 177_811_200;
+const OPENING_O_PATTERN_COUNT: usize = 25_401_600;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Fixture {
     Full6L,
+    Full6LOpeningO,
     OneI,
 }
 
@@ -53,20 +57,21 @@ impl Fixture {
     const fn name(self) -> &'static str {
         match self {
             Self::Full6L => "empty-6L-P1P7P7-srs-plus",
+            Self::Full6LOpeningO => "empty-6L-OP7P7-srs-plus",
             Self::OneI => "one-I-preflight-srs-plus",
         }
     }
 
     const fn height(self) -> u16 {
         match self {
-            Self::Full6L => 6,
+            Self::Full6L | Self::Full6LOpeningO => 6,
             Self::OneI => 1,
         }
     }
 
     const fn draws(self) -> usize {
         match self {
-            Self::Full6L => 15,
+            Self::Full6L | Self::Full6LOpeningO => 15,
             Self::OneI => 1,
         }
     }
@@ -74,7 +79,28 @@ impl Fixture {
     const fn patterns(self) -> usize {
         match self {
             Self::Full6L => FULL_PATTERN_COUNT,
+            Self::Full6LOpeningO => OPENING_O_PATTERN_COUNT,
             Self::OneI => 1,
+        }
+    }
+
+    const fn pattern(self) -> &'static str {
+        match self {
+            Self::Full6L => "P1P7P7",
+            Self::Full6LOpeningO => "OP7P7",
+            Self::OneI => "I",
+        }
+    }
+
+    const fn is_full6l(self) -> bool {
+        matches!(self, Self::Full6L | Self::Full6LOpeningO)
+    }
+
+    const fn first_atom_choices(self) -> &'static [PieceKind] {
+        match self {
+            Self::Full6L => &PieceKind::STANDARD_TETROMINOES,
+            Self::Full6LOpeningO => &[PieceKind::O],
+            Self::OneI => &[PieceKind::I],
         }
     }
 }
@@ -100,6 +126,7 @@ struct Options {
     objective: Objective,
     profile: bool,
     cancel_after_seconds: Option<u64>,
+    post_prepare_seconds: Option<u64>,
 }
 
 fn main() {
@@ -132,7 +159,10 @@ fn main_on_product_stack() -> i32 {
 }
 
 fn options() -> Result<Options, String> {
-    let mut args = std::env::args().skip(1);
+    parse_options(std::env::args().skip(1))
+}
+
+fn parse_options(mut args: impl Iterator<Item = String>) -> Result<Options, String> {
     let run = match args.next().as_deref() {
         Some("compile") => false,
         Some("run") => true,
@@ -144,11 +174,23 @@ fn options() -> Result<Options, String> {
         objective: Objective::Unique,
         profile: false,
         cancel_after_seconds: None,
+        post_prepare_seconds: None,
     };
     let mut selected_objective = false;
+    let mut selected_pattern = false;
     while let Some(arg) = args.next() {
         match arg.as_str() {
-            "--small" if options.fixture == Fixture::Full6L => options.fixture = Fixture::OneI,
+            "--small" if options.fixture == Fixture::Full6L && !selected_pattern => {
+                options.fixture = Fixture::OneI;
+            }
+            "--pattern" if options.fixture.is_full6l() && !selected_pattern => {
+                options.fixture = match args.next().as_deref() {
+                    Some("P1P7P7") => Fixture::Full6L,
+                    Some("OP7P7") => Fixture::Full6LOpeningO,
+                    _ => return Err(usage()),
+                };
+                selected_pattern = true;
+            }
             "--objective" if !selected_objective => {
                 options.objective = match args.next().as_deref() {
                     Some("unique") => Objective::Unique,
@@ -158,7 +200,10 @@ fn options() -> Result<Options, String> {
                 selected_objective = true;
             }
             "--profile" if !options.profile => options.profile = true,
-            "--cancel-after-seconds" if options.cancel_after_seconds.is_none() => {
+            "--cancel-after-seconds" | "--post-prepare-seconds"
+                if options.cancel_after_seconds.is_none()
+                    && options.post_prepare_seconds.is_none() =>
+            {
                 let seconds = args
                     .next()
                     .ok_or_else(usage)?
@@ -167,28 +212,48 @@ fn options() -> Result<Options, String> {
                 if seconds == 0 {
                     return Err(usage());
                 }
-                options.cancel_after_seconds = Some(seconds);
+                if arg == "--post-prepare-seconds" {
+                    options.post_prepare_seconds = Some(seconds);
+                } else {
+                    options.cancel_after_seconds = Some(seconds);
+                }
             }
             _ => return Err(usage()),
         }
     }
-    if !run && (options.profile || options.cancel_after_seconds.is_some()) {
+    if !run
+        && (options.profile
+            || options.cancel_after_seconds.is_some()
+            || options.post_prepare_seconds.is_some())
+    {
         return Err("profiling and the diagnostic deadline require run".into());
+    }
+    if options.post_prepare_seconds.is_some() && !options.fixture.is_full6l() {
+        return Err("the post-preparation deadline requires a Full6L source".into());
     }
     Ok(options)
 }
 
 fn usage() -> String {
-    "usage: full6l_bench compile|run [--small] [--objective unique|chance] [--profile] [--cancel-after-seconds N]".into()
+    "usage: full6l_bench compile|run [--small | --pattern P1P7P7|OP7P7] [--objective unique|chance] [--profile] [--cancel-after-seconds N | --post-prepare-seconds N]".into()
 }
 
 fn run(options: &Options, report: &mut Value) -> Result<(), String> {
     report["fixture"] = json!(options.fixture.name());
     report["mode"] = json!(if options.run { "run" } else { "compile" });
     report["requested_objective"] = json!(options.objective.name());
-    report["diagnostic_only"] = json!(options.profile || options.cancel_after_seconds.is_some());
+    report["diagnostic_only"] = json!(
+        options.profile
+            || options.cancel_after_seconds.is_some()
+            || options.post_prepare_seconds.is_some()
+    );
     report["diagnostic_deadline_seconds"] = json!(options.cancel_after_seconds);
-    report["deadline_scope"] = json!("source preparation, compilation, execution and result recording; cooperative cancellation, supervisor owns hard timeout");
+    report["post_prepare_seconds"] = json!(options.post_prepare_seconds);
+    report["deadline_scope"] = json!(if options.post_prepare_seconds.is_some() {
+        "after geometry-candidate-family: frozen family tables ready, before task split; cooperative cancellation, supervisor owns hard timeout"
+    } else {
+        "source preparation, compilation, execution and result recording; cooperative cancellation, supervisor owns hard timeout"
+    });
     report["supervision"] = json!({
         "supervised": std::env::var("CLEARRA_RUNTIME_SUPERVISED").ok(),
         "profile": std::env::var("CLEARRA_RUNTIME_PROFILE").ok(),
@@ -200,7 +265,7 @@ fn run(options: &Options, report: &mut Value) -> Result<(), String> {
                 "run requires native --features parallel; no serial substitute was used".into(),
             );
         }
-        if options.fixture == Fixture::Full6L
+        if options.fixture.is_full6l()
             && (std::env::var("CLEARRA_RUNTIME_SUPERVISED").as_deref() != Ok("1")
                 || std::env::var("CLEARRA_RUNTIME_PROFILE").as_deref() != Ok("benchmark-search"))
         {
@@ -208,22 +273,56 @@ fn run(options: &Options, report: &mut Value) -> Result<(), String> {
         }
     }
     let cancellation = ExecutionCancellationToken::new();
-    let timer = options.cancel_after_seconds.map(|seconds| {
-        let (done, wait) = mpsc::channel::<()>();
-        let handle = cancellation.handle();
-        let timer = thread::spawn(move || {
-            if matches!(
-                wait.recv_timeout(Duration::from_secs(seconds)),
-                Err(mpsc::RecvTimeoutError::Timeout)
-            ) {
-                eprintln!("full6l_bench diagnostic_cancel_after_seconds={seconds}");
-                handle.cancel();
-            }
+    let post_prepare = options
+        .post_prepare_seconds
+        .map(|seconds| Arc::new(PostPreparationWindow::new(seconds)));
+    let timer = options
+        .cancel_after_seconds
+        .or(options.post_prepare_seconds)
+        .map(|seconds| {
+            let (done, wait) = mpsc::channel::<DiagnosticTimerEvent>();
+            let handle = cancellation.handle();
+            let post_prepare = post_prepare.clone();
+            let timer = thread::spawn(move || {
+                if let Some(window) = post_prepare {
+                    let Ok(DiagnosticTimerEvent::FamilyPrepared(started)) = wait.recv() else {
+                        return;
+                    };
+                    loop {
+                        window.sample_memory();
+                        let remaining =
+                            Duration::from_secs(seconds).saturating_sub(started.elapsed());
+                        if remaining.is_zero() {
+                            window.record_cancellation_request();
+                            eprintln!("full6l_bench diagnostic_post_prepare_seconds={seconds}");
+                            handle.cancel();
+                            return;
+                        }
+                        match wait.recv_timeout(remaining.min(Duration::from_secs(1))) {
+                            Ok(DiagnosticTimerEvent::Finished)
+                            | Err(mpsc::RecvTimeoutError::Disconnected) => return,
+                            Ok(DiagnosticTimerEvent::FamilyPrepared(_))
+                            | Err(mpsc::RecvTimeoutError::Timeout) => {}
+                        }
+                    }
+                }
+                if matches!(
+                    wait.recv_timeout(Duration::from_secs(seconds)),
+                    Err(mpsc::RecvTimeoutError::Timeout)
+                ) {
+                    eprintln!("full6l_bench diagnostic_cancel_after_seconds={seconds}");
+                    handle.cancel();
+                }
+            });
+            (done, timer)
         });
-        (done, timer)
-    });
-    let control = ExecutionControl::new(cancellation.clone())
-        .with_progress_sink(Arc::new(DiagnosticProgress::new()));
+    let progress = DiagnosticProgress::new(
+        post_prepare.clone(),
+        timer.as_ref().map(|(done, _)| done.clone()),
+        cancellation.handle(),
+    );
+    let control =
+        ExecutionControl::new(cancellation.clone()).with_progress_sink(Arc::new(progress));
     let mut phases = PhaseClock::new();
     let outcome = (|| {
         let profile = start_profile(options.profile)?;
@@ -233,8 +332,11 @@ fn run(options: &Options, report: &mut Value) -> Result<(), String> {
     })();
     phases.finish(report);
     if let Some((done, timer)) = timer {
-        let _ = done.send(());
+        let _ = done.send(DiagnosticTimerEvent::Finished);
         timer.join().map_err(|_| "diagnostic timer panicked")?;
+    }
+    if let Some(window) = post_prepare {
+        report["post_preparation_observation"] = window.report(&report["profile"]);
     }
     report["cancellation_requested"] = json!(cancellation.is_cancelled());
     outcome
@@ -315,11 +417,11 @@ fn query(fixture: Fixture, hardware_limit: usize) -> Result<PcScenarioQuery, Str
         .with_tablebase_requested(false)
         .with_max_patterns(0);
     let (mask, queue, hold) = match fixture {
-        Fixture::Full6L => (
+        Fixture::Full6L | Fixture::Full6LOpeningO => (
             0,
             PcQueueInput::pattern_expression(
-                QueuePatternExpression::parse("P1P7P7", 0)
-                    .map_err(|error| format!("P1P7P7 expression: {error:?}"))?,
+                QueuePatternExpression::parse(fixture.pattern(), 0)
+                    .map_err(|error| format!("{} expression: {error:?}", fixture.pattern()))?,
             ),
             true,
         ),
@@ -379,7 +481,7 @@ fn validate_compiled(
     })).collect::<Vec<_>>()
     });
     report["source"] = json!({
-        "pattern": if fixture == Fixture::Full6L { "P1P7P7" } else { "I" },
+        "pattern": fixture.pattern(),
         "problem_id": problem.problem_id().as_str(),
         "piece_source_id": source.id().get(), "source_kind": source.kind().as_str(),
         "pattern_universe_id": universe.pattern_universe_id().get(),
@@ -425,7 +527,7 @@ fn validate_compiled(
         "max_memory_mib": problem.backend_request().max_memory_mib(),
         "resource_budget": format!("{:?}", problem.resource_budget()),
     });
-    let full = fixture == Fixture::Full6L;
+    let full = fixture.is_full6l();
     let expected_output = if objective == Objective::Unique {
         SearchOutputPolicy::Trace
     } else {
@@ -470,19 +572,31 @@ fn validate_compiled(
     }
     if full
         && !factorized.is_some_and(|shape| {
-            shape.pattern_count() == FULL_PATTERN_COUNT
+            shape.pattern_count() == fixture.patterns()
                 && shape.full_sequence_len() == 15
                 && shape.visible_sequence_len() == 15
                 && shape
                     .atoms()
                     .map(|atom| (atom.draw_count(), atom.variant_count()))
-                    .eq([(1, 7), (7, 5040), (7, 5040)])
-                && shape
-                    .atoms()
-                    .all(|atom| atom.choices() == PieceKind::STANDARD_TETROMINOES)
+                    .eq([
+                        (1, fixture.first_atom_choices().len()),
+                        (7, 5040),
+                        (7, 5040),
+                    ])
+                && shape.atoms().enumerate().all(|(index, atom)| {
+                    atom.choices()
+                        == if index == 0 {
+                            fixture.first_atom_choices()
+                        } else {
+                            &PieceKind::STANDARD_TETROMINOES
+                        }
+                })
         })
     {
-        return Err("P1P7P7 lost its complete ranked 1+7+7 factorized source".into());
+        return Err(format!(
+            "{} lost its complete ranked 1+7+7 factorized source",
+            fixture.pattern()
+        ));
     }
     report["compiled_contract_valid"] = json!(true);
     Ok(())
@@ -575,7 +689,7 @@ fn record_result(
         || words.len() != options.fixture.patterns().div_ceil(64)
         || result.usize_field("covered_pattern_count") != Some(covered as usize)
         || result.bool_field("backend_fallback_used") == Some(true)
-        || (options.fixture == Fixture::Full6L
+        || (options.fixture.is_full6l()
             && (result.usize_field("workers_used") != Some(expected_workers)
                 || result.bool_field("cpu_parallel_execution") != Some(expected_workers > 1)))
     {
@@ -621,20 +735,140 @@ impl PhaseClock {
     }
 }
 
+enum DiagnosticTimerEvent {
+    FamilyPrepared(Instant),
+    Finished,
+}
+
+#[derive(Default)]
+struct PostPreparationState {
+    started: Option<Instant>,
+    cancellation_requested: Option<Instant>,
+    timer_arm_failed: bool,
+    boundary: Value,
+    sampled_peak_rss_bytes: Option<u64>,
+}
+
+struct PostPreparationWindow {
+    seconds: u64,
+    state: Mutex<PostPreparationState>,
+}
+
+impl PostPreparationWindow {
+    fn new(seconds: u64) -> Self {
+        Self {
+            seconds,
+            state: Mutex::new(PostPreparationState::default()),
+        }
+    }
+
+    fn arm(&self, progress: &ExecutionProgress, run_elapsed: Duration) -> Option<Instant> {
+        let mut state = self.state.lock().expect("diagnostic observation state");
+        if state.started.is_some() {
+            return None;
+        }
+        let started = Instant::now();
+        let memory = process_memory();
+        state.started = Some(started);
+        state.sampled_peak_rss_bytes = memory["rss_bytes"].as_u64();
+        state.boundary = json!({
+            "stage": progress.stage,
+            "run_seconds": run_elapsed.as_secs_f64(),
+            "geometric_candidate_family_count": progress.total,
+            "process_memory": memory,
+            "profile": snapshot_profile(),
+            "complete": false,
+        });
+        eprintln!("full6l_bench post_prepare_started={}", state.boundary);
+        Some(started)
+    }
+
+    fn sample_memory(&self) {
+        let rss = process_memory()["rss_bytes"].as_u64();
+        let mut state = self.state.lock().expect("diagnostic observation state");
+        if state.started.is_some() {
+            state.sampled_peak_rss_bytes = state.sampled_peak_rss_bytes.max(rss);
+        }
+    }
+
+    fn record_cancellation_request(&self) {
+        self.state
+            .lock()
+            .expect("diagnostic observation state")
+            .cancellation_requested = Some(Instant::now());
+    }
+
+    fn record_timer_arm_failure(&self) {
+        self.state
+            .lock()
+            .expect("diagnostic observation state")
+            .timer_arm_failed = true;
+    }
+
+    fn report(&self, profile: &Value) -> Value {
+        self.sample_memory();
+        let state = self.state.lock().expect("diagnostic observation state");
+        let finished = Instant::now();
+        json!({
+            "requested_seconds": self.seconds,
+            "family_prepared": state.started.is_some(),
+            "boundary": state.boundary,
+            "timer_arm_failed": state.timer_arm_failed,
+            "diagnostic_stop_requested": state.cancellation_requested.is_some(),
+            "seconds_until_stop_request": state.started.zip(state.cancellation_requested)
+                .map(|(start, stop)| stop.duration_since(start).as_secs_f64()),
+            "seconds_until_joined_result": state.started
+                .map(|start| finished.duration_since(start).as_secs_f64()),
+            "shutdown_seconds_after_stop_request": state.cancellation_requested
+                .map(|stop| finished.duration_since(stop).as_secs_f64()),
+            "sampled_peak_rss_bytes": state.sampled_peak_rss_bytes,
+            "rss_sampling_interval_seconds": 1,
+            "rss_contract": "process RSS sampled while the diagnostic timer is armed and once after joined return; VmHWM and the supervisor receipt still cover the whole process",
+            "profile_delta": profile_delta(profile, &state.boundary["profile"]),
+            "profile_delta_contract": "finished spans through joined cancellation; preparation spans crossing the boundary are excluded; sampled durations and reachability work are estimates, not exclusive wall time or exact totals",
+            "complete": false,
+        })
+    }
+}
+
 struct DiagnosticProgress {
     last: Mutex<(&'static str, Instant)>,
     started: Instant,
+    post_prepare: Option<Arc<PostPreparationWindow>>,
+    timer: Option<mpsc::Sender<DiagnosticTimerEvent>>,
+    cancellation: ExecutionCancellationHandle,
 }
 impl DiagnosticProgress {
-    fn new() -> Self {
+    fn new(
+        post_prepare: Option<Arc<PostPreparationWindow>>,
+        timer: Option<mpsc::Sender<DiagnosticTimerEvent>>,
+        cancellation: ExecutionCancellationHandle,
+    ) -> Self {
         Self {
             last: Mutex::new(("", Instant::now())),
             started: Instant::now(),
+            post_prepare,
+            timer,
+            cancellation,
         }
     }
 }
 impl ProgressSink for DiagnosticProgress {
     fn report(&self, progress: ExecutionProgress) {
+        if progress.stage == "geometry-candidate-family" {
+            if let Some(window) = &self.post_prepare {
+                if let Some(started) = window.arm(&progress, self.started.elapsed()) {
+                    if !self.timer.as_ref().is_some_and(|timer| {
+                        timer
+                            .send(DiagnosticTimerEvent::FamilyPrepared(started))
+                            .is_ok()
+                    }) {
+                        window.record_timer_arm_failure();
+                        self.cancellation.cancel();
+                    }
+                }
+            }
+        }
         if let Ok(mut last) = self.last.lock() {
             if last.0 != progress.stage || last.1.elapsed() >= Duration::from_secs(1) {
                 eprintln!(
@@ -698,11 +932,7 @@ fn finish_profile(profile: Profile) -> Value {
     {
         profile.map_or(Value::Null, |profile| {
             let (caller, workers) = profile.finish_partitioned();
-            let rows = |stages: Vec<ExecutorSearchProfileStage>| stages.into_iter().filter(|stage| stage.invocation_count != 0 || stage.work_item_count != 0).map(|stage| json!({
-                "name": stage.name, "duration_ns": stage.duration_ns,
-                "invocation_count": stage.invocation_count, "work_item_count": stage.work_item_count,
-            })).collect::<Vec<_>>();
-            json!({ "timing_contract": "accumulated overlapping/nested spans; not exclusive wall time", "geometry_work_contract": "family substage work counts are exact owner totals; sampled duration and invocation counts remain weighted estimates", "caller": rows(caller), "pooled_workers": rows(workers) })
+            profile_json(caller, workers)
         })
     }
     #[cfg(not(all(feature = "wasm-stage-profiling", not(target_family = "wasm"))))]
@@ -710,6 +940,98 @@ fn finish_profile(profile: Profile) -> Value {
         let () = profile;
         Value::Null
     }
+}
+
+fn snapshot_profile() -> Value {
+    #[cfg(all(feature = "wasm-stage-profiling", not(target_family = "wasm")))]
+    {
+        ExecutorSearchProfileSession::snapshot_partitioned_current_thread()
+            .map_or(Value::Null, |(caller, workers)| {
+                profile_json(caller, workers)
+            })
+    }
+    #[cfg(not(all(feature = "wasm-stage-profiling", not(target_family = "wasm"))))]
+    {
+        Value::Null
+    }
+}
+
+#[cfg(all(feature = "wasm-stage-profiling", not(target_family = "wasm")))]
+fn profile_json(
+    caller: Vec<ExecutorSearchProfileStage>,
+    workers: Vec<ExecutorSearchProfileStage>,
+) -> Value {
+    let rows = |stages: Vec<ExecutorSearchProfileStage>| {
+        stages
+            .into_iter()
+            .filter(|stage| stage.invocation_count != 0 || stage.work_item_count != 0)
+            .map(|stage| {
+                json!({
+                    "name": stage.name,
+                    "duration_ns": stage.duration_ns,
+                    "invocation_count": stage.invocation_count,
+                    "work_item_count": stage.work_item_count,
+                    "work_item_kind": if stage.name.starts_with("wasm.reachability.") {
+                        "weighted-sample-estimate"
+                    } else {
+                        "stage-defined"
+                    },
+                })
+            })
+            .collect::<Vec<_>>()
+    };
+    json!({
+        "timing_contract": "accumulated overlapping/nested spans; not exclusive wall time; sampled reachability counters and timed spans are weighted estimates",
+        "geometry_work_contract": "family substage work counts are exact owner totals; sampled duration and invocation counts remain weighted estimates",
+        "reachability_work_contract": "weighted per-candidate samples of existing counter deltas; not exact totals; partial/exhaustive search counts are not separate reverse/forward state counts",
+        "caller": rows(caller),
+        "pooled_workers": rows(workers),
+    })
+}
+
+fn profile_delta(final_profile: &Value, baseline: &Value) -> Value {
+    if final_profile.is_null() || baseline.is_null() {
+        return Value::Null;
+    }
+    let mut result = json!({
+        "excluded_crossing_preparation_spans": ["wasm.geometry.parallel_compile_and_split"],
+        "work_item_contract": "stage-defined units; wasm.reachability.* are weighted sample estimates",
+    });
+    for owner in ["caller", "pooled_workers"] {
+        let mut rows = Vec::new();
+        for row in final_profile[owner].as_array().into_iter().flatten() {
+            let Some(name) = row["name"].as_str() else {
+                continue;
+            };
+            if name == "wasm.geometry.parallel_compile_and_split" {
+                continue;
+            }
+            let previous = baseline[owner]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .find(|candidate| candidate["name"].as_str() == Some(name));
+            let mut delta = json!({
+                "name": name,
+                "work_item_kind": row["work_item_kind"],
+            });
+            let mut nonzero = false;
+            for field in ["duration_ns", "invocation_count", "work_item_count"] {
+                let value = row[field].as_u64().unwrap_or(0).saturating_sub(
+                    previous
+                        .and_then(|previous| previous[field].as_u64())
+                        .unwrap_or(0),
+                );
+                nonzero |= value != 0;
+                delta[field] = json!(value);
+            }
+            if nonzero {
+                rows.push(delta);
+            }
+        }
+        result[owner] = json!(rows);
+    }
+    result
 }
 
 fn binary_sha256() -> Result<String, String> {
@@ -766,6 +1088,93 @@ mod tests {
         );
         assert_eq!(problem.initial_board().occupied_words(), [0; 4]);
         assert_eq!(problem.initial_hold().bag_remainder_key(), 0);
+    }
+
+    #[test]
+    fn opening_o_retains_both_complete_bags_and_original_ordinal_authority() {
+        let query = query(Fixture::Full6LOpeningO, 2).unwrap();
+        let problem = compile(&query, Objective::Unique).unwrap();
+        let mut report = json!({});
+        validate_compiled(
+            &problem,
+            Fixture::Full6LOpeningO,
+            Objective::Unique,
+            &mut report,
+        )
+        .unwrap();
+        assert_eq!(
+            report["source"]["original_pattern_count"],
+            OPENING_O_PATTERN_COUNT
+        );
+        assert_eq!(report["source"]["atoms"][0]["choices"], "O");
+        assert_eq!(report["source"]["atoms"][0]["variant_count"], 1);
+        assert_eq!(report["source"]["first_sequence"], "OIOTSZJLIOTSZJL");
+        assert_eq!(report["source"]["last_sequence"], "OLJZSTOILJZSTOI");
+        assert_eq!(problem.initial_board().occupied_words(), [0; 4]);
+        assert_eq!(problem.exact_pieces(), Some(15));
+    }
+
+    #[test]
+    fn post_preparation_deadline_is_explicit_and_excludes_the_total_deadline() {
+        let parse = |args: &[&str]| parse_options(args.iter().map(|arg| (*arg).to_owned()));
+        let options =
+            parse(&["run", "--pattern", "OP7P7", "--post-prepare-seconds", "300"]).unwrap();
+        assert_eq!(options.fixture, Fixture::Full6LOpeningO);
+        assert_eq!(options.post_prepare_seconds, Some(300));
+        assert_eq!(options.cancel_after_seconds, None);
+        for args in [
+            vec![
+                "run",
+                "--cancel-after-seconds",
+                "240",
+                "--post-prepare-seconds",
+                "300",
+            ],
+            vec![
+                "run",
+                "--post-prepare-seconds",
+                "300",
+                "--cancel-after-seconds",
+                "240",
+            ],
+            vec!["compile", "--post-prepare-seconds", "300"],
+            vec!["run", "--small", "--post-prepare-seconds", "300"],
+            vec!["run", "--post-prepare-seconds", "0"],
+        ] {
+            assert!(
+                parse(&args).is_err(),
+                "unexpected accepted arguments: {args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn profile_delta_excludes_the_preparation_span_crossing_the_boundary() {
+        let baseline = json!({
+            "caller": [{"name": "wasm.geometry.family_compile", "duration_ns": 80, "invocation_count": 1, "work_item_count": 7}],
+            "pooled_workers": [{"name": "wasm.geometry.row_order_prepare", "duration_ns": 20, "invocation_count": 1, "work_item_count": 7}],
+        });
+        let final_profile = json!({
+            "caller": [
+                {"name": "wasm.geometry.family_compile", "duration_ns": 80, "invocation_count": 1, "work_item_count": 7},
+                {"name": "wasm.geometry.parallel_compile_and_split", "duration_ns": 100, "invocation_count": 1, "work_item_count": 1},
+                {"name": "wasm.reachability.lock_queries", "duration_ns": 0, "invocation_count": 0, "work_item_count": 1024, "work_item_kind": "weighted-sample-estimate"},
+            ],
+            "pooled_workers": [
+                {"name": "wasm.geometry.row_order_prepare", "duration_ns": 20, "invocation_count": 1, "work_item_count": 7},
+                {"name": "wasm.geometry.emitted_candidates", "duration_ns": 0, "invocation_count": 0, "work_item_count": 11},
+            ],
+        });
+        let delta = profile_delta(&final_profile, &baseline);
+        assert_eq!(delta["caller"].as_array().unwrap().len(), 1);
+        assert_eq!(delta["caller"][0]["name"], "wasm.reachability.lock_queries");
+        assert_eq!(
+            delta["caller"][0]["work_item_kind"],
+            "weighted-sample-estimate"
+        );
+        assert_eq!(delta["pooled_workers"].as_array().unwrap().len(), 1);
+        assert_eq!(delta["pooled_workers"][0]["work_item_count"], 11);
+        assert!(profile_delta(&final_profile, &Value::Null).is_null());
     }
 
     #[test]

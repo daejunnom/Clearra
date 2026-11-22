@@ -130,6 +130,24 @@ pub(crate) enum ExecutorSearchStage {
     WasmCandidateFeasibility,
     WasmBuildOrderReachability,
     WasmCoverageLanguageProduct,
+    #[cfg(any(feature = "search-stage-profiling", feature = "wasm-stage-profiling"))]
+    WasmReachabilityLockQueries,
+    #[cfg(any(feature = "search-stage-profiling", feature = "wasm-stage-profiling"))]
+    WasmReachabilityHarddropQueries,
+    #[cfg(any(feature = "search-stage-profiling", feature = "wasm-stage-profiling"))]
+    WasmReachabilityHarddropHits,
+    #[cfg(any(feature = "search-stage-profiling", feature = "wasm-stage-profiling"))]
+    WasmReachabilityCacheReachableHits,
+    #[cfg(any(feature = "search-stage-profiling", feature = "wasm-stage-profiling"))]
+    WasmReachabilityCacheUnreachableHits,
+    #[cfg(any(feature = "search-stage-profiling", feature = "wasm-stage-profiling"))]
+    WasmReachabilityCacheKeyMisses,
+    #[cfg(any(feature = "search-stage-profiling", feature = "wasm-stage-profiling"))]
+    WasmReachabilityPartialSearches,
+    #[cfg(any(feature = "search-stage-profiling", feature = "wasm-stage-profiling"))]
+    WasmReachabilityExhaustiveSearches,
+    #[cfg(any(feature = "search-stage-profiling", feature = "wasm-stage-profiling"))]
+    WasmReachabilityGeneratedStates,
     WasmWitnessSearch,
     WasmCandidateResultReduce,
     WasmCandidateMemoryAccounting,
@@ -270,6 +288,15 @@ impl ExecutorSearchStage {
         Self::WasmCandidateFeasibility,
         Self::WasmBuildOrderReachability,
         Self::WasmCoverageLanguageProduct,
+        Self::WasmReachabilityLockQueries,
+        Self::WasmReachabilityHarddropQueries,
+        Self::WasmReachabilityHarddropHits,
+        Self::WasmReachabilityCacheReachableHits,
+        Self::WasmReachabilityCacheUnreachableHits,
+        Self::WasmReachabilityCacheKeyMisses,
+        Self::WasmReachabilityPartialSearches,
+        Self::WasmReachabilityExhaustiveSearches,
+        Self::WasmReachabilityGeneratedStates,
         Self::WasmWitnessSearch,
         Self::WasmCandidateResultReduce,
         Self::WasmCandidateMemoryAccounting,
@@ -409,6 +436,17 @@ impl ExecutorSearchStage {
             Self::WasmCandidateFeasibility => "wasm.candidate.feasibility",
             Self::WasmBuildOrderReachability => "wasm.candidate.build_order_reachability",
             Self::WasmCoverageLanguageProduct => "wasm.candidate.coverage_language_product",
+            Self::WasmReachabilityLockQueries => "wasm.reachability.lock_queries",
+            Self::WasmReachabilityHarddropQueries => "wasm.reachability.harddrop_queries",
+            Self::WasmReachabilityHarddropHits => "wasm.reachability.harddrop_hits",
+            Self::WasmReachabilityCacheReachableHits => "wasm.reachability.cache_reachable_hits",
+            Self::WasmReachabilityCacheUnreachableHits => {
+                "wasm.reachability.cache_unreachable_hits"
+            }
+            Self::WasmReachabilityCacheKeyMisses => "wasm.reachability.cache_key_misses",
+            Self::WasmReachabilityPartialSearches => "wasm.reachability.partial_searches",
+            Self::WasmReachabilityExhaustiveSearches => "wasm.reachability.exhaustive_searches",
+            Self::WasmReachabilityGeneratedStates => "wasm.reachability.generated_states",
             Self::WasmWitnessSearch => "wasm.candidate.witness_search",
             Self::WasmCandidateResultReduce => "wasm.candidate.result_reduce",
             Self::WasmCandidateMemoryAccounting => "wasm.candidate.memory_accounting",
@@ -728,6 +766,15 @@ impl SearchStageSpan {
         let _ = (stage, work_items);
     }
 
+    /// Publish a weighted sample without adding a timer or invocation count.
+    /// These work units are estimates, unlike exact owner totals. Callers must
+    /// keep that distinction when reporting sampled metrics or derived ratios.
+    #[inline]
+    #[cfg(any(feature = "search-stage-profiling", feature = "wasm-stage-profiling"))]
+    pub(crate) fn record_sampled_work(stage: ExecutorSearchStage, work_items: u64, scale: u64) {
+        Self::record_exact_work(stage, work_items.saturating_mul(scale));
+    }
+
     #[cfg(any(feature = "search-stage-profiling", feature = "wasm-stage-profiling"))]
     fn record(&mut self, work_items: u64) {
         if self.finished {
@@ -838,6 +885,29 @@ impl ExecutorSearchProfileSession {
                 .as_ref()
                 .map(|profile| Self::stage_rows(profile.totals))
         })
+    }
+
+    /// Snapshot finished caller spans and already joined worker jobs separately.
+    /// Active spans and running worker jobs are excluded. This does not reset
+    /// counters, retire the session, or grant completion to the search.
+    #[cfg(not(target_family = "wasm"))]
+    pub fn snapshot_partitioned_current_thread() -> Option<(
+        Vec<ExecutorSearchProfileStage>,
+        Vec<ExecutorSearchProfileStage>,
+    )> {
+        let (caller, workers) = ACTIVE_PROFILE.with(|slot| {
+            slot.borrow().as_ref().map(|profile| {
+                (
+                    profile.totals,
+                    profile.worker_totals.as_ref().map(Arc::clone),
+                )
+            })
+        })?;
+        let workers = workers.map_or(
+            [StageTotals::default(); ExecutorSearchStage::COUNT],
+            |totals| *totals.lock().expect("worker profile totals"),
+        );
+        Some((Self::stage_rows(caller), Self::stage_rows(workers)))
     }
 
     /// Return the submitting thread and pooled worker aggregates separately.
@@ -974,6 +1044,20 @@ mod tests {
     }
 
     #[test]
+    fn sampled_counter_deltas_add_weight_without_time_or_invocations() {
+        let session = ExecutorSearchProfileSession::start().unwrap();
+        let metric = ExecutorSearchStage::WasmReachabilityLockQueries;
+        SearchStageSpan::record_sampled_work(metric, 3, 1);
+        SearchStageSpan::record_sampled_work(metric, 5, 1024);
+        SearchStageSpan::record_sampled_work(metric, 99, 0);
+        let rows = session.finish();
+        let row = rows.iter().find(|row| row.name == metric.name()).unwrap();
+        assert_eq!(row.work_item_count, 3 + 5 * 1024);
+        assert_eq!(row.duration_ns, 0);
+        assert_eq!(row.invocation_count, 0);
+    }
+
+    #[test]
     fn worker_profile_pc_path_stages_keep_work_counts_separate() {
         let session = ExecutorSearchProfileSession::start().expect("caller profile");
         SearchStageSpan::begin(ExecutorSearchStage::WasmPcPathExecutionGraphs).finish(3);
@@ -1040,7 +1124,13 @@ mod tests {
                 .join()
                 .expect("worker job");
         });
+        let snapshot = ExecutorSearchProfileSession::snapshot_partitioned_current_thread()
+            .expect("active profile snapshot");
+        assert_eq!(stage(&snapshot.0).work_item_count, 3);
+        assert_eq!(stage(&snapshot.1).work_item_count, 10);
         let (caller, pool) = session.finish_partitioned();
+        assert_eq!((caller.clone(), pool.clone()), snapshot);
+        assert!(ExecutorSearchProfileSession::snapshot_partitioned_current_thread().is_none());
         assert_eq!(stage(&caller).invocation_count, 1);
         assert_eq!(stage(&caller).work_item_count, 3);
         assert_eq!(stage(&pool).invocation_count, 2);
