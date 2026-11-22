@@ -204,7 +204,10 @@ geometry 후보 전체의 source 실패는 명확히 다르다. 이 source-posit
 `FullDrawSourcePrefix`는 현재 **negative-only**로 사용한다. 실제 complete factorized
 layout `[1,7,7]`, full=visible=15, 표준 choices 순서, 초기 empty/Allowed Hold,
 cursor·source owner, ordinary native Full6 Unique 요청, 실제 후보 15-operation
-inventory를 확인한 경우에만 적용한다. 처음 7 locks가 만들어지기 전, cap을 이미
+inventory를 확인한 경우에만 적용한다. 현재는 preset과 problem kind가 일치하는
+Opening/Scenario 모두에서 ordinary `Trace`를 지원하며, 기본 trace limit 64와
+요청된 exact accelerator 설정을 그대로 유지한다. 확대 범위와 실행 검증은 아래
+별도 절에 기록했다. 처음 7 locks가 만들어지기 전, cap을 이미
 채운 종류의 다음 operation을 기존 물리 탐색에서 제외한다. 그 뒤의 source/Hold/EOF
 product와 original-ordinal probability·witness 계산은 유지한다. 일반 Build/CountAll,
 증거·replay 계약, 다른 초기 Hold나 source에 이 권한을 전용하지 않는다.
@@ -212,8 +215,9 @@ product와 original-ordinal probability·witness 계산은 유지한다. 일반 
 operation mask는 **현재 후보의 operation index**로 매번 만들고 다른 후보·source의
 cache key나 catalog row ID로 재사용하지 않는다. 이 검사는 실제 lock 순서의
 prefix에 관한 것이므로, 순서와 무관하게 선택된 geometry enumeration prefix에
-그대로 적용해서는 안 된다. `None` capability는 fallback이며 source 불가능성의
-증거가 아니다.
+그대로 적용해서는 안 된다. 아래의 selected-prefix 검사는 미선택 operation을
+별도로 완화한 다른 증명을 사용한다. `None` capability는 fallback이며 source
+불가능성의 증거가 아니다.
 
 [source_prefix_oracle_tests.rs](../../crates/clearra-core-executor/src/backend/wasm_cpu/source_prefix_oracle_tests.rs)에
 새 독립 회귀 4개가 있으며, 모두 `254cf3d2`에서 실행해 통과했다.
@@ -223,7 +227,7 @@ prefix에 관한 것이므로, 순서와 무관하게 선택된 geometry enumera
 | `source_prefix_small_alphabets_match_every_canonical_finite_queue_and_word` | `n=2,3,4`의 실제 materialized 원본 각각 8/108/2,304개에서 canonical Hold 전이와 finite EOF의 모든 reachable prefix를 열거한다. 실제 helper가 이를 제외하지 않음을 확인한 뒤, 고정 inventory의 모든 ordered word에서 원본 전체 언어 합집합·cap·helper의 동치를 비교한다. 통과 word마다 위 구성 queue/actions를 canonical automaton으로 실행한다. |
 | `source_prefix_full7_constructions_keep_eof_and_pointwise_coverage_separate` | 첫 bag 구성 3분기와 두 EOF 경우를 extra 7종 모두에 재명명해 검사한다. 어떤 source의 양성 word와 다른 원본 ordinal의 음성, 기존 physical-only mixed word를 분리한다. |
 | `source_prefix_kind_masks_preserve_operation_reindexing_and_reject_bad_inventory` | 32,768개 operation subsets의 재인덱싱 parity, 7-lock 경계 이후 cap 해제, 겹치거나 누락·비연속인 masks 및 잘못된 inventory를 확인한다. |
-| `source_prefix_compile_requires_actual_full15_owner_empty_hold_and_inventory` | 실제 Full15 owner/candidate는 지원하며, initial Hold·CountAll·VisibleSeven·trace·probability evidence·build replay, 같은 cardinality의 다른 atom 순서와 explicit source, 짧거나 다른 inventory인 후보는 fallback하는지 확인한다. |
+| `source_prefix_compile_requires_actual_full15_owner_empty_hold_and_inventory` | 당시 `254cf3d2`에서 실제 Full15 owner/candidate는 지원하며, initial Hold·CountAll·VisibleSeven·trace limit 초과·probability evidence·build replay, 같은 cardinality의 다른 atom 순서와 explicit source, 짧거나 다른 inventory인 후보는 fallback하는지 확인했다. ordinary Trace의 수치 제한은 이후 아래 native 범위 확대에서 제거했다. |
 
 축소 alphabet 전수 oracle의 실제 계수는 다음과 같다. prefix-state 방문 수는
 각 원본별 canonical state와 출력 prefix를 함께 검사한 방문 수이며, 원본 전체에서
@@ -255,6 +259,462 @@ P1P7P7 이외의 고정 큐 경로에서 이 source 제약을 적용하지 않�
 두 통합 회귀 역시 통과했다. 위의 한 후보 감소율을 원본 Full6 전체 실행 시간의
 개선율이나 전체 탐색 완주 증거로 해석하지 않는다. 실행 로그는
 [source-prefix-254cf3d2-tests.log](../../_local/artifacts/full6l-p1p7p7-20261122/source-prefix-254cf3d2-tests.log)다.
+
+### Temporal source-prefix 행 DP: 첫 7-lock prefix에 대한 음성 증명
+
+`750a3935cc178b28ee56ee5a64b4a082b1a117de`에는 기존 종류별 edge cap에 더해,
+물리 graph를 확장하기 전에 첫 7 locks의 **낙관적 시간·공급 조건**을 검사하는
+행 상태 DP가 추가되었다. 구현은
+[source_prefix.rs](../../crates/clearra-core-executor/src/backend/wasm_cpu/source_prefix.rs)의
+`temporal_prefix_relaxation`과 `FullDrawSourcePrefix::temporal_relaxation`이며,
+[buildup.rs](../../crates/clearra-core-executor/src/backend/wasm_cpu/buildup.rs)의
+`BuildOrderGraph::build_pass`가 이를 호출한다. 해당 커밋의 `source_prefix` 집중
+실행은 새 temporal 4개를 포함해 **11/11 통과**, 테스트 시간 **7.06초**였다.
+관리 receipt는 `1795370353701102665-2`이며, 이 작은 회귀의 성공은 큰 Full6
+전체 열거 완주나 전체 성능 개선을 주장하는 근거가 아니다.
+
+#### 입력과 상태의 정확한 정의
+
+적용 전제는 앞 절의 실제 complete `P1P7P7`, empty/Allowed Hold, full=visible=15,
+빈 10×6 전체 target과 후보 inventory `T=2·1_A+e_p`다. 기존
+`FullDrawSourcePrefix::compile`이 실제 source backing과 요청 계약을 확인한
+경우에만 이 검사를 수행한다. `B=1_A+e_p`를 첫 8 draws의 inventory로 둔다.
+기하 enumeration에서 선택 중인 partial candidate가 아니라, **이미 완성된 같은
+15-operation 후보**의 원본행 contributor와 realization 대안을 입력으로 사용한다.
+
+operation 집합을 `S={0,...,14}`, 원본 행 집합을 `F={0,...,5}`라 하자.
+`D ⊆ F`는 삭제되었다고 가정한 원본행 집합이다. 각 operation `s`에 대해
+`Req(s)`는 그 skeleton의 모든 concrete realization이 가진 positive required-row
+집합들의 모음이다. 다음 값들을 정의한다.
+
+```text
+A(D) = {s in S : some R in Req(s) satisfies R subset D}.
+C(r) = {s in S : s contributes cells to original row r}.
+C(D) = union of C(r) over r in D; C(empty) = empty.
+n_i(X) = number of operations of kind i in X.
+K(X) = sum over kinds i of min(n_i(X), B_i).
+```
+
+`A(D)`는 **positive ILC 조건만** 충족한 operation들의 집합이다. 같은 skeleton의
+realization 대안은 OR이며, 하나의 대안 안에서는 모든 required 행이 D에 포함돼야
+한다. `GeometryCatalog::realization_requirement_is_satisfied`가 이 전체 OR를
+조회한다. forbidden-deleted-rows, collision, grounding, SRS는 이 단계에서
+검사하지 않는다. 따라서 삭제된 행을 더 추가하면 `A(D)`는 줄어들지 않는다.
+
+`C(r)`는 row의 모든 contributor가 놓여야 한다는 AND 조건을 operation bitset으로
+표현한다. 여러 행의 `C(r)`를 합칠 때는 **bit OR**를 사용한다. 하나의 tetromino가
+여러 행에 기여해도 같은 operation은 한 번만 세야 한다. 행별 popcount나 종류별
+개수를 더하면 공유 contributor를 중복 계산해 실제 가능한 prefix를 거절할 수 있다.
+구현은 기존 `CandidateProjection.row_contributors`를 같은 operation index로
+빌려 쓰며, catalog row ID나 다른 후보의 index로 치환하지 않는다.
+
+#### 전이와 반환 의미
+
+reachable 집합은 `D=empty`에서 시작한다. 각 reachable D에 대해 다음 순서로
+처리한다.
+
+1. `K(A(D)) >= 7`이면 즉시 `Unknown`으로 끝낸다. source cap 안에서 고를 수 있는
+   operation이 7개 이상 있다는 뜻일 뿐, 물리적 prefix나 전체 15-lock 경로의
+   성공을 반환하지 않는다. D0에서 이를 만족하면 다른 행 상태를 탐색하지 않는다.
+2. 각 `r not in D`에 대해 `D'=D union {r}`를 다음 세 조건이 모두 맞을 때만 넣는다.
+   `C(r) subset A(D)`, `|C(D')| <= 7`, 그리고 `n_i(C(D')) <= B_i`다.
+3. 모든 reachable D를 소진해도 첫 조건을 만나지 못했을 때에만
+   `proved_infeasible=true`를 반환한다.
+
+마지막 종류 cap은 valid operation masks에서
+`K(C(D')) == |C(D')|`와 같으므로 구현이 이 비교를 사용한다. 이미 본 D는 다시
+처리하지 않는다. 지원하지 않는 행 수나 operation 범위의 입력은 음성 증명으로
+바꾸지 않고 `Unknown`을 반환한다. 마지막 반환의 의미는 **해당 후보에 첫 7개의
+source-compatible 물리 lock prefix가 없다**는 것이며, 이보다 넓은 후보나 다른
+source에 재사용할 수 있는 불가능성 memo가 아니다.
+
+#### 음성 판정의 soundness: 실제 first-seven prefix를 포함한다
+
+실제 성공 경로가 있다고 가정하자. 첫 j개 locked operation의 집합을 `P_j`,
+그 뒤 실제 삭제된 원본행 집합을 `D_j`라 두면, 첫 7-lock inventory 정리에 의해
+`n_i(P_j) <= B_i`가 모든 `j<=7`에서 성립한다.
+
+첫 7개 operation 각각은 자신을 놓기 전에 어떤 실제 realization의 positive
+요구를 충족했다. 그때의 삭제 행은 모두 `D_6`의 부분집합이다. positive 조건의
+단조성 때문에 `P_7 subset A(D_6)`이고, 따라서 `K(A(D_6)) >= 7`이다.
+
+DP가 `D_6`에 이르는 실제 삭제 과정을 포함한다는 것도 필요하다. lock `j<=6`에서
+여러 행이 동시에 clear되었다면 그 batch의 행들을 임의 순서로 하나씩 추가한다.
+각 추가 행 r의 모든 contributor는 이미 `P_j`에 들어 있다. 또한 `P_j`의 각
+operation은 자신보다 이전의 삭제 상태에서 준비되었으므로
+`C(r) subset P_j subset A(D_(j-1))`다. batch 중간에 D를 확대해도 이 조건은
+단조적으로 유지된다. 중간 D'의 `C(D')` 역시 `P_j`의 부분집합이므로
+`|C(D')|<=j<=6`과 종류별 cap을 만족한다. 따라서 실제 동시 clear를 행별 DP
+전이로 포함할 수 있다.
+
+DP가 그 전에 `Unknown`으로 끝나지 않았다면 `D_6`을 방문하고, 거기서 반드시
+`K(A(D_6))>=7`을 만난다. 그러므로 DP가 모든 상태를 소진하고 음성을 반환한
+경우에는 실제 first-seven prefix가 없고, 완전한 source-compatible 물리 경로도
+없다. **동시 clear를 금지하거나 서로 다른 realization의 OR를 AND로 합치는
+변형에는 이 증명이 적용되지 않는다.**
+
+역방향의 물리적 성공은 주장하지 않는다. 앞 절의 kind-word 정리는 이미 주어진
+**완전한 15-kind word**와 어떤 source의 존재성에 대한 iff다. 이 DP는 collision과
+SRS를 완화한 first-seven 조건만 검사하며, 나머지 8 locks의 가능성도 증명하지
+않는다. 따라서 `Unknown`을 그 정리의 완전한 물리 witness로 해석할 수 없다.
+개별 원본 ordinal, coverage bit, 최소 witness와 그 실제 Hold/EOF 전이는 계속
+기존 exact source product가 결정한다.
+
+#### 실제 Full6의 최대 22상태와 저장 공간
+
+일반 helper는 6개 행의 모든 `2^6=64`개 D를 표현할 수 있다. 그러나 인증된 빈
+10×6 tetromino tiling에서는 실제로 방문할 수 있는 상태가 **최대 22개**다.
+각 D의 모든 행을 채우는 operation 집합 `C(D)`는 원본 cells `10|D|`개를 포함한다.
+tetromino 하나의 원본 cells는 4개이고 후보는 겹치지 않는 완전한 tiling이므로
+다음 부등식이 성립한다.
+
+```text
+10 * |D| <= 4 * |C(D)| <= 4 * 7 = 28.
+Therefore |D| <= 2, and the number of states is at most
+choose(6,0) + choose(6,1) + choose(6,2) = 1 + 6 + 15 = 22.
+```
+
+이는 입력과 전이 조건에서 도출한 상한이다. **22개에서 탐색을 끊는 generation
+cap이나 샘플링 규칙을 추가한 것이 아니다.** 모든 reachable 상태를 소진한다.
+일반적인 작은 추상 회귀는 실제 10-cell 행의 tiling이 아니므로 이 22-state 상한을
+그 모델에 전용하지 않는다.
+
+실제 경로의 positive requirement 조회는 state마다 15개 operation에 대해 한 번씩,
+따라서 최대 `22*15=330`회다. D0는 한 번 계산한 값을 재사용하고, 빠른 통과는
+15회 조회 뒤 끝난다. pending과 seen은 각각 `u64` 하나이며, 기존 contributor
+배열을 사용해 candidate별 heap queue나 32,768-entry subset 배열을 추가하지 않는다.
+workspace에는 검사 수·D0 빠른 통과 수·방문 행 상태 수·음성 후보 수의 누적 scalar
+4개만 더한다. worker checkpoint의 이 값들은 관측된 작업량이며 최종 count나
+완료 authority가 아니다.
+
+음성일 때 `build_pass`는 root의 permitted-operation mask를 0으로 만들어 SRS
+reachability를 시작하지 않고 기존 dead-root 결과를 반환한다. 통과한 후보에는
+기존 first-seven per-edge cap과 exact source product를 계속 적용한다. 물리 graph
+export, scoring, replay 등 기존 capability 밖의 consumer는 이 경로를 사용하지
+않는다. geometry family, 정규화 결과의 전체 열거 기준, 자연 소진에 의한 완료
+계약은 바꾸지 않으며 coverage 100%에서 탐색을 종료하지 않는다.
+
+#### 새 회귀의 검증 설계와 실행 결과
+
+[source_prefix_temporal_tests.rs](../../crates/clearra-core-executor/src/backend/wasm_cpu/source_prefix_temporal_tests.rs)의
+독립 oracle은 locked operation subset을 전수 탐색한다. 각 subset에서 실제
+contributor AND를 만족하는 모든 행을 자동으로 clear하고, 모든 positive OR
+대안과 종류별 cap을 유지한다. 이 **양의 조건만 있는 추상 모델**에서는 row DP와
+동치를 비교할 수 있다. reachable D에 대해 `C(D)`를 만드는 operation 순서를
+구성하고, 추가 자동 clear가 positive 조건을 약화하지 않음을 이용하면 된다.
+이 추상 모델의 양성은 실제 SRS·collision·forbidden 조건이나 Full6 완주 권한이 아니다.
+
+| 새 테스트 | 고정한 검증 경계 |
+| --- | --- |
+| `temporal_source_prefix_matches_independent_all_subset_oracle` | 작은 alphabet과 행 모델 3,364개에서 독립 operation-subset oracle과 row DP의 가능 여부를 대조한다. 양성·음성과 D0 이후 통과가 모두 포함돼야 한다. |
+| `temporal_source_prefix_preserves_joint_clear_shared_owners_and_realization_or` | 동시 clear, 여러 행이 공유하는 contributor의 union, 서로 다른 realization OR, empty contributor AND와 D0 빠른 통과를 분리한다. |
+| `temporal_source_prefix_rejects_cap_blocked_rows_and_positive_dependency_cycles` | 행별로는 가능한 contributor를 합칠 때의 cap 위반, 하나의 행 자체의 cap 위반, positive dependency cycle과 OR escape를 검사한다. |
+| `temporal_source_prefix_reindexing_and_unsupported_input_never_gain_negative_authority` | 양성·음성 각각에서 operation 120개 순열과 row 720개 순열을 대조한다. 6행 초과와 foreign operation bit는 음성을 반환하지 않아야 한다. |
+
+위 새 4개 회귀는 모두 통과했다. 독립 operation-subset oracle과 비교한
+3,364개 모델에서 통과 158개, 음성 3,206개였으며, 통과한 158개는 모두 D0 이후
+행 전이를 진행한 경우였다. 별도의 all-ready fixture가 D0 빠른 통과를 검사한다.
+
+같은 커밋의 기존 mixed15 통합 회귀도 통과했다. 실제 graph 진입의 temporal
+`checks=1`, `negative_candidates=0`과 unfiltered exact coverage `5,846,037`
+assertion이 확인되었으며, 새 경로에서도 성공 원본 수는 **5,846,037**이었다.
+기존 전체 177,811,200개 original ordinal의 bitmap, 최소 witness `Some(0)`,
+15-step 대표 path가 모두 같았다. 테스트의 `source_prefix::with_disabled`는
+첫-seven edge cap과 새 temporal 검사 모두를 비활성화하여 reference가 새 음성
+규칙을 공유하지 않게 한다. 실행 근거는
+[temporal-750a3935-source-tests.log](../../_local/artifacts/full6l-p1p7p7-20261122/temporal-750a3935-source-tests.log)와
+[동일 실행 receipt](../../_local/artifacts/full6l-p1p7p7-20261122/temporal-750a3935-source-tests-receipt.json)다.
+
+같은 소스의 별도 row-order count 작은 회귀도 **3/3 통과**했다. 이 실행에서
+큰 Full6 compatible-leaf count 진단은 ignored 상태였으므로 그 계수를 측정한
+것은 아니다. 범위가 구분된 실행 기록은
+[row-order-count-750a3935-tests.log](../../_local/artifacts/full6l-p1p7p7-20261122/row-order-count-750a3935-tests.log)에 있다.
+
+### Selected geometry prefix의 source 부족량과 64-state 행 DP
+
+[geometry_source_prefix.rs](../../crates/clearra-core-executor/src/backend/wasm_cpu/geometry_source_prefix.rs)의
+`selected_source_prefix_relaxation`은 아직 완성되지 않은 기하 prefix를 포함하는
+**모든 completion의 불가능성**만 증명한다. 선택된 row들의 순서를 실제 lock
+순서로 간주하지 않는다. actual complete `P1P7P7`, 초기 empty Hold, finite
+15-draw/15-lock 계약과 실제 target 집합
+`{[2;7]+e_p | p는 표준 7종}`이 함께 인증된 소유 geometry에서만 활성화한다.
+빈 10×6, 전체 60칸 target 및 기존 ordinary physical-PC 출력 gate도 유지한다.
+
+#### 미선택 operation을 즉시 사용할 수 있게 완화한다
+
+선택된 operation 집합을 `S`, 종류 `i`의 선택 개수를 `u_i`로 둔다. 가능한
+extra 종류 `p`는 `u <= T_p`, `T_p=[2;7]+e_p`를 만족해야 한다. 이 조건을
+만족하는 `p`가 없으면 어떤 목표 inventory로도 완성할 수 없다. 각 `p`에 대해
+아직 선택되지 않은 inventory와 first-seven cap은 다음과 같다.
+
+```text
+R_p = T_p - u                 // 미선택 operation 수, 모든 성분이 음수가 아님
+B_p = [1;7] + e_p             // 첫 8 original draws의 inventory
+```
+
+원본 삭제 행 집합 `D`에서 `A_S(D)`는 선택된 operation 중 **어떤 positive
+realization 하나의 required rows가 D에 포함되는** operation들의 집합이다.
+같은 skeleton의 대안은 모두 OR로 남긴다. `a_i(D)`는 이 집합의 종류별 개수다.
+미선택 `R_p`는 collision·grounding·ILC 조건 없이 처음부터 모두 사용할 수
+있고, 행을 삭제할 때도 아무 비용을 내지 않는 것으로 완화한다. 따라서 first-seven
+cap 안에서 사용할 수 있다고 보는 최대 개수는 다음과 같다.
+
+```text
+K_p(D) = sum_i min(a_i(D) + R_p,i, B_p,i)
+       = sum_i [B_p,i - max(u_i - a_i(D) - 1, 0)]
+       = 8 - sum_i max(u_i - a_i(D) - 1, 0).
+```
+
+마지막 부족량은 가능한 `p`에 독립이다. 이는 `T_p=B_p+[1;7]`에서 나온
+식이며, 먼저 `R_p>=0`를 인증한 범위에서만 사용한다. 구현은 unavailable
+selected operation의 총 개수에서 unavailable 종류 수를 빼 같은 부족량을
+계산한다. **부족량이 1 이하이면 `Unknown`으로 통과**한다. 이때 7개의 실제
+SRS locks나 특정 원본 큐의 양성 경로를 구성했다는 뜻은 아니다.
+
+#### 행 상태마다 가능한 extra 종류를 보존한다
+
+`C_S(r)`는 행 `r`에 기여하는 selected operation bitset이고,
+`C_S(D)=OR_{r in D} C_S(r)`다. 같은 operation이 여러 행에 걸쳐 있어도 한 번만
+계산한다. `reachable_extra[D]`의 7개 bit는 그 삭제 행 상태가 가능한 각
+extra 종류 `p`를 나타낸다. 초기 상태는 `D=0`과 inventory상 가능한 모든 `p`다.
+
+각 reachable `D`에서 위 부족량 검사가 통과하지 않았다면, 삭제하지 않은 행
+`r`에 대해 다음 조건으로 `D'=D union {r}`에 전이한다.
+
+1. `C_S(r) subseteq A_S(D)`여야 한다. 미선택 contributor는 무료로 만족시키고,
+   selected contributor만 AND로 요구한다. future-only 행은 empty AND다.
+2. mandatory selected 집합 `C_S(D')`의 크기가 7 이하여야 한다.
+3. 그 집합의 종류별 개수가 `B_p` 이하여야 한다. 어떤 종류가 2개이면 `p`를
+   그 종류로 제한하고, 서로 다른 두 종류가 2개이거나 한 종류가 3개 이상이면
+   그 전이에서 가능한 `p`가 없다.
+
+같은 `D'`로 들어오는 종류 bitset은 OR한다. 전이가 항상 행 bit 하나를 추가하므로
+`D' > D`다. 따라서 `D=0..63`을 한 번 순회하면 나중에 도착하는 경로를 빠뜨리지
+않는다. 모든 reachable `(D,p)`를 소진해도 부족량 검사를 통과하지 못했을 때만
+prefix 전체를 음성으로 판정한다.
+
+#### 모든 실제 completion의 first-seven 경로를 포함한다
+
+source-compatible한 실제 완성 후보와 그 15-lock 물리 경로가 있다고 가정한다.
+그 후보의 extra 종류 `p`는 초기 `reachable_extra[0]`에 남는다. 실제 첫 7개
+locks의 inventory는 앞 절의 필요조건에 의해 `B_p` 이하다.
+
+첫 6 locks까지의 실제 clear가 일어나기 직전, 그 행의 selected contributors는
+모두 이미 놓였다.
+각 contributor가 사용한 realization의 positive 요구는 놓기 전 실제 삭제 집합에
+포함되므로, 현재의 더 큰 삭제 집합에서도 충족된다. 따라서 그 행의 selected
+contributors는 `A_S(D)`에 포함된다. 누적 mandatory selected 집합도 실제
+이미 놓인 first-seven operation들의 부분집합이므로 7개와 종류별 cap을 넘지
+않는다. 실제 동시 clear batch는 행을 하나씩 추가하는 전이로 펼칠 수 있다.
+positive 요구는 삭제 행이 늘 때 사라지지 않으므로 나중 행도 계속 추가 가능하다.
+
+이 귀납으로 실제 7번째 lock 직전의 삭제 집합 `D6`에 같은 `p`로 도달한다.
+실제 first-seven 중 selected인 operation들은 모두 `A_S(D6)`에 들어가며,
+나머지는 무료로 사용 가능하게 둔 `R_p`에 포함된다. 이 7개가 `B_p` 안에 있으므로
+`K_p(D6)>=7`이고, 반드시 `Unknown`으로 통과한다. 따라서 DP 소진 음성은
+그런 실제 completion이 존재한다는 가정과 모순된다.
+
+이 증명은 selected prefix의 모든 completion을 포함하지만, 통과의 역방향으로
+실제 물리성·원본 ordinal·최소 witness를 주장하지 않는다. 순서가 없는 selected
+inventory 자체에 first-seven cap을 곧바로 적용하는 것과도 다르다.
+
+#### 64상태, traversal 및 memo 경계
+
+완성 후보의 temporal DP에서 사용한 **최대 22상태** 경계는 여기에는 적용하지
+않는다. 미선택 contributor를 무료로 지웠으므로 `10|D|<=4|C_S(D)|`가 성립하지
+않는다. 실제 구현은 stack의 `[u8;64]`를 유지하며, 모든 64개 상태를 거쳐야 통과하는
+future-only fixture도 회귀에 포함한다. 후보마다 큰 배열이나 heap을 추가하지 않는다.
+
+열거기는 depth 8 이상에서 새로운 `Append` 뒤의 selected prefix를 검사한다.
+이는 검사 비용을 조절하는 시점이며 후보 생성 한도가 아니다. frozen parallel seed도
+같은 depth 조건으로 검사하고, 중간 yield는 prefix와 검증 상태를 함께 보존한다.
+음성인 현재 task와 그
+Product continuations만 제외하고 pending Union siblings의 순서는 유지한다.
+실제 prefix에 종속된 결론을 prefix가 없는 FamilyCompiler residual memo에 저장하지
+않으며, 기존 raw family count와 최종 emitted 영역의 구분도 유지한다.
+
+체크 수, 음성 subtree 수, 방문한 행 상태 수, D0 빠른 통과 수는 별도 profile
+계수다. 이 계수와 `Unknown`은 성공 개수나 coverage authority가 아니다.
+
+### Full15 source product의 첫 draw: inventory 보존으로 증명한 6개 음성 블록
+
+고정된 실제 15-operation 후보의 inventory가 `T_p=[2;7]+e_p`이면, 그 후보의
+operation-subset 물리 graph에서 모든 완전 accepting word는 정확히 `T_p`를
+사용한다. 반면 첫 independent draw가 `q`인 실제 `P1P7P7` 원본 큐의 inventory는
+`T_q=[2;7]+e_q`다. 초기 Hold가 비어 있고 유한한 source의 15개를 15번 lock할
+때 Hold/Store/Swap/EOF는 피스를 생성하거나 버리지 않는다. 따라서 `q!=p`이면
+두 inventory가 달라 그 원본 큐와 이 물리 언어의 교집합은 반드시 비어 있다.
+
+이 근거로 [standard_bag_coverage.rs](../../crates/clearra-core-executor/src/backend/wasm_cpu/standard_bag_coverage.rs)의
+root draw loop에서 다른 6개 종류의 계산만 생략한다. 남은 `p` 분기는 기존 exact
+source/Hold/EOF product를 그대로 실행한다. 이 증명은 남은 블록 전체의 양성이나
+candidate buildable을 뜻하지 않으며, 첫-seven 구성 정리로 membership 검증을
+대체하는 경로도 아니다.
+
+#### 실제 graph, source, language arena에 묶인 권한
+
+`FullDrawSourceRoot`의 발급자는 같은 후보를 검증한 `BuildOrderGraph`다.
+`FullDrawSourcePrefix::compile`의 실제 full15/source/initial Hold 확인을 받은
+graph가 자신의 canonical full15 language root에서만 토큰을 발급한다.
+`from_topological_parts` 같은 일반 graph 생성자는 이 권한을 갖지 않는다.
+소비 시에는 실제 source snapshot의 universe·weight identity, 초기 Hold/cursor와
+source 설정, finite/projected EOF 설정, full15 depth, 같은 root, 같은 language
+arena identity가 일치해야 한다. arbitrary root와 종류만 받아 토큰을 만드는
+외부 생성자는 없다.
+
+arena의 `clear_retain_capacity`는 identity를 바꾸므로, numeric root ID가 같아도
+옛 토큰은 새 언어에 적용되지 않는다. product owner도 arena 변경을 감지하면
+기존 원본 union을 먼저 정확히 flush하고 local product memo를 recycle한다.
+다른 source/config 또는 root에 토큰을 넘긴 경우는 **일반 product로 fallback**한다.
+capability가 맞지 않는다는 이유로 음성 결과를 만들어 내지 않는다.
+
+root에서만 생략한 6개 분기는 수학적으로 정확한 REJECT이므로 restricted root의
+memo 값은 일반 product의 값과 같다. 재귀 호출에는 숨겨진 `p` 제한을 넘기지
+않는다. 같은 원래 root를 일반 consumer가 다시 조회해도 exact 결과를 공유할 수
+있는 이유이며, 다른 root/arena로 권한을 옮겨도 된다는 뜻은 아니다.
+
+#### 원래 7-choice BDD domain을 유지한다
+
+계산할 draw loop만 줄이고 `intern_node`에는 원래 source의 7-choice valid mask
+`0x7f`를 그대로 넘긴다. 다른 6개 children은 REJECT로 남는다. 이를 `p` 한 종류의
+domain mask로 바꾸면 `p` child가 ACCEPT일 때 root가 ACCEPT로 축약되어,
+한 블록 25,401,600개를 전체 177,811,200개로 잘못 확장할 수 있다.
+
+현재 구현은 원래 ordinal block, weight, 최소 original ordinal 및 witness 계산을
+그대로 보존한다. root의 나머지 6개 블록이 음성이라는 증명과, 특정 블록 또는
+전체 원본 universe가 이미 coverage로 덮였다는 사실은 서로 다른 권한이다.
+
+### 첫 draw 블록 진단: 서로 겹치는 epoch와 flushed union의 정확한 의미
+
+`FactorizedSourceLayout::full_draw_blocks`는 actual complete `[1,7,7]`,
+full=visible=15와 각 atom의 실제 7종 choices를 확인한다. 첫 atom의 저장된
+choices 순서를 사용하여 원본 ordinal을 7개 연속 블록으로 나눈다. enum 순서를
+원본 순서로 대신하지 않는다. 각 블록 크기는 `7! * 7! = 25,401,600`이며,
+64-bit bitmap에서는 **396,900 words, 3,175,200 bytes**다.
+
+owner가 이미 flush한 exact bitmap union을 `F`, 현재 BDD epoch의 union을 `E`,
+첫 draw rank `r`의 원본 블록을 `U_r`로 두면 checkpoint 필드는 다음 의미다.
+
+| 진단 필드 | 정확한 의미 |
+| --- | --- |
+| `first_draw_order` | 실제 원본 첫 atom choices 순서. 아래 배열과 mask bit의 rank 기준이다. |
+| `flushed_counts[r]` | `card(F intersection U_r)`. 기존 bitmap flush에서 **새로 설정된 비트 수만** 누적한다. |
+| `epoch_counts[r]` | `card(E intersection U_r)`. 현재 root의 해당 child와 exact suffix summary에서 읽는다. |
+| `flushed_complete_mask` | `flushed_counts[r] == 25,401,600`인 rank의 bit. |
+| `epoch_complete_mask` | `epoch_counts[r] == 25,401,600`인 rank의 bit. |
+| `known_complete_mask` | 위 두 complete mask의 bitwise OR. 각각 완전한 블록이라는 독립 증명만 합친다. |
+| `root_restrictions`, `root_draw_branches_skipped` | 유효한 root capability 사용 횟수와 실제 생략한 draw 분기의 누적 작업 계수. coverage 수가 아니다. |
+
+`F`와 `E`는 겹칠 수 있으므로 두 count를 더하거나 포화시키지 않는다. 두 집합이
+각각 incomplete여도 합집합은 complete일 수 있으므로 `known_complete_mask`에
+bit가 없다는 사실 역시 합집합 incomplete의 증명은 아니다. 다음 기존 flush에서
+실제 union의 newly-set bits를 누적하면 그 경우에도 정확한 flushed count를 얻는다.
+한 `p` 블록이 complete인 것과 전체 7개 블록의 complete는 구분한다.
+
+`[u32;7]` flushed counts는 동일 coverage owner의 성공한 epoch recycle 뒤에도
+남고, 다른 source/config의 새 owner는 0에서 시작한다. epoch node reference는
+recycle을 넘어 보존하지 않는다. snapshot은 7개 summary만 읽으며 candidate마다
+전체 22,226,400-byte bitmap을 새로 flush하거나 scan하지 않는다. 추가 coverage
+inline 상태는 64-bit feature-on에서 56B이고 creation/retained accounting에 포함한다.
+
+이 필드들은 **진단 전용**이다. 어떤 실제 worker의 특정 `p` 블록이 이미 100%라는
+측정 결과를 가정하지 않으며, whole geometry 열거 중단이나 후속 후보의 exact
+probability product 생략에 사용하지 않는다. synthetic bitmap 회귀에서 만든 full
+block도 물리 후보가 그 블록을 실제로 성공시켰다는 증거로 해석하지 않는다.
+
+#### 이번 추가 증명 회귀의 실행 결과
+
+공동 source의 집중 검증은 **42/42 통과**, 테스트 시간 **18.53초**, receipt
+`1795371936183899089-2`다. 새 15개 중 이 절의 증명과 직접 관련된 11개는
+geometry source-prefix 5개, full-draw root 4개, block 진단 2개다. 나머지 새
+4개는 interner 재사용 회귀이며 전체 42개의 구성과 결과는
+[source-subtrees-focused-tests.log](../../_local/artifacts/full6l-p1p7p7-20261122/source-subtrees-focused-tests.log)와
+[실행 receipt](../../_local/artifacts/full6l-p1p7p7-20261122/source-subtrees-focused-tests-receipt.json)에 보존했다.
+
+| 새 증명 회귀 | 실행하여 확인한 경계 |
+| --- | --- |
+| [geometry_source_prefix_tests.rs](../../crates/clearra-core-executor/src/backend/wasm_cpu/geometry_source_prefix_tests.rs), 5개 | 독립 free-operation subset oracle의 6,144개 모델에서 통과 5,414개·음성 730개·D0 이후 통과 98개를 비교했다. future-only empty AND, realization OR, joint clear, 64상태 방문, operation/row/extra 종류 재인덱싱, unsupported fallback을 검사했다. 실제 source-positive mixed15의 32,768개 모든 selected subsets 및 역순도 모두 보존했다. |
+| [source_root_inventory_tests.rs](../../crates/clearra-core-executor/src/backend/wasm_cpu/source_root_inventory_tests.rs), 4개 | 실제 mixed15 언어의 모든 accepting words가 동일 inventory임을 독립 DAG 계산으로 확인했다. 일반 product와 제한한 product의 전체 177,811,200-bit bitmap·coverage·최소 ordinal·15-step path가 같았다. 다른 extra/mixed root, 같은 numeric ID를 재사용한 새 arena, 다른 source/Hold/EOF 및 일반 graph 발급 거절 뒤 generic fallback과 memo 재방문을 검사했다. |
+| [first_draw_block_tests.rs](../../crates/clearra-core-executor/src/backend/wasm_cpu/standard_bag_coverage/first_draw_block_tests.rs), 2개 | 겹친 epoch의 count 합이 블록보다 커도 complete를 주장하지 않고, flush한 실제 새 비트만 합쳤다. 단일 full block에서 global complete=false, 7개 full block에서 true를 확인했다. 실제 choices 순서, recycle 후 count 보존, 다른 owner 초기화와 unsupported layout도 검사했다. |
+
+동일 mixed15의 root-product 비교에서 product states는 **10,247 → 3,414**,
+edge checks는 **42,429 → 16,971**이었다. 성공 원본 수 **5,846,037**, 최소
+original ordinal **0**, 전체 bitmap 및 15-step 물리 path는 같았다. 이 비교는
+이미 같은 physical graph를 만든 뒤 다른 6개 first-draw source 분기의 음성을
+재사용한 효과다. 전체 Full6 후보 수나 소진 시간의 감소율, 전체 탐색 완주를
+측정한 값은 아니다.
+
+### Native Opening·Scenario의 현재 적용 범위와 실행 검증
+
+`e57962cf0e553d9fde7ab700fe4def2a19f70261`에서는 앞의 음성 필터를
+benchmark의 Scenario/Trace1 입력에만 한정하지 않는다.
+[result.rs](../../crates/clearra-core-executor/src/backend/wasm_cpu/result.rs)의
+`full6l_physical_prefix_pruning_eligible`과
+[source_prefix.rs](../../crates/clearra-core-executor/src/backend/wasm_cpu/source_prefix.rs)의
+`FullDrawSourcePrefix::compile`은 preset과 problem kind가 함께 일치하는
+`OpeningPc` 또는 `ScenarioPc`를 받는다. ordinary `Trace`의 retained limit에
+따른 거부를 제거했고, result gate는 exact legal-board 및 conditioned
+reachability가 켜진 요청도 받는다. 이 변경을 위해 preset, trace limit 또는
+accelerator 요청 값을 다른 값으로 바꾸지는 않는다.
+
+증명에 필요한 source와 consumer 경계는 유지한다. 64-bit native의 빈 10×6
+전체 target, 15 locks, 실제 complete factorized `[1,7,7]`의 full=visible=15,
+초기 empty/Allowed Hold와 finite EOF, `Unique` objective와 `CountUnique`,
+`FullQueueOracle`, ordinary `Trace`, chance evidence `Disabled` 및
+solution probability `Omit`가 적용 범위다. 후보별 source cap은 같은 후보의
+15-operation inventory와 실제 source owner를 다시 확인한다. root 제약의
+source/arena/root binding과 generic fallback도 바뀌지 않는다.
+
+물리 graph 전체 export, scoring, 별도 path/save/score/chance evidence, build
+replay, 다른 queue observation이나 초기 source/Hold에는 이 권한을 확대하지
+않는다. geometry 측의 external/parent-owned family, tablebase·dependency
+precompute 및 기존 명시적 resource-bound 제외도 유지한다. ordinary Trace의
+limit 64는 이 경로에서 별도 64개 replay를 요구하는 계약이 아니며, 기존 exact
+대표 경로 계산을 유지한다. 물리 graph export consumer는 source상 불가능한
+operation 순서까지 포함한 원래 graph를 계속 받는다.
+
+이 소스에서 수행한 집중 실행 결과는 다음과 같다. 시간은 각 test harness가
+보고한 테스트 시간이며, 감독 프로세스 전체 경과 시간과 구분한다.
+
+| 검증 | 실행 결과 | 근거 |
+| --- | --- | --- |
+| Core native 범위와 기존 exactness 회귀 | **54 passed, 0 failed, 1 ignored; 19.11초** | [native-scope-focused-tests.log](../../_local/artifacts/full6l-p1p7p7-20261122/native-scope-focused-tests.log), [receipt 1795373292549528809-2](../../_local/artifacts/full6l-p1p7p7-20261122/native-scope-focused-tests-receipt.json) |
+| 실제 CLI → App → ProblemCompiler 입력 전달 | **3 passed, 0 failed; 0.01초** | [native-frontdoor-tests.log](../../_local/artifacts/full6l-p1p7p7-20261122/native-frontdoor-tests.log), [receipt 1795373321218744364-2](../../_local/artifacts/full6l-p1p7p7-20261122/native-frontdoor-tests-receipt.json) |
+
+새 실제 consumer 회귀
+`full6_source_prefix_opening_trace64_accelerators_preserves_product_and_representative`는
+Opening/Trace64와 두 exact accelerator 요청을 켠 상태에서 `verify_candidate`를
+실행했다. 같은 mixed15 후보의 필터 없는 reference와 비교해 성공 원본 수
+**5,846,037**, 전체 **177,811,200-bit bitmap**, 최소 witness ordinal 및
+**15-step 대표 path**가 같았다. graph node 감소와 temporal 검사 실행도 확인했다.
+같은 요청의 별도 물리 graph export는 reference와 node 수·edges·piece edges가
+같았다. 실제 verifier가 legal-board와 conditioned reachability 요청을 소비한
+것을 검사했으며, 이 테스트를 위해 accelerator asset을 새로 설치하거나 모든
+설치 asset의 사용을 주장하지는 않는다. 관련 회귀는
+[source_prefix_graph_tests.rs](../../crates/clearra-core-executor/src/backend/wasm_cpu/source_prefix_graph_tests.rs)에 있다.
+
+[full6_frontdoor_tests.rs](../../crates/clearra-cli-command/src/full6_frontdoor_tests.rs)의
+3개 테스트는 실제 공개 parser와 App 요청을 거쳐 source/target 계약을 compile했다.
+기본 `clearra pc --lines 6 --patterns P1P7P7`은 Opening/Trace64와 두 accelerator
+요청을 보존하며, 명시적 Scenario 입력도 설정을 명시적으로 끄기 전에는 그대로
+유지한다. harness와 같은 Scenario/Trace1/accelerator-off 입력도 확인했다.
+각 입력의 원본 universe **177,811,200**, `[1,7,7]` segment schedule, empty Hold,
+finite EOF 및 생성 한도 없는 계약을 검사했다. 이는 native 입력 전달의 검증이며,
+CLI 3개 자체가 Geometry/BuildUp을 실행하거나 UI의 전체 탐색을 완주한 것은 아니다.
+
+위 Core 54개에는
+[geometry_source_prefix_cache_diagnostic_tests.rs](../../crates/clearra-core-executor/src/backend/wasm_cpu/geometry_source_prefix_cache_diagnostic_tests.rs)의
+작은 회귀 **3개**도 포함된다. 실제 catalog/owner에 결합한 key, offline replay의
+hit·collision 처리, capacity admission과 취소 시 incomplete 경계를 검사했다.
+큰 `full6l_source_prefix_cache_trace_diagnostic`는 **ignored로 남아 실행하지
+않았다**. 해당 진단은 실제 DP 결과를 먼저 기록하고 나중에 cache를 모사하는
+test-only 경로이며, 제품에 cache를 설치하거나 큰 Full6의 hit rate·성능 이득을
+확인한 결과가 아니다.
+
+과거 `254cf3d2`와 앞의 42개 회귀 기록은 당시 조건의 실행 이력으로 유지한다.
+이번 확대와 54개 통과는 source 없는 후보의 성공 판정, coverage 100% 조기 종료,
+정규화 결과의 전체 소진 완료를 새로 부여하지 않는다. Full6 완주에는 여전히 전체
+허용 후보의 정확한 물리/source 검증과 exhaustive CountUnique 완료가 필요하다.
 
 ## 3. ILC 의존성 closure의 정확한 단방향 계약
 

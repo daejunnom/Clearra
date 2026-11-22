@@ -1,8 +1,12 @@
+use clearra_core_domain::pc::pc_target::PcTarget;
+use clearra_objectives::policy::objective_policy::ObjectivePolicy;
 use clearra_pc_graph::request::{
-    PcExecutionPolicy, PcQueueInput, PcScenarioBoard, PcScenarioQuery, PieceWindow,
-    SupplyWindowSize,
+    OpeningPcSearchQuery, PcExecutionPolicy, PcQueueInput, PcScenarioBoard, PcScenarioQuery,
+    PieceWindow, SupplyWindowSize,
 };
-use clearra_problem::ProblemCompiler;
+use clearra_problem::{
+    ProblemCompiler, SearchOutputPolicy, SearchProblemKind, SearchProblemPreset,
+};
 use clearra_rules::{kicks::KickTableProfileId, profile::builtin_rules::srs_plus};
 use clearra_supply::queue::{
     fixed_sequence::FixedSequence, queue_pattern_expression::QueuePatternExpression,
@@ -70,6 +74,15 @@ fn graph(
     candidate: &GeometryCandidate,
     piece_language_projection_only: bool,
 ) -> BuildOrderGraph {
+    graph_with_metrics(problem, catalog, candidate, piece_language_projection_only).0
+}
+
+fn graph_with_metrics(
+    problem: &SearchProblem,
+    catalog: &GeometryCatalog,
+    candidate: &GeometryCandidate,
+    piece_language_projection_only: bool,
+) -> (BuildOrderGraph, source_prefix::SourcePrefixTemporalMetrics) {
     let mut workspace = BuildUpWorkspace::default();
     workspace
         .reachability
@@ -81,7 +94,7 @@ fn graph(
         BuildCompletion::ClearToEmpty,
     )
     .unwrap();
-    BuildOrderGraph::build_with_legal_board_admission(
+    let graph = BuildOrderGraph::build_with_legal_board_admission(
         problem,
         catalog,
         candidate,
@@ -94,7 +107,8 @@ fn graph(
         false,
         &CandidateMovementProofs::default(),
     )
-    .unwrap()
+    .unwrap();
+    (graph, workspace.source_prefix_temporal_metrics())
 }
 
 fn path_for_queue(
@@ -196,7 +210,10 @@ fn full6_source_prefix_preserves_exact_graph_source_intersection_and_witness() {
         "the unfiltered physical candidate is buildable"
     );
     let raw_source = source_summary(&problem, &raw);
-    let pruned = graph(&problem, &catalog, &candidate, true);
+    assert_eq!(raw_source.covered_count, 5_846_037);
+    let (pruned, temporal) = graph_with_metrics(&problem, &catalog, &candidate, true);
+    assert_eq!(temporal.checks, 1);
+    assert_eq!(temporal.negative_candidates, 0);
     let pruned_source = source_summary(&problem, &pruned);
     eprintln!(
         "full6 source prefix: raw_nodes={} pruned_nodes={} raw_edges={} pruned_edges={} raw_reachability={} pruned_reachability={} raw_covered={} pruned_covered={} raw_witness={:?} pruned_witness={:?}",
@@ -250,4 +267,134 @@ fn full6_source_prefix_keeps_arbitrary_fixed_queue_on_the_unfiltered_graph() {
     let actual = graph(&fixed, &catalog, &candidate, true);
     assert!(actual.is_live());
     assert_eq!(path_for_queue(&fixed, &actual, &physical_word).len(), 15);
+}
+
+#[cfg(all(not(target_family = "wasm"), target_pointer_width = "64"))]
+#[test]
+fn full6_source_prefix_opening_trace64_accelerators_preserves_product_and_representative() {
+    use clearra_supply::pattern_universe::PieceMultisetKey;
+
+    let problem = ProblemCompiler::compile_opening_pc(
+        &OpeningPcSearchQuery::new(PcTarget::six_lines())
+            .with_queue(PcQueueInput::pattern_expression(
+                QueuePatternExpression::parse("P1P7P7", 0).unwrap(),
+            ))
+            .with_rule(srs_plus())
+            .with_objective(ObjectivePolicy::unique())
+            .with_count_policy(PcCountPolicy::CountUnique)
+            .with_queue_observation_policy(QueueObservationPolicy::FullQueueOracle)
+            .with_execution_policy(PcExecutionPolicy::mvp_default().with_max_patterns(0)),
+    )
+    .unwrap();
+    assert_eq!(problem.preset(), SearchProblemPreset::OpeningPc);
+    assert_eq!(problem.problem_kind(), SearchProblemKind::OpeningPc);
+    assert_eq!(problem.output_policy(), SearchOutputPolicy::Trace);
+    assert_eq!(problem.replay_trace_policy().retained_trace_limit(), 64);
+    assert!(problem.backend_request().exact_legal_board_enabled());
+    assert!(problem.backend_request().conditioned_reachability_enabled());
+    let catalog = GeometryCatalog::compile(&problem).unwrap();
+    let (candidate, _) = mixed_candidate(&catalog);
+    assert!(FullDrawSourcePrefix::compile(&problem, &catalog, &candidate).is_some());
+
+    // Use the same source-aware target construction as the product. The shared
+    // source-extent membership cannot replace the exact original-queue product.
+    let universe = problem.piece_source().materialized_universe().unwrap();
+    let family = universe
+        .symbolic_factorized_full_draw_family_for_execution(
+            15,
+            problem.initial_hold(),
+            problem.supply().hold_enabled(),
+            super::super::packing_hold_projection(&problem),
+        )
+        .unwrap()
+        .unwrap();
+    let (targets, _) =
+        super::super::geometry::compile_target_groups(universe, &family, false).unwrap();
+    let key = PieceMultisetKey::from_pieces(
+        candidate
+            .row_ids()
+            .iter()
+            .map(|&row| catalog.skeleton(row).piece),
+    );
+    let target = targets.iter().find(|target| target.key == key).unwrap();
+    assert!(target.pattern_index.is_none());
+
+    let execute = |disable_prefix: bool| {
+        let mut workspace = BuildUpWorkspace::default();
+        let mut evaluator = CoverageProductEvaluator::default();
+        let mut run = || {
+            verify_candidate(
+                &problem,
+                &catalog,
+                &candidate,
+                target,
+                &mut workspace,
+                &mut evaluator,
+                CandidateWitnessMode::Disabled,
+                true,
+                1,
+                &ExecutionControl::default(),
+            )
+            .unwrap()
+        };
+        let result = if disable_prefix {
+            source_prefix::with_disabled(run)
+        } else {
+            run()
+        };
+        assert!(result.buildable);
+        assert!(result.count_complete);
+        assert_eq!(result.symbolic_covered_pattern_count, 5_846_037);
+        assert_eq!(result.representative_path.len(), 15);
+        // This calls the real verifier, which consumes the requested policies.
+        // No process-wide asset installation is required or changed by a test;
+        // exact asset lookup/primitive parity has its own reachability tests.
+        assert_eq!(workspace.legal_board_enabled, Some(true));
+        assert!(workspace.reachability.metrics().conditioned_requested);
+        let temporal = workspace.source_prefix_temporal_metrics();
+        if disable_prefix {
+            assert_eq!(temporal.checks, 0);
+        } else {
+            assert!(temporal.checks > 0);
+            assert_eq!(temporal.negative_candidates, 0);
+        }
+        let coverage = workspace
+            .materialize_standard_bag_root(result.symbolic_coverage_root.unwrap())
+            .unwrap();
+        (result, coverage)
+    };
+    let (reference, reference_coverage) = execute(true);
+    let (filtered, filtered_coverage) = execute(false);
+    assert!(filtered.graph_nodes < reference.graph_nodes);
+    assert_eq!(filtered.witness_pattern_id, reference.witness_pattern_id);
+    assert_eq!(filtered.representative_path, reference.representative_path);
+    assert_eq!(
+        filtered.symbolic_covered_pattern_count,
+        reference.symbolic_covered_pattern_count
+    );
+    assert_eq!(reference_coverage.pattern_count(), 177_811_200);
+    assert_eq!(
+        filtered_coverage.pattern_count(),
+        reference_coverage.pattern_count()
+    );
+    assert_eq!(
+        filtered_coverage.word_count(),
+        reference_coverage.word_count()
+    );
+    for word in 0..reference_coverage.word_count() {
+        assert_eq!(
+            filtered_coverage.word_at(word),
+            reference_coverage.word_at(word),
+            "word={word}"
+        );
+    }
+
+    // An actual physical graph export is a different consumer. It keeps source-
+    // impossible operation orders even under the same Opening/Trace64 input.
+    let exported = graph(&problem, &catalog, &candidate, false);
+    let reference_export =
+        source_prefix::with_disabled(|| graph(&problem, &catalog, &candidate, false));
+    assert_eq!(exported.nodes.len(), reference_export.nodes.len());
+    assert_eq!(exported.edges, reference_export.edges);
+    assert_eq!(exported.piece_edges, reference_export.piece_edges);
 }

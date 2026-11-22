@@ -41,6 +41,14 @@ mod inventory_tests;
 mod prefix_pruning;
 use prefix_pruning::PhysicalPrefixProfile;
 
+#[path = "geometry_source_prefix.rs"]
+mod source_prefix;
+use source_prefix::{FullDrawPrefixRequest, SourcePrefixProfile};
+
+#[cfg(test)]
+#[path = "geometry_source_prefix_tests.rs"]
+mod source_prefix_tests;
+
 #[path = "geometry_row_order.rs"]
 mod row_order;
 use row_order::{FamilyRowOrderBuilder, FamilyRowOrderTable, RowOrderBuildAdvance, ROW_ORDER_ALL};
@@ -48,6 +56,10 @@ use row_order::{FamilyRowOrderBuilder, FamilyRowOrderTable, RowOrderBuildAdvance
 #[cfg(test)]
 #[path = "geometry_row_order_tests.rs"]
 mod row_order_tests;
+
+#[cfg(test)]
+#[path = "geometry_row_order_count_tests.rs"]
+mod row_order_count_tests;
 
 #[cfg(test)]
 #[path = "geometry_prefix_pruning_tests.rs"]
@@ -2544,6 +2556,7 @@ struct TraversalTask {
     depth: u8,
     continuation_count: u8,
     prefix_verified: bool,
+    source_prefix_verified: bool,
     prefix_row_order_mask: u32,
 }
 
@@ -2566,10 +2579,12 @@ struct FamilyEnumerator {
     target_depth: u8,
     retained_limit_bytes: Option<u128>,
     physical_prefix_pruning: bool,
+    source_prefix_request: Option<FullDrawPrefixRequest>,
     row_order_attempted: bool,
     row_order_builder: Option<FamilyRowOrderBuilder>,
     row_order_table: Option<Arc<FamilyRowOrderTable>>,
     prefix_profile: PhysicalPrefixProfile,
+    source_prefix_profile: SourcePrefixProfile,
     #[cfg(feature = "parallel")]
     candidate_count: Option<u128>,
 }
@@ -2589,13 +2604,22 @@ impl FamilyEnumerator {
         self.invalidate_prefix_verification();
     }
 
+    fn enable_full_draw_source_prefix_pruning(&mut self, request: FullDrawPrefixRequest) {
+        if request.supports_targets(&self.targets) {
+            self.source_prefix_request = Some(request);
+            self.invalidate_prefix_verification();
+        }
+    }
+
     fn invalidate_prefix_verification(&mut self) {
         for task in &mut self.tasks {
             task.prefix_verified = task.depth == 0;
+            task.source_prefix_verified = task.depth == 0;
             task.prefix_row_order_mask = ROW_ORDER_ALL;
         }
         if let Some(task) = self.active_task.as_mut() {
             task.prefix_verified = task.depth == 0;
+            task.source_prefix_verified = task.depth == 0;
             task.prefix_row_order_mask = ROW_ORDER_ALL;
         }
     }
@@ -2696,6 +2720,7 @@ impl FamilyEnumerator {
                 depth: 0,
                 continuation_count: 0,
                 prefix_verified: true,
+                source_prefix_verified: true,
                 prefix_row_order_mask: ROW_ORDER_ALL,
             });
         }
@@ -2709,10 +2734,12 @@ impl FamilyEnumerator {
                 target_depth,
                 retained_limit_bytes: None,
                 physical_prefix_pruning: false,
+                source_prefix_request: None,
                 row_order_attempted: false,
                 row_order_builder: None,
                 row_order_table: None,
                 prefix_profile: PhysicalPrefixProfile::default(),
+                source_prefix_profile: SourcePrefixProfile::default(),
                 #[cfg(feature = "parallel")]
                 candidate_count,
             },
@@ -2746,6 +2773,7 @@ impl FamilyEnumerator {
                 depth: 0,
                 continuation_count: 0,
                 prefix_verified: true,
+                source_prefix_verified: true,
                 prefix_row_order_mask: ROW_ORDER_ALL,
             });
         }
@@ -2758,10 +2786,12 @@ impl FamilyEnumerator {
             target_depth,
             retained_limit_bytes: Some(retained_limit_bytes),
             physical_prefix_pruning: false,
+            source_prefix_request: None,
             row_order_attempted: false,
             row_order_builder: None,
             row_order_table: None,
             prefix_profile: PhysicalPrefixProfile::default(),
+            source_prefix_profile: SourcePrefixProfile::default(),
             #[cfg(feature = "parallel")]
             candidate_count: None,
         };
@@ -2853,10 +2883,12 @@ impl FamilyEnumerator {
                 target_depth: self.target_depth,
                 retained_limit_bytes: None,
                 physical_prefix_pruning: self.physical_prefix_pruning,
+                source_prefix_request: self.source_prefix_request,
                 row_order_attempted: self.row_order_attempted,
                 row_order_builder: None,
                 row_order_table: self.row_order_table.as_ref().map(Arc::clone),
                 prefix_profile: PhysicalPrefixProfile::default(),
+                source_prefix_profile: SourcePrefixProfile::default(),
                 #[cfg(feature = "parallel")]
                 candidate_count: Some(seed.weight),
             });
@@ -2992,6 +3024,21 @@ impl FamilyEnumerator {
                 if task.family == FAMILY_INVALID {
                     break;
                 }
+                if PHYSICAL && self.source_prefix_request.is_some() && !task.source_prefix_verified
+                {
+                    // These are checkpoint depths, never a candidate or work
+                    // limit. Frozen seeds at any depth are checked as well.
+                    // A failure discards this task AND its continuations, while
+                    // pending Union siblings keep their own saved prefixes.
+                    if task.depth >= 8
+                        && self
+                            .source_prefix_profile
+                            .stalls(catalog, &self.rows[..usize::from(task.depth)])
+                    {
+                        break;
+                    }
+                    task.source_prefix_verified = true;
+                }
                 if task.family == FAMILY_EMPTY {
                     if task.continuation_count != 0 {
                         task.continuation_count -= 1;
@@ -3017,6 +3064,9 @@ impl FamilyEnumerator {
                         self.rows[task.depth as usize] = node.row_id;
                         task.depth += 1;
                         task.family = node.left;
+                        if PHYSICAL {
+                            task.source_prefix_verified = false;
+                        }
                         if use_row_order {
                             if let Some(mask) = self
                                 .row_order_table
@@ -3432,6 +3482,7 @@ fn split_traversal_seed(
                 seed.task.family = node.left;
                 // Splitting has no catalog and grants no closure evidence.
                 seed.task.prefix_verified = false;
+                seed.task.source_prefix_verified = false;
             }
             FamilyNodeKind::Union => {
                 let mut left = seed;
@@ -3599,6 +3650,7 @@ pub(super) struct GeometrySearch {
     compiler: Option<FamilyCompiler>,
     enumerator: Option<FamilyEnumerator>,
     physical_prefix_pruning: bool,
+    source_prefix_request: Option<FullDrawPrefixRequest>,
     expanded_nodes: usize,
     peak_frontier: usize,
     candidate_family_count: Option<u128>,
@@ -4355,6 +4407,40 @@ impl GeometrySearch {
         self.physical_prefix_pruning
     }
 
+    pub fn enable_full_draw_source_prefix_pruning(
+        &mut self,
+        problem: &clearra_problem::SearchProblem,
+    ) {
+        if !self.physical_prefix_pruning {
+            return;
+        }
+        let Some(request) = FullDrawPrefixRequest::compile(problem) else {
+            return;
+        };
+        let supported_targets = self
+            .compiler
+            .as_ref()
+            .map(|compiler| request.supports_targets(&compiler.targets))
+            .or_else(|| {
+                self.targets()
+                    .map(|targets| request.supports_targets(targets))
+            })
+            .unwrap_or(false);
+        if !supported_targets {
+            // Unknown/deferred target domains retain the original traversal.
+            // Report application only after the actual owned targets match.
+            return;
+        }
+        self.source_prefix_request = Some(request);
+        if let Some(enumerator) = self.enumerator.as_mut() {
+            enumerator.enable_full_draw_source_prefix_pruning(request);
+        }
+    }
+
+    pub const fn source_prefix_pruning_enabled(&self) -> bool {
+        self.source_prefix_request.is_some()
+    }
+
     pub(super) fn new_for_verifier_target(required_cells: u64, target: &TargetGroup) -> Self {
         // The verifier already owns the possible-pattern backing. Geometry
         // needs the same key and keeps only a reference to that backing.
@@ -4450,6 +4536,7 @@ impl GeometrySearch {
             compiler: None,
             enumerator: None,
             physical_prefix_pruning: false,
+            source_prefix_request: None,
             expanded_nodes: 0,
             peak_frontier: 0,
             candidate_family_count: Some(0),
@@ -4569,6 +4656,7 @@ impl GeometrySearch {
             compiler: None,
             enumerator: None,
             physical_prefix_pruning: false,
+            source_prefix_request: None,
             expanded_nodes: 0,
             peak_frontier: 0,
             candidate_family_count: None,
@@ -4594,6 +4682,7 @@ impl GeometrySearch {
             )),
             enumerator: None,
             physical_prefix_pruning: false,
+            source_prefix_request: None,
             expanded_nodes: 0,
             peak_frontier: 0,
             candidate_family_count: None,
@@ -4622,6 +4711,7 @@ impl GeometrySearch {
             )?),
             enumerator: None,
             physical_prefix_pruning: false,
+            source_prefix_request: None,
             expanded_nodes: 0,
             peak_frontier: 0,
             candidate_family_count: None,
@@ -4706,6 +4796,7 @@ impl GeometrySearch {
             compiler: None,
             enumerator: None,
             physical_prefix_pruning: false,
+            source_prefix_request: None,
             expanded_nodes: 0,
             peak_frontier: 0,
             candidate_family_count: None,
@@ -4728,6 +4819,7 @@ impl GeometrySearch {
             compiler: None,
             enumerator: None,
             physical_prefix_pruning: false,
+            source_prefix_request: None,
             expanded_nodes: 0,
             peak_frontier: 0,
             candidate_family_count: None,
@@ -4872,6 +4964,9 @@ impl GeometrySearch {
                         };
                         if self.physical_prefix_pruning {
                             enumerator.enable_physical_prefix_pruning();
+                            if let Some(request) = self.source_prefix_request {
+                                enumerator.enable_full_draw_source_prefix_pruning(request);
+                            }
                         }
                         self.enumerator = Some(enumerator);
                     } else {
@@ -4880,6 +4975,9 @@ impl GeometrySearch {
                         self.candidate_family_count = root_count;
                         if self.physical_prefix_pruning {
                             enumerator.enable_physical_prefix_pruning();
+                            if let Some(request) = self.source_prefix_request {
+                                enumerator.enable_full_draw_source_prefix_pruning(request);
+                            }
                         }
                         self.enumerator = Some(enumerator);
                     }
@@ -5045,6 +5143,9 @@ impl GeometrySearch {
             self.candidate_family_count = root_count;
             if self.physical_prefix_pruning {
                 enumerator.enable_physical_prefix_pruning();
+                if let Some(request) = self.source_prefix_request {
+                    enumerator.enable_full_draw_source_prefix_pruning(request);
+                }
             }
             self.enumerator = Some(enumerator);
             stage.finish(u64::from(node_count));
@@ -5354,6 +5455,7 @@ impl GeometrySearch {
                 candidate_family_count: enumerator.candidate_count,
                 enumerator: Some(enumerator),
                 physical_prefix_pruning: self.physical_prefix_pruning,
+                source_prefix_request: self.source_prefix_request,
                 expanded_nodes: usize::from(index == 0) * self.expanded_nodes,
                 peak_frontier: usize::from(index == 0) * self.peak_frontier,
                 domain_pruned_states: usize::from(index == 0) * self.domain_pruned_states,
@@ -5391,6 +5493,9 @@ impl GeometrySearch {
         geometry.shared_family_bytes = shared_family_bytes;
         geometry.physical_prefix_pruning =
             searches.iter().any(Self::physical_prefix_pruning_enabled);
+        geometry.source_prefix_request = searches
+            .iter()
+            .find_map(|search| search.source_prefix_request);
         geometry.candidate_family_count = Some(0);
         for search in searches {
             geometry.expanded_nodes = geometry

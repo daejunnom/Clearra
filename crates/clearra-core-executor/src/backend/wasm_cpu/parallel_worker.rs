@@ -1044,6 +1044,23 @@ fn report_worker_checkpoint(
     };
     let memory = workspace.memory_components();
     let shared_bag = workspace.shared_standard_bag_request_retained_bytes();
+    let source_prefix_temporal = workspace.source_prefix_temporal_metrics();
+    let first_draw_blocks = match workspace.standard_bag_first_draw_blocks() {
+        Ok(Some(blocks)) => serde_json::json!({
+            "contract": "actual complete finite [1,7,7]; counts in original first-choice order; epoch and flushed counts overlap and are not additive",
+            "first_draw_order": blocks.first_draw_order.map(|piece| ["I", "O", "T", "S", "Z", "J", "L"][usize::from(piece)]),
+            "block_pattern_count": blocks.block_pattern_count,
+            "flushed_counts": blocks.flushed_counts,
+            "epoch_counts": blocks.epoch_counts,
+            "flushed_complete_mask": blocks.flushed_complete_mask,
+            "epoch_complete_mask": blocks.epoch_complete_mask,
+            "known_complete_mask": blocks.known_complete_mask,
+            "root_restrictions": blocks.root_restrictions,
+            "root_draw_branches_skipped": blocks.root_draw_branches_skipped,
+        }),
+        Ok(None) => serde_json::Value::Null,
+        Err(error) => serde_json::json!({"unavailable": format!("{error:?}")}),
+    };
     let stages = profile
         .into_iter()
         .filter(|stage| stage.invocation_count != 0 || stage.work_item_count != 0)
@@ -1065,6 +1082,13 @@ fn report_worker_checkpoint(
         "coverage_product_states_in_worker": aggregate.coverage_product_states,
         "reachability_states_in_worker": aggregate.total_reachability_states,
         "local_source_coverage_complete": workspace.standard_bag_coverage_complete(),
+        "local_first_draw_blocks": first_draw_blocks,
+        "source_prefix_temporal_in_worker": {
+            "checks": source_prefix_temporal.checks,
+            "root_fast_passes": source_prefix_temporal.root_fast_passes,
+            "visited_row_states": source_prefix_temporal.visited_row_states,
+            "negative_candidates": source_prefix_temporal.negative_candidates,
+        },
         "retained_capacity_bytes": {
             "piece_language": memory.piece_language_bytes,
             "standard_bag_private": memory.standard_bag_bytes.saturating_sub(shared_bag),

@@ -17,6 +17,15 @@ pub(super) struct FactorizedSourceLayout {
     segments: Box<[FactorizedPatternSegment]>,
 }
 
+/// Exact first-draw ordinal blocks from the actual complete [1, 7, 7] layout.
+/// Piece codes retain the first segment's stored order; enum order is not an
+/// ordinal certificate. All three segments contain the seven standard kinds.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct FullDrawBlockLayout {
+    pub first_draw_order: [u8; STANDARD_PIECE_COUNT],
+    pub block_pattern_count: u32,
+}
+
 impl FactorizedSourceLayout {
     pub(super) fn supported_layout(
         universe: &MaterializedPatternUniverse,
@@ -64,6 +73,38 @@ impl FactorizedSourceLayout {
 
     pub(super) fn initial_remainder(&self) -> u8 {
         self.segments[0].choice_mask()
+    }
+
+    pub(super) fn full_draw_blocks(&self) -> Option<FullDrawBlockLayout> {
+        if self.full_sequence_len != 15
+            || self.visible_sequence_len != 15
+            || self.segments.len() != 3
+            || !self
+                .segments
+                .iter()
+                .zip([(0, 1, 7), (1, 7, 5_040), (8, 7, 5_040)])
+                .all(|(segment, (start, draws, variants))| {
+                    segment.draw_start() == start
+                        && segment.draw_count() == draws
+                        && segment.variant_count() == variants
+                        && segment.choices().len() == STANDARD_PIECE_COUNT
+                        && segment.choice_mask() == FULL_STANDARD_BAG
+                })
+        {
+            return None;
+        }
+        let block_pattern_count = u32::try_from(self.segments[0].suffix_variant_count()).ok()?;
+        if block_pattern_count != 25_401_600 {
+            return None;
+        }
+        let mut first_draw_order = [0_u8; STANDARD_PIECE_COUNT];
+        for (index, piece) in first_draw_order.iter_mut().zip(self.segments[0].choices()) {
+            *index = piece_code(*piece) - 1;
+        }
+        Some(FullDrawBlockLayout {
+            first_draw_order,
+            block_pattern_count,
+        })
     }
 
     pub(super) fn retained_bytes(&self) -> usize {

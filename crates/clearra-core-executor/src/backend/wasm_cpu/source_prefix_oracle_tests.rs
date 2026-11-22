@@ -6,12 +6,13 @@
 
 use std::collections::{BTreeSet, HashSet};
 
-use clearra_core_domain::piece::piece_kind::PieceKind;
+use clearra_core_domain::{pc::pc_target::PcTarget, piece::piece_kind::PieceKind};
+use clearra_objectives::policy::objective_policy::ObjectivePolicy;
 use clearra_pc_graph::request::{
-    PcCountPolicy, PcExecutionPolicy, PcQueueInput, PcScenarioBoard, PcScenarioQuery,
-    PcSolutionProbabilityPolicy, PieceWindow, SupplyWindowSize,
+    OpeningPcSearchQuery, PcCountPolicy, PcExecutionPolicy, PcQueueInput, PcScenarioBoard,
+    PcScenarioQuery, PcSolutionProbabilityPolicy, PieceWindow, SupplyWindowSize,
 };
-use clearra_problem::ProblemCompiler;
+use clearra_problem::{ProblemCompiler, SearchProblemKind, SearchProblemPreset};
 use clearra_rules::profile::builtin_rules::srs_plus;
 use clearra_supply::{
     execution_automaton::{
@@ -558,9 +559,37 @@ fn source_prefix_compile_requires_actual_full15_owner_empty_hold_and_inventory()
     assert_eq!(source.pattern_count(), 177_811_200);
     assert!(source.complete_factorized_layout().is_some());
     assert!(FullDrawSourcePrefix::compile(&problem, &catalog, &candidate).is_some());
+    let ordinary_trace =
+        ProblemCompiler::compile_scenario_pc(&query.clone().with_retained_trace_limit(64)).unwrap();
+    assert_eq!(
+        ordinary_trace.replay_trace_policy().retained_trace_limit(),
+        64
+    );
+    assert!(FullDrawSourcePrefix::compile(&ordinary_trace, &catalog, &candidate).is_some());
+    let opening = ProblemCompiler::compile_opening_pc(
+        &OpeningPcSearchQuery::new(PcTarget::six_lines())
+            .with_queue(pattern())
+            .with_rule(srs_plus())
+            .with_objective(ObjectivePolicy::unique())
+            .with_count_policy(PcCountPolicy::CountUnique)
+            .with_queue_observation_policy(QueueObservationPolicy::FullQueueOracle)
+            .with_execution_policy(PcExecutionPolicy::mvp_default().with_max_patterns(0)),
+    )
+    .unwrap();
+    assert_eq!(opening.preset(), SearchProblemPreset::OpeningPc);
+    assert_eq!(opening.problem_kind(), SearchProblemKind::OpeningPc);
+    assert_eq!(opening.replay_trace_policy().retained_trace_limit(), 64);
+    assert!(opening.backend_request().exact_legal_board_enabled());
+    assert!(opening.backend_request().conditioned_reachability_enabled());
+    assert!(FullDrawSourcePrefix::compile(&opening, &catalog, &candidate).is_some());
     for evidence_problem in [
         problem.clone().with_pc_chance_probability_v2_evidence(),
         problem.clone().with_build_replay_evidence(),
+        opening.clone().with_pc_chance_probability_v2_evidence(),
+        opening.clone().with_build_replay_evidence(),
+        opening.clone().with_pc_path_v2_evidence(),
+        opening.clone().with_pc_save_groups_v2_evidence(),
+        opening.clone().with_pc_score_portfolio_v2_evidence(),
     ] {
         assert!(FullDrawSourcePrefix::compile(&evidence_problem, &catalog, &candidate).is_none());
     }
@@ -572,7 +601,6 @@ fn source_prefix_compile_requires_actual_full15_owner_empty_hold_and_inventory()
         query
             .clone()
             .with_queue_observation_policy(QueueObservationPolicy::VisibleSeven),
-        query.clone().with_retained_trace_limit(2),
         full_query(PcQueueInput::pattern_expression(
             QueuePatternExpression::parse("P7P1P7", 0).unwrap(),
         )),

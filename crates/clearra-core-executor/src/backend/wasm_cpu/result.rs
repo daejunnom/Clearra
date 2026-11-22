@@ -905,10 +905,14 @@ enum SearchProblemRetention {
     },
 }
 
-/// First product scope for the prefix impossibility proof. Pure tiling,
-/// ordinal-row evidence, retained replay families and external producers keep
-/// their established unfiltered geometry domain. The proof itself never
-/// grants queue membership or physical success to a retained candidate.
+/// Ordinary native PC scope for the prefix impossibility proof. Opening and
+/// explicit Scenario inputs share the compiled board, source and goal contract.
+/// Trace's numeric retention limit does not request a physical execution family:
+/// this consumer retains one exact representative. Exact movement accelerators
+/// preserve the physical transition authority and may remain enabled.
+/// Pure tiling, ordinal-row evidence, replay families and external producers
+/// keep their established unfiltered domain. A surviving candidate still needs
+/// exact physical and original-source verification.
 fn full6l_physical_prefix_pruning_eligible(
     problem: &SearchProblem,
     catalog: &GeometryCatalog,
@@ -922,8 +926,14 @@ fn full6l_physical_prefix_pruning_eligible(
     let backend = problem.backend_request();
     if cfg!(target_family = "wasm")
         || usize::BITS < 64
-        || problem.preset() != SearchProblemPreset::ScenarioPc
-        || problem.problem_kind() != SearchProblemKind::ScenarioPc
+        || !matches!(
+            (problem.preset(), problem.problem_kind()),
+            (SearchProblemPreset::OpeningPc, SearchProblemKind::OpeningPc)
+                | (
+                    SearchProblemPreset::ScenarioPc,
+                    SearchProblemKind::ScenarioPc
+                )
+        )
         || !matches!(problem.search_goal(), SearchGoal::ClearToEmpty)
         || catalog.width() != 10
         || catalog.height() != 6
@@ -937,12 +947,9 @@ fn full6l_physical_prefix_pruning_eligible(
         || problem.output_policy() != SearchOutputPolicy::Trace
         || problem.solution_probability_policy().requested()
         || problem.build_replay_evidence_requested()
-        || problem.replay_trace_policy().retained_trace_limit() > 1
         || problem.allowed_colored_solution_identities().is_some()
         || backend.tablebase_requested()
         || backend.precompute_build_dependencies()
-        || backend.exact_legal_board_enabled()
-        || backend.conditioned_reachability_enabled()
         || problem.budget().max_nodes() != 0
         || backend.max_candidates() != 0
         || backend.max_frontier_states() != 0
@@ -1864,6 +1871,7 @@ impl WasmExactSearchSession {
             && full6l_physical_prefix_pruning_eligible(problem.as_ref(), &catalog);
         if physical_prefix_pruning_active {
             geometry.enable_physical_prefix_pruning();
+            geometry.enable_full_draw_source_prefix_pruning(problem.as_ref());
         }
         geometry_span.finish(geometry.targets().map_or(0, |targets| targets.len()) as u64);
         let peak_cpu_bytes = catalog
@@ -5969,7 +5977,9 @@ impl WasmExactSearchSession {
             field("packing_candidate_count", self.packing_candidate_count),
             field(
                 "packing_candidate_domain",
-                if self.physical_prefix_pruning_active {
+                if self.geometry.source_prefix_pruning_enabled() {
+                    "physical-source-prefix-filtered"
+                } else if self.physical_prefix_pruning_active {
                     "physical-prefix-filtered"
                 } else {
                     "unfiltered-geometric-family"
@@ -5978,6 +5988,10 @@ impl WasmExactSearchSession {
             field(
                 "physical_prefix_pruning_active",
                 self.physical_prefix_pruning_active,
+            ),
+            field(
+                "source_prefix_pruning_active",
+                self.geometry.source_prefix_pruning_enabled(),
             ),
             field(
                 "geometry_candidate_family_count",

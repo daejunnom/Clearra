@@ -120,6 +120,10 @@ pub(crate) enum ExecutorSearchStage {
     WasmGeometryPrefixPrunedSubtrees,
     WasmGeometryRowOrderPrepare,
     WasmGeometryRowOrderPrunedSubtrees,
+    WasmGeometrySourcePrefix,
+    WasmGeometrySourcePrefixPrunedSubtrees,
+    WasmGeometrySourcePrefixRowStates,
+    WasmGeometrySourcePrefixRootFastPasses,
     WasmGeometryEmittedCandidates,
     WasmGeometryAdvance,
     WasmCandidateProjection,
@@ -256,6 +260,10 @@ impl ExecutorSearchStage {
         Self::WasmGeometryPrefixPrunedSubtrees,
         Self::WasmGeometryRowOrderPrepare,
         Self::WasmGeometryRowOrderPrunedSubtrees,
+        Self::WasmGeometrySourcePrefix,
+        Self::WasmGeometrySourcePrefixPrunedSubtrees,
+        Self::WasmGeometrySourcePrefixRowStates,
+        Self::WasmGeometrySourcePrefixRootFastPasses,
         Self::WasmGeometryEmittedCandidates,
         Self::WasmGeometryAdvance,
         Self::WasmCandidateProjection,
@@ -387,6 +395,14 @@ impl ExecutorSearchStage {
             Self::WasmGeometryPrefixPrunedSubtrees => "wasm.geometry.prefix_pruned_subtrees",
             Self::WasmGeometryRowOrderPrepare => "wasm.geometry.row_order_prepare",
             Self::WasmGeometryRowOrderPrunedSubtrees => "wasm.geometry.row_order_pruned_subtrees",
+            Self::WasmGeometrySourcePrefix => "wasm.geometry.source_prefix",
+            Self::WasmGeometrySourcePrefixPrunedSubtrees => {
+                "wasm.geometry.source_prefix_pruned_subtrees"
+            }
+            Self::WasmGeometrySourcePrefixRowStates => "wasm.geometry.source_prefix_row_states",
+            Self::WasmGeometrySourcePrefixRootFastPasses => {
+                "wasm.geometry.source_prefix_root_fast_passes"
+            }
             Self::WasmGeometryEmittedCandidates => "wasm.geometry.emitted_candidates",
             Self::WasmGeometryAdvance => "wasm.geometry.advance",
             Self::WasmCandidateProjection => "wasm.candidate.projection",

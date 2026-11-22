@@ -6,6 +6,10 @@ const FAMILY_INTERN_MIN_CAPACITY: usize = 4096;
 const FAMILY_INTERN_LOAD_NUMERATOR: usize = 7;
 const FAMILY_INTERN_LOAD_DENOMINATOR: usize = 10;
 
+#[cfg(test)]
+#[path = "geometry_family_intern_tests.rs"]
+mod intern_tests;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
 pub(super) enum FamilyNodeKind {
@@ -35,9 +39,32 @@ pub(super) struct GeometrySolutionFamily {
     node_count: u32,
     intern_slots: Vec<u32>,
     intern_count: usize,
+    // Changes whenever an index is replaced, rebuilt, or retired. A vacancy
+    // is reusable only within the same synchronous intern call and generation.
+    intern_generation: u64,
     interning_disabled: bool,
     retained_limit_bytes: Option<u128>,
     refused_retained_bytes: Option<u128>,
+    #[cfg(test)]
+    intern_work: InternWork,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct InternMiss {
+    hash: u64,
+    vacant_slot: Option<usize>,
+    slot_count: usize,
+    generation: u64,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct InternWork {
+    hashes: usize,
+    lookup_slots: usize,
+    insertion_slots: usize,
+    vacancy_validation_slots: usize,
+    reused_vacancies: usize,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -60,9 +87,12 @@ impl GeometrySolutionFamily {
             node_count: 0,
             intern_slots,
             intern_count: 0,
+            intern_generation: 0,
             interning_disabled,
             retained_limit_bytes: None,
             refused_retained_bytes: None,
+            #[cfg(test)]
+            intern_work: InternWork::default(),
         }
     }
 
@@ -258,6 +288,7 @@ impl GeometrySolutionFamily {
         if self.interning_disabled {
             return;
         }
+        self.intern_generation = self.intern_generation.wrapping_add(1);
         self.intern_slots.fill(FAMILY_INVALID);
         self.intern_count = 0;
         for reference in 2..self.node_count + 2 {
@@ -265,22 +296,30 @@ impl GeometrySolutionFamily {
                 self.disable_interning();
                 return;
             };
-            self.insert_interned(reference, node_hash(node));
+            let hash = self.hash_node(node);
+            self.insert_interned(reference, hash);
         }
     }
 
     fn intern(&mut self, node: FamilyNode) -> Option<u32> {
-        if !self.interning_disabled {
-            if let Some(reference) = self.find_interned(node) {
-                return Some(reference);
+        let miss = if self.interning_disabled {
+            None
+        } else {
+            match self.probe_interned(node) {
+                Ok(reference) => return Some(reference),
+                Err(miss) => Some(miss),
             }
-        }
+        };
 
+        // Preserve the old admission/growth order: a lookup hit never grows
+        // the table, and a refused node never requests an index replacement.
         let reference = self.push_node(node)?;
-        if !self.interning_disabled {
+        if let Some(miss) = miss {
             self.ensure_intern_capacity();
-            if !self.interning_disabled {
-                self.insert_interned(reference, node_hash(node));
+            if !self.interning_disabled && !self.insert_at_probed_vacancy(reference, miss) {
+                // A resize rebuilt the probe chain. Reuse only the hash and
+                // perform the original insertion probe in the new table.
+                self.insert_interned(reference, miss.hash);
             }
         }
         Some(reference)
@@ -405,23 +444,73 @@ impl GeometrySolutionFamily {
         Ok(replacement)
     }
 
-    fn find_interned(&self, node: FamilyNode) -> Option<u32> {
+    #[inline]
+    fn hash_node(&mut self, node: FamilyNode) -> u64 {
+        #[cfg(test)]
+        {
+            self.intern_work.hashes += 1;
+        }
+        node_hash(node)
+    }
+
+    fn probe_interned(&mut self, node: FamilyNode) -> Result<u32, InternMiss> {
+        let hash = self.hash_node(node);
+        let mut miss = InternMiss {
+            hash,
+            vacant_slot: None,
+            slot_count: self.intern_slots.len(),
+            generation: self.intern_generation,
+        };
         if self.intern_slots.is_empty() {
-            return None;
+            return Err(miss);
         }
         let mask = self.intern_slots.len() - 1;
-        let mut slot = node_hash(node) as usize & mask;
+        let mut slot = hash as usize & mask;
         for _ in 0..self.intern_slots.len() {
+            #[cfg(test)]
+            {
+                self.intern_work.lookup_slots += 1;
+            }
             let reference = self.intern_slots[slot];
             if reference == FAMILY_INVALID {
-                return None;
+                miss.vacant_slot = Some(slot);
+                return Err(miss);
             }
             if self.node(reference) == Some(node) {
-                return Some(reference);
+                return Ok(reference);
             }
             slot = (slot + 1) & mask;
         }
-        None
+        Err(miss)
+    }
+
+    fn insert_at_probed_vacancy(&mut self, reference: u32, miss: InternMiss) -> bool {
+        if self.interning_disabled
+            || self.intern_generation != miss.generation
+            || self.intern_slots.len() != miss.slot_count
+        {
+            return false;
+        }
+        let Some(slot) = miss
+            .vacant_slot
+            .and_then(|slot| self.intern_slots.get_mut(slot))
+        else {
+            return false;
+        };
+        #[cfg(test)]
+        {
+            self.intern_work.vacancy_validation_slots += 1;
+        }
+        if *slot != FAMILY_INVALID {
+            return false;
+        }
+        *slot = reference;
+        self.intern_count += 1;
+        #[cfg(test)]
+        {
+            self.intern_work.reused_vacancies += 1;
+        }
+        true
     }
 
     fn ensure_intern_capacity(&mut self) {
@@ -465,6 +554,7 @@ impl GeometrySolutionFamily {
             return;
         }
         replacement.resize(next_capacity, FAMILY_INVALID);
+        self.intern_generation = self.intern_generation.wrapping_add(1);
         let old = core::mem::replace(&mut self.intern_slots, replacement);
         self.intern_count = 0;
         for reference in old
@@ -475,7 +565,8 @@ impl GeometrySolutionFamily {
                 self.disable_interning();
                 return;
             };
-            self.insert_interned(reference, node_hash(node));
+            let hash = self.hash_node(node);
+            self.insert_interned(reference, hash);
         }
     }
 
@@ -483,6 +574,10 @@ impl GeometrySolutionFamily {
         let mask = self.intern_slots.len() - 1;
         let mut slot = hash as usize & mask;
         loop {
+            #[cfg(test)]
+            {
+                self.intern_work.insertion_slots += 1;
+            }
             if self.intern_slots[slot] == FAMILY_INVALID {
                 self.intern_slots[slot] = reference;
                 self.intern_count += 1;
@@ -493,6 +588,7 @@ impl GeometrySolutionFamily {
     }
 
     fn disable_interning(&mut self) {
+        self.intern_generation = self.intern_generation.wrapping_add(1);
         self.intern_slots = Vec::new();
         self.intern_count = 0;
         self.interning_disabled = true;

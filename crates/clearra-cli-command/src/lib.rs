@@ -37,6 +37,8 @@ mod build_v2_ingress_tests;
 #[cfg(test)]
 mod exact_accelerator_ingress_tests;
 #[cfg(test)]
+mod full6_frontdoor_tests;
+#[cfg(test)]
 mod queue_parser_contract_tests;
 #[cfg(test)]
 mod search_option_contract_tests;

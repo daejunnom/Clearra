@@ -16,6 +16,14 @@ mod placement_dependency;
 #[cfg(all(test, not(target_family = "wasm"), target_pointer_width = "64"))]
 #[path = "source_prefix_graph_tests.rs"]
 mod source_prefix_graph_tests;
+#[cfg(all(
+    test,
+    feature = "placement-dependency-pc",
+    not(target_family = "wasm"),
+    target_pointer_width = "64"
+))]
+#[path = "source_root_inventory_tests.rs"]
+mod source_root_inventory_tests;
 pub use compact_snapshot::{
     CompactBuildUpEdge, CompactBuildUpNode, CompactBuildUpSnapshot, CompactBuildUpSnapshotError,
     CompactBuildUpTransitionMode, RustCompactBuildUpWorkspace,
@@ -292,6 +300,50 @@ pub(super) struct BuildOrderGraph {
     // Worker-local suffix-language identity, consumed before the owning
     // BuildUpWorkspace may recycle its language arena. Never exported as an ID.
     canonical_language_root: Option<u32>,
+    // Issued only by the exact operation-subset BuildPass for this candidate.
+    // Generic/externally assembled graphs have no source-root authority.
+    #[cfg(feature = "placement-dependency-pc")]
+    full_draw_source: Option<GraphFullDrawSource>,
+}
+
+#[cfg(feature = "placement-dependency-pc")]
+#[derive(Debug)]
+struct GraphFullDrawSource {
+    prefix: super::source_prefix::FullDrawSourcePrefix,
+    language_arena: Arc<()>,
+}
+
+/// A fixed full-candidate language in one live arena and actual source owner.
+/// No public constructor accepts an arbitrary root and first kind. The exact
+/// BuildPass graph issues this only at its own canonical-language boundary.
+#[cfg(feature = "placement-dependency-pc")]
+pub(super) struct FullDrawSourceRoot {
+    source: super::standard_bag_coverage::StandardBagRequestIdentity,
+    language_arena: Arc<()>,
+    language_root: u32,
+    first_draw_index: u8,
+}
+
+#[cfg(feature = "placement-dependency-pc")]
+impl FullDrawSourceRoot {
+    pub(super) const fn language_root(&self) -> u32 {
+        self.language_root
+    }
+
+    pub(super) fn first_draw_for(
+        &self,
+        language: &PieceOrderLanguageCache,
+        root: u32,
+        source: super::standard_bag_coverage::StandardBagRequestIdentity,
+    ) -> Option<u8> {
+        (self.source == source
+            && self.language_root == root
+            && Arc::ptr_eq(&self.language_arena, language.arena_identity())
+            && language
+                .node(root)
+                .is_some_and(|node| !node.accepting && node.remaining_depth == 15))
+        .then_some(self.first_draw_index)
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -1003,6 +1055,7 @@ pub(super) struct BuildUpWorkspace {
     legal_board_policy_enabled: Option<bool>,
     legal_board_query_cache: LegalBoardNegativeQueryCache,
     legal_board_verified_negative_prunes: usize,
+    source_prefix_temporal: super::source_prefix::SourcePrefixTemporalMetrics,
     #[cfg(all(feature = "local-search-ab", feature = "placement-dependency-pc"))]
     observation_symbolic_recycles: usize,
 }
@@ -1348,6 +1401,37 @@ impl BuildUpWorkspace {
             Some(coverage) => coverage.global_is_complete(),
             None => false,
         }
+    }
+
+    #[cfg(any(
+        test,
+        all(
+            feature = "parallel",
+            not(target_family = "wasm"),
+            any(feature = "search-stage-profiling", feature = "wasm-stage-profiling")
+        )
+    ))]
+    pub fn standard_bag_first_draw_blocks(
+        &self,
+    ) -> Result<Option<super::standard_bag_coverage::FirstDrawBlockSnapshot>, WasmExactSearchError>
+    {
+        self.standard_bag_coverage
+            .as_ref()
+            .map_or(Ok(None), StandardBagCoverage::first_draw_block_snapshot)
+    }
+
+    #[cfg(any(
+        test,
+        all(
+            feature = "parallel",
+            not(target_family = "wasm"),
+            any(feature = "search-stage-profiling", feature = "wasm-stage-profiling")
+        )
+    ))]
+    pub const fn source_prefix_temporal_metrics(
+        &self,
+    ) -> super::source_prefix::SourcePrefixTemporalMetrics {
+        self.source_prefix_temporal
     }
 
     pub const fn reachability_metrics(&self) -> super::reachability::ReachabilityMetrics {
@@ -2453,12 +2537,10 @@ impl BuildUpWorkspace {
         Ok(Some(result))
     }
 
-    fn cover_standard_bag_language(
+    fn prepare_standard_bag_coverage(
         &mut self,
         problem: &SearchProblem,
-        language_root: u32,
-        control: &ExecutionControl,
-    ) -> Result<Option<StandardBagCoverageResult>, WasmExactSearchError> {
+    ) -> Result<(), WasmExactSearchError> {
         if !self.standard_bag_coverage_initialized {
             let universe = problem.piece_source().materialized_universe().ok_or(
                 WasmExactSearchError::InvalidProblem("wasm_piece_source_not_materialized"),
@@ -2480,11 +2562,43 @@ impl BuildUpWorkspace {
             };
             self.standard_bag_coverage_initialized = true;
         }
+        Ok(())
+    }
+
+    fn cover_standard_bag_language(
+        &mut self,
+        problem: &SearchProblem,
+        language_root: u32,
+        control: &ExecutionControl,
+    ) -> Result<Option<StandardBagCoverageResult>, WasmExactSearchError> {
+        self.prepare_standard_bag_coverage(problem)?;
         let Some(coverage) = self.standard_bag_coverage.as_mut() else {
             return Ok(None);
         };
         coverage
             .cover_language(&self.piece_order_languages, language_root, control)
+            .map(Some)
+    }
+
+    #[cfg(feature = "placement-dependency-pc")]
+    fn cover_standard_bag_language_with_full_draw_root(
+        &mut self,
+        problem: &SearchProblem,
+        language_root: u32,
+        proof: &FullDrawSourceRoot,
+        control: &ExecutionControl,
+    ) -> Result<Option<StandardBagCoverageResult>, WasmExactSearchError> {
+        self.prepare_standard_bag_coverage(problem)?;
+        let Some(coverage) = self.standard_bag_coverage.as_mut() else {
+            return Ok(None);
+        };
+        coverage
+            .cover_language_with_full_draw_root(
+                &self.piece_order_languages,
+                language_root,
+                proof,
+                control,
+            )
             .map(Some)
     }
 
@@ -2500,7 +2614,40 @@ impl BuildUpWorkspace {
         evaluator: &mut CoverageProductEvaluator,
         control: &ExecutionControl,
     ) -> Result<CandidateBuildResult, WasmExactSearchError> {
-        if let Some(coverage) = self.cover_standard_bag_language(problem, language_root, control)? {
+        self.cover_piece_language_impl(
+            problem,
+            target,
+            language_root,
+            #[cfg(feature = "placement-dependency-pc")]
+            None,
+            evaluator,
+            control,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn cover_piece_language_impl(
+        &mut self,
+        problem: &SearchProblem,
+        target: &TargetGroup,
+        language_root: u32,
+        #[cfg(feature = "placement-dependency-pc")] full_draw_root: Option<&FullDrawSourceRoot>,
+        evaluator: &mut CoverageProductEvaluator,
+        control: &ExecutionControl,
+    ) -> Result<CandidateBuildResult, WasmExactSearchError> {
+        #[cfg(feature = "placement-dependency-pc")]
+        let coverage = match full_draw_root {
+            Some(proof) => self.cover_standard_bag_language_with_full_draw_root(
+                problem,
+                language_root,
+                proof,
+                control,
+            )?,
+            None => self.cover_standard_bag_language(problem, language_root, control)?,
+        };
+        #[cfg(not(feature = "placement-dependency-pc"))]
+        let coverage = self.cover_standard_bag_language(problem, language_root, control)?;
+        if let Some(coverage) = coverage {
             return Ok(certified_language_result(Some(coverage)));
         }
         let pattern_index =
@@ -4856,6 +5003,16 @@ fn verify_candidate_with_projection(
                     language_span.finish(1);
                     language_id
                 };
+                graph.canonical_language_root = Some(language_id);
+                #[cfg(feature = "placement-dependency-pc")]
+                let full_draw_root =
+                    match graph.full_draw_source_root(&mut workspace.piece_order_languages) {
+                        Ok(proof) => proof,
+                        Err(error) => {
+                            workspace.recycle_graph(graph);
+                            return Err(error);
+                        }
+                    };
                 #[cfg(all(
                     feature = "local-search-ab",
                     feature = "parallel",
@@ -4868,10 +5025,12 @@ fn verify_candidate_with_projection(
                             profile_scale,
                         )
                     });
-                let product = match workspace.cover_piece_language(
+                let product = match workspace.cover_piece_language_impl(
                     problem,
                     target,
                     language_id,
+                    #[cfg(feature = "placement-dependency-pc")]
+                    full_draw_root.as_ref(),
                     evaluator,
                     control,
                 ) {
@@ -5913,6 +6072,42 @@ const fn witness_piece_from_code(code: u8) -> Option<PieceKind> {
 }
 
 impl BuildOrderGraph {
+    #[cfg(feature = "placement-dependency-pc")]
+    fn full_draw_source_root(
+        &mut self,
+        language: &mut PieceOrderLanguageCache,
+    ) -> Result<Option<FullDrawSourceRoot>, WasmExactSearchError> {
+        let Some(scope) = self.full_draw_source.as_ref() else {
+            return Ok(None);
+        };
+        if !Arc::ptr_eq(&scope.language_arena, language.arena_identity()) || !self.is_live() {
+            return Ok(None);
+        }
+        let Some((source, first_draw_index)) = scope.prefix.full_draw_source_identity() else {
+            return Ok(None);
+        };
+        let root = match self.canonical_language_root {
+            Some(root) => root,
+            None => {
+                let root = language.canonicalize(self)?;
+                self.canonical_language_root = Some(root);
+                root
+            }
+        };
+        if !language
+            .node(root)
+            .is_some_and(|node| !node.accepting && node.remaining_depth == 15)
+        {
+            return Ok(None);
+        }
+        Ok(Some(FullDrawSourceRoot {
+            source,
+            language_arena: Arc::clone(language.arena_identity()),
+            language_root: root,
+            first_draw_index,
+        }))
+    }
+
     pub(super) fn from_topological_parts(
         specs: Vec<BuildOrderNodeSpec>,
         edges: Vec<BuildEdge>,
@@ -6021,6 +6216,8 @@ impl BuildOrderGraph {
             root,
             reachability_states,
             canonical_language_root: None,
+            #[cfg(feature = "placement-dependency-pc")]
+            full_draw_source: None,
         })
     }
 
@@ -6280,6 +6477,15 @@ impl BuildOrderGraph {
                 super::source_prefix::FullDrawSourcePrefix::compile(problem, catalog, candidate)
             })
             .flatten();
+        let source_prefix_temporal_infeasible = source_prefix.as_ref().is_some_and(|prefix| {
+            let result = prefix.temporal_relaxation(
+                catalog,
+                candidate,
+                &projection.row_contributors[..usize::from(projection.height)],
+            );
+            workspace.source_prefix_temporal.record(result);
+            result.proved_infeasible
+        });
         let materialize_graph = matches!(representation, BuildPassRepresentation::Graph);
         #[cfg(any(test, all(feature = "local-search-ab", feature = "parallel")))]
         debug_assert!(
@@ -6406,6 +6612,13 @@ impl BuildOrderGraph {
                 });
             if let Some(prefix) = &source_prefix {
                 permitted_operations &= prefix.permitted_operations(subset as u16);
+            }
+            if source_prefix_temporal_infeasible {
+                // The relaxed row-state/source-cap language has no first-seven
+                // prefix. Keep the ordinary dead-root result and all downstream
+                // completion semantics, without starting any SRS reachability.
+                debug_assert_eq!(subset, 0);
+                permitted_operations = 0;
             }
             while permitted_operations != 0 {
                 let operation_index = permitted_operations.trailing_zeros() as usize;
@@ -6985,6 +7198,11 @@ impl BuildOrderGraph {
                 .generated_state_count()
                 .saturating_sub(reachability_states_before),
             canonical_language_root: None,
+            #[cfg(feature = "placement-dependency-pc")]
+            full_draw_source: source_prefix.map(|prefix| GraphFullDrawSource {
+                prefix,
+                language_arena: Arc::clone(workspace.piece_order_languages.arena_identity()),
+            }),
         };
         let graph = if fuse_language && accepting_reached {
             let mut graph = graph;
@@ -7095,6 +7313,10 @@ fn annotate_and_prune_finesse_graph_with_query_count(
 ) -> Result<PreparedFinesseLanguage, WasmExactSearchError> {
     // Finesse may replace the edge set, invalidating any earlier suffix ID.
     graph.canonical_language_root = None;
+    #[cfg(feature = "placement-dependency-pc")]
+    {
+        graph.full_draw_source = None;
+    }
     let target_grouping_span = SearchStageSpan::begin(ExecutorSearchStage::FinesseTargetGrouping);
     let mut subsets = vec![usize::MAX; graph.nodes.len()];
     subsets[graph.root as usize] = 0;

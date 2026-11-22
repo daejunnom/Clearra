@@ -1,11 +1,15 @@
-use clearra_core_domain::{execution_cancellation::ExecutionControl, piece::piece_kind::PieceKind};
+use clearra_core_domain::{
+    execution_cancellation::ExecutionControl, pc::pc_target::PcTarget, piece::piece_kind::PieceKind,
+};
 use clearra_objectives::policy::objective_policy::ObjectivePolicy;
 use clearra_pc_graph::request::{
-    PcCountPolicy, PcExecutionPolicy, PcQueueInput, PcScenarioBoard, PcScenarioQuery,
-    PcSolutionProbabilityPolicy, PieceWindow, RequestedSearchBackend, SupplyWindowSize,
-    WorkerPolicy,
+    OpeningPcSearchQuery, PcCountPolicy, PcExecutionPolicy, PcQueueInput, PcScenarioBoard,
+    PcScenarioQuery, PcSolutionProbabilityPolicy, PieceWindow, RequestedSearchBackend,
+    SupplyWindowSize, WorkerPolicy,
 };
-use clearra_problem::{ProblemCompiler, SearchOutputPolicy, SearchProblem};
+use clearra_problem::{
+    ProblemCompiler, SearchOutputPolicy, SearchProblem, SearchProblemKind, SearchProblemPreset,
+};
 use clearra_rules::profile::builtin_rules::srs_plus;
 use clearra_supply::{
     queue::{fixed_sequence::FixedSequence, queue_pattern_expression::QueuePatternExpression},
@@ -14,7 +18,7 @@ use clearra_supply::{
 
 use crate::{CoreExecutionResult, WasmCpuSearchBackend};
 
-use super::{ExactSearchAdvance, GeometryAdvance, WasmExactSearchSession};
+use super::{ExactSearchAdvance, GeometryAdvance, GeometrySearch, WasmExactSearchSession};
 
 fn query(queue: PcQueueInput, workers: usize) -> PcScenarioQuery {
     PcScenarioQuery::new(
@@ -152,7 +156,84 @@ fn full6l_physical_prefix_pruning_matches_harness_and_rejects_other_contracts() 
     let session = WasmExactSearchSession::new(&problem).unwrap();
     assert!(session.physical_prefix_pruning_active);
     assert!(session.geometry.physical_prefix_pruning_enabled());
+    assert!(session.geometry.source_prefix_pruning_enabled());
     assert_eq!(session.geometry.expanded_nodes(), 0);
+
+    // Numeric trace retention is an upper bound on the ordinary representative,
+    // not an execution-family evidence request. Both exact accelerators retain
+    // the physical transition contract; their request values must not be
+    // rewritten to activate the negative-only geometry filters.
+    for (trace_limit, legal_board, conditioned) in
+        [(64, false, false), (1, true, false), (1, false, true)]
+    {
+        let ordinary = ProblemCompiler::compile_scenario_pc(
+            &query
+                .clone()
+                .with_retained_trace_limit(trace_limit)
+                .with_execution_policy(
+                    query
+                        .execution_policy()
+                        .clone()
+                        .with_exact_legal_board_enabled(legal_board)
+                        .with_conditioned_reachability_enabled(conditioned),
+                ),
+        )
+        .unwrap();
+        assert_eq!(
+            ordinary.replay_trace_policy().retained_trace_limit(),
+            trace_limit
+        );
+        assert_eq!(
+            ordinary.backend_request().exact_legal_board_enabled(),
+            legal_board
+        );
+        assert_eq!(
+            ordinary
+                .backend_request()
+                .conditioned_reachability_enabled(),
+            conditioned
+        );
+        let ordinary_session = WasmExactSearchSession::new(&ordinary).unwrap();
+        assert!(ordinary_session.physical_prefix_pruning_active);
+        assert!(ordinary_session.geometry.physical_prefix_pruning_enabled());
+        assert!(ordinary_session.geometry.source_prefix_pruning_enabled());
+        assert_eq!(ordinary_session.geometry.expanded_nodes(), 0);
+    }
+    let opening = ProblemCompiler::compile_opening_pc(
+        &OpeningPcSearchQuery::new(PcTarget::six_lines())
+            .with_queue(PcQueueInput::pattern_expression(
+                QueuePatternExpression::parse("P1P7P7", 0).unwrap(),
+            ))
+            .with_objective(ObjectivePolicy::unique())
+            .with_count_policy(PcCountPolicy::CountUnique)
+            .with_queue_observation_policy(QueueObservationPolicy::FullQueueOracle)
+            .with_execution_policy(
+                query
+                    .execution_policy()
+                    .clone()
+                    .with_exact_legal_board_enabled(true)
+                    .with_conditioned_reachability_enabled(true),
+            ),
+    )
+    .unwrap();
+    assert_eq!(opening.preset(), SearchProblemPreset::OpeningPc);
+    assert_eq!(opening.problem_kind(), SearchProblemKind::OpeningPc);
+    assert_eq!(opening.replay_trace_policy().retained_trace_limit(), 64);
+    assert!(opening.backend_request().exact_legal_board_enabled());
+    assert!(opening.backend_request().conditioned_reachability_enabled());
+    let opening_session = WasmExactSearchSession::new(&opening).unwrap();
+    assert!(opening_session.physical_prefix_pruning_active);
+    assert!(opening_session.geometry.physical_prefix_pruning_enabled());
+    assert!(opening_session.geometry.source_prefix_pruning_enabled());
+    assert_eq!(opening_session.geometry.expanded_nodes(), 0);
+
+    let mut single_target = GeometrySearch::new_for_verifier_target(
+        session.catalog.required_cells(),
+        session.geometry.compiling_target(0).unwrap(),
+    );
+    single_target.enable_physical_prefix_pruning();
+    single_target.enable_full_draw_source_prefix_pruning(&problem);
+    assert!(!single_target.source_prefix_pruning_enabled());
 
     let explicit_query = full6l_query(PcQueueInput::fixed_sequence(FixedSequence::new(vec![
         PieceKind::I,
@@ -188,9 +269,30 @@ fn full6l_physical_prefix_pruning_matches_harness_and_rejects_other_contracts() 
             .unwrap(),
         ),
         (
-            "multiple retained traces",
-            ProblemCompiler::compile_scenario_pc(&query.clone().with_retained_trace_limit(2))
-                .unwrap(),
+            "build replay evidence",
+            opening.clone().with_build_replay_evidence(),
+        ),
+        (
+            "physical path-family evidence",
+            opening.clone().with_pc_path_v2_evidence(),
+        ),
+        (
+            "terminal-supply replay evidence",
+            opening.clone().with_pc_save_groups_v2_evidence(),
+        ),
+        (
+            "Opening candidate coverage evidence",
+            opening.clone().with_pc_chance_probability_v2_evidence(),
+        ),
+        (
+            "Opening score portfolio evidence",
+            opening.clone().with_pc_score_portfolio_v2_evidence(),
+        ),
+        (
+            "pure tiling output",
+            opening
+                .clone()
+                .with_output_policy(SearchOutputPolicy::TilingOnly),
         ),
         (
             "coverage-only output",
@@ -206,7 +308,12 @@ fn full6l_physical_prefix_pruning_matches_harness_and_rejects_other_contracts() 
     }
     let external = WasmExactSearchSession::new_external_geometry(&problem).unwrap();
     assert!(!external.physical_prefix_pruning_active);
+    assert!(!external.geometry.source_prefix_pruning_enabled());
     assert!(!external.geometry.physical_prefix_pruning_enabled());
+    let external_opening = WasmExactSearchSession::new_external_geometry(&opening).unwrap();
+    assert!(!external_opening.physical_prefix_pruning_active);
+    assert!(!external_opening.geometry.source_prefix_pruning_enabled());
+    assert!(!external_opening.geometry.physical_prefix_pruning_enabled());
 }
 
 #[test]

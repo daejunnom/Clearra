@@ -3,9 +3,11 @@ use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 
 mod factorized_source;
-use factorized_source::FactorizedSourceLayout;
+use factorized_source::{FactorizedSourceLayout, FullDrawBlockLayout};
 #[cfg(test)]
 mod factorized_tests;
+#[cfg(test)]
+mod first_draw_block_tests;
 
 use crate::resource::ExecutionMemoryBound;
 
@@ -19,7 +21,12 @@ use super::{
     WasmExactSearchError,
 };
 use clearra_core_domain::{execution_cancellation::ExecutionControl, piece::piece_kind::PieceKind};
-use clearra_coverage::pattern::pattern_bitset::PatternBitSet;
+use clearra_coverage::{
+    pattern::pattern_bitset::PatternBitSet,
+    universe::{
+        pattern_universe_id::PatternUniverseId, pattern_weight_model_id::PatternWeightModelId,
+    },
+};
 use clearra_supply::{
     bag::BagState,
     execution_automaton::{SupplyBranchKind, SupplyExecutionAutomaton, SupplyExecutionState},
@@ -558,14 +565,36 @@ pub(super) struct SharedStandardBagRequest {
     snapshot: OnceLock<StandardBagRequestSnapshot>,
 }
 
-#[derive(Clone, Copy, Eq, PartialEq)]
-struct StandardBagRequestIdentity {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct StandardBagRequestIdentity {
     structure: MaterializedPatternUniverseStructure,
     pattern_count: usize,
+    pattern_universe_id: PatternUniverseId,
+    pattern_weight_model_id: PatternWeightModelId,
     initial_hold: HoldAutomatonState,
     hold_enabled: bool,
     projects_unplaced_lookahead: bool,
     factorized: bool,
+}
+
+impl StandardBagRequestIdentity {
+    pub(super) fn for_universe(
+        universe: &MaterializedPatternUniverse,
+        initial_hold: HoldAutomatonState,
+        hold_enabled: bool,
+        projects_unplaced_lookahead: bool,
+    ) -> Self {
+        Self {
+            structure: universe.structure(),
+            pattern_count: universe.pattern_count(),
+            pattern_universe_id: universe.pattern_universe_id(),
+            pattern_weight_model_id: universe.pattern_weight_model_id(),
+            initial_hold,
+            hold_enabled,
+            projects_unplaced_lookahead,
+            factorized: FactorizedSourceLayout::supported_layout(universe).is_some(),
+        }
+    }
 }
 
 struct StandardBagRequestSnapshot {
@@ -574,11 +603,14 @@ struct StandardBagRequestSnapshot {
 }
 
 struct StandardBagRequestTables {
+    #[cfg(feature = "placement-dependency-pc")]
+    identity: StandardBagRequestIdentity,
     sequence_len: u8,
     initial_hold_code: u8,
     cursor_transitions: StandardBagCursorTransitions,
     suffix_counts: Box<[u128]>,
     factorized_layout: Option<FactorizedSourceLayout>,
+    first_draw_blocks: Option<FullDrawBlockLayout>,
     #[cfg(test)]
     supply_identity: SupplyExecutionState,
 }
@@ -599,6 +631,7 @@ impl StandardBagRequestTables {
         universe: &MaterializedPatternUniverse,
         initial_hold: HoldAutomatonState,
         hold_enabled: bool,
+        projects_unplaced_lookahead: bool,
     ) -> Result<Option<Self>, WasmExactSearchError> {
         if !StandardBagCoverage::supports(universe, initial_hold) {
             return Ok(None);
@@ -652,12 +685,27 @@ impl StandardBagRequestTables {
             )?;
             (cursor, suffix)
         };
+        let first_draw_blocks = factorized_layout
+            .as_ref()
+            .and_then(FactorizedSourceLayout::full_draw_blocks)
+            .filter(|layout| {
+                u64::from(layout.block_pattern_count) * STANDARD_PIECE_COUNT as u64
+                    == universe.pattern_count() as u64
+            });
         Ok(Some(Self {
+            #[cfg(feature = "placement-dependency-pc")]
+            identity: StandardBagRequestIdentity::for_universe(
+                universe,
+                initial_hold,
+                hold_enabled,
+                projects_unplaced_lookahead,
+            ),
             sequence_len,
             initial_hold_code,
             cursor_transitions,
             suffix_counts,
             factorized_layout,
+            first_draw_blocks,
             #[cfg(test)]
             supply_identity,
         }))
@@ -672,18 +720,21 @@ impl SharedStandardBagRequest {
         hold_enabled: bool,
         projects_unplaced_lookahead: bool,
     ) -> Result<Option<Arc<StandardBagRequestTables>>, WasmExactSearchError> {
-        let identity = StandardBagRequestIdentity {
-            structure: universe.structure(),
-            pattern_count: universe.pattern_count(),
+        let identity = StandardBagRequestIdentity::for_universe(
+            universe,
             initial_hold,
             hold_enabled,
             projects_unplaced_lookahead,
-            factorized: FactorizedSourceLayout::supported_layout(universe).is_some(),
-        };
+        );
         let snapshot = self.snapshot.get_or_init(|| StandardBagRequestSnapshot {
             identity,
-            tables: StandardBagRequestTables::compile(universe, initial_hold, hold_enabled)
-                .map(|tables| tables.map(Arc::new)),
+            tables: StandardBagRequestTables::compile(
+                universe,
+                initial_hold,
+                hold_enabled,
+                projects_unplaced_lookahead,
+            )
+            .map(|tables| tables.map(Arc::new)),
         });
         // A request owner must never cross the supply/hold/projected-lookahead
         // boundary, including after an unsupported result was cached.
@@ -841,6 +892,9 @@ pub(super) struct StandardBagCoverage {
     epoch_global_root: u32,
     global_words: Vec<u64>,
     global_covered_pattern_count: usize,
+    first_draw_state: FirstDrawCoverageState,
+    #[cfg(feature = "placement-dependency-pc")]
+    product_language_arena: Option<Arc<()>>,
     interning_disabled: bool,
     cancellation_poll_counter: u32,
     product_state_count: usize,
@@ -855,6 +909,30 @@ pub(super) struct StandardBagCoverage {
     p7p4_capture: P7P4CaptureCache,
 }
 
+/// Counts belong to global_words and survive only this coverage owner's
+/// successful epoch recycling. No decision-node reference is retained here.
+#[derive(Clone, Copy, Debug, Default)]
+struct FirstDrawCoverageState {
+    flushed_counts: [u32; STANDARD_PIECE_COUNT],
+    root_restrictions: usize,
+    root_draw_branches_skipped: usize,
+}
+
+/// Diagnostic-only exact observations. Epoch and flushed sets may overlap;
+/// their counts must never be added to certify their union.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct FirstDrawBlockSnapshot {
+    pub first_draw_order: [u8; STANDARD_PIECE_COUNT],
+    pub block_pattern_count: u32,
+    pub flushed_counts: [u32; STANDARD_PIECE_COUNT],
+    pub epoch_counts: [u32; STANDARD_PIECE_COUNT],
+    pub flushed_complete_mask: u8,
+    pub epoch_complete_mask: u8,
+    pub known_complete_mask: u8,
+    pub root_restrictions: usize,
+    pub root_draw_branches_skipped: usize,
+}
+
 #[derive(Clone, Copy)]
 struct StandardBagResourceBoundary {
     bound: ExecutionMemoryBound,
@@ -862,6 +940,14 @@ struct StandardBagResourceBoundary {
 }
 
 impl StandardBagCoverage {
+    fn inline_source_state_bytes() -> usize {
+        #[cfg(feature = "placement-dependency-pc")]
+        let arena_bytes = core::mem::size_of::<Option<Arc<()>>>();
+        #[cfg(not(feature = "placement-dependency-pc"))]
+        let arena_bytes = 0;
+        core::mem::size_of::<FirstDrawCoverageState>() + arena_bytes
+    }
+
     /// Pre-admit this before constructing an unshared request. It includes
     /// both table buffers and possible Vec-to-box relocation while the old
     /// buffers coexist, plus the immutable Arc allocation. A caller using an
@@ -887,7 +973,8 @@ impl StandardBagCoverage {
             .checked_add(suffix_bytes)?
             .checked_mul(2)?
             .checked_add(core::mem::size_of::<StandardBagRequestTables>() as u128)?
-            .checked_add(2 * core::mem::size_of::<usize>() as u128)
+            .checked_add(2 * core::mem::size_of::<usize>() as u128)?
+            .checked_add(Self::inline_source_state_bytes() as u128)
     }
 
     pub fn set_resource_boundary(
@@ -960,7 +1047,12 @@ impl StandardBagCoverage {
         hold_enabled: bool,
         projects_unplaced_lookahead: bool,
     ) -> Result<Option<Self>, WasmExactSearchError> {
-        let Some(tables) = StandardBagRequestTables::compile(universe, initial_hold, hold_enabled)?
+        let Some(tables) = StandardBagRequestTables::compile(
+            universe,
+            initial_hold,
+            hold_enabled,
+            projects_unplaced_lookahead,
+        )?
         else {
             return Ok(None);
         };
@@ -1051,6 +1143,9 @@ impl StandardBagCoverage {
             epoch_global_root: REJECT,
             global_words: Vec::new(),
             global_covered_pattern_count: 0,
+            first_draw_state: FirstDrawCoverageState::default(),
+            #[cfg(feature = "placement-dependency-pc")]
+            product_language_arena: None,
             interning_disabled: false,
             cancellation_poll_counter: 0,
             product_state_count: 0,
@@ -1069,6 +1164,58 @@ impl StandardBagCoverage {
         language_root: u32,
         control: &ExecutionControl,
     ) -> Result<StandardBagCoverageResult, WasmExactSearchError> {
+        self.cover_language_impl(language, language_root, None, control)
+    }
+
+    #[cfg(feature = "placement-dependency-pc")]
+    pub(super) fn cover_language_with_full_draw_root(
+        &mut self,
+        language: &PieceOrderLanguageCache,
+        language_root: u32,
+        proof: &super::buildup::FullDrawSourceRoot,
+        control: &ExecutionControl,
+    ) -> Result<StandardBagCoverageResult, WasmExactSearchError> {
+        let first_draw = self
+            .tables
+            .first_draw_blocks
+            .and_then(|_| proof.first_draw_for(language, language_root, self.tables.identity));
+        let Some(first_draw) = first_draw.filter(|piece| {
+            *piece < STANDARD_PIECE_COUNT as u8
+                && self.sequence_len == 15
+                && self.initial_hold_code == 0
+                && self.hold_enabled
+        }) else {
+            // Failed capability is unsupported, never an empty language. In
+            // particular, old roots cannot restrict a recycled language arena.
+            return self.cover_language(language, language_root, control);
+        };
+        self.first_draw_state.root_restrictions =
+            self.first_draw_state.root_restrictions.saturating_add(1);
+        self.cover_language_impl(language, language_root, Some(first_draw), control)
+    }
+
+    fn cover_language_impl(
+        &mut self,
+        language: &PieceOrderLanguageCache,
+        language_root: u32,
+        first_draw: Option<u8>,
+        control: &ExecutionControl,
+    ) -> Result<StandardBagCoverageResult, WasmExactSearchError> {
+        #[cfg(feature = "placement-dependency-pc")]
+        {
+            if self
+                .product_language_arena
+                .as_ref()
+                .is_some_and(|owner| !Arc::ptr_eq(owner, language.arena_identity()))
+            {
+                // Numeric suffix IDs are arena-local. Preserve exact accepted
+                // ordinals before clearing memo references from an old owner.
+                self.flush_and_recycle_local_cache()?;
+            }
+            if self.product_language_arena.is_none() {
+                self.product_language_arena = Some(Arc::clone(language.arena_identity()));
+            }
+        }
         let state = self.root_source();
         let key = product_key(language_root, state, self.initial_hold_code);
         let cache_hit = self.product_memo.contains_key(&key);
@@ -1079,11 +1226,12 @@ impl StandardBagCoverage {
         }
         let states_before = self.product_state_count;
         let edges_before = self.edge_check_count;
-        let root = self.solve(
+        let root = self.solve_with_root_first_draw(
             language,
             language_root,
             state,
             self.initial_hold_code,
+            first_draw,
             control,
         )?;
         let root_source = state;
@@ -1125,6 +1273,73 @@ impl StandardBagCoverage {
     pub const fn global_is_complete(&self) -> bool {
         self.global_covered_pattern_count == self.materialized_pattern_count
             || self.epoch_global_root == ACCEPT
+    }
+
+    pub(super) fn first_draw_block_snapshot(
+        &self,
+    ) -> Result<Option<FirstDrawBlockSnapshot>, WasmExactSearchError> {
+        let Some(layout) = self.tables.first_draw_blocks else {
+            return Ok(None);
+        };
+        let source = self.root_source();
+        let children = self.first_draw_children(self.epoch_global_root)?;
+        let mut epoch_counts = [0_u32; STANDARD_PIECE_COUNT];
+        let mut flushed_complete_mask = 0_u8;
+        let mut epoch_complete_mask = 0_u8;
+        for (rank, piece_index) in layout.first_draw_order.into_iter().enumerate() {
+            let next = self.advance_source(source, usize::from(piece_index))?;
+            let covered = self
+                .summary(children[usize::from(piece_index)], next)?
+                .covered_pattern_count;
+            if covered > u64::from(layout.block_pattern_count)
+                || self.first_draw_state.flushed_counts[rank] > layout.block_pattern_count
+            {
+                return Err(WasmExactSearchError::InvalidProblem(
+                    "wasm_first_draw_coverage_count_out_of_range",
+                ));
+            }
+            epoch_counts[rank] = covered as u32;
+            if epoch_counts[rank] == layout.block_pattern_count {
+                epoch_complete_mask |= 1_u8 << rank;
+            }
+            if self.first_draw_state.flushed_counts[rank] == layout.block_pattern_count {
+                flushed_complete_mask |= 1_u8 << rank;
+            }
+        }
+        Ok(Some(FirstDrawBlockSnapshot {
+            first_draw_order: layout.first_draw_order,
+            block_pattern_count: layout.block_pattern_count,
+            flushed_counts: self.first_draw_state.flushed_counts,
+            epoch_counts,
+            flushed_complete_mask,
+            epoch_complete_mask,
+            known_complete_mask: flushed_complete_mask | epoch_complete_mask,
+            root_restrictions: self.first_draw_state.root_restrictions,
+            root_draw_branches_skipped: self.first_draw_state.root_draw_branches_skipped,
+        }))
+    }
+
+    fn first_draw_children(
+        &self,
+        root: u32,
+    ) -> Result<[u32; STANDARD_PIECE_COUNT], WasmExactSearchError> {
+        if root == REJECT || root == ACCEPT {
+            return Ok([root; STANDARD_PIECE_COUNT]);
+        }
+        let index = reference_index(root);
+        if self.node_levels.get(index).copied() != Some(0)
+            || self.node_valid_masks.get(index).copied() != Some(FULL_STANDARD_BAG)
+        {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "wasm_first_draw_coverage_root_mismatch",
+            ));
+        }
+        self.nodes
+            .get(index)
+            .map(|node| node.children)
+            .ok_or(WasmExactSearchError::InvalidProblem(
+                "wasm_first_draw_coverage_root_out_of_range",
+            ))
     }
 
     pub fn materialize_global(&mut self) -> Result<PatternBitSet, WasmExactSearchError> {
@@ -1354,6 +1569,7 @@ impl StandardBagCoverage {
 
     pub fn retained_bytes(&self) -> usize {
         let retained = self.shared_request_retained_bytes()
+            + Self::inline_source_state_bytes()
             + self.nodes.capacity() * core::mem::size_of::<DecisionNode>()
             + self.node_summaries.capacity() * core::mem::size_of::<DecisionSummary>()
             + self.node_levels.capacity() * core::mem::size_of::<u8>()
@@ -1431,6 +1647,10 @@ impl StandardBagCoverage {
 
     pub fn flush_and_recycle_local_cache(&mut self) -> Result<(), WasmExactSearchError> {
         self.flush_epoch_global()?;
+        #[cfg(feature = "placement-dependency-pc")]
+        {
+            self.product_language_arena = None;
+        }
         #[cfg(any(test, feature = "local-search-ab"))]
         {
             self.p7p4_capture = P7P4CaptureCache::default();
@@ -1589,6 +1809,19 @@ impl StandardBagCoverage {
         hold_code: u8,
         control: &ExecutionControl,
     ) -> Result<u32, WasmExactSearchError> {
+        self.solve_with_root_first_draw(language, language_node, source, hold_code, None, control)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn solve_with_root_first_draw(
+        &mut self,
+        language: &PieceOrderLanguageCache,
+        language_node: u32,
+        source: SourceState,
+        hold_code: u8,
+        first_draw: Option<u8>,
+        control: &ExecutionControl,
+    ) -> Result<u32, WasmExactSearchError> {
         self.poll_cancellation(control)?;
         let source = source.normalized();
         let node = language
@@ -1596,6 +1829,13 @@ impl StandardBagCoverage {
             .ok_or(WasmExactSearchError::InvalidProblem(
                 "wasm_piece_language_node_out_of_range",
             ))?;
+        if first_draw.is_some()
+            && (source.depth != 0 || hold_code != 0 || node.remaining_depth != 15)
+        {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "wasm_full_draw_source_root_scope_mismatch",
+            ));
+        }
         if node.accepting {
             let projected_terminal_depth = self.sequence_len.checked_add(1);
             let projected_terminal = (source.depth == self.sequence_len && hold_code == 0)
@@ -1718,6 +1958,17 @@ impl StandardBagCoverage {
         'current_draw: for (current_index, child) in children.iter_mut().enumerate() {
             let current_bit = 1_u8 << current_index;
             if source.bag_remainder & current_bit == 0 {
+                continue;
+            }
+            if first_draw.is_some_and(|piece| usize::from(piece) != current_index) {
+                // Every accepted word of this bound full-candidate language
+                // has inventory [2;7]+e_p. The actual finite source inventory
+                // is [2;7]+e_current, so these six complete ordinal blocks are
+                // exactly empty. Recursive products carry no hidden constraint.
+                self.first_draw_state.root_draw_branches_skipped = self
+                    .first_draw_state
+                    .root_draw_branches_skipped
+                    .saturating_add(1);
                 continue;
             }
             let current_code = current_index as u8 + 1;
@@ -2241,18 +2492,68 @@ impl StandardBagCoverage {
                 })?;
             self.global_words.resize(word_count, 0);
         }
-        let newly_covered = self.accumulate_global(
-            root,
-            self.root_source(),
-            0,
-            self.materialized_pattern_count as u128,
-        )?;
+        let newly_covered = if let Some(layout) = self.tables.first_draw_blocks {
+            self.accumulate_first_draw_blocks(root, layout)?
+        } else {
+            self.accumulate_global(
+                root,
+                self.root_source(),
+                0,
+                self.materialized_pattern_count as u128,
+            )?
+        };
         self.global_covered_pattern_count = self
             .global_covered_pattern_count
             .saturating_add(newly_covered)
             .min(self.materialized_pattern_count);
         self.epoch_global_root = REJECT;
         Ok(())
+    }
+
+    fn accumulate_first_draw_blocks(
+        &mut self,
+        root: u32,
+        layout: FullDrawBlockLayout,
+    ) -> Result<usize, WasmExactSearchError> {
+        let children = self.first_draw_children(root)?;
+        let source = self.root_source();
+        let mut counts = self.first_draw_state.flushed_counts;
+        let mut total_new = 0_usize;
+        for (rank, piece_index) in layout.first_draw_order.into_iter().enumerate() {
+            let next = self.advance_source(source, usize::from(piece_index))?;
+            if self.suffix_count(next) != u128::from(layout.block_pattern_count) {
+                return Err(WasmExactSearchError::InvalidProblem(
+                    "wasm_first_draw_coverage_block_size_mismatch",
+                ));
+            }
+            let base = rank as u128 * u128::from(layout.block_pattern_count);
+            let new = self.accumulate_global(
+                children[usize::from(piece_index)],
+                next,
+                base,
+                base + u128::from(layout.block_pattern_count),
+            )?;
+            counts[rank] = counts[rank]
+                .checked_add(u32::try_from(new).map_err(|_| {
+                    WasmExactSearchError::InvalidProblem(
+                        "wasm_first_draw_coverage_count_out_of_range",
+                    )
+                })?)
+                .filter(|count| *count <= layout.block_pattern_count)
+                .ok_or(WasmExactSearchError::InvalidProblem(
+                    "wasm_first_draw_coverage_count_out_of_range",
+                ))?;
+            total_new = total_new
+                .checked_add(new)
+                .ok_or(WasmExactSearchError::InvalidProblem(
+                    "wasm_first_draw_coverage_count_overflow",
+                ))?;
+        }
+        // Publish the counters only after the same exact bitmap union succeeds.
+        // Each delta counts newly set bits, so repeated/overlapping epochs are
+        // not summed as disjoint probability mass.
+        self.first_draw_state.flushed_counts = counts;
+        Ok(total_new)
     }
 
     fn count_patterns(
