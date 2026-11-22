@@ -465,3 +465,18 @@ Windows Tauri 빌드 자체의 통과는 후속 CI가 확인한다.
 이 후속 후보의 원본 CI 응답·실패 로그와 로컬 확인 자료는
 `_local/artifacts/candidate-preflight-45071469548/`에 보존한다. 성능 측정 source는
 계속 1절의 tree이며, cfg·lockfile 후속 수정의 성능 결과로 바꾸지 않는다.
+
+### 8.4. CI 중단과 생성 이후 비용으로의 우선순위 변경
+
+사용자 요청에 따라 `1ad794056bec85454c511d21394d8359184743ee`의
+[Candidate Preflight #59](https://github.com/daejunnom/Clearra/actions/runs/45072498523)는
+취소했다. 관측된 최종 상태는 required job 8개 성공, product E2E 취소이며,
+9개 전체 통과가 아니다. **별도 사용자 승인 전까지 CI 실행·재실행·대기·모니터링을
+재개하지 않는다.** 취소 근거는
+`_local/artifacts/general-queue-perf-20261123/ci-cancelled.jpg`에 있다.
+
+다음 작업은 기존 총 240초 제한 대신 family 준비 이후의 별도 진단 창으로
+도달성·후보 집합 비용을 계측한다. 전체 Full6 완료 탐색이나 이미 주어진 100%
+확률의 재증명은 수행하지 않는다. 진행 내용, 코드·실행파일 식별자 및 로컬 검증은
+[보드 생성 이후의 도달성·후보 집합 비용](post-generation-set-reuse-2026-11-23.md)에
+이어 기록한다. 이 문서의 과거 CI 후속 계획보다 이 중단 지시를 우선한다.
