@@ -5,6 +5,26 @@ use std::{
 
 const COMPACT_SLOT_PAYLOAD_BYTES: usize = 12;
 
+/// Whole replacement allocation for the SwissTable reserve used here. This
+/// is the same conservative growth envelope as extended Build admission:
+/// capacity rounding, a control byte per bucket, and the trailing control
+/// group are included. The caller already owns/charges the old allocation.
+pub(super) fn checked_hash_reserve_future_bytes(
+    capacity: usize,
+    len: usize,
+    additional: usize,
+    item_bytes: usize,
+) -> Option<u128> {
+    let needed = len.checked_add(additional)?;
+    if needed <= capacity {
+        return Some(0);
+    }
+    (needed as u128)
+        .checked_mul(4)?
+        .checked_mul(item_bytes as u128 + 1)?
+        .checked_add(16)
+}
+
 /// Identical hashing for the reference and compact exact memo tables. The
 /// complete packed key is always compared; a hash never authorizes a hit.
 #[derive(Default)]
@@ -212,6 +232,15 @@ impl ExactU64MemoMap {
             MemoStorage::Reference(entries) => entries.try_reserve(additional),
             MemoStorage::Compact(entries) => entries.try_reserve(additional),
         }
+    }
+
+    pub fn checked_reserve_future_bytes(&self, additional: usize) -> Option<u128> {
+        checked_hash_reserve_future_bytes(
+            self.capacity(),
+            self.len(),
+            additional,
+            self.storage().slot_payload_bytes(),
+        )
     }
 
     #[inline]

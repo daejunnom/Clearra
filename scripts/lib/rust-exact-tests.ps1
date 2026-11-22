@@ -16,11 +16,6 @@ function Get-RustExactPackageSpecs {
             SerialWholePackage = $true
         },
         [pscustomobject]@{
-            Package = 'clearra-webgpu'
-            Target = 'clearra_webgpu'
-            SerialWholePackage = $true
-        },
-        [pscustomobject]@{
             Package = 'clearra-core-domain'
             Target = 'clearra_core_domain'
             SerialWholePackage = $false
@@ -63,7 +58,7 @@ function New-RustExactCompileArguments {
     }
     $arguments.Add('--lib')
     $arguments.Add('--features')
-    $arguments.Add('clearra-core-ffi/native-c-core,clearra-core-executor/native-c-core,clearra-core-executor/webgpu-search,clearra-app/native-c-core,clearra-app/webgpu-search')
+    $arguments.Add('clearra-core-ffi/native-c-core,clearra-core-executor/native-c-core,clearra-app/native-c-core')
     return @($arguments.ToArray())
 }
 

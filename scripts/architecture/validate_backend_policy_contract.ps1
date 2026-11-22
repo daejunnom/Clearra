@@ -20,8 +20,7 @@ foreach ($requiredMarker in @(
     }
 $cliParser = Read-Text "crates/clearra-cli/src/args/cli_parser.rs"
 foreach ($requiredMarker in @(
-            "--backend auto|cpu|gpu|hybrid",
-            "--gpu-device auto|N",
+            "--backend auto|cpu",
             "--allow-backend-fallback",
             "--no-backend-fallback",
             "--max-candidates N",
@@ -198,20 +197,11 @@ foreach ($requiredMarker in @(
             Add-ArchitectureError "M19 UI execution schema must expose backend preset marker '$requiredMarker'"
         }
     }
-$processE2E = Read-Text "crates/clearra-cli/tests/process_e2e.rs"
+$processE2E = Read-Text "crates/clearra-cli/tests/process_e2e/process_e2e_setup_backend.rs"
 foreach ($requiredMarker in @(
-            "process_e2e_m19_backend_policy_reports_fallback_and_backend_split",
-            "--backend",
-            "gpu",
-            "--allow-backend-fallback",
-            "--max-candidates",
-            "--max-patterns",
-            '\"backend_requested\":\"gpu\"',
-            '\"backend_selected\":\"cpu\"',
-            '\"backend_fallback_reason\":\"gpu_kernel_unavailable\"',
-            "expected_candidate_backend",
-            "expected_buildup_backend",
-            "expected_native_c_core_executed_json"
+            "process_e2e_retired_gpu_has_no_cpu_fallback",
+            "--backend", "gpu", "--allow-backend-fallback", "--no-backend-fallback",
+            "webgpu_backend_retired", "E_BACKEND_GPU_UNAVAILABLE"
         )) {
         if ($processE2E -notlike "*$requiredMarker*") {
             Add-ArchitectureError "M19 process E2E must verify backend policy/fallback output marker '$requiredMarker'"

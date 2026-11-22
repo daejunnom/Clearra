@@ -88,24 +88,10 @@ function Invoke-ReleaseForbiddenApiValidation {
         }
     }
 
-    $webGpuSurface = Get-ReleaseSourceSurface @(
-        'crates/clearra-webgpu/src', 'apps/clearra-web',
-        'packages/clearra-ui/src'
-    )
-    foreach ($forbidden in @(
-        'userProvidedWgsl', 'userProvidedWGSL', 'runtimeShaderInjection',
-        'shaderTextFromUser', 'createShaderModule({ code: data',
-        'new Function', 'eval(', 'can_source_exact_probability: true'
-    )) {
-        if ($webGpuSurface -like "*$forbidden*") {
-            Add-ArchitectureError "WebGPU product surface contains forbidden API '$forbidden'"
-        }
-    }
-
     $productExecutionSurface = Get-ReleaseSourceSurface @(
         'crates/clearra-app/src', 'crates/clearra-core-executor/src',
         'crates/clearra-gui-host/src', 'crates/clearra-wasm/src',
-        'crates/clearra-postprocess-gpu/src', 'crates/clearra-render/src',
+        'crates/clearra-render/src',
         'apps/clearra-web/src', 'core-c/src', 'core-c/include'
     )
     foreach ($forbidden in @(
@@ -181,21 +167,10 @@ function Invoke-UnsupportedCapabilityStaticValidation {
         'RenderCapabilityReport', 'pub fn current()', 'connected_exact',
         'supported: true', 'render_exact: true'
     ) 'Renderer connected exact capability'
-    Assert-ReleasePublicContractContains 'crates/clearra-postprocess-gpu/src/post_gpu_capability.rs' @(
-        'PostGpuCapabilityState', 'Connected', 'Unavailable', 'RejectedMismatch',
-        'connected_exact', 'exact_supported: true', 'exact_supported: false'
-    ) 'PostProcess GPU stable capability outcomes'
-
-    $postGpuResult = Read-PhysicalText 'crates/clearra-postprocess-gpu/src/post_gpu_result.rs'
-    if ($postGpuResult -match '(?m)^\s*pub\s+fn\s+(new|trusted)\s*\(') {
-        Add-ArchitectureError 'PostProcess GPU trusted results must be constructed only by the connected backend'
-    }
-
     foreach ($capabilityPath in @(
         'crates/clearra-ui-schema/src/capability/capability_state.rs',
         'crates/clearra-validation/src/capability/mvp2_capability_registry.rs',
-        'crates/clearra-validation/src/capability/mvp3_capability_registry.rs',
-        'crates/clearra-postprocess-gpu/src/post_gpu_capability.rs'
+        'crates/clearra-validation/src/capability/mvp3_capability_registry.rs'
     )) {
         $capability = Read-PhysicalText $capabilityPath
         foreach ($forbiddenState in @(

@@ -25,7 +25,9 @@ use crate::backend::wasm_cpu::{
     piece_order_language::PieceOrderLanguageCache,
     placement_poset::CandidateGeometry,
     queue_observation_policy::{
-        kind_union::{KindUnionArena, KindUnionResources, KnownSupplyQuery, KIND_SOURCE_TAG},
+        kind_union::{
+            KindUnionArena, KindUnionResources, KnownSupplyQuery, KIND_SOURCE_TAG, KIND_UNION_TAG,
+        },
         ObservationLanguageNode, ObservationPieceLanguage,
     },
     reachability::{harddrop_path_mask, ReachabilityWorkspace, ReachableLocks},
@@ -36,9 +38,9 @@ use crate::backend::wasm_cpu::{
     WasmExactSearchError, MAX_BOARD64_PIECES,
 };
 
-use super::{
-    invalid, piece_code, storage, MAX_EDGES, MAX_NODES, MAX_UNION_MEMBERS, MAX_WORK, NO_NODE,
-};
+use super::{checked_work, invalid, piece_code, storage, GenerationLimits, NO_NODE};
+#[cfg(test)]
+use super::{MAX_UNION_MEMBERS, MAX_WORK};
 
 #[cfg(any(test, feature = "local-search-ab"))]
 #[path = "queue_observation_prefix_masks.rs"]
@@ -60,15 +62,19 @@ use ordered_policy_quotient::OrderedPolicyQuotient;
 
 const REVEALED_BOARD_TAG: u32 = 1 << 30;
 const KIND_TAG: u32 = KIND_SOURCE_TAG;
-const KIND_UNION_TAG: u32 = 1 << 29;
 const SMALL_ROOTS: usize = 32;
 const PREFIX_CONE_SLOTS: usize = 65_536;
-const EXACT_CONE_LIMIT: usize = MAX_NODES;
+// Optional certificate storage: a full cache falls back to exact traversal.
+// This does not limit generated nodes, candidates, edges or work.
+const EXACT_CONE_LIMIT: usize = 1_000_000;
 const EXACT_CONE_CHUNK: usize = 4_096;
 const EXACT_CONE_FIRST_BUCKETS: usize = 1_024;
 const EXACT_CONE_MAX_BUCKETS: usize = 524_288;
 const CONE_FRONTIER_WORDS: [[u64; MAX_PREFIX_WORDS]; 6] = cone_frontier_words();
-const _: () = assert!(MAX_NODES < KIND_UNION_TAG as usize);
+// Producer handles reserve bit 28 for pending H groups. Policy tags use
+// higher bits, and the ordered quotient's node*8+kind stamp also fits u32.
+const BOARD_NODE_CAPACITY: usize = ProducerNode::BOUNDARY_TAG as usize;
+const _: () = assert!(BOARD_NODE_CAPACITY < KIND_UNION_TAG as usize);
 const _: () = assert!(PREFIX_CONE_SLOTS.is_power_of_two());
 
 const fn cone_frontier_words() -> [[u64; MAX_PREFIX_WORDS]; 6] {
@@ -95,6 +101,7 @@ enum EdgeClosureMode {
 
 #[derive(Debug)]
 pub(in crate::backend::wasm_cpu) struct BoardObservationPlan {
+    generation_limits: GenerationLimits,
     width: u8,
     height: u8,
     initial_board: u64,
@@ -154,6 +161,7 @@ impl BoardObservationPlan {
         }
         let cone_mode = prefix_cone_mode()?;
         Ok(Arc::new(Self {
+            generation_limits: GenerationLimits::default(),
             width,
             height,
             initial_board,
@@ -594,6 +602,7 @@ pub(in crate::backend::wasm_cpu) struct BoardActionMetrics {
 }
 
 pub(in crate::backend::wasm_cpu) struct BoardActionFamily {
+    limits: GenerationLimits,
     plan: Arc<BoardObservationPlan>,
     nodes: Vec<BoardNode>,
     index: HashMap<BoardKey, u32>,
@@ -640,6 +649,7 @@ pub(in crate::backend::wasm_cpu) struct BoardActionFamily {
 impl BoardActionFamily {
     pub(in crate::backend::wasm_cpu) fn new(plan: Arc<BoardObservationPlan>) -> Self {
         Self {
+            limits: plan.generation_limits,
             plan,
             nodes: Vec::new(),
             index: HashMap::new(),
@@ -1583,7 +1593,11 @@ impl BoardActionFamily {
         }
         let cache = &mut self.prefix_masks[0];
         let before = cache.metrics();
-        let result = cache.query(pieces, MAX_WORK.saturating_sub(self.metrics.work), control);
+        let result = cache.query(
+            pieces,
+            self.limits.work().saturating_sub(self.metrics.work),
+            control,
+        );
         let after = cache.metrics();
         let work = after.work - before.work;
         self.prefix_mask_metrics[0] += after.lookups - before.lookups;
@@ -1600,7 +1614,7 @@ impl BoardActionFamily {
             .metrics
             .work
             .checked_add(work)
-            .filter(|&total| total <= MAX_WORK)
+            .filter(|&total| total <= self.limits.work())
             .ok_or_else(|| invalid("wasm_observation_physical_work_limit"))?;
         if control.is_cancelled() {
             return Err(WasmExactSearchError::Cancelled);
@@ -1690,10 +1704,15 @@ impl BoardActionFamily {
         if let Some(&group) = self.pending_boundaries.as_ref().unwrap().index.get(&key) {
             return ProducerNode::pending(group);
         }
-        // Every retained pending group has at least one root. Both the group
-        // allocation and its roots remain subject to the unchanged 8M member
-        // limit; naming a value staging never exempts retained H bindings.
-        if self.pending_boundaries.as_ref().unwrap().groups.len() >= MAX_UNION_MEMBERS {
+        // Every pending group has at least one retained root. The optional
+        // member budget also covers staging; the encoded handle separately
+        // reserves bit 28 and must never wrap while converting the index.
+        if self.pending_boundaries.as_ref().unwrap().groups.len()
+            >= self
+                .limits
+                .members()
+                .min(ProducerNode::BOUNDARY_TAG as usize)
+        {
             return Err(invalid("wasm_observation_physical_union_limit"));
         }
         let old = self.pending_boundaries.as_ref().unwrap().groups.capacity()
@@ -1783,7 +1802,7 @@ impl BoardActionFamily {
             },
             child,
         )?;
-        if self.metrics.edges >= MAX_EDGES {
+        if self.metrics.edges >= self.limits.edges(usize::MAX) {
             return Err(invalid("wasm_observation_physical_edge_limit"));
         }
         let old = pending.edges.capacity()
@@ -1840,7 +1859,7 @@ impl BoardActionFamily {
             .ok_or_else(|| invalid("wasm_observation_physical_root_invalid"))?
             .roots;
         let old = roots.retained_bytes();
-        let inserted = roots.insert(root, self.metrics.suffix_roots < MAX_UNION_MEMBERS);
+        let inserted = roots.insert(root, self.metrics.suffix_roots < self.limits.members());
         let new = roots.retained_bytes();
         pending.root_capacity_bytes = pending.root_capacity_bytes - old + new;
         let (inserted, extra) = inserted?;
@@ -1859,7 +1878,7 @@ impl BoardActionFamily {
         if let Some(&node) = self.index.get(&key) {
             return Ok(node);
         }
-        if self.nodes.len() >= MAX_NODES {
+        if self.nodes.len() >= self.limits.nodes(BOARD_NODE_CAPACITY) {
             return Err(invalid("wasm_observation_physical_node_limit"));
         }
         let old = self.nodes.capacity() * core::mem::size_of::<BoardNode>();
@@ -1944,7 +1963,7 @@ impl BoardActionFamily {
         edge: BoardEdge,
         index: usize,
     ) -> Result<(), WasmExactSearchError> {
-        if self.metrics.edges >= MAX_EDGES {
+        if self.metrics.edges >= self.limits.edges(usize::MAX) {
             return Err(invalid("wasm_observation_physical_edge_limit"));
         }
         let node = &mut self.nodes[parent as usize];
@@ -1964,7 +1983,7 @@ impl BoardActionFamily {
         }
         let suffixes = &mut self.nodes[node as usize].suffixes;
         let old = suffixes.retained_bytes();
-        let inserted = suffixes.insert(root, self.metrics.suffix_roots < MAX_UNION_MEMBERS);
+        let inserted = suffixes.insert(root, self.metrics.suffix_roots < self.limits.members());
         let new = suffixes.retained_bytes();
         #[cfg(feature = "local-search-ab")]
         if matches!(
@@ -2015,7 +2034,7 @@ impl BoardActionFamily {
         if !Arc::ptr_eq(&self.plan, &source.plan) {
             return Err(invalid("wasm_observation_board_request_scope_changed"));
         }
-        self.charge(source.metrics.work.saturating_add(1), control)?;
+        self.charge(checked_work(source.metrics.work, 1)?, control)?;
         let source_exact_metrics = source.prefix_cone_exact_metrics();
         let incoming_bytes = source.retained_bytes();
         self.merge_peak_bytes = incoming_bytes;
@@ -2381,18 +2400,22 @@ impl BoardActionFamily {
                 edges: self.metrics.edges,
                 // Retained original edge-index choices are extra u32
                 // references. Identity slices need no additional member.
-                members: self.metrics.suffix_roots.saturating_add(
-                    self.ordered_quotient
-                        .as_ref()
-                        .map_or(0, OrderedPolicyQuotient::member_count),
-                ),
+                members: self
+                    .metrics
+                    .suffix_roots
+                    .checked_add(
+                        self.ordered_quotient
+                            .as_ref()
+                            .map_or(0, OrderedPolicyQuotient::member_count),
+                    )
+                    .ok_or_else(|| invalid("wasm_observation_physical_union_limit"))?,
                 work: self.metrics.work,
             },
             KindUnionResources {
-                nodes: MAX_NODES,
-                edges: MAX_EDGES,
-                members: MAX_UNION_MEMBERS,
-                work: MAX_WORK,
+                nodes: self.limits.nodes(usize::MAX),
+                edges: self.limits.edges(usize::MAX),
+                members: self.limits.members(),
+                work: self.limits.work(),
             },
         )?;
         let supply_multiset_enabled = supply_multiset_enabled()? && union_enabled;
@@ -2435,7 +2458,7 @@ impl BoardActionFamily {
             return Err(invalid("wasm_observation_board_edges_not_finalized"));
         }
         for index in 0..self.nodes.len() {
-            self.charge(self.nodes[index].suffixes.len().saturating_add(1), control)?;
+            self.charge(checked_work(self.nodes[index].suffixes.len(), 1)?, control)?;
             if matches!(
                 self.nodes[index].suffixes,
                 SuffixRoots::FrozenUniqueUnordered(_)
@@ -2483,7 +2506,7 @@ impl BoardActionFamily {
             .metrics
             .work
             .checked_add(steps)
-            .filter(|&work| work <= MAX_WORK)
+            .filter(|&work| work <= self.limits.work())
         else {
             #[cfg(feature = "local-search-ab")]
             {
@@ -3797,6 +3820,7 @@ mod tests {
                 .unwrap();
             let before_publish = complete.metrics.work - complete.prefix_cone_metrics()[4];
             let mut limited = BoardActionFamily::new(plan(true, 4, EdgeClosureMode::Off));
+            limited.limits = GenerationLimits::DEVELOPMENT;
             limited.metrics.work = MAX_WORK - before_publish;
             assert!(matches!(
                 limited.register_source_qualified(&qualified, &suffixes, &control),
@@ -4012,6 +4036,7 @@ mod tests {
             let old_buckets = family.exact_cones.buckets.clone();
             let old_work = family.metrics.work;
             let rebuild_work = EXACT_CONE_FIRST_BUCKETS * 9;
+            family.limits = GenerationLimits::DEVELOPMENT;
             family.metrics.work = MAX_WORK - rebuild_work + 1;
             let next = PrefixConeEntry {
                 cells: [EXACT_CONE_FIRST_BUCKETS as u64 + 1, 0, 0, 0, 0, 0, 0],
@@ -4100,6 +4125,7 @@ mod tests {
             assert_eq!(graph(&destination), expected);
 
             let mut limited = BoardActionFamily::new(scope);
+            limited.limits = GenerationLimits::DEVELOPMENT;
             limited.metrics.work = MAX_WORK - before_publish;
             assert!(matches!(
                 limited.register_source_qualified(&qualified, &suffixes, &control),
@@ -4361,6 +4387,7 @@ mod tests {
 
         let mut owner = PhysicalActionLanguage::default();
         owner.set_board_plan(source_filter_plan(true)).unwrap();
+        owner.board.as_mut().unwrap().limits = GenerationLimits::DEVELOPMENT;
         owner.board.as_mut().unwrap().metrics.work = MAX_WORK;
         assert!(matches!(
             owner.produce_board_relation(
@@ -5210,6 +5237,7 @@ mod tests {
                 &mut suffixes,
             )
             .unwrap();
+        family.limits = GenerationLimits::DEVELOPMENT;
         family.metrics.work = MAX_WORK - 1;
         assert!(matches!(
             family.register(orders, &suffixes, &control),

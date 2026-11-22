@@ -20,8 +20,6 @@ pub mod hybrid_backpressure_report;
 mod native_packing_executor_registry;
 #[cfg(test)]
 mod native_packing_executors;
-#[cfg(all(feature = "webgpu-search", feature = "native-c-core"))]
-pub mod native_webgpu_packing_executor;
 #[cfg(test)]
 mod packing_backend_dispatch;
 mod raw_geometry_packing_executor;
@@ -145,8 +143,6 @@ pub use search_backend_warmup::{
 pub use wasm_build_probability_backend::{
     WasmBuildProbabilityAdvance, WasmBuildProbabilityBackend, WasmBuildProbabilitySession,
 };
-#[cfg(feature = "webgpu-search")]
-pub use wasm_cpu::WasmWebGpuCandidateProducer;
 pub use wasm_cpu::{
     any_pc4_ilc_target_field, canonical_wasm_candidate_packet_batch_sha256,
     encode_canonical_wasm_candidate_packet_batch, enumerate_pc4_ilc_geometric_predecessor_fields,

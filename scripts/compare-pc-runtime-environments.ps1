@@ -275,9 +275,9 @@ function Invoke-WslEnvironment {
     $inventoryMode = if (Get-GpuInventoryRequested) { 'query' } else { 'skip' }
     $profileMode = if ($ProfileStages.IsPresent) { 'profile' } else { 'no-profile' }
     $cargoFeatures = if ($ProfileStages.IsPresent) {
-        'gpu-backend,stage-profiling'
+        'native-c-reference,stage-profiling'
     } else {
-        'gpu-backend'
+        'native-c-reference'
     }
     $sessionOutput = Join-Path $outputRoot '_wsl-managed-session'
     New-Item -ItemType Directory -Force -Path $sessionOutput | Out-Null

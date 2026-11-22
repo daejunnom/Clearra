@@ -12,8 +12,6 @@ $requiredFiles = @(
         "packages/clearra-ui/src/lib/host/clearraDesktopHost.ts",
         "packages/clearra-ui/src/lib/stores/desktopJobStore.ts",
         "crates/clearra-wasm/src/lib_tests.rs",
-        "crates/clearra-webgpu/src/shader_contract.rs",
-        "crates/clearra-webgpu/src/shader_contract_tests.rs",
         "scripts/architecture/validate_host_runtime_contract.ps1",
         "scripts/clearra.ps1",
         "scripts/verify.ps1",
@@ -177,21 +175,6 @@ foreach ($requiredMarker in @(
     )) {
         if ($wasmTests.IndexOf($requiredMarker, [System.StringComparison]::Ordinal) -lt 0) {
             Add-ArchitectureError "WASM command tests must keep T5 user shader rejection marker '$requiredMarker'"
-        }
-    }
-$webGpuShaderSurface = @(
-    Read-PhysicalText "crates/clearra-webgpu/src/shader_contract.rs"
-    Read-PhysicalText "crates/clearra-webgpu/src/shader_contract_tests.rs"
-) -join "`n"
-foreach ($requiredMarker in @(
-        "webgpu_user_shader_rejected",
-        "reject_user_provided_wgsl",
-        "E_WEBGPU_USER_PROVIDED_WGSL_REJECTED",
-        "embedded_reviewed",
-        "no_runtime_shader_injection"
-    )) {
-        if ($webGpuShaderSurface.IndexOf($requiredMarker, [System.StringComparison]::Ordinal) -lt 0) {
-            Add-ArchitectureError "WebGPU shader contract must keep T5 embedded-only marker '$requiredMarker'"
         }
     }
 $taskList = Read-Text "scripts/lib/architecture-validation-tasks.ps1"

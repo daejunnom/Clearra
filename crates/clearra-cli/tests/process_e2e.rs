@@ -49,7 +49,6 @@ mod process_e2e_path_percent;
 mod process_e2e_routing;
 #[path = "process_e2e/process_e2e_scenario.rs"]
 mod process_e2e_scenario;
-#[cfg(not(feature = "webgpu-search"))]
 #[path = "process_e2e/process_e2e_setup_backend.rs"]
 mod process_e2e_setup_backend;
 #[path = "process_e2e/process_e2e_verify_continue.rs"]

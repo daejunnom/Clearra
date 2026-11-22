@@ -8,13 +8,11 @@ publish = false
 [features]
 default = []
 stage-profiling = ["dep:wasm-bindgen"]
-webgpu-postprocess = ["dep:clearra-postprocess-gpu"]
 
 [dependencies]
 clearra-coverage = { path = "../clearra-coverage" }
 clearra-core-domain = { path = "../clearra-core-domain" }
 clearra-objectives = { path = "../clearra-objectives" }
-clearra-postprocess-gpu = { path = "../clearra-postprocess-gpu", optional = true }
 clearra-replay = { path = "../clearra-replay" }
 clearra-scoring = { path = "../clearra-scoring" }
 clearra-spin = { path = "../clearra-spin" }
@@ -25,7 +23,6 @@ wasm-bindgen = { version = "0.2.126", optional = true }
 
 [dev-dependencies]
 clearra-geometry = { path = "../clearra-geometry" }
-pollster = "0.4"
 
 [lints]
 workspace = true

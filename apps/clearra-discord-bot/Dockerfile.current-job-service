@@ -15,7 +15,7 @@ RUN cargo build \
       --locked \
       --release \
       --package clearra-cli \
-      --features wasm-cpu-runtime,webgpu-search \
+      --features wasm-cpu-runtime \
     && output="$(/workspace/target/release/clearra --format json rules list)" \
     && printf '%s' "${output}" | grep -Fq "\"source_commit\":\"${CLEARRA_SOURCE_COMMIT}\"" \
     && printf '%s' "${output}" | grep -Fq "\"engine_build_id\":\"${CLEARRA_ENGINE_BUILD_ID}\"" \

@@ -963,6 +963,79 @@ impl PieceOrderLanguageCache {
         Ok(imported)
     }
 
+    /// Peak additional allocation for canonicalizing this already-built graph.
+    /// Each live physical node contributes at most one kind node and each
+    /// physical piece edge at most one kind edge. Interning can only reduce
+    /// those counts. Include old/new arena coexistence and bucket rebuilding;
+    /// existing retained payload is supplied separately by the caller.
+    pub fn checked_canonicalize_future_bytes(&self, graph: &BuildOrderGraph) -> Option<u128> {
+        fn growth(capacity: usize, required: usize, item: usize) -> Option<u128> {
+            if required <= capacity {
+                return Some(0);
+            }
+            // reserve(1) may double capacity; another grown old allocation
+            // may coexist with the final buffer. Exact-reserve paths fit too.
+            (required.max(4) as u128)
+                .checked_mul(4)?
+                .checked_mul(item as u128)
+        }
+        let mut live_nodes = 0_usize;
+        let mut live_edges = 0_usize;
+        let mut max_degree = 0_usize;
+        for (index, node) in graph.nodes.iter().enumerate() {
+            if !node.live {
+                continue;
+            }
+            live_nodes = live_nodes.checked_add(1)?;
+            let degree = graph.piece_edges(index).len();
+            live_edges = live_edges.checked_add(degree)?;
+            max_degree = max_degree.max(degree);
+        }
+        let nodes = self.nodes.len().checked_add(live_nodes)?;
+        let edges = self.edges.len().checked_add(live_edges)?;
+        let mut future = growth(
+            self.nodes.capacity(),
+            nodes,
+            core::mem::size_of::<CanonicalPieceNode>(),
+        )?
+        .checked_add(growth(
+            self.piece_range_ends.capacity(),
+            nodes,
+            core::mem::size_of::<[u8; 7]>(),
+        )?)?
+        .checked_add(growth(
+            self.edges.capacity(),
+            edges,
+            core::mem::size_of::<CanonicalPieceEdge>(),
+        )?)?
+        .checked_add(growth(
+            self.graph_classes.capacity(),
+            graph.nodes.len(),
+            core::mem::size_of::<u32>(),
+        )?)?
+        .checked_add(growth(
+            self.edge_scratch.capacity(),
+            max_degree,
+            core::mem::size_of::<CanonicalPieceEdge>(),
+        )?)?;
+        if !self.interning_disabled {
+            // Growth occurs at load >= 3/4, so strict inequality avoids
+            // missing the final doubling exactly on that threshold.
+            let buckets = nodes
+                .checked_mul(4)?
+                .checked_div(3)?
+                .checked_add(1)?
+                .max(INITIAL_BUCKET_COUNT)
+                .checked_next_power_of_two()?;
+            if buckets > self.bucket_heads.len() {
+                future = future.checked_add(
+                    (buckets as u128).checked_mul(2 * core::mem::size_of::<u32>() as u128)?,
+                )?;
+            }
+        }
+        Some(future)
+    }
+
     pub fn canonicalize(&mut self, graph: &BuildOrderGraph) -> Result<u32, WasmExactSearchError> {
         self.prepare_graph_classes(graph.nodes.len())?;
 

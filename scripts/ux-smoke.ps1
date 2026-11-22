@@ -75,7 +75,7 @@ function Remove-StaleClearraCliBinary {
         } else {
             $cargoArgs = @(
                 "run", "--locked", "-q", "-p", "clearra-cli",
-                "--features", "wasm-cpu-runtime,webgpu-search",
+                "--features", "wasm-cpu-runtime",
                 "--bin", "clearra", "--"
             ) + $CommandArgs
             $previousCargoTargetDir = $env:CARGO_TARGET_DIR

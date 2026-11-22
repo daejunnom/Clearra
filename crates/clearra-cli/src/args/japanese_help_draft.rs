@@ -19,15 +19,15 @@ Sfinder-man形式のネイティブ互換コマンドは clearra sfinder <comman
 開幕プリセットの実行例: clearra pc --lines 2"#
         }
         CliHelpTopic::Pc => {
-            r#"使い方: clearra pc --lines 2 [--queue IOTSZJL] [--fixed|--observed] [--hold|--no-hold] [--queue-knowledge oracle|visible-7] [--objective all|unique|min-cover|tiling] [--tiling-only] [--solution-probabilities] [--score] [--score-profile tetrio|guideline|jstris-ultra] [--spin-profile t-spins|t-spins-plus|all-spin|all-spin-plus|all-mini|all-mini-plus] [--initial-b2b N] [--preserve-b2b] [--rule srs-plus|srs|srs-x|jstris-180|no-kick] [--kick-profile-json JSON] [--backend auto|cpu|gpu|hybrid] [--workers N|--cpu-threads N|--auto-workers N] [--use-all-cpu-threads] [--cpu-warmup] [--gpu-warmup] [--tablebase|--no-tablebase] [--legal-board|--no-legal-board] [--conditioned-reachability|--no-conditioned-reachability] [--no-gpu] [--deterministic] [--max-candidates N] [--max-patterns N] [--max-memory-mib N] [--gpu-device auto|N] [--allow-backend-fallback|--no-backend-fallback]
+            r#"使い方: clearra pc --lines 2 [--queue IOTSZJL] [--fixed|--observed] [--hold|--no-hold] [--queue-knowledge oracle|visible-7] [--objective all|unique|min-cover|tiling] [--tiling-only] [--solution-probabilities] [--score] [--score-profile tetrio|guideline|jstris-ultra] [--spin-profile t-spins|t-spins-plus|all-spin|all-spin-plus|all-mini|all-mini-plus] [--initial-b2b N] [--preserve-b2b] [--rule srs-plus|srs|srs-x|jstris-180|no-kick] [--kick-profile-json JSON] [--backend auto|cpu] [--workers N|--cpu-threads N|--auto-workers N] [--use-all-cpu-threads] [--cpu-warmup] [--tablebase|--no-tablebase] [--legal-board|--no-legal-board] [--conditioned-reachability|--no-conditioned-reachability] [--no-gpu] [--deterministic] [--max-candidates N] [--max-patterns N] [--max-memory-mib N] [--allow-backend-fallback|--no-backend-fallback]
 B2Bを維持できる解法の有無を調べる専用形式: `clearra pc allspin-sol --help`、`clearra pc allspin-pres-chance --help`
 --auto-workersはCPUの自動並列数に上限を設定します。小規模な検索を強制的に並列実行するものではありません。
 --tiling-onlyは、BuildUpによる構築可能性の検証や確率計算を行わず、正確な幾何学的配置を列挙します。実際には組めない配置が含まれる場合があります。ホールドは使用可能なミノの種類と個数に引き続き影響します。ルール、スコア、B2B、visible-7、tablebase、依存DAG、解法別確率のオプションは利用できません。
 ASCとARSはルールレジストリで確認できますが、出現位置からの到達可能性が実装されるまでは検索に使用できません。"#
         }
         CliHelpTopic::PcScenario => {
-            r#"使い方: clearra pc-scenario --fixture tests/fixtures/pc/scenario_simple_4l.json [--verify-expected] [--solution-probabilities] [--backend auto|cpu|gpu|hybrid] [--workers N|--cpu-threads N] [--use-all-cpu-threads] [--cpu-warmup] [--gpu-warmup] [--no-gpu]
-  または: clearra pc-scenario --field 0x... --queue IOTSZJ --max-pieces 6 [--solution-probabilities] [--rule srs-plus|srs|srs-x|jstris-180|asc|ars|no-kick] [--kick-profile-json JSON] [--workers N|--cpu-threads N] [--use-all-cpu-threads] [--cpu-warmup] [--gpu-warmup] [--no-gpu] [--deterministic] [--max-candidates N] [--max-patterns N] [--max-memory-mib N] [--gpu-device auto|N] [--allow-backend-fallback|--no-backend-fallback]
+            r#"使い方: clearra pc-scenario --fixture tests/fixtures/pc/scenario_simple_4l.json [--verify-expected] [--solution-probabilities] [--backend auto|cpu] [--workers N|--cpu-threads N] [--use-all-cpu-threads] [--cpu-warmup] [--no-gpu]
+  または: clearra pc-scenario --field 0x... --queue IOTSZJ --max-pieces 6 [--solution-probabilities] [--rule srs-plus|srs|srs-x|jstris-180|asc|ars|no-kick] [--kick-profile-json JSON] [--workers N|--cpu-threads N] [--use-all-cpu-threads] [--cpu-warmup] [--no-gpu] [--deterministic] [--max-candidates N] [--max-patterns N] [--max-memory-mib N] [--allow-backend-fallback|--no-backend-fallback]
 シナリオプリセットをSearchProblemに変換します。解法別確率の出力はCLIの正規化された解法順序を維持します。"#
         }
         CliHelpTopic::Path => {
@@ -38,7 +38,7 @@ ASCとARSはルールレジストリで確認できますが、出現位置か�
             r#"使い方: clearra percent --queue IOTSZ [--observed|--bag-aligned|--fixed] [--min-len N] [--max-patterns N] [--failed-count N]"#
         }
         CliHelpTopic::FailedQueue => {
-            r#"使い方: clearra failed-queue --lines 4 [--patterns P7P3 | --queue IOTSZJL --fixed|--observed] [--hold|--no-hold] [--queue-knowledge oracle|visible-7] [--rule srs-plus|srs|srs-x|jstris-180] [--backend auto|cpu|gpu|hybrid] [--workers N|--cpu-threads N|--auto-workers N] [--tablebase|--no-tablebase] [--failed-count N]
+            r#"使い方: clearra failed-queue --lines 4 [--patterns P7P3 | --queue IOTSZJL --fixed|--observed] [--hold|--no-hold] [--queue-knowledge oracle|visible-7] [--rule srs-plus|srs|srs-x|jstris-180] [--backend auto|cpu] [--workers N|--cpu-threads N|--auto-workers N] [--tablebase|--no-tablebase] [--failed-count N]
 指定した逆向き検索のPC目標に到達できないミノ順を、成功集合の正確な補集合として返します。--failed-countを省略すると失敗するミノ順をすべて具体化します。"#
         }
         CliHelpTopic::Setup => {
@@ -92,12 +92,12 @@ pub(super) fn product_help_body(topic: ProductHelpTopic) -> &'static str {
 連続した2～42ミノの供給順を扱います。--role-maskで必要な各供給位置のロック時4マスを指定できます。先行配置を許す場合は第2段階の供給位置を選びます。--queue-patternでは完全な7ミノバッグ、全配置役割、最大100000の供給パターンを対象に通常成功・追加リカバリー・未確定の重み付き確率を計算します。順序が変わっても役割と先行配置はバッグとミノ種に結び付けます。どちらのモードも将来の全供給を知る場合の解析であり、観測制限下の実戦可能性は証明しません。"#
         }
         ProductHelpTopic::PcTiling => {
-            r#"使い方: clearra pc tiling --lines 2 [--patterns PATTERN | --queue QUEUE] [--no-hold] [--backend auto|cpu|gpu|hybrid] [--gpu-device auto|N] [--workers N|--auto-workers N] [--use-all-cpu-threads] [--cpu-warmup] [--gpu-warmup] [--max-patterns N] [--max-nodes N] [--max-frontier-states N] [--max-candidates N] [--max-memory-mib N] [--allow-backend-fallback|--no-backend-fallback]
+            r#"使い方: clearra pc tiling --lines 2 [--patterns PATTERN | --queue QUEUE] [--no-hold] [--backend auto|cpu] [--workers N|--auto-workers N] [--use-all-cpu-threads] [--cpu-warmup] [--max-patterns N] [--max-nodes N] [--max-frontier-states N] [--max-candidates N] [--max-memory-mib N] [--allow-backend-fallback|--no-backend-fallback]
   または: clearra pc tiling --board-mask HEX --height 1..6 --pieces N --lines same-as-height [--patterns PATTERN | --queue QUEUE] [--hold empty|PIECE|--no-hold] [バックエンド・リソースオプション]
 PC専用の幾何学的配置検索を実行し、供給されるミノと正確に適合する配置群を返します。BuildUp、到達可能性、カバー率、確率、ルール、スピン、B2B、スコア、visible-7、tablebase、依存DAG、実行制約の意味付けは利用できません。実際には組めない配置が含まれる場合があります。汎用形式の`clearra pc --tiling-only`と`clearra pc --objective tiling`は上級者向けの汎用PCリクエストとして維持され、この専用結果と同じ意味にはなりません。"#
         }
         ProductHelpTopic::PcMinimals => {
-            r#"使い方: clearra pc minimals --lines 2 [--patterns PATTERN | --queue IOTSZJL] [--hold|--no-hold] [--rule srs-plus|srs|srs-x|jstris-180|no-kick] [--backend auto|cpu|gpu|hybrid] [--workers N|--auto-workers N] [--tablebase|--no-tablebase] [--max-patterns N] [--max-nodes N] [--max-frontier-states N] [--max-candidates N]
+            r#"使い方: clearra pc minimals --lines 2 [--patterns PATTERN | --queue IOTSZJL] [--hold|--no-hold] [--rule srs-plus|srs|srs-x|jstris-180|no-kick] [--backend auto|cpu] [--workers N|--auto-workers N] [--tablebase|--no-tablebase] [--max-patterns N] [--max-nodes N] [--max-frontier-states N] [--max-candidates N]
   または: clearra pc minimals --board-mask HEX --height 1..6 --pieces N --lines same-as-height [--patterns PATTERN | --queue QUEUE] [--hold empty|PIECE|--no-hold] [検索オプション]
 最小解法集合の専用検索を実行します。--pin-key KEYを複数指定すると、完全な元の候補から選んだ解法を必須として条件付き最小集合を再計算します。入力全体のカバー状況を完全にリプレイ検証した後、その検索条件に対する正確な最小カバーを返します。明示的なメモリ上限、スコア、tiling-only、visible-7、依存DAGは利用できません。--tablebaseは正確に適格化された完全候補群だけを使用し、オフライン探索を自動開始しません。トップレベルのminimalsとsfinder minimalsは従来互換の汎用結果を返します。"#
         }
@@ -107,7 +107,7 @@ PC専用の幾何学的配置検索を実行し、供給されるミノと正確
 objective all、count allで完全なリプレイ経路を専用検索します。各手順は配置、元のミノ列、ホールドと読み取り位置の遷移、消費ミノ数、ライン消去を保持します。--tablebaseは正確に適格化された完全候補群だけを使用し、オフライン探索を自動開始しません。最適集合の同率候補ではなく、同率集合のメタデータやページ継続カーソルは含みません。"#
         }
         ProductHelpTopic::PcChance => {
-            r#"使い方: clearra pc chance --lines 2 [--patterns PATTERN | --queue IOTSZJL] [--hold|--no-hold] [--rule srs-plus|srs|srs-x|jstris-180|no-kick] [--backend auto|cpu|gpu|hybrid] [--workers N|--auto-workers N] [--max-patterns N]
+            r#"使い方: clearra pc chance --lines 2 [--patterns PATTERN | --queue IOTSZJL] [--hold|--no-hold] [--rule srs-plus|srs|srs-x|jstris-180|no-kick] [--backend auto|cpu] [--workers N|--auto-workers N] [--max-patterns N]
 元のミノ順全体に対する正確なPC成功率を返します。トップレベルのchanceとpercentは従来互換の汎用結果を返します。"#
         }
         ProductHelpTopic::PcScore => {
@@ -142,13 +142,13 @@ objective all、count allで完全なリプレイ経路を専用検索します�
         ProductHelpTopic::PcAllSpinSolution => {
             r#"使い方: clearra pc allspin-sol --lines 2|4|6 --queue QUEUE --spin-profile t-spins|t-spins-plus|all-spin|all-spin-plus|all-mini|all-mini-plus [--no-hold] [検索オプション]
   または: clearra pc allspin-sol --board-mask HEX --height 1..6 --pieces N [--lines same-as-height] --queue QUEUE --spin-profile PROFILE [--no-hold] [検索オプション]
-検索オプション: [--rule srs-plus|srs|srs-x|jstris-180|no-kick] [--backend auto|cpu|gpu|hybrid] [--gpu-device auto|N] [--workers N|--auto-workers N] [--use-all-cpu-threads] [--cpu-warmup] [--gpu-warmup] [--tablebase|--no-tablebase] [--max-patterns N] [--max-nodes N] [--max-frontier-states N] [--max-candidates N] [--max-memory-mib N] [--allow-backend-fallback|--no-backend-fallback]
+検索オプション: [--rule srs-plus|srs|srs-x|jstris-180|no-kick] [--backend auto|cpu] [--workers N|--auto-workers N] [--use-all-cpu-threads] [--cpu-warmup] [--tablebase|--no-tablebase] [--max-patterns N] [--max-nodes N] [--max-frontier-states N] [--max-candidates N] [--max-memory-mib N] [--allow-backend-fallback|--no-backend-fallback]
 元の固定ミノ順を正確に1件指定して、固定とライン消去を逆にたどるPC検索を行います。B2Bを維持できる手順が存在する場合は、一定の規則で選んだ手順を返します。分母は具体化された元のミノ順1件であり、ホールドや経路の重複は数えません。任意のboard-mask/height/piecesの組は初期盤面を表します。盤面を空にする目標は暗黙に固定され、目標盤面の入力はありません。この組と--linesを併用する場合は--heightと同じ値が必要です。この形式はoracle-fixed専用であり、FILEやローカルパス、visible-7、スコアや目的の選択、シナリオのホールド枠の上書き、呼び出し側による--preserve-b2b指定は拒否されます。Clearraは明示的に選択された6種類のスピン・リプレイ仕様を使用します。sfinderbotのallspin_sol_finderとはコマンドの目的のみ互換で、従来の認識規則との完全一致を保証しません。"#
         }
         ProductHelpTopic::PcAllSpinPreservationChance => {
             r#"使い方: clearra pc allspin-pres-chance --lines 2|4|6 --patterns PATTERN --spin-profile t-spins|t-spins-plus|all-spin|all-spin-plus|all-mini|all-mini-plus [--no-hold] [検索オプション]
   または: clearra pc allspin-pres-chance --board-mask HEX --height 1..6 --pieces N [--lines same-as-height] --patterns PATTERN --spin-profile PROFILE [--no-hold] [検索オプション]
-検索オプション: [--rule srs-plus|srs|srs-x|jstris-180|no-kick] [--backend auto|cpu|gpu|hybrid] [--gpu-device auto|N] [--workers N|--auto-workers N] [--use-all-cpu-threads] [--cpu-warmup] [--gpu-warmup] [--tablebase|--no-tablebase] [--max-patterns N] [--max-nodes N] [--max-frontier-states N] [--max-candidates N] [--max-memory-mib N] [--allow-backend-fallback|--no-backend-fallback]
+検索オプション: [--rule srs-plus|srs|srs-x|jstris-180|no-kick] [--backend auto|cpu] [--workers N|--auto-workers N] [--use-all-cpu-threads] [--cpu-warmup] [--tablebase|--no-tablebase] [--max-patterns N] [--max-nodes N] [--max-frontier-states N] [--max-candidates N] [--max-memory-mib N] [--allow-backend-fallback|--no-backend-fallback]
 具体化された元のミノ順パターンに対し、固定とライン消去を逆にたどるPC検索を行います。B2Bを維持する手順が存在するミノ順の件数、元のミノ順の総数、入力の確率、計算の完全性を返します。各ミノ順は1回だけ数え、ホールドや経路の重複は数えません。任意のboard-mask/height/piecesの組は初期盤面を表します。盤面を空にする目標は暗黙に固定され、目標盤面の入力はありません。この組と--linesを併用する場合は--heightと同じ値が必要です。この形式はoracle-fixed専用であり、FILEやローカルパス、visible-7、スコアや目的の選択、シナリオのホールド枠の上書き、呼び出し側による--preserve-b2b指定は拒否されます。Clearraは明示的に選択された6種類のスピン・リプレイ仕様を使用します。sfinderbotのallspin_pres_chanceとはコマンドの目的のみ互換で、従来の認識規則との完全一致を保証しません。"#
         }
         ProductHelpTopic::BuildV2 => {
@@ -162,7 +162,7 @@ objective all、count allで完全なリプレイ経路を専用検索します�
 セットアップと継続の検索に、独立した2種類の高速化設定を適用します。データが未インストール、無効、または対象外の場合は標準の正確な検索を使用します。CPU専用であり、バックエンドのフォールバックやGPU設定は利用できません。"#
         }
         ProductHelpTopic::BuildProbability => {
-            r#"使い方: clearra build-probability --base-mask HEX --target-mask HEX --height 1..24 (--queue QUEUE | --patterns PATTERN) [--hold empty|PIECE|--no-hold] [--source-pieces N] [--aggregate buildability|tiling|spin] [--result-mode all-solutions|complete-replay-paths|field-average-score|fixed-queue-maximum-score|highest-score-minimum-set|failed-queues] [--paths|--score] [--score-profile tetrio|guideline|jstris-ultra] [--initial-b2b N] [--failed-count N] [--tiling-only] [--solution-probabilities] [--spin-profile t-spins|t-spins-plus|all-spin|all-spin-plus|all-mini|all-mini-plus] [--preserve-b2b] [--rule srs-plus|srs|srs-x|jstris-180|no-kick] [--finesse off|inputs] [--pattern-knowledge both|oracle|visible-7] [--include-mirror|--no-mirror] [--backend auto|cpu|gpu|hybrid] [--workers N|--auto-workers N] [--use-all-cpu-threads] [--cpu-warmup] [--max-patterns N] [--max-candidates N] [--max-memory-mib N] [--allow-backend-fallback|--no-backend-fallback]
+            r#"使い方: clearra build-probability --base-mask HEX --target-mask HEX --height 1..24 (--queue QUEUE | --patterns PATTERN) [--hold empty|PIECE|--no-hold] [--source-pieces N] [--aggregate buildability|tiling|spin] [--result-mode all-solutions|complete-replay-paths|field-average-score|fixed-queue-maximum-score|highest-score-minimum-set|failed-queues] [--paths|--score] [--score-profile tetrio|guideline|jstris-ultra] [--initial-b2b N] [--failed-count N] [--tiling-only] [--solution-probabilities] [--spin-profile t-spins|t-spins-plus|all-spin|all-spin-plus|all-mini|all-mini-plus] [--preserve-b2b] [--rule srs-plus|srs|srs-x|jstris-180|no-kick] [--finesse off|inputs] [--pattern-knowledge both|oracle|visible-7] [--include-mirror|--no-mirror] [--backend auto|cpu] [--workers N|--auto-workers N] [--use-all-cpu-threads] [--cpu-warmup] [--max-patterns N] [--max-candidates N] [--max-memory-mib N] [--allow-backend-fallback|--no-backend-fallback]
 エンジン側の集約と結果の集約は別の概念であり、組み合わせの可否が明示されています。現在、all以外の結果モードには構築可能性の集約が必要で、互換性のないtiling/spinとの組み合わせは拒否されます。完全リプレイ経路は操作、固定、ライン消去を網羅する手順です。リプレイとスコアの結果モードでは、既存セルと目標セルが下6行以内に収まる必要があります。その上の空の表示行は使用できます。より高い位置にセルがある構築にはall-solutions、failed-queues、build coverの最小集合を使用できます。盤面平均スコアは成功したすべての正規化盤面と、失敗パターンを0点として含めた入力全体のスコアを返します。固定ミノ順の最高スコアには正確なミノ順1件が必要で、スコアが同率の候補をすべて保持します。最高スコア最小集合は、成功する各パターンの最高スコアに並ぶすべての候補から正確な最小集合を求めます。攻撃力は参考値としてのみ扱います。失敗するミノ順は構築成功集合の正確な補集合です。--failed-countは表示例の数だけを制限します。最小構築集合には`clearra build cover --objective min-cover`を使用します。主指標は引き続き全未来を既知とするoracleの構築確率です。--solution-probabilitiesは正確な解法別確率を追加します。--spin-profileには--aggregate spinまたは--preserve-b2bが必要です。--pattern-knowledgeには--finesse inputsが必要です。tiling集約ではルール、スピン、B2B、依存DAG、解法別確率、finesseのオプションは拒否されます。"#
         }
         ProductHelpTopic::Finesse => {

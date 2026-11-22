@@ -891,14 +891,23 @@ impl SolutionSetAuditReport {
             // fixed SHA-256 values. Their transition clones must therefore be
             // sized from the actual input lengths.
             .checked_add(checked_checkpoint_identity_clone_bytes(input)?)?;
-        let pattern_owner_count = candidate_count_u128.checked_mul(8)?.checked_add(16)?;
-        let all_pattern_ids =
-            pattern_owner_count.checked_mul(input.required_patterns.pattern_count() as u128)?;
-        let pattern_bytes = PatternBitSet::checked_shared_construction_upper_bound(
-            input.required_patterns.pattern_count(),
-            pattern_owner_count,
-            all_pattern_ids,
-        )?;
+        let pattern_bytes = if input.candidates.is_empty() {
+            // No classes, coverage matrices, or portfolio solvers are built.
+            // The required set moves into the report, but snapshot hashing
+            // calls words() and may initialize a sparse set's dense cache.
+            // Its Vec and Arc word payloads can coexist during conversion.
+            PatternBitSet::checked_all_projection(input.required_patterns.pattern_count())?
+                .constructor_peak_bytes
+        } else {
+            let pattern_owner_count = candidate_count_u128.checked_mul(8)?.checked_add(16)?;
+            let all_pattern_ids =
+                pattern_owner_count.checked_mul(input.required_patterns.pattern_count() as u128)?;
+            PatternBitSet::checked_shared_construction_upper_bound(
+                input.required_patterns.pattern_count(),
+                pattern_owner_count,
+                all_pattern_ids,
+            )?
+        };
         let required_peak_bytes = slot_bytes
             .checked_add(key_payload_bytes)?
             .checked_add(dimension_payload_bytes)?
@@ -2716,17 +2725,187 @@ mod memory_projection_tests {
     use clearra_coverage::pattern::pattern_bitset::PatternBitSet;
 
     use super::{
-        checked_count_bytes, EquivalentCoverageClass, SolutionAuditCheckpoint,
-        SolutionPortfolioFamily, SolutionPortfolioPageEntry, SolutionPortfolioSelectionPolicy,
+        checked_count_bytes, EquivalentCoverageClass, SolutionAuditCandidate,
+        SolutionAuditCheckpoint, SolutionPortfolioFamily, SolutionPortfolioPageEntry,
+        SolutionPortfolioSelectionPolicy,
         SolutionPortfolioSnapshot, SolutionProductFamily, SolutionSemanticDimensions,
         SolutionSetAuditInput, SolutionSetAuditMemoryGuardError, SolutionSetAuditReport,
-        SolutionSetAuditStage,
+        SolutionSetAuditStage, SolutionSetAuditStageKind,
     };
 
     fn reserved(value: &str, capacity: usize) -> String {
         let mut result = String::with_capacity(capacity);
         result.push_str(value);
         result
+    }
+
+    const TWO_BAG_PATTERN_COUNT: usize = 25_401_600;
+
+    fn candidate_empty_two_bag_input(
+        coverage: usize,
+        policy: SolutionPortfolioSelectionPolicy,
+        normalized_count: usize,
+    ) -> SolutionSetAuditInput {
+        let required = match coverage {
+            0 => PatternBitSet::all(TWO_BAG_PATTERN_COUNT),
+            1 => PatternBitSet::from_pattern_indices(
+                TWO_BAG_PATTERN_COUNT,
+                vec![0, TWO_BAG_PATTERN_COUNT as u32 - 1],
+            )
+            .expect("sparse two-bag required coverage"),
+            2 => PatternBitSet::new(TWO_BAG_PATTERN_COUNT),
+            _ => unreachable!("known test coverage layout"),
+        };
+        SolutionSetAuditInput::new(SolutionProductFamily::BuildProbability, required, policy)
+            .with_source_checkpoints(
+                SolutionAuditCheckpoint::known(normalized_count, "produced-set"),
+                SolutionAuditCheckpoint::known(normalized_count, "execution-set"),
+                SolutionAuditCheckpoint::known(normalized_count, "filtered-set"),
+            )
+            .with_normalized_keys(
+                (0..normalized_count)
+                    .rev()
+                    .map(|index| format!("solution-{index}"))
+                    .collect(),
+                true,
+                Vec::<String>::new(),
+            )
+    }
+
+    #[test]
+    fn candidate_empty_two_bag_audit_preserves_dense_sparse_and_empty_coverage_at_exact_cap() {
+        for policy in [
+            SolutionPortfolioSelectionPolicy::EquivalentCoverageRepresentatives,
+            SolutionPortfolioSelectionPolicy::ProductDeferredExactMinimumCover,
+            SolutionPortfolioSelectionPolicy::ExactMinimumCover,
+        ] {
+            for coverage in 0..3 {
+                // Build independent inputs: the unguarded reference must not
+                // pre-initialize the guarded sparse input's shared dense cache.
+                let expected = SolutionSetAuditReport::analyze(candidate_empty_two_bag_input(
+                    coverage, policy, 2,
+                ))
+                .expect("unbounded two-bag audit reference");
+                let input = candidate_empty_two_bag_input(coverage, policy, 2);
+                let input_bytes = input.checked_nested_retained_bytes().unwrap();
+                let projection = SolutionSetAuditReport::checked_analysis_memory_projection(&input)
+                    .expect("candidate-empty projection");
+                assert!(projection.required_peak_bytes < 8 * 1_024 * 1_024);
+                let exact_cap = input_bytes + projection.required_peak_bytes;
+                let (actual, _) = SolutionSetAuditReport::analyze_with_memory_limit(
+                    input,
+                    input_bytes,
+                    exact_cap,
+                )
+                .expect("the exact projected cap includes snapshot dense-cache construction");
+                assert_eq!(actual, expected);
+                assert_eq!(
+                    actual.required_patterns().pattern_count(),
+                    TWO_BAG_PATTERN_COUNT
+                );
+                assert_eq!(
+                    actual.required_patterns().count_ones(),
+                    [25_401_600, 2, 0][coverage]
+                );
+                assert_eq!(
+                    actual
+                        .stage(SolutionSetAuditStageKind::Normalized)
+                        .output_count(),
+                    Some(2)
+                );
+                assert!(actual
+                    .stage(SolutionSetAuditStageKind::Normalized)
+                    .complete());
+                assert!(!actual
+                    .stage(SolutionSetAuditStageKind::CoverageClassed)
+                    .complete());
+                assert!(actual.coverage_classes().is_empty());
+                assert!(actual.portfolio_families().is_empty());
+                assert!(
+                    !actual.complete(),
+                    "missing per-solution coverage remains explicit"
+                );
+
+                let rejected = candidate_empty_two_bag_input(coverage, policy, 2);
+                assert_eq!(rejected.checked_nested_retained_bytes(), Some(input_bytes));
+                assert!(matches!(
+                    SolutionSetAuditReport::analyze_with_memory_limit(
+                        rejected,
+                        input_bytes,
+                        exact_cap - 1,
+                    ),
+                    Err(SolutionSetAuditMemoryGuardError::MemoryCapacityExceeded { .. })
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn candidate_empty_two_bag_zero_solution_audit_preserves_completeness_contract() {
+        for policy in [
+            SolutionPortfolioSelectionPolicy::EquivalentCoverageRepresentatives,
+            SolutionPortfolioSelectionPolicy::ProductDeferredExactMinimumCover,
+            SolutionPortfolioSelectionPolicy::ExactMinimumCover,
+        ] {
+            let input = candidate_empty_two_bag_input(2, policy, 0);
+            let input_bytes = input.checked_nested_retained_bytes().unwrap();
+            let (report, _) = SolutionSetAuditReport::analyze_with_memory_limit(
+                input,
+                input_bytes,
+                16 * 1_024 * 1_024,
+            )
+            .expect("a zero-solution audit needs no coverage-matrix workspace");
+            let complete =
+                policy != SolutionPortfolioSelectionPolicy::ProductDeferredExactMinimumCover;
+            assert_eq!(report.complete(), complete);
+            assert_eq!(report.portfolio_snapshot().complete(), complete);
+            assert_eq!(
+                report.required_patterns().pattern_count(),
+                TWO_BAG_PATTERN_COUNT
+            );
+            assert_eq!(report.required_patterns().count_ones(), 0);
+            assert_eq!(
+                report
+                    .stage(SolutionSetAuditStageKind::Normalized)
+                    .output_count(),
+                Some(0)
+            );
+            assert!(report
+                .stage(SolutionSetAuditStageKind::CoverageClassed)
+                .complete());
+        }
+    }
+
+    #[test]
+    fn candidate_present_two_bag_audit_keeps_generic_memory_admission() {
+        let mut input = candidate_empty_two_bag_input(
+            1,
+            SolutionPortfolioSelectionPolicy::EquivalentCoverageRepresentatives,
+            1,
+        );
+        input.candidates.push(
+            SolutionAuditCandidate::new(
+                "solution-0",
+                input.required_patterns.clone(),
+                SolutionSemanticDimensions::new(
+                    SolutionProductFamily::BuildProbability,
+                    "build",
+                    "none",
+                    "none",
+                    "disabled",
+                ),
+            )
+            .expect("candidate with matching required coverage"),
+        );
+        let input_bytes = input.checked_nested_retained_bytes().unwrap();
+        assert!(matches!(
+            SolutionSetAuditReport::analyze_with_memory_limit(
+                input,
+                input_bytes,
+                1_024 * 1_024 * 1_024,
+            ),
+            Err(SolutionSetAuditMemoryGuardError::MemoryCapacityExceeded { .. })
+        ));
     }
 
     #[test]

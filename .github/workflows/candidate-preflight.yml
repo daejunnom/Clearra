@@ -476,7 +476,7 @@ jobs:
           . ./scripts/lib/clearra-path-helpers.ps1
           Ensure-ClearraBuildArtifactCache -RepositoryRoot $env:GITHUB_WORKSPACE -Purpose experiment
           try {
-            cargo build --locked --release --package clearra-cli --features wasm-cpu-runtime,webgpu-search
+            cargo build --locked --release --package clearra-cli --features wasm-cpu-runtime
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
             $candidateCli = Join-Path $env:CARGO_TARGET_DIR 'release/clearra'
             if (-not (Test-Path -LiteralPath $candidateCli -PathType Leaf)) { throw 'Candidate CLI was not built' }
@@ -484,7 +484,7 @@ jobs:
             & $candidateCli --help
             $startupExitCode = $LASTEXITCODE
             # Both checks consume this owner's binary even if the startup check failed.
-            cargo test --locked --release --package clearra-cli --features wasm-cpu-runtime,webgpu-search --lib score_finder_renderer_ -- --nocapture
+            cargo test --locked --release --package clearra-cli --features wasm-cpu-runtime --lib score_finder_renderer_ -- --nocapture
             $rendererExitCode = $LASTEXITCODE
             if ($startupExitCode -ne 0) { exit $startupExitCode }
             if ($rendererExitCode -ne 0) { exit $rendererExitCode }
@@ -520,7 +520,7 @@ jobs:
           Ensure-ClearraBuildArtifactCache -RepositoryRoot $env:GITHUB_WORKSPACE -Purpose experiment
           try {
             if ((& git rev-parse HEAD).Trim() -cne $env:GITHUB_SHA) { throw 'Candidate source mismatch' }
-            cargo build --locked --release --package clearra-cli --bin clearra --features wasm-cpu-runtime,webgpu-search,stage-profiling
+            cargo build --locked --release --package clearra-cli --bin clearra --features wasm-cpu-runtime,stage-profiling
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
             git diff --quiet HEAD --
             if ($LASTEXITCODE -ne 0 -or (& git rev-parse HEAD).Trim() -cne $env:GITHUB_SHA) { throw 'Candidate source changed during compilation' }
@@ -539,7 +539,7 @@ jobs:
               path = 'clearra.exe'
               bytes = (Get-Item -LiteralPath $staged).Length
               sha256 = (Get-FileHash -LiteralPath $staged -Algorithm SHA256).Hash.ToLowerInvariant()
-              features = @('wasm-cpu-runtime', 'webgpu-search', 'stage-profiling')
+              features = @('wasm-cpu-runtime', 'stage-profiling')
             }
             $record | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $artifact 'stage-profile-cli.json') -Encoding utf8
             [IO.File]::AppendAllText($env:GITHUB_OUTPUT, "artifact_path=$artifact`n", [Text.UTF8Encoding]::new($false))

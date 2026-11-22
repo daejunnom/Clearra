@@ -107,15 +107,10 @@ impl BackendPresetSchema {
 }
 
 pub(crate) fn backend_presets() -> Vec<BackendPresetSchema> {
-    [
-        RequestedSearchBackend::Auto,
-        RequestedSearchBackend::Cpu,
-        RequestedSearchBackend::Gpu,
-        RequestedSearchBackend::Hybrid,
-    ]
-    .into_iter()
-    .map(backend_preset)
-    .collect()
+    [RequestedSearchBackend::Auto, RequestedSearchBackend::Cpu]
+        .into_iter()
+        .map(backend_preset)
+        .collect()
 }
 
 pub(crate) fn backend_options(presets: &[BackendPresetSchema]) -> Vec<DropdownOption> {
@@ -184,28 +179,9 @@ fn backend_preset_capability(backend: RequestedSearchBackend) -> BackendPresetCa
             supports_sample_traces: true,
             supports_frontier_budget: true,
         },
-        RequestedSearchBackend::Gpu => BackendPresetCapability {
-            description: "Uses the connected exact GPU backend; runtime capability and fallback policy decide availability.",
-            enabled: true,
-            disabled_reason_code: None,
-            disabled_diagnostic_code: None,
-            requires_feature: None,
-            supports_trace_enumeration: false,
-            supports_total_count: true,
-            supports_sample_traces: true,
-            supports_frontier_budget: true,
-        },
-        RequestedSearchBackend::Hybrid => BackendPresetCapability {
-            description: "Uses GPU-only packing when the GPU is prepared and CPU-only packing otherwise; results are never merged.",
-            enabled: true,
-            disabled_reason_code: None,
-            disabled_diagnostic_code: None,
-            requires_feature: None,
-            supports_trace_enumeration: false,
-            supports_total_count: true,
-            supports_sample_traces: true,
-            supports_frontier_budget: true,
-        },
+        RequestedSearchBackend::Gpu | RequestedSearchBackend::Hybrid => {
+            unreachable!("retired GPU presets are not advertised")
+        }
     }
 }
 

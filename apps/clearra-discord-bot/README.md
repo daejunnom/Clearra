@@ -665,7 +665,7 @@ try {
 ```
 
 The current-job Dockerfile uses the Rust 1.96 Bookworm image and the same
-`wasm-cpu-runtime,webgpu-search` features as the Linux CLI release contract. It
+`wasm-cpu-runtime` features as the Linux CLI release contract. It
 builds the exact archived accepted commit rather than a mutable checkout or the
 downloaded v0.5.1 release binary.
 The root `.gcloudignore` deliberately reuses root-anchored `.gitignore` rules.

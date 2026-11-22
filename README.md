@@ -237,9 +237,10 @@ Version tags publish three standalone GitHub Release executables:
 - `Clearra-CLI-*-windows-x86_64.exe`: Windows CLI
 - `Clearra-GUI-*-windows-x86_64.exe`: SvelteKit/Tauri desktop GUI
 
-The CLI and desktop executables compile the exact WASM CPU search backend and
-WebGPU adapter into the host binary; they do not use fixture fallbacks or need
-a separate `.wasm` file. The Tauri executable embeds the built SvelteKit
+The CLI and desktop executables compile the exact Rust CPU search backend
+into the host binary and do not need a separate `.wasm` file. WebGPU search
+and GPU postprocess have been retired; explicit `gpu` or `hybrid` requests
+return unsupported without running a CPU fallback. The Tauri executable embeds the built SvelteKit
 assets. GitHub records an immutable digest for each release asset, so Clearra
 does not publish duplicate `.sha256` sidecar files.
 

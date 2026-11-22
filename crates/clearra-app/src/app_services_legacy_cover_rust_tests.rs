@@ -11,6 +11,7 @@ use clearra_core_domain::{
 use clearra_core_executor::SolutionCoverage;
 use clearra_coverage::pattern::pattern_id::PatternId;
 use clearra_problem::{BuildProblemLimits, BuildQuery, BuildTemplateBridge};
+use clearra_profiles::search::search_defaults::SearchDefaults;
 
 use super::*;
 
@@ -65,7 +66,8 @@ fn exact_four_line_witness(pattern_count: usize) -> BuildCoverageQuery {
         domains,
         Vec::new(),
         pattern_count,
-        BuildCoverageLimits::default(),
+        // This fixture intentionally exercises the truncated-source seam.
+        BuildCoverageLimits::new(1024, 4096),
     )
 }
 
@@ -78,6 +80,23 @@ fn compile(query: &BuildCoverageQuery) -> SearchProblem {
         BuildProblemLimits::new(limits.max_assignments(), limits.max_patterns()),
     ))
     .expect("canonical Legacy coverage bridge")
+}
+
+#[test]
+fn rust_legacy_cover_authority_does_not_replace_explicit_budgets_with_old_defaults() {
+    let count = PieceKind::STANDARD_TETROMINOES.len().pow(2);
+    for max_patterns in [0, 4097] {
+        let query = one_horizontal_i(count, max_patterns);
+        let legacy = compile(&query);
+        assert!(validate_canonical_authority(
+            &legacy,
+            &query,
+            OriginalSupplyAuthority::CompleteObserved,
+        )
+        .is_ok());
+        assert!(legacy.piece_source().complete());
+        assert_eq!(legacy.budget().max_patterns(), max_patterns);
+    }
 }
 
 #[test]

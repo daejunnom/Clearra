@@ -23,7 +23,6 @@ pub enum WasmBuildProbabilityAdvance {
 
 pub struct WasmBuildProbabilitySession {
     inner: InnerSession,
-    cpu_fallback_reason: Option<&'static str>,
 }
 
 impl WasmBuildProbabilitySession {
@@ -33,16 +32,16 @@ impl WasmBuildProbabilitySession {
         aggregation: BuildProbabilityAggregation,
         finesse: BuildProbabilityFinesseRequest,
     ) -> Result<Self, WasmCpuSearchError> {
-        let explicit_gpu =
-            problem.backend_policy().requested_backend() == RequestedSearchBackend::Gpu;
-        if explicit_gpu && !problem.backend_policy().allow_backend_fallback() {
+        if matches!(
+            problem.backend_policy().requested_backend(),
+            RequestedSearchBackend::Gpu | RequestedSearchBackend::Hybrid
+        ) {
             return Err(WasmCpuSearchError::Unsupported {
-                reason: "webgpu_backend_unavailable",
+                reason: "webgpu_backend_retired",
             });
         }
         Ok(Self {
             inner: InnerSession::new(problem, field, aggregation, finesse).map_err(map_error)?,
-            cpu_fallback_reason: explicit_gpu.then_some("gpu_kernel_unavailable"),
         })
     }
 
@@ -57,11 +56,12 @@ impl WasmBuildProbabilitySession {
         external_retained_owner_bytes: u128,
         returned_carrier_bytes: u128,
     ) -> Result<Self, WasmCpuSearchError> {
-        let explicit_gpu =
-            problem.backend_policy().requested_backend() == RequestedSearchBackend::Gpu;
-        if explicit_gpu && !problem.backend_policy().allow_backend_fallback() {
+        if matches!(
+            problem.backend_policy().requested_backend(),
+            RequestedSearchBackend::Gpu | RequestedSearchBackend::Hybrid
+        ) {
             return Err(WasmCpuSearchError::Unsupported {
-                reason: "webgpu_backend_unavailable",
+                reason: "webgpu_backend_retired",
             });
         }
         Ok(Self {
@@ -74,7 +74,6 @@ impl WasmBuildProbabilitySession {
                 returned_carrier_bytes,
             )
             .map_err(map_error)?,
-            cpu_fallback_reason: explicit_gpu.then_some("gpu_kernel_unavailable"),
         })
     }
 
@@ -140,10 +139,6 @@ impl WasmBuildProbabilitySession {
         match advance {
             BuildProbabilityAdvance::Pending => Ok(WasmBuildProbabilityAdvance::Pending),
             BuildProbabilityAdvance::Completed(result) => {
-                let result = match self.cpu_fallback_reason {
-                    Some(reason) => mark_cpu_fallback(&self.inner, result, reason)?,
-                    None => result,
-                };
                 Ok(WasmBuildProbabilityAdvance::Completed(result))
             }
             BuildProbabilityAdvance::Cancelled => Ok(WasmBuildProbabilityAdvance::Cancelled),
@@ -249,80 +244,6 @@ fn validated_terminal_result(
     })?;
     authority.validate_public_result_memory(&result)?;
     Ok(result)
-}
-
-fn mark_cpu_fallback(
-    session: &InnerSession,
-    result: CoreExecutionResult,
-    reason: &'static str,
-) -> Result<CoreExecutionResult, WasmCpuSearchError> {
-    let fallback_backend = result
-        .field("backend_selected")
-        .unwrap_or("wasm-cpu-build-probability");
-    let borrowed = [
-        ("backend_fallback_used", "true"),
-        ("fallback_used", "true"),
-        ("backend_fallback_reason", reason),
-        ("fallback_backend", fallback_backend),
-        ("gpu_available", "false"),
-        ("gpu_disabled_reason", reason),
-        ("gpu_trust_state", "fallback-used"),
-        ("gpu_failure_class", "unavailable"),
-        ("gpu_failure_stage", "capability-query"),
-        ("discarded_partial_gpu_result", "false"),
-        ("gpu_original_result_incomplete", "false"),
-    ];
-    let projection = result
-        .checked_borrowed_field_replacement_projection(&borrowed)
-        .ok_or_else(|| fallback_resource_projection_error(session, &result))?;
-    session
-        .validate_public_result_memory_with_future(&result, projection.required_future_bytes)
-        .map_err(map_error)?;
-
-    let fields = vec![
-        field("backend_fallback_used", true),
-        field("fallback_used", true),
-        field("backend_fallback_reason", reason),
-        field("fallback_backend", fallback_backend),
-        field("gpu_available", false),
-        field("gpu_disabled_reason", reason),
-        field("gpu_trust_state", "fallback-used"),
-        field("gpu_failure_class", "unavailable"),
-        field("gpu_failure_stage", "capability-query"),
-        field("discarded_partial_gpu_result", false),
-        field("gpu_original_result_incomplete", false),
-    ];
-    let projection_error = fallback_resource_projection_error(session, &result);
-    result
-        .try_with_replaced_fields_with_memory_guard(fields, |live, future| {
-            session
-                .validate_public_result_memory_with_future(live, future)
-                .map_err(map_error)
-        })
-        .map_err(|error| match error {
-            crate::core_execution_result::CoreResultFieldReplacementError::ProjectionOverflow
-            | crate::core_execution_result::CoreResultFieldReplacementError::AllocationFailed {
-                ..
-            } => projection_error,
-            crate::core_execution_result::CoreResultFieldReplacementError::MemoryGuard(error) => {
-                error
-            }
-        })
-}
-
-fn fallback_resource_projection_error(
-    session: &InnerSession,
-    result: &CoreExecutionResult,
-) -> WasmCpuSearchError {
-    map_error(
-        session
-            .validate_public_result_memory_with_future(result, u128::MAX)
-            .expect_err("checked fallback projection overflow is unavailable"),
-    )
-}
-
-fn field(key: impl Into<String>, value: impl ToString) -> (String, String) {
-    (key.into(), value.to_string())
 }
 
 fn map_error(error: super::wasm_cpu::WasmExactSearchError) -> WasmCpuSearchError {

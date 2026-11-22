@@ -27,8 +27,10 @@ impl SearchDefaults {
         setup_max_build_variants_per_tiling: 1024,
         setup_max_results: 256,
         setup_max_patterns: 4096,
-        build_max_assignments: 1024,
-        build_max_patterns: 4096,
+        // Zero selects complete generation; finite limits belong to the
+        // requesting caller or an explicitly bounded development fixture.
+        build_max_assignments: 0,
+        build_max_patterns: 0,
         observed_max_suffix_patterns: 16,
         scenario_retained_trace_limit: 64,
         execution_deterministic: true,
@@ -134,7 +136,8 @@ mod tests {
         let defaults = SearchDefaults::MVP1;
 
         assert_eq!(defaults.setup_max_results(), 256);
-        assert_eq!(defaults.build_max_patterns(), 4096);
+        assert_eq!(defaults.build_max_assignments(), 0);
+        assert_eq!(defaults.build_max_patterns(), 0);
         assert_eq!(defaults.observed_max_suffix_patterns(), 16);
         assert_eq!(defaults.scenario_retained_trace_limit(), 64);
         assert!(defaults.execution_deterministic());

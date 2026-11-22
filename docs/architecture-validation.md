@@ -45,9 +45,12 @@ Examples of claims that marker presence cannot prove:
 - BuildOrders and HoldReachableOrders types do not prove an independent
   language intersection implementation.
 - Proof-carrying pruning types do not prove that a hot path prunes safely.
-- PostProcess GPU types do not prove a connected backend. The executed WebGPU
-  batch and deterministic CPU confirmation provide that evidence; static scans
-  enforce only its public outcome and API boundaries.
+- Backend labels and retained C GPU descriptors do not prove a connected
+  product GPU runtime. Product search uses the Rust CPU runtime; WebGPU
+  execution is retired. Explicit GPU/Hybrid requests return
+  `webgpu_backend_retired`, including when CPU fallback was allowed. Static
+  scans preserve the necessary ABI and unsupported-capability boundaries;
+  executable tests check the CPU results and the retired-request response.
 
 ## Executed Correctness Authority
 
@@ -73,8 +76,13 @@ produce byte-checked PNG/GIF artifacts.
 | All-pattern minimum cover | Rust required-pattern cover test |
 | Ledger strict retention | C pruning suite plus Rust domain and executor CompleteRequired tests |
 | Same candidate, different pattern execution | Rust ExecutionVariantSet retention test |
+| Retired GPU/Hybrid request | Rust pre-search rejection with both fallback settings, and App Unsupported/BackendGpuUnavailable response without solver execution |
 
 The C harness is `clearra_adversarial_tests`. The runner requires each named
-Rust case to appear as passed in its complete library suite. It executes the suites for the
-core domain, executor, FFI, coverage, and guarded PostProcess GPU crates so the
-focused proofs do not narrow the surrounding regression gate.
+Rust case to appear as passed in its complete library suite. The current
+`Get-AdversarialRustCases` owners are `clearra-core-domain` and
+`clearra-core-executor`; the standalone adversarial runner executes their full
+library suites. During `ReleaseAcceptance`, the broader `RustExactTests` owner
+supplies that evidence once. Retired WebGPU/PostProcess GPU crates are not
+execution targets. CPU product, WASM, desktop and App response contracts retain
+their own executed gates.

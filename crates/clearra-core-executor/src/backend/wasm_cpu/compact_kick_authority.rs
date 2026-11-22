@@ -20,9 +20,9 @@ const SLOTS_PER_PIECE: usize = 12;
 type OrderedDeltas = [Option<Box<[(i16, i16)]>>; SLOTS_PER_PIECE];
 type BorrowedOrderedEntries<'a> = [Option<&'a KickTableEntry>; SLOTS_PER_PIECE];
 
-/// Limits on logical compiler allocation counts, not allocator RSS. Pose
-/// and target counts bound each corresponding linear table; the offset cap
-/// covers both index tables and the temporary reverse cursor together.
+/// Explicit limits on logical compiler allocation counts, not allocator RSS.
+/// Production admission passes no implicit budget. Encoded pose/target indices
+/// and checked count arithmetic are validated independently in every mode.
 #[derive(Clone, Copy)]
 struct CompileBudget {
     poses: usize,
@@ -133,28 +133,16 @@ fn normalized_offsets(entry: Option<&KickTableEntry>) -> impl Iterator<Item = (i
 impl CompactKickAuthority {
     /// Bind the full verified ordered table, independently of its display ID.
     /// This is the standard-shape all-sky contract, not fixed-spawn gameplay.
-    /// Compile limits are checked refusals, never negative movement answers.
+    /// Encoded index/coordinate and allocation failures remain checked refusals,
+    /// never negative movement answers. A development generation budget is not
+    /// silently imposed on the product's verified ordered table.
     pub(super) fn admit_profile(
         width: u8,
         height: u8,
         selected_rule: RuleProfileId,
         verified: &VerifiedKickTableProfile,
     ) -> Result<Self, CompactKickAdmission> {
-        Self::admit(
-            width,
-            height,
-            selected_rule,
-            verified,
-            CompileBudget {
-                // Covers all i8 raw offsets after wide origin normalization.
-                // Checked resource ceilings, not a per-transition kick count.
-                // Raw and packed ordinals are retained in u32 without pruning
-                // or truncating the source table's ordered candidate lists.
-                poses: 100_000,
-                rotation_targets: 64_000_000,
-                index_entries: 600_000,
-            },
-        )
+        Self::admit(width, height, selected_rule, verified, None)
     }
 
     #[cfg(any(test, not(target_family = "wasm")))]
@@ -192,17 +180,7 @@ impl CompactKickAuthority {
         {
             return Err(CompactKickAdmission::Unsupported);
         }
-        Self::admit(
-            width,
-            height,
-            selected_rule,
-            verified,
-            CompileBudget {
-                poses: 10_000,
-                rotation_targets: 100_000,
-                index_entries: 50_000,
-            },
-        )
+        Self::admit(width, height, selected_rule, verified, None)
     }
 
     pub(super) fn dimensions(&self) -> (u8, u8) {
@@ -237,7 +215,7 @@ impl CompactKickAuthority {
         height: u8,
         selected_rule: RuleProfileId,
         verified: &VerifiedKickTableProfile,
-        budget: CompileBudget,
+        budget: Option<CompileBudget>,
     ) -> Result<Self, CompactKickAdmission> {
         Self::preflight(width, height, selected_rule, verified, budget)?.materialize()
     }
@@ -247,7 +225,7 @@ impl CompactKickAuthority {
         height: u8,
         selected_rule: RuleProfileId,
         verified: &'a VerifiedKickTableProfile,
-        budget: CompileBudget,
+        budget: Option<CompileBudget>,
     ) -> Result<AdmittedKickLayout<'a>, CompactKickAdmission> {
         use CompactKickAdmission::{BudgetExceeded, IndexOrCoordinateOverflow, Unsupported};
 
@@ -304,7 +282,7 @@ impl CompactKickAuthority {
                 return Err(Unsupported);
             }
             u32::try_from(offsets.len()).map_err(|_| IndexOrCoordinateOverflow)?;
-            if offsets.len() > budget.rotation_targets {
+            if budget.is_some_and(|budget| offsets.len() > budget.rotation_targets) {
                 return Err(BudgetExceeded);
             }
             piece[slot] = Some(entry);
@@ -343,10 +321,11 @@ impl CompactKickAuthority {
             .and_then(|count| count.checked_add(3))
             .and_then(|count| count.checked_mul(7))
             .ok_or(IndexOrCoordinateOverflow)?;
-        if minimum_poses > budget.poses
-            || minimum_targets > budget.rotation_targets
-            || minimum_indices > budget.index_entries
-        {
+        if budget.is_some_and(|budget| {
+            minimum_poses > budget.poses
+                || minimum_targets > budget.rotation_targets
+                || minimum_indices > budget.index_entries
+        }) {
             return Err(BudgetExceeded);
         }
 
@@ -390,10 +369,11 @@ impl CompactKickAuthority {
                 .checked_add(piece_indices)
                 .ok_or(IndexOrCoordinateOverflow)?;
         }
-        if poses > budget.poses
-            || rotation_targets > budget.rotation_targets
-            || index_entries > budget.index_entries
-        {
+        if budget.is_some_and(|budget| {
+            poses > budget.poses
+                || rotation_targets > budget.rotation_targets
+                || index_entries > budget.index_entries
+        }) {
             return Err(BudgetExceeded);
         }
         Ok(AdmittedKickLayout {
@@ -525,7 +505,7 @@ mod tests {
                 6,
                 profile.profile().source_rule(),
                 &profile,
-                BUDGET,
+                Some(BUDGET),
             )
             .unwrap();
             for piece in PieceKind::STANDARD_TETROMINOES {
@@ -572,7 +552,7 @@ mod tests {
         offsets[..=2].rotate_right(1);
         let changed = replace_t_kicks(offsets);
         let admit = |profile| {
-            CompactKickAuthority::admit(10, 2, RuleProfileId::Srs, profile, BUDGET).unwrap()
+            CompactKickAuthority::admit(10, 2, RuleProfileId::Srs, profile, Some(BUDGET)).unwrap()
         };
         let a = admit(&canonical);
         let b = admit(&changed);
@@ -641,11 +621,11 @@ mod tests {
 
         let canonical = verify(SrsKicks::profile());
         assert_eq!(
-            CompactKickAuthority::admit(10, 7, RuleProfileId::Srs, &canonical, BUDGET),
+            CompactKickAuthority::admit(10, 7, RuleProfileId::Srs, &canonical, Some(BUDGET)),
             Err(Unsupported)
         );
         assert_eq!(
-            CompactKickAuthority::admit(10, 2, RuleProfileId::SrsPlus, &canonical, BUDGET),
+            CompactKickAuthority::admit(10, 2, RuleProfileId::SrsPlus, &canonical, Some(BUDGET)),
             Err(Unsupported)
         );
         for rule in [
@@ -676,7 +656,7 @@ mod tests {
             },
         ] {
             assert_eq!(
-                CompactKickAuthority::admit(10, 2, RuleProfileId::Srs, &canonical, budget),
+                CompactKickAuthority::admit(10, 2, RuleProfileId::Srs, &canonical, Some(budget)),
                 Err(BudgetExceeded)
             );
         }
@@ -696,15 +676,20 @@ mod tests {
                 .iter()
                 .all(|entry| { entry.sequence().len() < BUDGET.rotation_targets }));
             assert!(matches!(
-                CompactKickAuthority::preflight(10, 4, RuleProfileId::Srs, profile, BUDGET),
+                CompactKickAuthority::preflight(10, 4, RuleProfileId::Srs, profile, Some(BUDGET)),
                 Err(CompactKickAdmission::BudgetExceeded),
             ));
         }
+        assert!(
+            CompactKickAuthority::preflight(10, 4, RuleProfileId::Srs, &too_many, None,).is_ok(),
+            "an explicit fixture budget must not become a product admission limit"
+        );
         // The same borrowed stage preserves a valid long ordered list; it
         // hands its proved ceiling to the only stage that may allocate it.
         let accepted = replace_t_kicks(vec![KickOffset::new(0, 0); 300]);
-        let layout = CompactKickAuthority::preflight(10, 2, RuleProfileId::Srs, &accepted, BUDGET)
-            .expect("finite complete prefix fits this compiler budget");
+        let layout =
+            CompactKickAuthority::preflight(10, 2, RuleProfileId::Srs, &accepted, Some(BUDGET))
+                .expect("finite complete prefix fits this compiler budget");
         let ceiling = layout.ceilings[piece_index(PieceKind::T)];
         let authority = layout.materialize().unwrap();
         assert_eq!(authority.piece(PieceKind::T).ceiling, ceiling);

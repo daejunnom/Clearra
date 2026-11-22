@@ -11,6 +11,10 @@ currently support every identical request. The
 product service coverage from kernel availability. Changing backend does not
 change requested result meaning, including exactness and resource outcomes.
 
+GPU search and GPU postprocess have been retired. Explicit `gpu` and `hybrid`
+product requests return `webgpu_backend_retired` without CPU fallback; current
+builds have no WebGPU crate or runtime dependency. See [GPU retirement](gpu-pipeline.md).
+
 ## Owners
 
 - `clearra-piece-registry` and `clearra-rules` own Rust shape and ordered kick
@@ -44,7 +48,6 @@ retiring a C implementation without changing the product or external ABI.
 - `clearra-postprocess -> clearra-replay`
 - `clearra-postprocess -> clearra-spin`
 - `clearra-postprocess -> clearra-scoring`
-- `clearra-postprocess-gpu -> clearra-postprocess`
 - `clearra-output -> clearra-replay`
 - `clearra-output -> clearra-fumen`
 - `clearra-output -> clearra-render`
@@ -59,8 +62,6 @@ retiring a C implementation without changing the product or external ABI.
 - `clearra-spin -> clearra-scoring`
 - `clearra-scoring -> core-c raw binding`
 - `clearra-postprocess -> clearra-core-executor`
-- `clearra-postprocess-gpu -> clearra-core-executor`
-- `clearra-postprocess-gpu -> clearra-core-ffi`
 - `clearra-render -> clearra-core-executor`
 - `clearra-fumen -> clearra-core-executor`
 - `clearra-core-executor -> clearra-render`

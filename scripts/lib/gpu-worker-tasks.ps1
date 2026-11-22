@@ -1,4 +1,4 @@
-# The product gate checks Rust WebGPU. The explicit native-reference task
+# The product gate checks the Rust CPU product after WebGPU retirement. The explicit native-reference task
 # below still runs the independent C tests.
 
 function Invoke-GpuWorkerCargoCheck([string]$Root, [string[]]$Packages) {
@@ -14,7 +14,7 @@ function Invoke-GpuWorkerCargoCheck([string]$Root, [string[]]$Packages) {
         foreach ($packageName in $Packages) {
             $arguments = @("check", "-p", $packageName, "--lib", "--tests")
             if ($packageName -in @("clearra-core-executor", "clearra-app")) {
-                $arguments += @("--features", "parallel,webgpu-search")
+                $arguments += @("--features", "parallel")
             }
             Invoke-ClearraProgressCase `
                 -Scope $scope `

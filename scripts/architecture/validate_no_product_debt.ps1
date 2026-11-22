@@ -186,9 +186,6 @@ function Invoke-NoProductDebtStaticValidation {
     if ($desktopGuiHostDependency -match '"native-c-core"') {
         Add-ArchitectureError 'NoProductDebt desktop release must not depend on the retired Windows native C execution path'
     }
-    if ($desktopGuiHostDependency -notmatch '"webgpu-search"') {
-        Add-ArchitectureError 'NoProductDebt desktop product must enable the connected WebGPU search backend'
-    }
     $wasmManifest = Read-PhysicalText 'crates/clearra-wasm/Cargo.toml'
     if ($wasmManifest -match '(?m)^clearra-webgpu\s*=') {
         Add-ArchitectureError 'NoProductDebt WASM must not register an unconnected WebGPU search backend'

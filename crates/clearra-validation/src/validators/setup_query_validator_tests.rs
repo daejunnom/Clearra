@@ -77,7 +77,7 @@ fn setup_query_validator_rejects_a_selected_hold_missing_from_inventory() {
 }
 
 #[test]
-fn setup_query_validator_rejects_outside_mvp_target_and_board() {
+fn setup_query_validator_rejects_non_fixed_target_and_board() {
     let query = SetupSearchQuery::default();
     let query = SetupSearchQuery::new(
         BoardSize::new(12, 20).expect("board"),
@@ -94,7 +94,16 @@ fn setup_query_validator_rejects_outside_mvp_target_and_board() {
 
     assert!(report.has_errors());
     assert!(report.contains_code(DiagnosticCode::EBoardUnsupportedMvp));
-    assert!(report.contains_code(DiagnosticCode::EPcTargetUnsupportedMvp));
+    assert!(report.diagnostics().iter().any(|diagnostic| {
+        diagnostic.code() == DiagnosticCode::ESetupQueryInvalid
+            && diagnostic
+                .location()
+                .is_some_and(|location| location.path() == "setup.target")
+            && diagnostic.evidence().iter().any(|evidence| {
+                evidence.key() == "reason"
+                    && evidence.value() == "setup_finder_target_is_not_fixed_empty_10x4"
+            })
+    }));
 }
 
 #[test]

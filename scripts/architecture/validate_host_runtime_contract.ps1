@@ -1,5 +1,5 @@
 # This file is dot-sourced by scripts/lib/architecture-validation.ps1.
-# R keeps native CLI, desktop, WASM, and WebGPU on the same typed product contract.
+# R keeps native CLI, desktop, and WASM on the same typed product contract.
 
 function Invoke-HostRuntimeContractValidation() {
 foreach ($requiredFile in @(
@@ -10,9 +10,6 @@ foreach ($requiredFile in @(
             "crates/clearra-wasm/src/wasm_worker_job.rs",
             "crates/clearra-wasm/tests/wasm_host_contract.rs",
             "crates/clearra-cli-command/src/web_command_parser.rs",
-            "crates/clearra-webgpu/src/embedded_pattern_bitset_union.wgsl",
-            "crates/clearra-webgpu/src/shader_contract.rs",
-            "crates/clearra-webgpu/src/webgpu_backend.rs",
             "crates/clearra-gui-host/src/desktop_host/desktop_request_bridge.rs",
             "crates/clearra-gui-host/src/job/gui_job_runner.rs",
             "crates/clearra-gui-host/tests/desktop_cli_boundary.rs",
@@ -68,38 +65,12 @@ foreach ($requiredMarker in @(
             "AppRequest",
             "Web Worker",
             "WASM CPU",
-            "WebGPU",
             "AppResponse",
             "JobEvent",
             "wasm_runtime_does_not_spawn_process"
         )) {
         if ($wasmSurface -notlike "*$requiredMarker*") {
             Add-ArchitectureError "R WASM command runtime must expose marker '$requiredMarker'"
-        }
-    }
-$webGpuSurface = @(
-        Read-Text "crates/clearra-webgpu/src/shader_contract.rs"
-        Read-Text "crates/clearra-webgpu/src/webgpu_backend.rs"
-        Read-Text "crates/clearra-webgpu/src/embedded_pattern_bitset_union.wgsl"
-        Read-Text "crates/clearra-wasm/src/webgpu/webgpu_backend_report.rs"
-    ) -join "`n"
-foreach ($requiredMarker in @(
-            "user_provided_wgsl_rejected",
-            "no_runtime_shader_injection",
-            "embedded_reviewed",
-            "shader_hash",
-            "shader_version",
-            "WebGpuBatchOutcome",
-            "Connected",
-            "Unavailable",
-            "RejectedMismatch",
-            "dispatch_workgroups",
-            "cpu_confirmed",
-            "fallback_backend",
-            "wasm-cpu"
-        )) {
-        if ($webGpuSurface -notlike "*$requiredMarker*") {
-            Add-ArchitectureError "R WebGPU contract must expose marker '$requiredMarker'"
         }
     }
 $desktopRustRequestSurface = @(
@@ -196,7 +167,6 @@ foreach ($forbiddenMarker in @(
         )) {
         if ($hostContractSurface.IndexOf($forbiddenMarker, [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
             $wasmSurface.IndexOf($forbiddenMarker, [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
-            $webGpuSurface.IndexOf($forbiddenMarker, [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
             $desktopSurface.IndexOf($forbiddenMarker, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
             Add-ArchitectureError "R host runtime contract forbids marker '$forbiddenMarker'"
         }
@@ -210,7 +180,7 @@ if ([regex]::IsMatch("clearra.execution-resource-authority.v1", $clearraExecutab
     -not ([regex]::IsMatch('Command::new("clearra.exe")', $clearraExecutablePattern))) {
     Add-ArchitectureError "R host runtime clearra.exe token matcher failed its positive/negative regression contract"
 }
-foreach ($surface in @($hostContractSurface, $wasmSurface, $webGpuSurface, $desktopSurface)) {
+foreach ($surface in @($hostContractSurface, $wasmSurface, $desktopSurface)) {
     if ([regex]::IsMatch($surface, $clearraExecutablePattern)) {
         Add-ArchitectureError "R host runtime contract forbids executable token 'clearra.exe'"
     }

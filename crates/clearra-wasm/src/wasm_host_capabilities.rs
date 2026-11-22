@@ -49,10 +49,6 @@ impl WasmHostCapabilities {
 
 impl Default for WasmHostCapabilities {
     fn default() -> Self {
-        Self::new(
-            WorkerPolicy::hardware_worker_limit(),
-            cfg!(all(feature = "webgpu-search", not(target_arch = "wasm32"))),
-            false,
-        )
+        Self::new(WorkerPolicy::hardware_worker_limit(), false, false)
     }
 }

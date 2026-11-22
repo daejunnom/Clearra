@@ -28,34 +28,17 @@ const EXPLICIT_GPU_SCENARIO: &[&str] = &[
 ];
 
 #[test]
-fn process_e2e_m19_backend_policy_reports_fallback_and_backend_split() {
-    // This executable has no compiled WebGPU kernel. Hardware inventory
-    // cannot turn this fallback-policy probe into a GPU availability test.
-    let mut args = EXPLICIT_GPU_SCENARIO.to_vec();
-    args.push("--allow-backend-fallback");
-    let result = run_json(&args);
-    assert_eq!(result["kind"], "pc-scenario");
-    let summary = &result["summary"];
-    assert_rust_cpu(summary);
-    assert_eq!(summary["backend_requested"], "gpu");
-    assert_eq!(summary["backend_selected"], "wasm-cpu");
-    assert_eq!(summary["backend_fallback_used"], true);
-    assert_eq!(summary["fallback_backend"], "wasm-cpu");
-    assert_eq!(summary["backend_fallback_reason"], "gpu_kernel_unavailable");
-    assert_eq!(summary["gpu_trust_state"], "fallback-used");
-    assert_eq!(summary["solution_found"], true);
-    assert_eq!(summary["count_complete"], true);
-    assert_eq!(summary["normalized_unique_solution_count"], 1);
-    assert_eq!(summary["probability_complete"], true);
-    assert_eq!(summary["coverage_probability"].as_f64(), Some(1.0));
-
-    let denied = clearra()
-        .args(EXPLICIT_GPU_SCENARIO)
-        .arg("--no-backend-fallback")
-        .output()
-        .expect("launch the product CLI without fallback");
-    assert_eq!(denied.status.code(), Some(3));
-    assert!(denied.stdout.is_empty());
-    let stderr = String::from_utf8_lossy(&denied.stderr);
-    assert!(stderr.contains("E_BACKEND_GPU_UNAVAILABLE"), "{stderr}");
+fn process_e2e_retired_gpu_has_no_cpu_fallback() {
+    for fallback in ["--allow-backend-fallback", "--no-backend-fallback"] {
+        let denied = clearra()
+            .args(EXPLICIT_GPU_SCENARIO)
+            .arg(fallback)
+            .output()
+            .expect("launch the product CLI");
+        assert_eq!(denied.status.code(), Some(3));
+        assert!(denied.stdout.is_empty());
+        let stderr = String::from_utf8_lossy(&denied.stderr);
+        assert!(stderr.contains("E_BACKEND_GPU_UNAVAILABLE"), "{stderr}");
+        assert!(stderr.contains("webgpu_backend_retired"), "{stderr}");
+    }
 }

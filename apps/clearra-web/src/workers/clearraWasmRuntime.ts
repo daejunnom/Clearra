@@ -1,4 +1,3 @@
-import { BrowserGpuAvailability, type BrowserGpuProbe } from './BrowserGpuAvailability';
 
 import type {
   ClearraHostAppResponse,
@@ -221,7 +220,6 @@ export type ClearraWasmHostCapabilities = {
   productRetentionByteCap?: number;
 };
 
-const browserGpuAvailability = new BrowserGpuAvailability();
 let wasmModulePromise: Promise<ClearraWasmModule> | null = null;
 const CONSERVATIVE_HOST_CAPABILITIES: ClearraWasmHostCapabilities = Object.freeze({
   logicalProcessorCount: 1,
@@ -581,10 +579,7 @@ export async function loadClearraWasmModule(
   }
   const attempt = wasmModulePromise;
   try {
-    const [module] = await Promise.all([
-      attempt,
-      browserGpuAvailability.qualify(hostCapabilities.webGpuAvailable, (self.navigator as unknown as { gpu?: BrowserGpuProbe } | undefined)?.gpu)
-    ]);
+    const module = await attempt;
     module.configure_host(hostCapabilities);
     return module;
   } catch (error) {
@@ -1064,7 +1059,6 @@ function wrapRawModule(
     const ptr = raw.clearra_wasm_input_ptr() >>> 0;
     new Uint8Array(raw.memory.buffer, ptr, bytes.byteLength).set(bytes);
   };
-  let gpuWarmupGeneration = 0;
 
   const module: ClearraWasmModule = {
     ...(raw.clearra_wasm_accelerator_catalog && raw.clearra_wasm_accelerator_request_policy &&
@@ -1158,9 +1152,7 @@ function wrapRawModule(
       };
     },
     configure_host(capabilities) {
-      const flags =
-        (capabilities.webGpuAvailable && browserGpuAvailability.available ? 1 : 0) |
-        (capabilities.crossOriginIsolated ? 2 : 0);
+      const flags = capabilities.crossOriginIsolated ? 2 : 0;
       requireOk(
         raw.clearra_wasm_configure_host(
           Math.max(1, Math.floor(capabilities.logicalProcessorCount)),
@@ -1218,6 +1210,12 @@ function wrapRawModule(
       } as const;
       const selectedMode = labels[mode];
       if (!selectedMode) throw new Error(`invalid Clearra WASM distributed mode: ${mode}`);
+      if (selectedMode === 'gpu-multi') {
+        throw new ClearraWasmRuntimeError(
+          'E_WASM_BACKEND_RETIRED',
+          'WebGPU search has been retired'
+        );
+      }
       requireExactCount(
         raw.clearra_wasm_distributed_worker_count_available(),
         raw.clearra_wasm_distributed_worker_count_exact(),
@@ -1234,7 +1232,7 @@ function wrapRawModule(
         workerCount: Math.max(1, raw.clearra_wasm_distributed_worker_count()),
         requestedBackend:
           requestedLabels[raw.clearra_wasm_distributed_requested_backend()] ?? 'auto',
-        selectedBackend: selectedMode === 'gpu-multi' ? 'webgpu' : 'wasm-cpu',
+        selectedBackend: 'wasm-cpu',
         fallbackUsed: fallbackReasonCode !== 0,
         fallbackReason:
           fallbackReasonLabels[fallbackReasonCode as keyof typeof fallbackReasonLabels] ?? null,
@@ -1649,34 +1647,11 @@ function wrapRawModule(
       requireOk(raw.clearra_wasm_distributed_verifier_finish());
       return outputBytes();
     },
-    async prewarm_gpu(deviceIndex) {
-      if (!browserGpuAvailability.available) return 'unavailable';
-      const generation = ++gpuWarmupGeneration;
-      requireOk(raw.clearra_wasm_gpu_warmup_start(deviceIndex ?? -1));
-      for (;;) {
-        if (generation !== gpuWarmupGeneration) {
-          throw new ClearraWasmRuntimeError(
-            'E_WASM_GPU_WARMUP_CANCELLED',
-            'GPU warmup ownership was transferred to a foreground command'
-          );
-        }
-        const status = raw.clearra_wasm_gpu_warmup_advance();
-        requireOk(status);
-        if (status === 1) {
-          raw.clearra_wasm_output_release();
-          return 'connected';
-        }
-        if (status === 2) {
-          raw.clearra_wasm_output_release();
-          return 'unavailable';
-        }
-        if (status !== 0) throw new Error(`invalid GPU warmup status: ${status}`);
-        await yieldToRuntimeHost();
-      }
+    async prewarm_gpu(_deviceIndex) {
+      return 'unavailable';
     },
     cancel_gpu_warmup() {
-      gpuWarmupGeneration += 1;
-      requireOk(raw.clearra_wasm_gpu_warmup_cancel());
+      // Compatibility method: retirement creates no asynchronous GPU owner.
     }
   };
   if (raw.clearra_wasm_profile_start && raw.clearra_wasm_profile_finish) {

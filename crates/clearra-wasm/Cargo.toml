@@ -7,7 +7,6 @@ publish = false
 
 [features]
 default = []
-webgpu-search = ["clearra-app/webgpu-search"]
 stage-profiling = ["clearra-app/wasm-stage-profiling"]
 
 [dependencies]

@@ -3,8 +3,6 @@ pub mod hybrid_scheduler_report;
 pub mod packing_error;
 pub mod packing_memory_report;
 pub mod packing_metrics;
-#[cfg(all(test, feature = "webgpu-search", feature = "native-c-core"))]
-pub mod packing_native_bridge;
 pub mod packing_problem_preparer;
 pub(crate) mod packing_queue;
 pub mod packing_runner;

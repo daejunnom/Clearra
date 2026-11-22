@@ -89,6 +89,30 @@ impl ExecutionAdmissionPlan {
         )
     }
 
+    /// The admitted Boolean standard-bag path retains the original-ID bitmap
+    /// but owns no per-pattern position index or explicit sequence array.
+    /// Selection of that exact execution mode belongs to the Build backend.
+    /// Mutable language/decision arenas remain subject to their runtime owner
+    /// checks; this plan covers source-proportional preparation and reduction.
+    pub(crate) fn symbolic_build_probability_with_verifiers(
+        problem: &SearchProblem,
+        pass_count: usize,
+        verifier_count: usize,
+    ) -> Option<Self> {
+        let passes = pass_count.max(1) as u128;
+        let replicas = (verifier_count as u128).checked_add(1)?;
+        // Global DD flush, its exported bitmap, and the reducer can coexist.
+        let copies = passes.checked_mul(3)?.checked_mul(replicas)?;
+        let source_rows = (problem.supply().source_sequence_length() as u128).checked_add(2)?;
+        // Canonical cursor transitions plus suffix counts for every bag mask,
+        // with old/new temporary coexistence and small owner/table overhead.
+        let tables = source_rows
+            .checked_mul(128)?
+            .checked_mul(2 * (7 + 16))?
+            .checked_add(64 * 1024)?;
+        Some(Self::new(copies, 0, tables.checked_mul(replicas)?).with_compute_units(replicas))
+    }
+
     // Native packing registries consume this projection only when that backend is linked.
     #[allow(dead_code)]
     pub(crate) fn native_packing(problem: &CPackingProblem, worker_count: usize) -> Option<Self> {
@@ -228,6 +252,10 @@ impl ExecutionMemoryBound {
     }
 
     #[allow(clippy::result_large_err)]
+    #[cfg_attr(
+        all(feature = "local-search-ab", not(target_family = "wasm")),
+        track_caller
+    )]
     pub(crate) fn ensure(
         self,
         observed_retained_bytes: u128,
@@ -236,6 +264,14 @@ impl ExecutionMemoryBound {
         let required_memory_bytes = observed_retained_bytes
             .checked_add(checked_future_bytes)
             .ok_or_else(|| {
+                #[cfg(all(feature = "local-search-ab", not(target_family = "wasm")))]
+                trace_memory_admission_failure(
+                    self.cap_bytes,
+                    observed_retained_bytes,
+                    checked_future_bytes,
+                    None,
+                    std::panic::Location::caller(),
+                );
                 admission_failure(
                     ExecutionAvailability::unavailable(
                         ExecutionAvailabilityReason::PatternCountAddressSpaceExceeded,
@@ -249,6 +285,14 @@ impl ExecutionMemoryBound {
         if required_memory_bytes <= self.cap_bytes {
             return Ok(());
         }
+        #[cfg(all(feature = "local-search-ab", not(target_family = "wasm")))]
+        trace_memory_admission_failure(
+            self.cap_bytes,
+            observed_retained_bytes,
+            checked_future_bytes,
+            Some(required_memory_bytes),
+            std::panic::Location::caller(),
+        );
         Err(admission_failure(
             ExecutionAvailability::exhausted(ExecutionAvailabilityReason::MemoryBudgetExceeded),
             self.descriptor_pattern_count,
@@ -257,6 +301,48 @@ impl ExecutionMemoryBound {
             required_memory_bytes,
         ))
     }
+}
+
+#[cfg(all(feature = "local-search-ab", not(target_family = "wasm")))]
+fn memory_admission_trace_enabled(value: Option<&str>) -> bool {
+    value == Some("1")
+}
+
+/// Local diagnostics only. Optional memo admission can also fail and continue
+/// exactly, so retain every failed projection line; capture the expensive stack
+/// only once. Neither reporting nor a declined optional cache changes credit.
+#[cfg(all(feature = "local-search-ab", not(target_family = "wasm")))]
+fn trace_memory_admission_failure(
+    cap: u128,
+    observed: u128,
+    future: u128,
+    required: Option<u128>,
+    caller: &std::panic::Location<'_>,
+) {
+    if !memory_admission_trace_enabled(
+        std::env::var("CLEARRA_TRACE_MEMORY_ADMISSION")
+            .ok()
+            .as_deref(),
+    ) {
+        return;
+    }
+    let thread = std::thread::current();
+    eprintln!(
+        "clearra_memory_admission_failure cap_bytes={cap} observed_retained_bytes={observed} checked_future_bytes={future} required_memory_bytes={} projection_overflow={} thread={:?} caller={}:{}:{}",
+        required.unwrap_or(u128::MAX),
+        required.is_none(),
+        thread.name().unwrap_or("unnamed"),
+        caller.file(),
+        caller.line(),
+        caller.column(),
+    );
+    static FIRST_FAILURE_BACKTRACE: std::sync::Once = std::sync::Once::new();
+    FIRST_FAILURE_BACKTRACE.call_once(|| {
+        eprintln!(
+            "clearra_memory_admission_first_failure_backtrace\n{}",
+            std::backtrace::Backtrace::force_capture(),
+        );
+    });
 }
 
 impl ExecutionAdmission {
@@ -815,6 +901,39 @@ mod tests {
     use clearra_supply::queue::fixed_sequence::FixedSequence;
 
     use super::*;
+
+    #[cfg(all(feature = "local-search-ab", not(target_family = "wasm")))]
+    #[test]
+    fn memory_admission_trace_requires_the_explicit_local_opt_in() {
+        assert!(memory_admission_trace_enabled(Some("1")));
+        for value in [
+            None,
+            Some(""),
+            Some("0"),
+            Some("true"),
+            Some(" 1"),
+            Some("1 "),
+        ] {
+            assert!(!memory_admission_trace_enabled(value));
+        }
+    }
+
+    #[test]
+    fn memory_admission_failure_keeps_exact_required_bytes_and_original_cap() {
+        let bound = ExecutionMemoryBound::for_test_cap(100);
+        assert!(bound.ensure(60, 40).is_ok());
+        let report = bound.ensure(60, 41).unwrap_err();
+        assert_eq!(
+            report.execution_availability().required_memory_bytes(),
+            Some(101)
+        );
+        assert_eq!(
+            report.execution_availability().reason(),
+            Some(ExecutionAvailabilityReason::MemoryBudgetExceeded),
+        );
+        assert_eq!(bound.cap_bytes(), 100);
+        assert!(bound.ensure(60, 40).is_ok());
+    }
 
     fn one_piece_scenario_problem() -> SearchProblem {
         let query = PcScenarioQuery::new(

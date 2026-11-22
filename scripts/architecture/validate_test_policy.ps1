@@ -147,7 +147,6 @@ function Invoke-TestPolicyArchitectureValidation() {
         "scripts/desktop-host-check.ps1",
         "scripts/worker-e2e.ps1",
         "scripts/wasm-command-runtime-check.ps1",
-        "scripts/webgpu-backend-check.ps1",
         "scripts/job-worker-progress-check.ps1"
     )) {
         if ((Read-PhysicalText $guardedScript) -notlike '*Assert-ClearraTrustedExecutionSurface*') {

@@ -181,19 +181,11 @@ fn setup_explorer_schema_exposes_canonical_execution_options() {
         .map(|option| option.value())
         .collect::<Vec<_>>();
 
-    assert_eq!(backend_values, ["auto", "cpu", "gpu", "hybrid"]);
+    assert_eq!(backend_values, ["auto", "cpu"]);
     assert!(execution.deterministic_default());
     assert!(execution.allow_backend_fallback_default());
     assert_eq!(execution.worker_options().len(), 5);
     assert_eq!(execution.gpu_device_options().len(), 1);
-
-    let gpu = execution
-        .backend_options()
-        .iter()
-        .find(|option| option.value() == "gpu")
-        .expect("gpu backend option");
-    assert!(!gpu.is_disabled());
-    assert!(gpu.disabled_reason().is_none());
 }
 
 #[test]
@@ -256,7 +248,7 @@ fn setup_explorer_schema_exposes_m28_schema_surfaces() {
         .map(|field| field.id())
         .collect::<Vec<_>>();
 
-    assert_eq!(backend_values, ["auto", "cpu", "gpu", "hybrid"]);
+    assert_eq!(backend_values, ["auto", "cpu"]);
     assert!(schema
         .backend_options()
         .result_contract_fields()

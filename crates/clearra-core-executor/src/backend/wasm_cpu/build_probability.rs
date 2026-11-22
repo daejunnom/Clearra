@@ -316,6 +316,19 @@ impl WasmBuildProbabilitySession {
         let pass_count = usize::from(mirror_distinct) + 1;
         let allocation_plan = if score_requested {
             ExecutionAdmissionPlan::finesse_score(problem)
+        } else if !field.is_compact()
+            && super::extended_build_probability::ExtendedBuildProbabilitySession::uses_standard_bag_coverage(
+                problem,
+                aggregation,
+                finesse_metric.requested(),
+            )?
+        {
+            ExecutionAdmissionPlan::symbolic_build_probability_with_verifiers(
+                problem, pass_count, 0,
+            )
+            .ok_or(WasmExactSearchError::InvalidProblem(
+                "wasm_extended_symbolic_admission_projection_overflow",
+            ))?
         } else {
             ExecutionAdmissionPlan::build_probability(problem, pass_count)
         };
@@ -852,8 +865,9 @@ fn checked_initial_session_coexisting_retained_bytes(
 }
 
 pub(super) fn checked_public_result_bytes(result: &CoreExecutionResult) -> Option<u128> {
-    let bytes = result.checked_resource_retained_bytes()?;
-    Some(bytes.max(result.usize_field("resource_peak_cpu_bytes").unwrap_or(0) as u128))
+    // Admission counts the result's current owners. The reported execution peak
+    // includes released worker scratch and remains reporting-only history.
+    result.checked_resource_retained_bytes()
 }
 
 pub(super) fn checked_core_result_vec_retained_bytes(

@@ -14,7 +14,7 @@ fn execution_options_schema_uses_canonical_backends_and_defaults() {
         .map(DropdownOption::value)
         .collect::<Vec<_>>();
 
-    assert_eq!(backend_values, ["auto", "cpu", "gpu", "hybrid"]);
+    assert_eq!(backend_values, ["auto", "cpu"]);
     let preset_values = schema
         .backend_presets()
         .iter()
@@ -32,36 +32,13 @@ fn execution_options_schema_uses_canonical_backends_and_defaults() {
         SearchDefaults::MVP1.execution_max_memory_mib()
     );
 
-    let gpu = schema
-        .backend_options()
-        .iter()
-        .find(|option| option.value() == "gpu")
-        .expect("gpu option");
-    assert!(!gpu.is_disabled());
-    assert_eq!(
-        gpu.localized_label()
-            .expect("localized label")
-            .key()
-            .as_str(),
-        "ui.backend.gpu.label"
-    );
-    assert!(gpu.disabled_reason().is_none());
-
-    let hybrid = schema
-        .backend_options()
-        .iter()
-        .find(|option| option.value() == "hybrid")
-        .expect("hybrid option");
-    assert!(!hybrid.is_disabled());
-    assert!(hybrid.disabled_reason().is_none());
-
     assert_eq!(
         schema
             .backend_options()
             .iter()
             .map(|option| option.value())
             .collect::<Vec<_>>(),
-        ["auto", "cpu", "gpu", "hybrid"]
+        ["auto", "cpu"]
     );
 }
 
@@ -87,39 +64,6 @@ fn backend_presets_expose_user_facing_capabilities() {
     assert!(cpu.supports_sample_traces());
     assert!(cpu.supports_deterministic());
     assert!(cpu.supports_frontier_budget());
-
-    let gpu = schema
-        .backend_presets()
-        .iter()
-        .find(|preset| preset.id() == "gpu")
-        .expect("gpu");
-    assert!(gpu.enabled());
-    assert_eq!(
-        gpu.localized_description()
-            .resolve(TranslationCatalog::new(LanguageId::Ko))
-            .text(),
-        "frontier count 작업용 GPU 백엔드입니다."
-    );
-    assert_eq!(gpu.disabled_reason_code(), None);
-    assert_eq!(gpu.requires_feature(), None);
-    assert!(!gpu.supports_trace_enumeration());
-    assert!(gpu.supports_total_count());
-    assert!(gpu.supports_sample_traces());
-    assert!(gpu.supports_deterministic());
-    assert!(gpu.supports_frontier_budget());
-
-    let hybrid = schema
-        .backend_presets()
-        .iter()
-        .find(|preset| preset.id() == "hybrid")
-        .expect("hybrid");
-    assert!(hybrid.enabled());
-    assert_eq!(hybrid.disabled_reason_code(), None);
-    assert_eq!(hybrid.requires_feature(), None);
-    assert!(!hybrid.supports_trace_enumeration());
-    assert!(hybrid.supports_total_count());
-    assert!(hybrid.supports_sample_traces());
-    assert!(hybrid.supports_frontier_budget());
 }
 
 #[test]

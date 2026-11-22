@@ -44,7 +44,7 @@ export const HOST_CAPABILITY_SNAPSHOT_CONTEXT = Symbol.for(
 export const DEFAULT_RUNTIME_WARMUP_POLICY: RuntimeWarmupPolicy = Object.freeze({
   backend: 'auto',
   cpuWarmup: true,
-  gpuWarmup: true
+  gpuWarmup: false
 });
 
 export const CPU_ONLY_RUNTIME_WARMUP_POLICY: RuntimeWarmupPolicy = Object.freeze({
@@ -113,7 +113,7 @@ export function createHostCapabilitySnapshot(
     automaticWorkerCap: Math.max(1, reportedLogicalProcessors - 1),
     reportedDeviceMemoryGiB,
     wasmTransferByteCap: wasmTransferByteCap(reportedDeviceMemoryGiB),
-    webGpuAvailable: input.webGpuAvailable === true,
+    webGpuAvailable: false,
     crossOriginIsolated: input.crossOriginIsolated === true
   });
 }
@@ -129,7 +129,7 @@ export function sharedBrowserHostCapabilitySnapshot(
     source: host.navigator ? 'browser-main' : 'conservative-fallback',
     reportedLogicalProcessors: host.navigator?.hardwareConcurrency,
     reportedDeviceMemoryGiB: host.navigator?.deviceMemory,
-    webGpuAvailable: Boolean(host.navigator && 'gpu' in host.navigator),
+    webGpuAvailable: false,
     crossOriginIsolated: host.crossOriginIsolated === true
   });
   return sharedBrowserSnapshot;
@@ -182,7 +182,7 @@ export function normalizeRuntimeWarmupPolicy(
   return Object.freeze({
     backend: policy.backend,
     cpuWarmup: policy.cpuWarmup === true,
-    gpuWarmup: policy.backend !== 'cpu' && policy.gpuWarmup === true,
+    gpuWarmup: false,
     ...(policy.verifierWarmup === false ? { verifierWarmup: false as const } : {})
   });
 }

@@ -64,7 +64,7 @@ function Resolve-WorkerE2EBinary {
             try {
                 $cargoArgs = @(
                     "run", "--locked", "-q", "-p", "clearra-cli",
-                    "--features", "wasm-cpu-runtime,webgpu-search",
+                    "--features", "wasm-cpu-runtime",
                     "--bin", "clearra", "--"
                 ) + $CommandArgs
                 $nativeResult = Invoke-NativeWithProgress `

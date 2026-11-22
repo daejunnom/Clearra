@@ -49,8 +49,6 @@ pub mod spin;
 pub(crate) mod terminal_supply_conformance;
 pub mod tiling_solution_store;
 
-#[cfg(feature = "webgpu-search")]
-pub use backend::WasmWebGpuCandidateProducer;
 pub use backend::{
     any_pc4_ilc_target_field, canonical_wasm_candidate_packet_batch_sha256,
     encode_canonical_wasm_candidate_packet_batch, enumerate_pc4_ilc_geometric_predecessor_fields,

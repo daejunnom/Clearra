@@ -7,6 +7,8 @@ pub struct BuildCoverageLimits {
 }
 
 impl BuildCoverageLimits {
+    /// Zero leaves the corresponding generation dimension unbounded.
+    /// Positive values are explicit caller budgets.
     pub fn new(max_assignments: usize, max_patterns: usize) -> Self {
         Self {
             max_assignments,
@@ -48,7 +50,7 @@ mod tests {
     fn converts_profile_defaults_into_build_coverage_limits() {
         let limits = BuildCoverageLimits::from(SearchDefaults::MVP1);
 
-        assert_eq!(limits.max_assignments(), 1024);
-        assert_eq!(limits.max_patterns(), 4096);
+        assert_eq!(limits.max_assignments(), 0);
+        assert_eq!(limits.max_patterns(), 0);
     }
 }

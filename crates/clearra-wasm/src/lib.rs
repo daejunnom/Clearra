@@ -21,7 +21,6 @@ pub use clearra_app::{
     ExecutorSearchProfileError, ExecutorSearchProfileSession, ExecutorSearchProfileStage,
 };
 pub use clearra_core_domain::execution_cancellation::ExecutionControl;
-#[cfg(feature = "webgpu-search")]
 pub use clearra_core_executor::backend::{
     prewarm_gpu_search, prewarm_gpu_search_async, GpuSearchWarmupReport,
 };

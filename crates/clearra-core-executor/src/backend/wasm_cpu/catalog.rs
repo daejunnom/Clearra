@@ -913,16 +913,6 @@ impl GeometryCatalog {
         &self.support_rows[start..end]
     }
 
-    #[cfg(feature = "webgpu-search")]
-    pub fn support_offsets(&self) -> &[u32] {
-        &self.support_offsets
-    }
-
-    #[cfg(feature = "webgpu-search")]
-    pub fn support_rows(&self) -> &[u32] {
-        &self.support_rows
-    }
-
     pub fn apdp_index(&self) -> &ExactArmPairIndex {
         &self.apdp_index
     }

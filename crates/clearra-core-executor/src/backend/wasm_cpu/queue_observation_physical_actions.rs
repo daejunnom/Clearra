@@ -31,6 +31,10 @@ use clearra_piece_registry::standard::tetromino_registry::standard_tetromino_reg
 use super::{piece_code, ObservationLanguageNode, ObservationPieceLanguage, WasmExactSearchError};
 use crate::backend::wasm_cpu::buildup::{BuildEdge, BuildOrderGraph};
 
+#[path = "queue_observation_generation_limits.rs"]
+mod generation_limits;
+use generation_limits::GenerationLimits;
+
 #[cfg(feature = "placement-dependency-pc")]
 #[path = "queue_observation_factored_actions.rs"]
 mod factored;
@@ -40,10 +44,16 @@ mod factored;
 pub(super) mod board_actions;
 
 const NO_NODE: u32 = u32::MAX;
-const MAX_NODES: usize = 1_000_000;
-const MAX_EDGES: usize = 8_000_000;
-const MAX_UNION_MEMBERS: usize = 8_000_000;
-const MAX_WORK: usize = 64_000_000;
+#[cfg(test)]
+const MAX_WORK: usize = GenerationLimits::DEVELOPMENT.work();
+#[cfg(all(test, feature = "placement-dependency-pc"))]
+const MAX_UNION_MEMBERS: usize = GenerationLimits::DEVELOPMENT.members();
+
+pub(super) fn checked_work(count: usize, overhead: usize) -> Result<usize, WasmExactSearchError> {
+    count
+        .checked_add(overhead)
+        .ok_or_else(|| invalid("wasm_observation_physical_work_limit"))
+}
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub(in crate::backend::wasm_cpu) struct PhysicalActionEdge {
@@ -87,6 +97,7 @@ struct PhysicalNode {
 /// interning additionally compares every physical action and child exactly.
 #[derive(Default)]
 pub(in crate::backend::wasm_cpu) struct PhysicalActionLanguage {
+    limits: GenerationLimits,
     nodes: Vec<PhysicalNode>,
     edges: Vec<PhysicalActionEdge>,
     hash_heads: HashMap<u64, u32>,
@@ -155,7 +166,7 @@ impl PhysicalActionLanguage {
                 continue;
             }
             let edges = graph.edges(index);
-            self.charge(edges.len().saturating_add(1), control)?;
+            self.charge(checked_work(edges.len(), 1)?, control)?;
             if node.accepting() {
                 if !edges.is_empty() || horizon.is_some_and(|depth| depth != node.depth) {
                     return Err(invalid("wasm_observation_physical_depth_mismatch"));
@@ -229,7 +240,7 @@ impl PhysicalActionLanguage {
         edges: &mut Vec<PhysicalActionEdge>,
         control: &ExecutionControl,
     ) -> Result<u32, WasmExactSearchError> {
-        self.charge(edges.len().saturating_add(1), control)?;
+        self.charge(checked_work(edges.len(), 1)?, control)?;
         edges.sort_unstable();
         edges.dedup();
         if (remaining_depth == 0) != edges.is_empty() {
@@ -265,7 +276,15 @@ impl PhysicalActionLanguage {
             }
             existing = node.next_same_hash;
         }
-        if self.nodes.len() >= MAX_NODES || self.edges.len().saturating_add(edges.len()) > MAX_EDGES
+        // Graph import reserves both NO_NODE and its preceding PENDING marker.
+        // Flat edge ranges are encoded as u32; these are representation
+        // boundaries, independent of optional development generation budgets.
+        if self.nodes.len() >= self.limits.nodes(NO_NODE as usize - 1)
+            || self
+                .edges
+                .len()
+                .checked_add(edges.len())
+                .is_none_or(|count| count > self.limits.edges(u32::MAX as usize))
         {
             return Err(invalid("wasm_observation_physical_relation_limit"));
         }
@@ -420,7 +439,7 @@ impl PhysicalActionLanguage {
             .map_err(|_| storage())?;
         let mut edges = Vec::new();
         for node in source.nodes.iter().copied() {
-            self.charge(node.edge_count as usize + 1, control)?;
+            self.charge(checked_work(node.edge_count as usize, 1)?, control)?;
             edges.clear();
             edges
                 .try_reserve(node.edge_count as usize)
@@ -705,7 +724,8 @@ impl PhysicalActionLanguage {
         let qualified = SourceQualifiedPrefixOrders::new(&orders, control, &mut metrics);
         // These are source-compiler visits, like the physical relation's
         // composition words. They do not reset or redefine the physical
-        // owner's cumulative 64M work gate. Failed attempts keep their work.
+        // owner's cumulative work ledger and any explicitly installed budget.
+        // Failed attempts keep their work.
         for (total, actual) in self.source_filter.iter_mut().zip([
             1,
             metrics.mask_words,
@@ -1147,7 +1167,7 @@ impl PhysicalActionLanguage {
         self.work = self
             .work
             .checked_add(steps)
-            .filter(|work| *work <= MAX_WORK)
+            .filter(|work| *work <= self.limits.work())
             .ok_or_else(|| invalid("wasm_observation_physical_work_limit"))?;
         Ok(())
     }
@@ -1157,7 +1177,7 @@ impl PhysicalActionLanguage {
         mut sources: Vec<u32>,
         control: &ExecutionControl,
     ) -> Result<u32, WasmExactSearchError> {
-        self.charge(sources.len().saturating_add(1), control)?;
+        self.charge(checked_work(sources.len(), 1)?, control)?;
         sources.sort_unstable();
         sources.dedup();
         if sources.len() == 1 {
@@ -1182,7 +1202,7 @@ impl PhysicalActionLanguage {
             }
             edge_count = edge_count
                 .checked_add(node.edge_count as usize)
-                .filter(|count| *count <= MAX_EDGES)
+                .filter(|count| *count <= self.limits.edges(u32::MAX as usize))
                 .ok_or_else(|| invalid("wasm_observation_physical_relation_limit"))?;
         }
         self.charge(edge_count, control)?;
@@ -1197,7 +1217,7 @@ impl PhysicalActionLanguage {
         let members = self
             .union_members
             .checked_add(sources.capacity())
-            .filter(|members| *members <= MAX_UNION_MEMBERS)
+            .filter(|members| *members <= self.limits.members())
             .ok_or_else(|| invalid("wasm_observation_physical_union_limit"))?;
         self.unions.try_reserve(1).map_err(|_| storage())?;
         self.unions.insert(sources, root);
@@ -1636,6 +1656,31 @@ mod tests {
     }
 
     #[test]
+    fn default_generation_crosses_development_work_budget_but_keeps_overflow_and_cancel() {
+        let control = ExecutionControl::default();
+        let mut owner = PhysicalActionLanguage::default();
+        owner.work = MAX_WORK;
+        let terminal = owner.intern_node(0, &mut Vec::new(), &control).unwrap();
+        owner.insert_root(terminal).unwrap();
+        assert!(owner.view(&control).unwrap().is_some());
+        assert!(owner.work > MAX_WORK);
+
+        owner.work = usize::MAX;
+        assert!(matches!(
+            owner.intern_node(0, &mut Vec::new(), &control),
+            Err(WasmExactSearchError::InvalidProblem(
+                "wasm_observation_physical_work_limit"
+            ))
+        ));
+        control.cancellation.handle().cancel();
+        assert!(matches!(
+            owner.view(&control),
+            Err(WasmExactSearchError::Cancelled)
+        ));
+        assert!(owner.has_roots());
+    }
+
+    #[test]
     fn invalid_edges_and_bounded_refusals_are_not_empty_languages() {
         let control = ExecutionControl::default();
         let mut owner = PhysicalActionLanguage::default();
@@ -1649,6 +1694,7 @@ mod tests {
             )
             .is_err());
         owner.insert_root(terminal).unwrap();
+        owner.limits = GenerationLimits::DEVELOPMENT;
         owner.work = MAX_WORK;
         assert!(matches!(
             owner.view(&control),

@@ -59,6 +59,7 @@ mod lazy {
         sync::Arc,
     };
 
+    use super::super::physical_actions::checked_work;
     use clearra_core_domain::execution_cancellation::ExecutionControl;
 
     use super::{
@@ -72,8 +73,14 @@ mod lazy {
     };
 
     pub(in crate::backend::wasm_cpu) const KIND_SOURCE_TAG: u32 = 1 << 31;
+    pub(in crate::backend::wasm_cpu) const KIND_UNION_TAG: u32 = 1 << 29;
     const NO_NODE: u32 = u32::MAX;
     const NO_MULTISET: u32 = u32::MAX;
+    // Optional annotations/payloads keep bounded caches. Reaching these
+    // capacities returns the exact original language/DP, never a generation
+    // failure or a negative membership result.
+    const OPTIONAL_ANNOTATION_ENTRIES: usize = 1_000_000;
+    const OPTIONAL_PAYLOAD_MEMBERS: usize = 8_000_000;
 
     struct StoredWordProfile {
         profile: QueryProfile,
@@ -223,7 +230,6 @@ mod lazy {
                 || base.edges > limits.edges
                 || base.members > limits.members
                 || base.work > limits.work
-                || limits.nodes >= KIND_SOURCE_TAG as usize
             {
                 return Err(invalid("wasm_observation_kind_union_base_limit"));
             }
@@ -591,17 +597,22 @@ mod lazy {
             words
                 .checked_mul(2)
                 .and_then(|new| self.word_bitmap_members.checked_add(new))
+                .and_then(|count| count.checked_add(self.group_members))
+                .filter(|&count| count <= OPTIONAL_PAYLOAD_MEMBERS)
                 .and_then(|count| count.checked_add(self.base.members))
                 .and_then(|count| count.checked_add(self.members))
-                .and_then(|count| count.checked_add(self.group_members))
                 .is_some_and(|count| count <= self.limits.members)
+        }
+
+        fn annotation_limit(&self) -> usize {
+            self.limits.nodes.min(OPTIONAL_ANNOTATION_ENTRIES)
         }
 
         fn word_bitmap_metadata_room(&self) -> bool {
             self.word_bitmaps
                 .len()
                 .checked_add(self.board_word_bitmaps.len())
-                .is_some_and(|len| len < self.limits.nodes)
+                .is_some_and(|len| len < self.annotation_limit())
         }
 
         fn word_query_charge(
@@ -708,7 +719,7 @@ mod lazy {
             if !self.word_bitmap_room(word_count) {
                 return Ok(false);
             }
-            self.word_query_charge(word_count.saturating_add(1), control)?;
+            self.word_query_charge(checked_work(word_count, 1)?, control)?;
             let mut words = Vec::new();
             if words.try_reserve_exact(word_count).is_err() {
                 return Ok(false);
@@ -817,7 +828,7 @@ mod lazy {
                     continue;
                 }
                 self.charge(
-                    self.word_bitmaps[&root].words.len().saturating_add(1),
+                    checked_work(self.word_bitmaps[&root].words.len(), 1)?,
                     control,
                 )?;
                 bitmap.or_same_counts(counts, &self.word_bitmaps[&root].words, |_| Ok(()))?;
@@ -834,7 +845,7 @@ mod lazy {
                     if !self.word_bitmap_room(bitmap.words().len()) {
                         return Ok(false);
                     }
-                    self.charge(bitmap.words().len().saturating_add(1), control)?;
+                    self.charge(checked_work(bitmap.words().len(), 1)?, control)?;
                     let mut words = Vec::new();
                     if words.try_reserve_exact(bitmap.words().len()).is_err() {
                         return Ok(false);
@@ -962,7 +973,7 @@ mod lazy {
             if !self.word_bitmap_metadata_room() || !self.word_bitmap_room(bitmap.words().len()) {
                 return Ok(false);
             }
-            self.charge(bitmap.words().len().saturating_add(1), control)?;
+            self.charge(checked_work(bitmap.words().len(), 1)?, control)?;
             let mut words = Vec::new();
             words
                 .try_reserve_exact(bitmap.words().len())
@@ -999,7 +1010,7 @@ mod lazy {
             control: &ExecutionControl,
         ) -> Result<(), WasmExactSearchError> {
             let before = self.work;
-            self.charge(self.word_bitmap_drop_work.saturating_add(4), control)?;
+            self.charge(checked_work(self.word_bitmap_drop_work, 4)?, control)?;
             self.word_bitmap_metrics[8] += self.work - before;
             self.word_bitmap_board_metrics[5] += self.board_word_bitmaps.len().saturating_add(1);
             self.word_bitmaps = HashMap::new();
@@ -1094,10 +1105,9 @@ mod lazy {
                 }
                 return Ok(Some(reference));
             }
-            // These optional annotation caches use the existing finite node
-            // bound. Reaching it keeps the original language rather than
-            // admitting an unbounded cache or treating unknown as impossible.
-            if self.supply_aliases.len() >= self.limits.nodes {
+            // This annotation bound controls cache retention only. Reaching
+            // it keeps the original language and its exact policy path.
+            if self.supply_aliases.len() >= self.annotation_limit() {
                 return Ok(None);
             }
             if roots.is_empty() {
@@ -1241,14 +1251,14 @@ mod lazy {
                 index
             } else {
                 let admitted = self
-                    .base
-                    .members
-                    .checked_add(self.members)
-                    .and_then(|count| count.checked_add(self.group_members))
-                    .and_then(|count| count.checked_add(self.word_bitmap_members))
+                    .group_members
+                    .checked_add(self.word_bitmap_members)
                     .and_then(|count| count.checked_add(roots.len()))
+                    .filter(|&count| count <= OPTIONAL_PAYLOAD_MEMBERS)
+                    .and_then(|count| count.checked_add(self.base.members))
+                    .and_then(|count| count.checked_add(self.members))
                     .is_some_and(|count| count <= self.limits.members);
-                if !admitted || self.multiset_groups.len() >= self.limits.nodes {
+                if !admitted || self.multiset_groups.len() >= self.annotation_limit() {
                     self.group_metrics[5] += 1;
                     return Ok(false);
                 }
@@ -1432,7 +1442,7 @@ mod lazy {
             if let Some(&counts) = self.multisets.get(&root) {
                 return Ok((counts != NO_MULTISET).then_some(counts));
             }
-            if self.multisets.len() >= self.limits.nodes {
+            if self.multisets.len() >= self.annotation_limit() {
                 return Ok(None);
             }
             self.supply_metrics[2] += 1;
@@ -1487,7 +1497,7 @@ mod lazy {
             };
             // Children can fill the cache while this frame is being proved.
             // Not retaining this optional result never licenses a prune.
-            if self.multisets.len() < self.limits.nodes {
+            if self.multisets.len() < self.annotation_limit() {
                 let old = self.multisets.capacity() * (core::mem::size_of::<(u32, u32)>() + 1);
                 self.multisets.try_reserve(1).map_err(|_| storage())?;
                 self.multisets.insert(root, counts.unwrap_or(NO_MULTISET));
@@ -1509,7 +1519,7 @@ mod lazy {
             kinds: &PieceOrderLanguageCache,
             control: &ExecutionControl,
         ) -> Result<u32, WasmExactSearchError> {
-            self.charge(roots.len().saturating_add(1), control)?;
+            self.charge(checked_work(roots.len(), 1)?, control)?;
             if roots.len() > self.limits.members {
                 return Err(invalid("wasm_observation_physical_union_limit"));
             }
@@ -1579,7 +1589,18 @@ mod lazy {
                 }
                 existing = node.next_same_hash;
             }
-            if self.base.nodes.saturating_add(self.nodes.len()) >= self.limits.nodes {
+            // Local union references occupy the low bits below KIND_UNION_TAG.
+            // The sum with physical base nodes is only an optional caller
+            // budget; it is not the capacity of this separate namespace.
+            if self.nodes.len() >= KIND_UNION_TAG as usize {
+                return Err(invalid("wasm_observation_kind_namespace_exhausted"));
+            }
+            if self
+                .base
+                .nodes
+                .checked_add(self.nodes.len())
+                .is_none_or(|count| count >= self.limits.nodes)
+            {
                 return Err(invalid("wasm_observation_physical_node_limit"));
             }
             let required_members = self
@@ -1737,7 +1758,12 @@ mod lazy {
                 }
                 if !self.scratch.is_empty() {
                     let child = self.intern_scratch(remaining - 1, kinds, control)?;
-                    if self.base.edges.saturating_add(self.edges) >= self.limits.edges {
+                    if self
+                        .base
+                        .edges
+                        .checked_add(self.edges)
+                        .is_none_or(|count| count >= self.limits.edges)
+                    {
                         return Err(invalid("wasm_observation_physical_edge_limit"));
                     }
                     let edges = &mut self.nodes[node as usize].edges;
@@ -1802,7 +1828,9 @@ mod lazy {
 }
 
 #[cfg(feature = "placement-dependency-pc")]
-pub(in crate::backend::wasm_cpu) use lazy::{KindUnionArena, KindUnionResources, KIND_SOURCE_TAG};
+pub(in crate::backend::wasm_cpu) use lazy::{
+    KindUnionArena, KindUnionResources, KIND_SOURCE_TAG, KIND_UNION_TAG,
+};
 
 #[cfg(all(test, feature = "placement-dependency-pc"))]
 mod tests {
@@ -1856,6 +1884,31 @@ mod tests {
             members: 256,
             work: 10_000,
         }
+    }
+
+    #[test]
+    fn product_kind_union_is_not_limited_by_development_generation_budgets() {
+        let mut kinds = PieceOrderLanguageCache::default();
+        let roots = fixture(&mut kinds);
+        let base = KindUnionResources {
+            nodes: 1_000_000,
+            edges: 8_000_000,
+            members: 8_000_000,
+            work: 64_000_000,
+        };
+        let unlimited = KindUnionResources {
+            nodes: usize::MAX,
+            edges: usize::MAX,
+            members: usize::MAX,
+            work: usize::MAX,
+        };
+        let mut arena = KindUnionArena::new(base, unlimited).unwrap();
+        let control = ExecutionControl::default();
+        let root = arena.intern(3, &roots, &kinds, &control).unwrap();
+        arena.prepare_edges(root, 0x7f, &kinds, &control).unwrap();
+        assert!(root < KIND_UNION_TAG);
+        assert!(arena.metrics()[4] > 0);
+        assert_eq!(lazy_words(&mut arena, &kinds, root).len(), 3);
     }
 
     fn known_supply(queue: &[u8], hold_code: u8, hold_enabled: bool) -> KnownSupplyQuery {

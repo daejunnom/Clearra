@@ -13,24 +13,6 @@ use clearra_coverage::{
 };
 use serde_json::Value;
 
-#[cfg(not(feature = "webgpu-search"))]
-pub(super) fn assert_same_pc(cpu: &Value, other: &Value) {
-    for field in [
-        "normalized_unique_solution_count",
-        "normalized_solution_set_hash",
-        "covered_pattern_count",
-        "coverage_probability",
-        "count_complete",
-        "probability_complete",
-    ] {
-        let expected = cpu["summary"]
-            .get(field)
-            .unwrap_or_else(|| panic!("missing {field}"));
-        assert!(!expected.is_null(), "{field}");
-        assert_eq!(other["summary"][field], *expected, "{field}");
-    }
-}
-
 pub(super) fn assert_fixture_probability(
     fixture: &Value,
     row_kind: CoverageRowKind,

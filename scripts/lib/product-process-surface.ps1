@@ -28,7 +28,7 @@ function Ensure-ClearraBuiltBinary([string]$Root) {
                     -Label "cargo build clearra" `
                     -FileName $CargoPath `
                     -Arguments @(
-                        "build", "--locked", "--release", "-p", "clearra-cli", "--features", "wasm-cpu-runtime,webgpu-search",
+                        "build", "--locked", "--release", "-p", "clearra-cli", "--features", "wasm-cpu-runtime",
                         "--bin", "clearra"
                     )
                 if ($VerboseLog.IsPresent -and -not [string]::IsNullOrWhiteSpace($result.Output)) {

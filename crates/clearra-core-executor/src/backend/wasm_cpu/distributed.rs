@@ -171,17 +171,6 @@ impl WasmDistributedProgress {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum WasmDistributedBackendExecution {
     Cpu,
-    WebGpu {
-        adapter_index: u8,
-        adapter_name: String,
-        adapter_type: &'static str,
-        adapter_backend: String,
-        peak_gpu_bytes: u64,
-        shader_hash: String,
-        shader_version: &'static str,
-        warmup_performed: bool,
-        session_reused: bool,
-    },
     CpuFallback {
         reason: &'static str,
         failure_class: &'static str,

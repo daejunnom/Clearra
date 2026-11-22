@@ -105,7 +105,7 @@ Invoke-DesktopHostCommand `
         -FileName $CargoPath `
         -Arguments @(
             "test", "-p", "clearra-gui-host",
-            "--features", "wasm-cpu-runtime,webgpu-search",
+            "--features", "wasm-cpu-runtime",
             "--lib",
             "--", "--test-threads=1"
         ) `

@@ -35,7 +35,7 @@ test('profiling artifacts are opt-in, build-only, and separate from normal candi
   const cliBuild = cli.split('      - name: Build exact-source Windows CLI for stage profiling\n')[1]
     .split(/^      - /mu)[0];
   assert.match(cliBuild, diagnostic);
-  assert.match(cliBuild, /cargo build --locked --release --package clearra-cli --bin clearra --features wasm-cpu-runtime,webgpu-search,stage-profiling/u);
+  assert.match(cliBuild, /cargo build --locked --release --package clearra-cli --bin clearra --features wasm-cpu-runtime,stage-profiling/u);
   assert.match(cliBuild, /source_commit = \$env:GITHUB_SHA/u);
   assert.match(cliBuild, /release_authority = \$false/u);
   assert.match(cliBuild, /Get-FileHash -LiteralPath \$staged -Algorithm SHA256/u);

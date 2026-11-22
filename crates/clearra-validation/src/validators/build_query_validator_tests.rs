@@ -38,6 +38,28 @@ fn base_query() -> BuildCoverageQuery {
 }
 
 #[test]
+fn default_build_pattern_generation_is_unlimited_but_explicit_budgets_are_enforced() {
+    let original = base_query();
+    let query = |limits| {
+        BuildCoverageQuery::new(
+            original.template().clone(),
+            original.domains().to_vec(),
+            Vec::new(),
+            4097,
+            limits,
+        )
+    };
+    assert!(!validate_build_coverage_query(&query(BuildCoverageLimits::default())).has_errors());
+    let bounded = validate_build_coverage_query(&query(BuildCoverageLimits::new(0, 4096)));
+    assert!(bounded.has_errors());
+    assert!(bounded.diagnostics().iter().any(|diagnostic| {
+        diagnostic.evidence().iter().any(|evidence| {
+            evidence.key() == "reason" && evidence.value() == "pattern_limit_exceeded"
+        })
+    }));
+}
+
+#[test]
 fn valid_build_query_is_supported() {
     let report = validate_build_coverage_query(&base_query());
 

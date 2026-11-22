@@ -527,7 +527,11 @@ impl WasmFullHeightPcResultMerger {
             .buildable_tilings
             .try_reserve(accepted.len())
             .map_err(|_| storage_error())?;
-        self.engine.buildable_tilings.extend(accepted);
+        for tiling in accepted {
+            self.engine
+                .insert_admitted_buildable_tiling(tiling)
+                .map_err(typed_error)?;
+        }
         if self.engine.pc_observation.is_some() {
             // Worker-local observation trees cannot be OR'ed. The original
             // owner re-materializes one global language from this exact family.

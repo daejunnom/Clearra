@@ -139,7 +139,7 @@ test('cannot use the historical C ProductE2E receipt as shipping authority', (t)
         binary: 'clearra',
         profile: 'dev',
         target_triple: 'x86_64-pc-windows-msvc',
-        features: ['native-c-core', 'webgpu-search'],
+        features: ['native-c-core'],
       };
     }
     writeFileSync(paths.receiptFile, `${JSON.stringify(receipt)}\n`);

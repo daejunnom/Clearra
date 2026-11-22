@@ -13,7 +13,6 @@ use super::{
     BackendFallback, GpuFailureDisposition, PackingBackendOutcome, PcBackendSelection,
     SelectedSearchBackend,
 };
-#[cfg(not(all(feature = "webgpu-search", feature = "native-c-core")))]
 use super::{GpuExecutionFailure, GpuExecutionFailureStage, SearchBackendFallbackReason};
 
 #[cfg(all(test, feature = "native-c-core"))]
@@ -190,28 +189,6 @@ fn execute_cpu(
     })
 }
 
-#[cfg(all(feature = "webgpu-search", feature = "native-c-core"))]
-fn execute_gpu(
-    search_problem: &SearchProblem,
-    source_pattern_bits: Option<&PatternBitSet>,
-    problem: &CPackingProblem,
-    policy: &PcExecutionPolicy,
-    cancellation: &ExecutionCancellationToken,
-    backend: SelectedSearchBackend,
-    worker_count: usize,
-) -> Result<PackingBackendOutcome, PackingRunnerError> {
-    super::native_webgpu_packing_executor::execute_webgpu_buildable_unique(
-        search_problem,
-        source_pattern_bits,
-        problem,
-        policy,
-        cancellation,
-        backend,
-        worker_count,
-    )
-}
-
-#[cfg(not(all(feature = "webgpu-search", feature = "native-c-core")))]
 fn execute_gpu(
     _search_problem: &SearchProblem,
     _source_pattern_bits: Option<&PatternBitSet>,

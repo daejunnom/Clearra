@@ -53,6 +53,8 @@ pub struct BuildProblemLimits {
 }
 
 impl BuildProblemLimits {
+    /// Zero leaves the corresponding generation dimension unbounded.
+    /// Positive values are explicit caller budgets.
     pub fn new(max_assignments: usize, max_patterns: usize) -> Self {
         Self {
             max_assignments,

@@ -16,8 +16,7 @@ function Test-RustUnsafeBoundaryAllowed([string]$RelativePath) {
             "crates/clearra-core-executor/src/performance/host_clock.rs",
             "crates/clearra-postprocess/src/score_batch/exact_scoring_execution_materializer.rs",
             "crates/clearra-platform-fs/src/linux.rs",
-            "crates/clearra-platform-fs/src/windows.rs",
-            "crates/clearra-webgpu/src/geometry_exact_cover_timing.rs"
+            "crates/clearra-platform-fs/src/windows.rs"
         )) {
         return $true
     }

@@ -77,30 +77,6 @@ pub(crate) enum ExecutorSearchStage {
     PackingCpuTaskSplit,
     #[cfg_attr(not(feature = "native-c-core"), allow(dead_code))]
     PackingCpuBuildabilityReduce,
-    #[cfg(feature = "webgpu-search")]
-    PackingGpuBatchPlan,
-    #[cfg(feature = "webgpu-search")]
-    PackingGpuConnect,
-    #[cfg(feature = "webgpu-search")]
-    // The native-c-core WebGPU backend combines dispatch and readback here;
-    // WASM-CPU/WebGPU builds emit the split host/dispatch/payload stages below.
-    #[cfg_attr(not(feature = "native-c-core"), allow(dead_code))]
-    PackingGpuDispatchReadback,
-    #[cfg(feature = "webgpu-search")]
-    PackingGpuHostPrepareSubmit,
-    #[cfg(feature = "webgpu-search")]
-    PackingGpuDispatchCounterWait,
-    #[cfg(feature = "webgpu-search")]
-    PackingGpuPayloadReadback,
-    #[cfg(feature = "webgpu-search")]
-    PackingGpuHostReduce,
-    #[cfg(feature = "webgpu-search")]
-    PackingGpuTraceEnumeration,
-    #[cfg(feature = "webgpu-search")]
-    // Canonicalization is currently emitted by the native geometry backend;
-    // retain the stage identity so cross-target profiler schemas stay stable.
-    #[cfg_attr(not(feature = "native-c-core"), allow(dead_code))]
-    PackingGpuCanonicalize,
     BuildUpNativeExecution,
     BuildUpGeometryLanguageExport,
     BuildUpLanguageIntersection,
@@ -219,24 +195,6 @@ impl ExecutorSearchStage {
         Self::PackingCpuGeometryGraph,
         Self::PackingCpuTaskSplit,
         Self::PackingCpuBuildabilityReduce,
-        #[cfg(feature = "webgpu-search")]
-        Self::PackingGpuBatchPlan,
-        #[cfg(feature = "webgpu-search")]
-        Self::PackingGpuConnect,
-        #[cfg(feature = "webgpu-search")]
-        Self::PackingGpuDispatchReadback,
-        #[cfg(feature = "webgpu-search")]
-        Self::PackingGpuHostPrepareSubmit,
-        #[cfg(feature = "webgpu-search")]
-        Self::PackingGpuDispatchCounterWait,
-        #[cfg(feature = "webgpu-search")]
-        Self::PackingGpuPayloadReadback,
-        #[cfg(feature = "webgpu-search")]
-        Self::PackingGpuHostReduce,
-        #[cfg(feature = "webgpu-search")]
-        Self::PackingGpuTraceEnumeration,
-        #[cfg(feature = "webgpu-search")]
-        Self::PackingGpuCanonicalize,
         Self::BuildUpNativeExecution,
         Self::BuildUpGeometryLanguageExport,
         Self::BuildUpLanguageIntersection,
@@ -347,24 +305,6 @@ impl ExecutorSearchStage {
             Self::PackingCpuGeometryGraph => "rust.packing.cpu.geometry_graph",
             Self::PackingCpuTaskSplit => "rust.packing.cpu.task_split",
             Self::PackingCpuBuildabilityReduce => "rust.packing.cpu.buildability_reduce",
-            #[cfg(feature = "webgpu-search")]
-            Self::PackingGpuBatchPlan => "rust.packing.gpu.batch_plan",
-            #[cfg(feature = "webgpu-search")]
-            Self::PackingGpuConnect => "rust.packing.gpu.connect",
-            #[cfg(feature = "webgpu-search")]
-            Self::PackingGpuDispatchReadback => "rust.packing.gpu.dispatch_readback",
-            #[cfg(feature = "webgpu-search")]
-            Self::PackingGpuHostPrepareSubmit => "rust.packing.gpu.host_prepare_submit",
-            #[cfg(feature = "webgpu-search")]
-            Self::PackingGpuDispatchCounterWait => "rust.packing.gpu.dispatch_counter_wait",
-            #[cfg(feature = "webgpu-search")]
-            Self::PackingGpuPayloadReadback => "rust.packing.gpu.payload_readback",
-            #[cfg(feature = "webgpu-search")]
-            Self::PackingGpuHostReduce => "rust.packing.gpu.host_exact_reduce",
-            #[cfg(feature = "webgpu-search")]
-            Self::PackingGpuTraceEnumeration => "rust.packing.gpu.trace_enumeration",
-            #[cfg(feature = "webgpu-search")]
-            Self::PackingGpuCanonicalize => "rust.packing.gpu.canonicalize",
             Self::BuildUpNativeExecution => "rust.buildup.native_execution",
             Self::BuildUpGeometryLanguageExport => "rust.buildup.geometry_language_export",
             Self::BuildUpLanguageIntersection => "rust.buildup.language_intersection",
@@ -504,7 +444,7 @@ thread_local! {
 /// Measure only the job body, and publish its completion after this returns.
 /// A pooled thread then leaves with no residual state from the request.
 #[cfg(feature = "parallel")]
-pub(crate) struct WorkerSearchProfile {
+pub struct WorkerSearchProfile {
     #[cfg(all(
         not(target_family = "wasm"),
         any(feature = "search-stage-profiling", feature = "wasm-stage-profiling")
@@ -515,7 +455,7 @@ pub(crate) struct WorkerSearchProfile {
 #[cfg(feature = "parallel")]
 impl WorkerSearchProfile {
     #[inline]
-    pub(crate) fn capture() -> Self {
+    pub fn capture() -> Self {
         Self {
             #[cfg(all(
                 not(target_family = "wasm"),
@@ -534,7 +474,7 @@ impl WorkerSearchProfile {
     }
 
     #[inline]
-    pub(crate) fn measure<R>(self, job: impl FnOnce() -> R) -> R {
+    pub fn measure<R>(self, job: impl FnOnce() -> R) -> R {
         #[cfg(all(
             not(target_family = "wasm"),
             any(feature = "search-stage-profiling", feature = "wasm-stage-profiling")
@@ -691,31 +631,6 @@ impl SearchStageSpan {
         }
         #[cfg(not(any(feature = "search-stage-profiling", feature = "wasm-stage-profiling")))]
         let _ = work_items;
-    }
-
-    #[cfg(feature = "webgpu-search")]
-    pub(crate) fn record_elapsed(
-        stage: ExecutorSearchStage,
-        elapsed: Option<std::time::Duration>,
-        work_items: u64,
-    ) {
-        #[cfg(any(feature = "search-stage-profiling", feature = "wasm-stage-profiling"))]
-        if let Some(elapsed) = elapsed {
-            ACTIVE_PROFILE.with(|profile| {
-                let mut profile = profile.borrow_mut();
-                let Some(profile) = profile.as_mut() else {
-                    return;
-                };
-                let stage = &mut profile.totals[stage as usize];
-                stage.duration = stage.duration.saturating_add(elapsed);
-                stage.invocation_count = stage.invocation_count.saturating_add(1);
-                stage.work_item_count = stage.work_item_count.saturating_add(work_items);
-            });
-        }
-        #[cfg(not(any(feature = "search-stage-profiling", feature = "wasm-stage-profiling")))]
-        {
-            let _ = (stage, elapsed, work_items);
-        }
     }
 
     #[cfg(any(feature = "search-stage-profiling", feature = "wasm-stage-profiling"))]

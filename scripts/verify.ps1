@@ -152,16 +152,6 @@ try {
             Write-Output "[verify] ManagedLocal does not compile Rust tests because Cargo build helpers are generated executables"
         }
     }
-    Invoke-ClearraProgressCase -Scope $progress -Name "WebGPU test surface" -Body {
-        if ($trustedExecution) {
-            Invoke-VerifyCargoCompile @(
-                "check", "--locked", "-p", "clearra-core-executor", "--features", "parallel,webgpu-search", "--tests"
-            ) "cargo check clearra-core-executor WebGPU tests"
-        } else {
-            Write-Output "[verify] ManagedLocal leaves WebGPU compilation to Trusted execution"
-        }
-    }
-
     $script:VerifyCoreResult = $null
     Invoke-ClearraProgressCase -Scope $progress -Name "C core" -PreserveOutput -Body {
         Complete-ClearraProgressLine $progress
@@ -178,7 +168,7 @@ try {
     Invoke-ClearraProgressCase -Scope $progress -Name "product contract" -Body {
         if ($nativeTestExecutionAllowed) {
             $output = Invoke-VerifyCargoCompile @(
-                "test", "--locked", "-p", "clearra-cli", "--features", "wasm-cpu-runtime,webgpu-search",
+                "test", "--locked", "-p", "clearra-cli", "--features", "wasm-cpu-runtime",
                 "--lib", "product_contract_e2e::",
                 "--", "--test-threads=1"
             ) "product contract E2E"

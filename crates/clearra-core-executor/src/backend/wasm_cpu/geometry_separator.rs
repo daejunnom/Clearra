@@ -145,12 +145,6 @@ impl SeparatorCatalog {
             && (right_demand - right_supply).is_multiple_of(4)
     }
 
-    // The GPU constraint catalog is the only consumer of the packed bitset.
-    #[cfg_attr(not(feature = "webgpu-search"), allow(dead_code))]
-    pub const fn safe_column_bits(&self) -> u64 {
-        self.safe_column_bits
-    }
-
     pub const fn identity_digest(&self) -> u64 {
         self.identity_digest
     }

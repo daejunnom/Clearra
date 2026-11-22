@@ -30,7 +30,7 @@ use super::{
         WasmCandidatePacket, WasmCandidateProducerAdvance, WasmDistributedGeometrySummary,
         WasmDistributedProgress,
     },
-    extended_build_probability::ExtendedBuildProbabilitySession,
+    extended_build_probability::{ExtendedBuildProbabilitySession, ExtendedBuildSharedPreparation},
     WasmExactSearchError,
 };
 
@@ -195,6 +195,15 @@ impl DistributedBuildProbabilitySession {
         match self {
             Self::Compact(session) => Some(session.shared_supply_catalog()),
             Self::Extended(_) => None,
+        }
+    }
+
+    fn shared_extended_preparation(
+        &mut self,
+    ) -> Result<Option<ExtendedBuildSharedPreparation>, WasmExactSearchError> {
+        match self {
+            Self::Compact(_) => Ok(None),
+            Self::Extended(session) => session.shared_build_preparation(),
         }
     }
 
@@ -440,6 +449,7 @@ pub struct WasmBuildProbabilityCandidateProducer {
     active: Option<ProducerPass>,
     pending: VecDeque<ProducerPassSpec>,
     shared_supply_catalog: Option<CompactBuildProbabilitySharedCatalog>,
+    shared_extended_preparation: Option<ExtendedBuildSharedPreparation>,
     finalizers: Vec<DistributedBuildProbabilitySession>,
     summaries: Vec<WasmDistributedGeometrySummary>,
     mirror_included: bool,
@@ -546,11 +556,26 @@ impl WasmBuildProbabilityCandidateProducer {
         let execution_admission = admit_budget_bound_search_execution(problem, local_compute_units)
             .map_err(WasmCpuSearchError::resource_admission)?;
         let pass_count = usize::from(mirror_distinct) + 1;
-        let aggregate_plan = ExecutionAdmissionPlan::build_probability_with_verifiers(
-            problem,
-            pass_count,
-            verifier_count,
-        )
+        let symbolic = !field.is_compact()
+            && ExtendedBuildProbabilitySession::uses_standard_bag_coverage(
+                problem,
+                aggregation,
+                finesse_metric.requested(),
+            )
+            .map_err(map_typed_error)?;
+        let aggregate_plan = if symbolic {
+            ExecutionAdmissionPlan::symbolic_build_probability_with_verifiers(
+                problem,
+                pass_count,
+                verifier_count,
+            )
+        } else {
+            ExecutionAdmissionPlan::build_probability_with_verifiers(
+                problem,
+                pass_count,
+                verifier_count,
+            )
+        }
         .ok_or_else(|| {
             WasmCpuSearchError::resource_admission(
                 execution_admission
@@ -578,7 +603,7 @@ impl WasmBuildProbabilityCandidateProducer {
             .memory_bound()
             .with_cap(aggregate_budget.replica_cap_bytes)
             .map_err(WasmCpuSearchError::resource_admission)?;
-        let active_session = DistributedBuildProbabilitySession::new_with_finesse(
+        let mut active_session = DistributedBuildProbabilitySession::new_with_finesse(
             problem,
             original,
             aggregation,
@@ -587,6 +612,16 @@ impl WasmBuildProbabilityCandidateProducer {
         )
         .map_err(map_typed_error)?;
         let shared_supply_catalog = active_session.shared_supply_catalog();
+        // Only native, in-process delegation can share these immutable owners.
+        // Other passes/realms preserve their existing typed preparation path.
+        let shared_extended_preparation =
+            if !cfg!(target_family = "wasm") && verifier_count != 0 && !mirror_included {
+                active_session
+                    .shared_extended_preparation()
+                    .map_err(map_typed_error)?
+            } else {
+                None
+            };
         let active = Some(ProducerPass {
             pass_index: 0,
             session: active_session,
@@ -604,6 +639,7 @@ impl WasmBuildProbabilityCandidateProducer {
             active,
             pending,
             shared_supply_catalog,
+            shared_extended_preparation,
             finalizers: Vec::with_capacity(usize::from(mirror_distinct) + 1),
             summaries: Vec::with_capacity(usize::from(mirror_distinct) + 1),
             mirror_included,
@@ -634,6 +670,14 @@ impl WasmBuildProbabilityCandidateProducer {
         field: BuildProbabilityField,
         aggregation: BuildProbabilityAggregation,
     ) -> Result<WasmBuildProbabilityDistributedVerifier, WasmCpuSearchError> {
+        if let Some(prepared) = self.shared_extended_preparation.as_ref() {
+            return WasmBuildProbabilityDistributedVerifier::new_with_shared_build_preparation(
+                prepared,
+                field,
+                aggregation,
+                self.delegate_verifier_admission()?,
+            );
+        }
         WasmBuildProbabilityDistributedVerifier::new_with_delegated_admission(
             &self.problem,
             field,
@@ -879,11 +923,6 @@ impl WasmBuildProbabilityCandidateProducer {
                             .checked_mul(core::mem::size_of::<ProducerPassSpec>() as u128)?,
                     )
                 })?;
-        for summary in &self.summaries {
-            observed = observed.checked_add(checked_backend_execution_nested_retained_bytes(
-                &summary.backend_execution,
-            )?)?;
-        }
         if let Some(active) = &self.active {
             observed = observed.checked_add(active.session.checked_retained_bytes()?)?;
         }
@@ -934,6 +973,7 @@ pub struct WasmBuildProbabilityDistributedVerifier {
     aggregation: BuildProbabilityAggregation,
     pass_fields: Vec<BuildProbabilityField>,
     shared_supply_catalog: Option<CompactBuildProbabilitySharedCatalog>,
+    shared_extended_preparation: Option<ExtendedBuildSharedPreparation>,
     active_pass: Option<(u8, DistributedBuildProbabilitySession)>,
     completed_results: Vec<CoreExecutionResult>,
     completed_progress: WasmDistributedProgress,
@@ -974,11 +1014,29 @@ impl WasmBuildProbabilityDistributedVerifier {
             .then(|| original.mirrored_horizontally())
             .filter(|candidate| *candidate != original);
         let pass_count = usize::from(mirrored.is_some()) + 1;
-        execution_admission
-            .ensure_plan(
-                ExecutionAdmissionPlan::build_probability(problem, pass_count),
-                0,
+        let symbolic = !field.is_compact()
+            && ExtendedBuildProbabilitySession::uses_standard_bag_coverage(
+                problem,
+                aggregation,
+                false,
             )
+            .map_err(map_typed_error)?;
+        let plan = if symbolic {
+            ExecutionAdmissionPlan::symbolic_build_probability_with_verifiers(
+                problem, pass_count, 0,
+            )
+            .ok_or_else(|| {
+                WasmCpuSearchError::resource_admission(
+                    memory_bound
+                        .ensure(u128::MAX, 1)
+                        .expect_err("checked verifier plan overflow is unavailable"),
+                )
+            })?
+        } else {
+            ExecutionAdmissionPlan::build_probability(problem, pass_count)
+        };
+        execution_admission
+            .ensure_plan(plan, 0)
             .map_err(WasmCpuSearchError::resource_admission)?;
         let mut pass_fields = Vec::with_capacity(usize::from(mirrored.is_some()) + 1);
         pass_fields.push(original);
@@ -990,6 +1048,7 @@ impl WasmBuildProbabilityDistributedVerifier {
             aggregation,
             pass_fields,
             shared_supply_catalog: None,
+            shared_extended_preparation: None,
             active_pass: None,
             completed_results: Vec::with_capacity(pass_count),
             completed_progress: WasmDistributedProgress::default(),
@@ -997,6 +1056,29 @@ impl WasmBuildProbabilityDistributedVerifier {
             memory_bound,
             finished: false,
         })
+    }
+
+    fn new_with_shared_build_preparation(
+        prepared: &ExtendedBuildSharedPreparation,
+        field: BuildProbabilityField,
+        aggregation: BuildProbabilityAggregation,
+        execution_admission: ExecutionAdmission,
+    ) -> Result<Self, WasmCpuSearchError> {
+        if !prepared.matches_pass(field, aggregation) {
+            return Err(WasmCpuSearchError::InvalidProblem {
+                reason: "extended_build_shared_preparation_request_mismatch",
+            });
+        }
+        // Request identity is by construction: no separately supplied source,
+        // rule profile or weights can be paired with this preparation.
+        let mut verifier = Self::new_with_delegated_admission(
+            prepared.problem(),
+            field,
+            aggregation,
+            execution_admission,
+        )?;
+        verifier.shared_extended_preparation = Some(prepared.clone());
+        Ok(verifier)
     }
 
     pub fn consume(
@@ -1112,8 +1194,20 @@ impl WasmBuildProbabilityDistributedVerifier {
             .checked_retained_bytes()
             .and_then(|bytes| bytes.checked_add(external_retained_bytes))
             .ok_or_else(|| self.verifier_memory_projection_error())?;
-        let session = match self.shared_supply_catalog.as_ref() {
-            Some(shared) => {
+        let prepared = self
+            .shared_extended_preparation
+            .as_ref()
+            .filter(|_| pass_index == 0);
+        let session = match (prepared, self.shared_supply_catalog.as_ref()) {
+            (Some(prepared), _) => ExtendedBuildProbabilitySession::new_shared_build_verifier(
+                prepared,
+                field,
+                self.aggregation,
+                self.memory_bound,
+                new_session_coexisting,
+            )
+            .map(DistributedBuildProbabilitySession::Extended),
+            (None, Some(shared)) => {
                 DistributedBuildProbabilitySession::new_with_shared_supply_catalog_and_coexisting_retained_bytes(
                     &self.problem,
                     field,
@@ -1124,7 +1218,7 @@ impl WasmBuildProbabilityDistributedVerifier {
                     new_session_coexisting,
                 )
             }
-            None => {
+            (None, None) => {
                 DistributedBuildProbabilitySession::new_external_geometry_with_coexisting_retained_bytes(
                     &self.problem,
                     field,
@@ -1940,11 +2034,6 @@ impl WasmBuildProbabilityDistributedResultMerger {
                     )
                 })?
                 .checked_add(self.pattern_weights.checked_storage_retained_bytes()?)?;
-        for summary in &self.summaries {
-            observed = observed.checked_add(checked_backend_execution_nested_retained_bytes(
-                &summary.backend_execution,
-            )?)?;
-        }
         for pass in &self.passes {
             observed = observed.checked_add(pass.checked_retained_bytes()?)?;
         }
@@ -1967,25 +2056,6 @@ impl WasmBuildProbabilityDistributedResultMerger {
             .checked_add(checked_finesse_material_vec_retained_bytes(
                 finesse_materials,
             )?)
-    }
-}
-
-fn checked_backend_execution_nested_retained_bytes(
-    execution: &super::distributed::WasmDistributedBackendExecution,
-) -> Option<u128> {
-    use super::distributed::WasmDistributedBackendExecution;
-
-    match execution {
-        WasmDistributedBackendExecution::Cpu
-        | WasmDistributedBackendExecution::CpuFallback { .. } => Some(0),
-        WasmDistributedBackendExecution::WebGpu {
-            adapter_name,
-            adapter_backend,
-            shader_hash,
-            ..
-        } => (adapter_name.capacity() as u128)
-            .checked_add(adapter_backend.capacity() as u128)?
-            .checked_add(shader_hash.capacity() as u128),
     }
 }
 
@@ -2035,7 +2105,6 @@ fn apply_backend_execution_with_memory_guard(
 ) -> Result<CoreExecutionResult, WasmExactSearchError> {
     use super::distributed::WasmDistributedBackendExecution;
 
-    let hybrid_requested = result.field("backend_requested") == Some("hybrid");
     let cpu_backend = if result.field("board_storage") == Some("board256-canonical") {
         "wasm-cpu-build-probability-extended"
     } else {
@@ -2064,51 +2133,6 @@ fn apply_backend_execution_with_memory_guard(
             ("gpu_failure_stage", failure_stage),
             ("discarded_partial_gpu_result", "false"),
             ("gpu_original_result_incomplete", "false"),
-        ]),
-        WasmDistributedBackendExecution::WebGpu {
-            adapter_index: _,
-            adapter_name,
-            adapter_type,
-            adapter_backend,
-            peak_gpu_bytes: _,
-            shader_hash,
-            shader_version,
-            warmup_performed: _,
-            session_reused: _,
-        } => result.checked_borrowed_field_replacement_projection(&[
-            ("backend_selected", "webgpu"),
-            ("actual_backend", "webgpu"),
-            ("backend_fallback_used", "false"),
-            ("fallback_used", "false"),
-            ("backend_fallback_reason", "none"),
-            ("fallback_backend", "none"),
-            ("gpu_available", "false"),
-            ("gpu_disabled_reason", "none"),
-            ("gpu_trust_state", "gpu-computed-cpu-confirmed"),
-            (
-                "hybrid_status",
-                if hybrid_requested {
-                    "gpu-ready"
-                } else {
-                    "not-requested"
-                },
-            ),
-            ("hybrid_disabled_reason", "none"),
-            ("gpu_failure_class", "none"),
-            ("gpu_failure_stage", "none"),
-            ("discarded_partial_gpu_result", "false"),
-            ("gpu_original_result_incomplete", "false"),
-            // Decimal maxima make this stack-only borrowed projection an
-            // upper bound for every concrete u8/u64 backend value.
-            ("gpu_device_selected_index", "255"),
-            ("gpu_device_selected_name", adapter_name.as_str()),
-            ("gpu_device_selected_type", adapter_type),
-            ("gpu_device_selected_backend", adapter_backend.as_str()),
-            ("resource_peak_gpu_bytes", "18446744073709551615"),
-            ("gpu_shader_hash", shader_hash.as_str()),
-            ("gpu_shader_version", shader_version),
-            ("gpu_warmup_performed", "false"),
-            ("gpu_session_reused", "false"),
         ]),
     }
     .ok_or(WasmExactSearchError::InvalidProblem(
@@ -2141,49 +2165,6 @@ fn apply_backend_execution_with_memory_guard(
                 "gpu_original_result_incomplete",
                 original_gpu_result_incomplete,
             ),
-        ],
-        WasmDistributedBackendExecution::WebGpu {
-            adapter_index,
-            adapter_name,
-            adapter_type,
-            adapter_backend,
-            peak_gpu_bytes,
-            shader_hash,
-            shader_version,
-            warmup_performed,
-            session_reused,
-        } => vec![
-            field("backend_selected", "webgpu"),
-            field("actual_backend", "webgpu"),
-            field("backend_fallback_used", false),
-            field("fallback_used", false),
-            field("backend_fallback_reason", "none"),
-            field("fallback_backend", "none"),
-            field("gpu_available", true),
-            field("gpu_disabled_reason", "none"),
-            field("gpu_trust_state", "gpu-computed-cpu-confirmed"),
-            field(
-                "hybrid_status",
-                if hybrid_requested {
-                    "gpu-ready"
-                } else {
-                    "not-requested"
-                },
-            ),
-            field("hybrid_disabled_reason", "none"),
-            field("gpu_failure_class", "none"),
-            field("gpu_failure_stage", "none"),
-            field("discarded_partial_gpu_result", false),
-            field("gpu_original_result_incomplete", false),
-            field("gpu_device_selected_index", adapter_index),
-            field("gpu_device_selected_name", adapter_name),
-            field("gpu_device_selected_type", adapter_type),
-            field("gpu_device_selected_backend", adapter_backend),
-            field("resource_peak_gpu_bytes", peak_gpu_bytes),
-            field("gpu_shader_hash", shader_hash),
-            field("gpu_shader_version", shader_version),
-            field("gpu_warmup_performed", warmup_performed),
-            field("gpu_session_reused", session_reused),
         ],
     };
     result
@@ -2978,16 +2959,12 @@ mod tests {
     fn backend_field_replacement_is_guarded_before_strings_at_the_one_byte_boundary() {
         use super::super::distributed::WasmDistributedBackendExecution;
 
-        let execution = WasmDistributedBackendExecution::WebGpu {
-            adapter_index: u8::MAX,
-            adapter_name: "adapter-name".repeat(32),
-            adapter_type: "discrete-gpu",
-            adapter_backend: "vulkan".repeat(32),
-            peak_gpu_bytes: u64::MAX,
-            shader_hash: "f".repeat(256),
-            shader_version: "v-test",
-            warmup_performed: true,
-            session_reused: true,
+        let execution = WasmDistributedBackendExecution::CpuFallback {
+            reason: "webgpu_backend_retired",
+            failure_class: "unavailable",
+            failure_stage: "capability-query",
+            discarded_partial_gpu_result: false,
+            original_gpu_result_incomplete: false,
         };
         let result = || {
             CoreExecutionResult::default().with_additional_fields(vec![
@@ -3008,7 +2985,15 @@ mod tests {
                 Ok(())
             })
             .expect("unbounded guarded backend materialization");
-        assert_eq!(materialized.field("backend_selected"), Some("webgpu"));
+        assert_eq!(
+            materialized.field("backend_selected"),
+            Some("wasm-cpu-build-probability")
+        );
+        assert_eq!(materialized.bool_field("gpu_available"), Some(false));
+        assert_eq!(
+            materialized.field("gpu_disabled_reason"),
+            Some("webgpu_backend_retired")
+        );
 
         let problem = exact_probability_problem(4, 1, PcSolutionProbabilityPolicy::Omit);
         let unbounded =
@@ -3190,6 +3175,103 @@ mod tests {
         merger
             .finish(&summary, 2)
             .expect("distributed probability result")
+    }
+
+    #[test]
+    #[cfg(not(target_family = "wasm"))]
+    fn native_extended_preparation_is_delegated_only_for_the_matching_original_pass() {
+        let (problem, field) =
+            super::super::build_probability::inverse_dependency_build_fixture(8, false);
+        let standalone = WasmBuildProbabilityDistributedVerifier::new_typed(
+            &problem,
+            field,
+            BuildProbabilityAggregation::Buildability,
+        )
+        .unwrap();
+        assert!(standalone.shared_extended_preparation.is_none());
+        drop(standalone);
+        let mut producer =
+            WasmBuildProbabilityCandidateProducer::new_with_finesse_and_verifiers_typed(
+                &problem,
+                field,
+                BuildProbabilityAggregation::Buildability,
+                FinesseMetric::Off,
+                FinessePatternKnowledge::Both,
+                1,
+                0,
+            )
+            .unwrap();
+        assert!(producer.shared_extended_preparation.is_some());
+        let mut verifier = producer
+            .new_delegated_verifier(field, BuildProbabilityAggregation::Buildability)
+            .unwrap();
+        assert!(verifier.shared_extended_preparation.is_some());
+        assert!(producer
+            .new_delegated_verifier(
+                field.mirrored_horizontally(),
+                BuildProbabilityAggregation::Buildability,
+            )
+            .is_err());
+
+        let control = ExecutionControl::default();
+        let summary = loop {
+            match producer.advance(&control).unwrap() {
+                WasmCandidateProducerAdvance::Pending => {}
+                WasmCandidateProducerAdvance::Candidate(candidate) => {
+                    verifier.consume(&candidate, &control).unwrap();
+                }
+                WasmCandidateProducerAdvance::Completed(summary) => break summary,
+                WasmCandidateProducerAdvance::Cancelled => panic!("not cancelled"),
+            }
+        };
+        let partials = verifier.finish().unwrap();
+        drop(verifier);
+        let mut merger = producer.into_merger().unwrap();
+        for partial in &partials {
+            merger.absorb(partial).unwrap();
+        }
+        let shared_result = merger.finish(&summary, 2).unwrap();
+        drop(merger);
+        let serial_result = run_serial_without_finesse(&problem, field);
+        assert_eq!(
+            shared_result.coverage_pattern_words(),
+            serial_result.coverage_pattern_words()
+        );
+        assert_eq!(
+            shared_result.normalized_solution_keys(),
+            serial_result.normalized_solution_keys()
+        );
+        assert_eq!(shared_result.path_steps(), serial_result.path_steps());
+        assert_eq!(shared_result.field("coverage_probability"), Some("1"));
+        assert_eq!(shared_result.field("count_complete"), Some("true"));
+
+        let mirror_field =
+            BuildProbabilityField::from_words_preserving_height(8, [0; 4], [0xf, 0, 0, 0])
+                .unwrap()
+                .with_horizontal_mirror_included(true);
+        assert!(mirror_field.includes_applicable_horizontal_mirror());
+        for (fallback_field, finesse) in [
+            (mirror_field, FinesseMetric::Off),
+            (field, FinesseMetric::Inputs),
+        ] {
+            let fallback =
+                WasmBuildProbabilityCandidateProducer::new_with_finesse_and_verifiers_typed(
+                    &problem,
+                    fallback_field,
+                    BuildProbabilityAggregation::Buildability,
+                    finesse,
+                    FinessePatternKnowledge::Both,
+                    1,
+                    0,
+                )
+                .unwrap();
+            assert!(fallback.shared_extended_preparation.is_none());
+            assert!(fallback
+                .new_delegated_verifier(fallback_field, BuildProbabilityAggregation::Buildability,)
+                .unwrap()
+                .shared_extended_preparation
+                .is_none());
+        }
     }
 
     fn assert_solution_probability_contract(
@@ -3870,6 +3952,98 @@ mod tests {
             terminal.expect_err("identity terminal must preserve the guarded failure"),
             "wasm_build_probability_aggregate_memory_budget_exceeded"
         );
+    }
+
+    #[test]
+    fn public_result_memory_does_not_recharge_reported_peak_at_the_exact_live_and_future_cap() {
+        let problem = exact_probability_problem(4, 1, PcSolutionProbabilityPolicy::Include);
+        let field = BuildProbabilityField::from_words_preserving_height(4, [0; 4], [0xf, 0, 0, 0])
+            .expect("compact one-I field");
+        let (mut merger, partial, summary) = one_worker_partial_and_merger(&problem, field);
+        merger.absorb(&partial).expect("valid worker partial");
+        drop(partial);
+        let reported_peak = 1_073_741_824_usize;
+        let result = merger
+            .finish(&summary, 2)
+            .expect("baseline final result")
+            .with_replaced_fields(vec![(
+                "resource_peak_cpu_bytes".to_owned(),
+                reported_peak.to_string(),
+            )]);
+        let result_bytes = result
+            .checked_resource_retained_bytes()
+            .expect("actual final-result owners, including the replaced reporting field");
+        assert!(result_bytes < reported_peak as u128);
+        let coexisting_bytes = merger
+            .checked_retained_bytes()
+            .expect("actual coexisting merger owners");
+        let future_bytes = 4_096;
+        let required = coexisting_bytes + result_bytes + future_bytes;
+        let unbounded =
+            ExecutionMemoryBound::unbounded_for_problem(&problem).expect("test memory authority");
+
+        merger.memory_bound = unbounded.with_cap(required).expect("exact live-plus-future cap");
+        merger
+            .validate_public_result_memory_with_future(&result, future_bytes)
+            .expect("released execution history must not be charged as live result storage");
+        assert_eq!(result.usize_field("resource_peak_cpu_bytes"), Some(reported_peak));
+        merger.memory_bound = unbounded
+            .with_cap(required - 1)
+            .expect("one-byte-short live-plus-future cap");
+        assert_eq!(
+            merger
+                .validate_public_result_memory_with_future(&result, future_bytes)
+                .expect_err("one byte below actual current ownership must still fail closed"),
+            "wasm_build_probability_aggregate_memory_budget_exceeded"
+        );
+        assert_eq!(result.usize_field("resource_peak_cpu_bytes"), Some(reported_peak));
+    }
+
+    #[test]
+    fn extended_merger_finishes_with_reported_worker_peak_larger_than_its_live_memory_cap() {
+        let problem = exact_probability_problem(24, 1, PcSolutionProbabilityPolicy::Include);
+        let field = BuildProbabilityField::from_words_preserving_height(24, [0; 4], [0xf, 0, 0, 0])
+            .expect("extended one-I field");
+        let (mut merger, partial, summary) = one_worker_partial_and_merger(&problem, field);
+        assert!(matches!(
+            merger.passes.as_slice(),
+            [DistributedBuildProbabilitySession::Extended(_)]
+        ));
+        let reported_worker_peak = 1_073_741_824_usize;
+        let partial = partial.with_replaced_fields(vec![(
+            "resource_peak_cpu_bytes".to_owned(),
+            reported_worker_peak.to_string(),
+        )]);
+        let partial_bytes = partial
+            .checked_resource_retained_bytes()
+            .expect("actual worker-result owners");
+        let live_cap = 16 * 1_024 * 1_024;
+        assert!(partial_bytes < live_cap);
+        assert!(live_cap < reported_worker_peak as u128);
+        let bound = ExecutionMemoryBound::unbounded_for_problem(&problem)
+            .expect("test memory authority")
+            .with_cap(live_cap)
+            .expect("bounded merger and inner extended finalizer");
+        merger.memory_bound = bound;
+        merger.passes[0].set_memory_bound_for_test(bound);
+        merger
+            .absorb_with_external_retained(&partial, partial_bytes)
+            .expect("the worker result is admitted by its actual payload size");
+        assert_eq!(
+            partial.usize_field("resource_peak_cpu_bytes"),
+            Some(reported_worker_peak)
+        );
+        drop(partial);
+
+        let result = merger
+            .finish(&summary, 2)
+            .expect("the extended finalizer must not re-admit released worker history");
+        assert_solution_probability_contract(&result, true, 1);
+        assert_eq!(result.bool_field("probability_complete"), Some(true));
+        assert_eq!(result.bool_field("count_complete"), Some(true));
+        assert_eq!(result.bool_field("resource_truncated"), Some(false));
+        assert!(result.checked_resource_retained_bytes().unwrap() < live_cap);
+        assert!(result.usize_field("resource_peak_cpu_bytes").unwrap() >= reported_worker_peak);
     }
 
     fn rejected_partial_reason(

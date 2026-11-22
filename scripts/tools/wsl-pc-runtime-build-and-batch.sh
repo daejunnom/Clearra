@@ -13,7 +13,7 @@ GPU_DEVICE="$4"
 WORKERS="$5"
 INVENTORY="$6"
 PROFILE="$7"
-case "$FEATURES" in gpu-backend | gpu-backend,stage-profiling) ;; *) exit 2 ;; esac
+case "$FEATURES" in native-c-reference | native-c-reference,stage-profiling) ;; *) exit 2 ;; esac
 [[ "$REPORT_ROOT" == "${CLEARRA_WSL_REPORT_ROOT:?A private guest report root is required}" &&
    "$REPORT_ROOT" == "$ROOT/.clearra-pc-runtime."* ]] || exit 2
 case "$BACKEND" in auto | cpu | gpu | hybrid) ;; *) exit 2 ;; esac
@@ -34,7 +34,7 @@ prepare_started_ns="$(date +%s%N)"
 # This benchmark arm is the independent native C reference. The fixed
 # transport arguments select profiling, not a different solver.
 bash "$AUTHORITY_ROOT/scripts/tools/wsl-native-cargo.sh" \
-    build --release -p clearra-pc-artifact --features "native-c-reference,$FEATURES"
+    build --release -p clearra-pc-artifact --features "$FEATURES"
 prepare_ended_ns="$(date +%s%N)"
 batch_started_ns="$(date +%s%N)"
 bash "$AUTHORITY_ROOT/scripts/tools/wsl-pc-runtime-batch.sh" \

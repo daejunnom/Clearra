@@ -106,9 +106,6 @@ let requestedPrewarmWorkerCount = 1;
 let completedPrewarmWorkerCount = 0;
 let completedRootOnlyPrewarm = false;
 let loadedWasm: ClearraWasmModule | null = null;
-let gpuWarmup: Promise<void> | null = null;
-let gpuWarmupGeneration = 0;
-let gpuWarmupCompleted = false;
 let tablebaseRequested = false;
 let deferredTablebaseRequested = false;
 let tablebaseWarmup: Promise<void> | null = null;
@@ -271,7 +268,7 @@ async function runCommandText(
   let failureCode = 'E_WASM_MODULE_LOAD_FAILED';
   let wasm: ClearraWasmModule | null = null;
   try {
-    // Entry warmup is opportunistic. A slow optional worker or GPU adapter
+    // Entry warmup is opportunistic. A slow optional worker
     // must never become a correctness barrier for a foreground command.
     interruptIncompleteRuntimePrewarm();
     wasm = loadedWasm ?? (await loadClearraWasmModule(
@@ -543,7 +540,6 @@ function startRuntimePrewarm(
   }
   if (
     !normalizedWarmupPolicy.cpuWarmup &&
-    !normalizedWarmupPolicy.gpuWarmup &&
     !requestedTablebase
   ) {
     postRuntimePrewarmPhase('finished', 0);
@@ -562,7 +558,6 @@ function startRuntimePrewarm(
   }
   if (prewarmCompleted) {
     if (loadedWasm) {
-      if (normalizedWarmupPolicy.gpuWarmup) void startGpuWarmupAfterWasm(loadedWasm);
       void startTablebaseWarmupAfterWasm(loadedWasm);
     }
     return;
@@ -580,7 +575,6 @@ function startRuntimePrewarm(
       loadedWasm = wasm;
       rootWarmupCompleted = true;
       completedRootOnlyPrewarm = true;
-      if (normalizedWarmupPolicy.gpuWarmup) void startGpuWarmupAfterWasm(wasm);
       void startTablebaseWarmupAfterWasm(wasm);
       if (
         normalizedWarmupPolicy.cpuWarmup &&
@@ -628,36 +622,7 @@ function startRuntimePrewarm(
     });
 }
 
-function startGpuWarmupAfterWasm(wasm: ClearraWasmModule): Promise<void> {
-  if (gpuWarmupCompleted) return Promise.resolve();
-  if (gpuWarmup) return gpuWarmup;
-  const generation = ++gpuWarmupGeneration;
-  gpuWarmup = wasm.prewarm_gpu(null)
-    .then(() => {
-      if (generation === gpuWarmupGeneration) gpuWarmupCompleted = true;
-    })
-    .catch((error) => {
-      if (generation === gpuWarmupGeneration) {
-        console.warn('Clearra GPU warmup was unavailable', error);
-      }
-    })
-    .finally(() => {
-      if (generation === gpuWarmupGeneration) gpuWarmup = null;
-    });
-  return gpuWarmup;
-}
-
 function interruptIncompleteRuntimePrewarm() {
-  if (gpuWarmup) {
-    gpuWarmupGeneration += 1;
-    gpuWarmup = null;
-    gpuWarmupCompleted = false;
-    const wasm = loadedWasm;
-    if (!wasm) {
-      throw new Error('GPU warmup is active without an owned WASM runtime');
-    }
-    wasm.cancel_gpu_warmup();
-  }
   if (!runtimePrewarm) return;
   runtimePrewarmGeneration += 1;
   runtimePrewarm = null;
@@ -818,14 +783,6 @@ function disposeRuntime() {
   pendingRuntimePrewarm = null;
   completedPrewarmWorkerCount = 0;
   completedRootOnlyPrewarm = false;
-  gpuWarmupGeneration++;
-  gpuWarmup = null;
-  gpuWarmupCompleted = false;
-  try {
-    loadedWasm?.cancel_gpu_warmup();
-  } catch {
-    // Closing the worker releases a trapped GPU warmup state.
-  }
   tablebaseRequested = false;
   deferredTablebaseRequested = false;
   tablebaseWarmupGeneration += 1;
@@ -899,14 +856,6 @@ function closeFailClosedWorker() {
   pendingRuntimePrewarm = null;
   completedPrewarmWorkerCount = 0;
   completedRootOnlyPrewarm = false;
-  gpuWarmupGeneration++;
-  gpuWarmup = null;
-  gpuWarmupCompleted = false;
-  try {
-    loadedWasm?.cancel_gpu_warmup();
-  } catch {
-    // Worker termination is the final fail-closed release boundary.
-  }
   deferredTablebaseRequested = false;
   tablebaseWarmupGeneration += 1;
   tablebaseWarmup = null;

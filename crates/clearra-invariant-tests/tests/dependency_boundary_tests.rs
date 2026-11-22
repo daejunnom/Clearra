@@ -52,7 +52,7 @@ fn dependency_boundary_contract_documents_product_pipeline() {
         &text,
         "architecture_validation_rejects_core_executor_runtime_scoring",
     );
-    assert_contains(&text, "clearra-postprocess-gpu -> clearra-postprocess");
+    assert_contains(&text, "webgpu_backend_retired");
 }
 
 #[test]
@@ -111,8 +111,8 @@ fn search_postprocess_boundary_keeps_adapters_out_of_search() {
         &text,
         "CandidateExecutionAggregate -> ReplayTrace -> ScoreMatrix",
     );
-    assert_contains(&text, "PostProcessCoverageUnion -> WebGPU bitset union");
-    assert_contains(&text, "PostGpuTrustState");
+    assert_contains(&text, "PostProcess runs on CPU");
+    assert_contains(&text, "unsupported without CPU fallback");
 }
 
 #[test]

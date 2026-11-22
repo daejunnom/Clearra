@@ -113,19 +113,9 @@ $dependencyRules = @(
             Forbidden = @("clearra-search", "clearra-core-ffi", "clearra-core-executor", "clearra-cli", "clearra-output")
         },
         @{
-            Crate = "clearra-postprocess-gpu"
-            Path = "crates/clearra-postprocess-gpu/Cargo.toml"
-            Forbidden = @("clearra-search", "clearra-core-ffi", "clearra-core-executor", "clearra-cli", "clearra-output")
-        },
-        @{
             Crate = "clearra-wasm"
             Path = "crates/clearra-wasm/Cargo.toml"
             Forbidden = @("clearra-cli", "clearra-core-ffi")
-        },
-        @{
-            Crate = "clearra-webgpu"
-            Path = "crates/clearra-webgpu/Cargo.toml"
-            Forbidden = @("clearra-cli", "clearra-app")
         },
         @{
             Crate = "clearra-validation"
@@ -347,22 +337,6 @@ $importRules = @(
             )
         },
         @{
-            Dir = "crates/clearra-postprocess-gpu/src"
-            ForbiddenCrates = @("clearra_search", "clearra_core_ffi", "clearra_core_executor", "clearra_cli", "clearra_output")
-            Forbidden = @(
-                "clearra_search",
-                "clearra_core_ffi",
-                "clearra_core_executor",
-                "clearra_cli",
-                "clearra_output",
-                "SpecialSpinCaseRegistry::finalize",
-                "Fumen",
-                "JSON",
-                "extern `"C`"",
-                "clr_"
-            )
-        },
-        @{
             # Browser WASM links the same pure command compiler as native CLI;
             # exact dependency/import checks below still reject clearra_cli.
             Dir = "crates/clearra-wasm/src"
@@ -377,21 +351,6 @@ $importRules = @(
                 "PathBuf",
                 "Path::new",
                 "CARGO_BIN_EXE_clearra"
-            )
-        },
-        @{
-            Dir = "crates/clearra-webgpu/src"
-            ForbiddenCrates = @("clearra_cli", "clearra_app")
-            Forbidden = @(
-                "clearra_cli",
-                "clearra_app",
-                "std::fs",
-                "File::open",
-                "read_to_string",
-                "shader_path",
-                "user_shader_path",
-                "load_wgsl",
-                "WGSL_PATH"
             )
         },
         @{

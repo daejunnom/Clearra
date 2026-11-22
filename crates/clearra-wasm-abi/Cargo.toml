@@ -16,7 +16,7 @@ clearra-pc-graph = { path = "../clearra-pc-graph" }
 clearra-accelerator-product-host = { path = "../clearra-accelerator-product-host" }
 clearra-core-executor = { path = "../clearra-core-executor" }
 clearra-rules = { path = "../clearra-rules" }
-clearra-wasm = { path = "../clearra-wasm", features = ["webgpu-search"] }
+clearra-wasm = { path = "../clearra-wasm" }
 serde_json = { workspace = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]

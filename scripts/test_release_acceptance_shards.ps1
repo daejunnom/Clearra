@@ -164,7 +164,6 @@ $expectedRustPackages = @(
     'clearra-app',
     'clearra-core-executor',
     'clearra-core-ffi',
-    'clearra-webgpu',
     'clearra-core-domain',
     'clearra-coverage',
     'clearra-objectives',
@@ -203,36 +202,10 @@ $serialWholePackageKey = ($serialWholePackages | Sort-Object) -join '|'
 $expectedSerialWholePackageKey = (@(
     'clearra-app',
     'clearra-core-executor',
-    'clearra-core-ffi',
-    'clearra-webgpu'
+    'clearra-core-ffi'
 ) | Sort-Object) -join '|'
 if ($serialWholePackageKey -ne $expectedSerialWholePackageKey) {
     throw 'Every package that can reach the process-global lease must use an isolated serial harness.'
-}
-$searchBackend = Get-Content -LiteralPath (
-    Join-Path $repositoryRoot 'crates/clearra-core-executor/src/backend/wasm_cpu_search_backend.rs'
-) -Raw
-# Match the pure module itself, not its position relative to the independent
-# score-resource tests. Rustfmt leaves top-level module braces at column zero.
-$pureSelectionModules = [regex]::Matches(
-    $searchBackend,
-    '(?ms)^#\[cfg\(all\(test, feature = "webgpu-search"\)\)\]\r?\nmod tests \{\r?\n(?<body>.*?)^\}'
-)
-if ($pureSelectionModules.Count -ne 1) {
-    throw 'Expected exactly one pure WebGPU workload-selection test module.'
-}
-$pureSelectionBody = $pureSelectionModules[0].Groups['body'].Value
-if ($pureSelectionBody.Contains('score_resource_test_guard') -or
-    $pureSelectionBody.Contains('SCORE_RESOURCE_TEST_LOCK')) {
-    throw 'Pure WebGPU workload-selection tests must not reserve the process-global score resource.'
-}
-foreach ($testName in @(
-    'auto_uses_cpu_for_small_geometry_and_gpu_for_large_geometry',
-    'explicit_backend_selection_is_not_overridden_by_workload_size'
-)) {
-    if ([regex]::Matches($pureSelectionBody, "(?m)^\s*fn $testName\(").Count -ne 1) {
-        throw "Pure WebGPU workload-selection test is missing or duplicated: $testName"
-    }
 }
 Write-Output 'release_acceptance_shard_test=rust-global-resource-first-and-parallel-safe status=passed'
 

@@ -186,10 +186,6 @@ pub use structural_order::{
 };
 mod terminal_hold_projection;
 mod tiling_parallel;
-#[cfg(feature = "webgpu-search")]
-mod webgpu_distributed;
-#[cfg(feature = "webgpu-search")]
-mod webgpu_search;
 
 pub(crate) use build_probability::{BuildProbabilityAdvance, WasmBuildProbabilitySession};
 pub use build_probability_distributed::{
@@ -246,10 +242,6 @@ pub use tiling_parallel::{
     WasmPackedTilingIdentity, WasmPcRootProducer, WasmPcRootResultMerger, WasmTilingRootAdvance,
     WasmTilingRootChunk, WasmTilingRootProducer, WasmTilingRootResultMerger, WasmTilingRootWorker,
 };
-#[cfg(feature = "webgpu-search")]
-pub use webgpu_distributed::WasmWebGpuCandidateProducer;
-#[cfg(feature = "webgpu-search")]
-pub(crate) use webgpu_search::WasmWebGpuSearchSession;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) enum WasmExactSearchError {

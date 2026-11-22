@@ -1,6 +1,6 @@
 # This file is dot-sourced by scripts/lib/architecture-validation.ps1.
-# Native search GPU is unavailable in the default build. CPU fallback remains
-# a CPU result with an explicit reason. WebGPU is owned by clearra-webgpu.
+# This validates the independent C reference ABI only. Product WebGPU has
+# been retired; explicit product GPU/Hybrid requests are unsupported.
 
 function Invoke-GpuPackingBackendValidation() {
     foreach ($requiredFile in @(

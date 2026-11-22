@@ -1410,6 +1410,7 @@ fn drive_durable_build_probability<J: DelegationJournal, C: NativeDurableClock>(
     }
 
     let mut summary = None;
+    let mut candidates_dispatched = 0_u64;
     while summary.is_none() {
         let mut wave = Vec::new();
         wave.try_reserve_exact(request_senders.len())
@@ -1455,7 +1456,12 @@ fn drive_durable_build_probability<J: DelegationJournal, C: NativeDurableClock>(
                 )?;
                 live_tokens.push(pending.token.clone());
                 wave.push(pending);
-                control.report_progress("build-probability-candidates", count as u64, None);
+                candidates_dispatched = candidates_dispatched.saturating_add(count as u64);
+                control.report_progress(
+                    "build-probability-candidates",
+                    candidates_dispatched,
+                    None,
+                );
             }
             if summary.is_some() {
                 break;
@@ -1662,28 +1668,48 @@ pub(crate) fn run_provider_admitted_native_build_probability<
     for worker_index in 0..worker_threads {
         let worker_id = u32::try_from(worker_index)
             .ok()
-            .and_then(|value| value.checked_add(1))
-            .ok_or_else(|| {
-                durable_runtime_unavailable("native_build_probability_worker_identity_overflow")
-            })?;
+            .and_then(|value| value.checked_add(1));
+        let Some(worker_id) = worker_id else {
+            drop(request_senders);
+            drop(completion_sender);
+            drop(completion_receiver);
+            let _ = join_workers(handles);
+            return Err(durable_runtime_unavailable(
+                "native_build_probability_worker_identity_overflow",
+            ));
+        };
         let (request_sender, request_receiver) =
             mpsc::sync_channel(NATIVE_BUILD_REQUEST_CHANNEL_CAPACITY);
         let worker_completion_sender = completion_sender.clone();
         let worker_control = control.clone();
-        let thread_name = native_worker_thread_name(worker_index)?;
+        let thread_name = match native_worker_thread_name(worker_index) {
+            Ok(name) => name,
+            Err(error) => {
+                drop(request_senders);
+                drop(completion_sender);
+                drop(completion_receiver);
+                let _ = join_workers(handles);
+                return Err(error);
+            }
+        };
+        let worker_profile = clearra_core_executor::performance::WorkerSearchProfile::capture();
         let handle = match thread::Builder::new()
             .name(thread_name)
             .stack_size(NATIVE_BUILD_WORKER_STACK_BYTES)
             .spawn(move || {
-                durable_worker_main(
-                    worker_index,
-                    worker_id,
-                    expected_job_sha256,
-                    request_sha256,
-                    request_receiver,
-                    worker_completion_sender,
-                    worker_control,
-                )
+                // These workers belong to this one request and are joined
+                // before its result or cancellation is returned to the caller.
+                worker_profile.measure(|| {
+                    durable_worker_main(
+                        worker_index,
+                        worker_id,
+                        expected_job_sha256,
+                        request_sha256,
+                        request_receiver,
+                        worker_completion_sender,
+                        worker_control,
+                    )
+                })
             }) {
             Ok(handle) => handle,
             Err(_) => {

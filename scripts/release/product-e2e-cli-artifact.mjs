@@ -12,7 +12,7 @@ const RECIPE = Object.freeze({
   binary: 'clearra',
   profile: 'release',
   target_triple: 'x86_64-pc-windows-msvc',
-  features: ['online-pc4-tablebase', 'wasm-cpu-runtime', 'webgpu-search'],
+  features: ['online-pc4-tablebase', 'wasm-cpu-runtime'],
 });
 
 function fail(message) {

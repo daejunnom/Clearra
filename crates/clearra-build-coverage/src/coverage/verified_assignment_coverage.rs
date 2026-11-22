@@ -125,8 +125,7 @@ pub(super) fn validate_verified_query(
     }
     let limits = query.limits();
     if query.pattern_count() == 0
-        || query.pattern_count() > limits.max_patterns()
-        || limits.max_assignments() == 0
+        || (limits.max_patterns() != 0 && query.pattern_count() > limits.max_patterns())
     {
         return Err(Error::InvalidConcreteCoverageLimits);
     }

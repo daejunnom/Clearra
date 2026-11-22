@@ -79,17 +79,9 @@ try {
             -CommandArgs @(Get-ProductE2EOpeningSearchArgs "cpu") `
             -ReuseExactReadOnlyProbe
 
-        Invoke-ProductE2EOpening2LBackendEquivalenceCase
-
         Invoke-ProductE2EBackendCapabilityReportCase
 
-        Invoke-ProductE2EScenario4LBackendEquivalenceCase
-
-        Invoke-ProductE2EGpuNoFallbackUnavailableCase
-
-        Invoke-ProductE2EGpuAllowFallbackReasonCase
-
-        Invoke-ProductE2EGpuBackendTrustStateCase
+        Invoke-ProductE2ERetiredBackendCase
     }
 
     Invoke-ProductE2EFixtureCase `

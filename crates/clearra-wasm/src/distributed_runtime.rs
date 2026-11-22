@@ -12,8 +12,6 @@ use clearra_app::{
 };
 use clearra_cli_command::CliCommandRequest;
 use clearra_core_executor::performance::CooperativeWorkQuantum;
-#[cfg(feature = "webgpu-search")]
-use clearra_core_executor::WasmWebGpuCandidateProducer;
 use clearra_core_executor::{
     CoreExecutionError, WasmBuildProbabilityCandidateProducer,
     WasmBuildProbabilityDistributedResultMerger, WasmBuildProbabilityDistributedVerifier,
@@ -1254,8 +1252,6 @@ enum DistributedCandidateProducer {
     Forward(ForwardParallelCoordinator),
     Setup(WasmSetupParallelCoordinator),
     Recovery(RecoveryBuildParallelCoordinator),
-    #[cfg(feature = "webgpu-search")]
-    WebGpu(WasmWebGpuCandidateProducer),
 }
 
 pub struct WasmDistributedVerifierRuntime {
@@ -1526,44 +1522,17 @@ impl WasmDistributedCoordinator {
         }
         let requested_backend = problem.backend_policy().requested_backend();
         let distributed_requested_backend = requested_backend.into();
-        let explicit_gpu = requested_backend == RequestedSearchBackend::Gpu;
-        let webgpu_connected = build_probability_request.is_none()
-            && !full_height_pc
-            && !full_height_tiling
-            && problem.backend_policy().runtime_webgpu_available()
-            && cfg!(feature = "webgpu-search");
-        if explicit_gpu && !webgpu_connected && !problem.backend_policy().allow_backend_fallback() {
-            return Ok(WasmDistributedPreparation::Serial);
+        if matches!(
+            requested_backend,
+            RequestedSearchBackend::Gpu | RequestedSearchBackend::Hybrid
+        ) {
+            return Err(distributed_error(
+                "E_WASM_DISTRIBUTED_START",
+                "webgpu_backend_retired",
+            ));
         }
-        let unavailable_gpu = (explicit_gpu && !webgpu_connected).then(|| {
-            if build_probability_request.is_some()
-                || full_height_pc
-                || full_height_tiling
-                || problem.backend_policy().runtime_webgpu_available()
-            {
-                (
-                    "gpu_kernel_unavailable",
-                    WasmDistributedFallbackReason::GpuKernelUnavailable,
-                )
-            } else {
-                (
-                    "gpu_device_not_found",
-                    WasmDistributedFallbackReason::GpuDeviceNotFound,
-                )
-            }
-        });
-        let backend_execution_override = unavailable_gpu.map(|(reason, _)| {
-            clearra_core_executor::WasmDistributedBackendExecution::CpuFallback {
-                reason,
-                failure_class: "unavailable",
-                failure_stage: "capability-query",
-                discarded_partial_gpu_result: false,
-                original_gpu_result_incomplete: false,
-            }
-        });
-        let preparation_fallback_reason = unavailable_gpu
-            .map(|(_, reason)| reason)
-            .unwrap_or(WasmDistributedFallbackReason::None);
+        let backend_execution_override = None;
+        let preparation_fallback_reason = WasmDistributedFallbackReason::None;
         let selected_product_backend = build_probability_request
             .is_none()
             .then(|| WasmCpuSearchBackend::selected_product_backend(problem));
@@ -1741,23 +1710,11 @@ impl WasmDistributedCoordinator {
                         worker_count,
                     )
                 }
-                WasmProductSearchBackend::WebGpu => {
-                    #[cfg(feature = "webgpu-search")]
-                    {
-                        (
-                            DistributedCandidateProducer::WebGpu(
-                                WasmWebGpuCandidateProducer::new(problem).map_err(|error| {
-                                    distributed_search_error("E_WASM_DISTRIBUTED_START", error)
-                                })?,
-                            ),
-                            WasmDistributedMode::WebGpuMulti,
-                            worker_count,
-                        )
-                    }
-                    #[cfg(not(feature = "webgpu-search"))]
-                    {
-                        return Ok(WasmDistributedPreparation::Serial);
-                    }
+                WasmProductSearchBackend::RetiredGpu => {
+                    return Err(distributed_error(
+                        "E_WASM_DISTRIBUTED_START",
+                        "webgpu_backend_retired",
+                    ))
                 }
             }
         };
@@ -2165,10 +2122,6 @@ impl WasmDistributedCoordinator {
             DistributedCandidateProducer::FullHeightPc(_)
             | DistributedCandidateProducer::FullHeightTiling(_) => (true, false),
             DistributedCandidateProducer::Cpu(producer) => {
-                (true, producer.target_preparation_pending())
-            }
-            #[cfg(feature = "webgpu-search")]
-            DistributedCandidateProducer::WebGpu(producer) => {
                 (true, producer.target_preparation_pending())
             }
             _ => (false, false),
@@ -3310,8 +3263,6 @@ impl DistributedCandidateProducer {
             Self::Tiling(producer) => (Some(producer.root_count() as u128), false),
             Self::BuildProbability(producer) => (producer.progress().candidate_family_count, true),
             Self::Forward(_) | Self::Setup(_) | Self::Recovery(_) => (None, true),
-            #[cfg(feature = "webgpu-search")]
-            Self::WebGpu(producer) => (producer.progress().candidate_family_count, true),
         };
         let candidate_family_count = candidate_family_count?;
         // Before the streaming Geometry producer has completed compilation,
@@ -3336,8 +3287,6 @@ impl DistributedCandidateProducer {
             Self::BuildProbability(_) | Self::Forward(_) | Self::Setup(_) | Self::Recovery(_) => {
                 true
             }
-            #[cfg(feature = "webgpu-search")]
-            Self::WebGpu(producer) => producer.verification_required(),
         }
     }
 
@@ -3368,8 +3317,6 @@ impl DistributedCandidateProducer {
             Self::Recovery(_) => Err(invalid_search_error(
                 "recovery_producer_requires_pair_batch_advance",
             )),
-            #[cfg(feature = "webgpu-search")]
-            Self::WebGpu(producer) => producer.advance(control),
         }
     }
 
@@ -3406,8 +3353,6 @@ impl DistributedCandidateProducer {
             Self::Recovery(_) => Err(invalid_search_error(
                 "recovery_producer_owns_its_result_merger",
             )),
-            #[cfg(feature = "webgpu-search")]
-            Self::WebGpu(producer) => producer.into_merger().map(DistributedResultMerger::Pc),
         }
     }
 
@@ -3451,8 +3396,6 @@ impl DistributedCandidateProducer {
                     layer_total,
                 }
             }
-            #[cfg(feature = "webgpu-search")]
-            Self::WebGpu(producer) => producer.progress(),
         }
     }
 }

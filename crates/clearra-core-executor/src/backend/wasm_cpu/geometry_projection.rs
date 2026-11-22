@@ -26,8 +26,6 @@ pub(super) struct ProjectionCatalog {
     piece_checker_options: [u8; 7],
     piece_column_mod_four_options: [u8; 7],
     piece_column_checker_options: [u32; 7],
-    // Serialized into the GPU constraint catalog only when that backend is built.
-    #[cfg_attr(not(feature = "webgpu-search"), allow(dead_code))]
     standard_checker_rule_certified: bool,
     identity_digest: u64,
 }
@@ -258,17 +256,7 @@ impl ProjectionCatalog {
         self.identity_digest
     }
 
-    // The GPU catalog owns the packed per-piece column bounds consumer.
-    #[cfg_attr(not(feature = "webgpu-search"), allow(dead_code))]
-    pub fn piece_column_bounds(&self, piece: usize, column: usize) -> (u8, u8) {
-        (
-            self.piece_minimum[piece][column],
-            self.piece_maximum[piece][column],
-        )
-    }
-
-    // The GPU catalog owns the checker-rule certification consumer.
-    #[cfg_attr(not(feature = "webgpu-search"), allow(dead_code))]
+    #[cfg(test)]
     pub const fn standard_checker_rule_certified(&self) -> bool {
         self.standard_checker_rule_certified
     }

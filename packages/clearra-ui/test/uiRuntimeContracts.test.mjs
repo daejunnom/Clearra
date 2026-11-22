@@ -551,7 +551,7 @@ test('root worker runtime imports stay outside the component-bearing WASM barrel
   }
 });
 
-test('CPU-only policies suppress GPU warmup in build and forward production paths', () => {
+test('retired GPU warmup is suppressed in product paths', () => {
   const normalized = production.normalizeRuntimeWarmupPolicy({
     backend: 'cpu',
     cpuWarmup: true,
@@ -574,10 +574,7 @@ test('CPU-only policies suppress GPU warmup in build and forward production path
     new URL('../../../apps/clearra-web/src/workers/clearraWorker.ts', import.meta.url),
     'utf8'
   );
-  assert.match(
-    workerSource,
-    /if \(normalizedWarmupPolicy\.gpuWarmup\) void startGpuWarmupAfterWasm/u
-  );
+  assert.doesNotMatch(workerSource, /startGpuWarmupAfterWasm/u);
 });
 
 test('serial product warmup preserves requested worker authority and legacy policy shape', () => {
@@ -628,7 +625,7 @@ test('root-only warmup loads WASM without prewarming verifiers and can later exp
     new URL('../../../apps/clearra-web/src/workers/clearraWorker.ts', import.meta.url), 'utf8'
   );
   const start = source.indexOf('function startRuntimePrewarm(');
-  const end = source.indexOf('\nfunction startGpuWarmupAfterWasm(', start);
+  const end = source.indexOf('\nfunction interruptIncompleteRuntimePrewarm(', start);
   assert.ok(start >= 0 && end > start);
   const { code } = await transform(source.slice(start, end), { loader: 'ts', format: 'cjs' });
   const peers = [];
@@ -655,7 +652,6 @@ test('root-only warmup loads WASM without prewarming verifiers and can later exp
       return emptyResultWasmFixture();
     },
     wasmHostCapabilities: () => ({}), startTablebaseWarmupAfterWasm: async () => {},
-    startGpuWarmupAfterWasm: async () => {},
     prewarmDistributedWorkers: async (workers) => {
       peers.push(workers);
       if (failPeers) throw new Error('injected verifier warmup failure');
@@ -731,7 +727,7 @@ test('in-flight warmup applies only the latest policy and respects worker lifeti
     return source.slice(from, to);
   };
   const { code } = await transform([
-    extract('startRuntimePrewarm', 'startGpuWarmupAfterWasm'),
+    extract('startRuntimePrewarm', 'interruptIncompleteRuntimePrewarm'),
     extract('interruptIncompleteRuntimePrewarm', 'setTablebaseRequested'),
     extract('disposeRuntime', 'postStarted')
   ].join('\n'), { loader: 'ts', format: 'cjs' });
@@ -757,7 +753,7 @@ test('in-flight warmup applies only the latest policy and respects worker lifeti
       lifecycleOwnerId: 'test', RUNTIME_PREWARM_TIMEOUT_MS: 30000,
       setTablebaseRequested: () => {}, postRuntimePrewarmPhase: () => {},
       loadClearraWasmModule: () => load, wasmHostCapabilities: () => ({}),
-      startTablebaseWarmupAfterWasm: async () => {}, startGpuWarmupAfterWasm: async () => {},
+      startTablebaseWarmupAfterWasm: async () => {},
       prewarmDistributedWorkers: async (workers) => {
         peers.push(workers);
         if (scenario === 'already-started') await peerGate;
@@ -809,7 +805,7 @@ test('active search retains the latest warmup policy, while cancellation remains
     .replaceAll('import.meta.env.MODE', "'test'");
   const { code } = await transform([
     run,
-    slice('function startRuntimePrewarm(', '\nfunction startGpuWarmupAfterWasm('),
+    slice('function startRuntimePrewarm(', '\nfunction interruptIncompleteRuntimePrewarm('),
     slice('function updateRuntimeAuthority(', '\nfunction wasmHostCapabilities('),
     slice('function cancelActiveJob(', '\nfunction disposeRuntime(')
   ].join('\n'), { loader: 'ts', format: 'cjs' });

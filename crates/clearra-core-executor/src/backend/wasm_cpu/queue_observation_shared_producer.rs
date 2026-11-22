@@ -561,6 +561,7 @@ mod tests {
                     "wasm_observation_board_transition_invalid"
                 ))
             ));
+            family.limits = GenerationLimits::DEVELOPMENT;
             family.metrics.suffix_roots = MAX_UNION_MEMBERS;
         }
         // A duplicate binding at capacity is a hit; a genuinely new future
@@ -575,15 +576,12 @@ mod tests {
         assert!(shared.finish(true, &ExecutionControl::default()).is_err());
 
         let limited = SharedObservationProducer::new(Arc::clone(&scope)).unwrap();
-        limited
-            .state
-            .lock()
-            .unwrap()
-            .family
-            .as_mut()
-            .unwrap()
-            .metrics
-            .work = MAX_WORK - 1;
+        {
+            let mut state = limited.state.lock().unwrap();
+            let family = state.family.as_mut().unwrap();
+            family.limits = GenerationLimits::DEVELOPMENT;
+            family.metrics.work = MAX_WORK - 1;
+        }
         assert!(matches!(
             produce(
                 &mut local(&scope),

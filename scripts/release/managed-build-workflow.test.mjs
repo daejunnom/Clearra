@@ -78,7 +78,7 @@ test('ProductE2E verifies and executes the same Rust release CLI that Windows sh
     .split(/^  [a-z][a-z0-9-]*:\n/mu)[0];
   const operations = [
     'Ensure-ClearraBuildArtifactCache -RepositoryRoot $env:GITHUB_WORKSPACE -Purpose product',
-    'cargo build --locked --release --package clearra-cli --bin clearra --no-default-features --features online-pc4-tablebase,wasm-cpu-runtime,webgpu-search',
+    'cargo build --locked --release --package clearra-cli --bin clearra --no-default-features --features online-pc4-tablebase,wasm-cpu-runtime',
     'Copy-Item -LiteralPath $builtCli -Destination $cli',
     "Invoke-ClearraJsonSmoke -Name 'terminal-supply-p0'",
     'node scripts/release/product-e2e-cli-artifact.mjs seal',

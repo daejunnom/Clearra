@@ -55,7 +55,7 @@ try {
     Invoke-CheckedCommand `
         -Label "cargo check default GPU surfaces" `
         -FileName $CargoPath `
-        -Arguments @("check", "-p", "clearra-core-ffi", "-p", "clearra-webgpu")
+        -Arguments @("check", "-p", "clearra-core-ffi")
 
     Invoke-CheckedCommand `
         -Label "core-c COnlySplit" `

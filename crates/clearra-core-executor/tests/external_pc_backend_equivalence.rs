@@ -153,13 +153,6 @@ fn tsar_gpu_unavailable_without_fallback_returns_error() {
         false,
     );
 
-    #[cfg(feature = "webgpu-search")]
-    if pollster::block_on(clearra_webgpu::WebGpuGeometryExactCoverBackend::adapter_available()) {
-        let evidence = result.expect("a connected WebGPU backend must execute without fallback");
-        assert_connected_gpu_execution(&evidence, RequestedSearchBackend::Gpu);
-        return;
-    }
-
     assert!(
         result.is_err(),
         "an unavailable GPU backend must not silently fall back"

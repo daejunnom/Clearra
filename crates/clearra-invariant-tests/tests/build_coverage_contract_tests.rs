@@ -140,8 +140,8 @@ mod case_build_coverage_limits_come_from_profile_defaults {
     fn build_coverage_limits_come_from_profile_defaults() {
         let limits = BuildCoverageLimits::from(SearchDefaults::MVP1);
 
-        assert_eq!(limits.max_assignments(), 1024);
-        assert_eq!(limits.max_patterns(), 4096);
+        assert_eq!(limits.max_assignments(), 0);
+        assert_eq!(limits.max_patterns(), 0);
     }
 }
 

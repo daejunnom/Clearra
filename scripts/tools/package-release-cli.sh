@@ -59,7 +59,7 @@ cargo build \
     --locked \
     --release \
     --package clearra-cli \
-    --features wasm-cpu-runtime,webgpu-search
+    --features wasm-cpu-runtime
 
 BINARY="$CARGO_TARGET_DIR/release/clearra"
 if [[ ! -x "$BINARY" ]]; then

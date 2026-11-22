@@ -11,8 +11,6 @@ use clearra_problem::{SearchOutputPolicy, SearchProblem};
 
 use crate::{resource::WasmCpuTerminalResourceAuthority, CoreExecutionError, CoreExecutionResult};
 
-#[cfg(feature = "webgpu-search")]
-use super::wasm_cpu::WasmWebGpuSearchSession;
 #[cfg(any(test, feature = "local-search-ab"))]
 use super::wasm_cpu::{CapturedSolutionCoverage, SolutionCoverageCapture};
 use super::wasm_cpu::{
@@ -107,7 +105,8 @@ pub struct WasmCpuSearchBackend;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WasmProductSearchBackend {
     Cpu,
-    WebGpu,
+    /// Legacy explicit GPU/Hybrid requests remain identifiable and are rejected.
+    RetiredGpu,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -208,44 +207,16 @@ enum WasmSearchSessionInner {
     Cpu(WasmExactSearchSession),
     ExtendedPc(ExtendedPcSearchSession),
     ExtendedPcTiling(ExtendedPcTilingSession),
-    #[cfg(feature = "webgpu-search")]
-    WebGpu(WasmWebGpuSearchSession),
 }
 
 impl WasmCpuSearchSession {
     pub fn new(problem: &SearchProblem) -> Result<Self, WasmCpuSearchError> {
+        validate_product_backend(problem)?;
         if problem.visible_height() > 6 {
             validate_extended_pc_backend(problem)?;
             return Ok(Self {
                 inner: WasmSearchSessionInner::ExtendedPc(
                     ExtendedPcSearchSession::new(problem).map_err(map_error)?,
-                ),
-            });
-        }
-        if let Some(unavailable_reason) = explicit_gpu_unavailable_reason(problem) {
-            if !problem.backend_policy().allow_backend_fallback() {
-                return Err(WasmCpuSearchError::Unsupported {
-                    reason: "webgpu_backend_unavailable",
-                });
-            }
-            let mut cpu =
-                WasmExactSearchSession::new_for_selected_cpu(problem).map_err(map_error)?;
-            cpu.mark_cpu_fallback(
-                unavailable_reason,
-                "unavailable",
-                "capability-query",
-                false,
-                false,
-            );
-            return Ok(Self {
-                inner: WasmSearchSessionInner::Cpu(cpu),
-            });
-        }
-        #[cfg(feature = "webgpu-search")]
-        if should_use_webgpu(problem) {
-            return Ok(Self {
-                inner: WasmSearchSessionInner::WebGpu(
-                    WasmWebGpuSearchSession::new(problem).map_err(map_error)?,
                 ),
             });
         }
@@ -379,8 +350,6 @@ impl WasmCpuSearchSession {
             WasmSearchSessionInner::ExtendedPcTiling(session) => {
                 session.advance(work_budget, control).map_err(map_error)
             }
-            #[cfg(feature = "webgpu-search")]
-            WasmSearchSessionInner::WebGpu(session) => session.advance(work_budget, control),
         }?;
         match advance {
             ExactSearchAdvance::Pending => Ok(WasmCpuSearchAdvance::Pending),
@@ -416,10 +385,6 @@ impl WasmCpuSearchSession {
             WasmSearchSessionInner::ExtendedPcTiling(session) => {
                 session.validate_public_result_memory_with_future(result, checked_future_bytes)
             }
-            #[cfg(feature = "webgpu-search")]
-            WasmSearchSessionInner::WebGpu(session) => {
-                session.validate_public_result_memory_with_future(result, checked_future_bytes)
-            }
         }
         .map_err(map_error)
     }
@@ -434,10 +399,6 @@ impl WasmCpuSearchSession {
             WasmSearchSessionInner::ExtendedPcTiling(session) => {
                 session.admitted_memory_cap_bytes()
             }
-            #[cfg(feature = "webgpu-search")]
-            WasmSearchSessionInner::WebGpu(_) => {
-                unreachable!("test memory-cap probe requires the explicitly selected CPU backend")
-            }
         }
     }
 
@@ -449,8 +410,6 @@ impl WasmCpuSearchSession {
             WasmSearchSessionInner::ExtendedPcTiling(session) => {
                 session.shares_problem_arc(problem)
             }
-            #[cfg(feature = "webgpu-search")]
-            WasmSearchSessionInner::WebGpu(_) => false,
         }
     }
 
@@ -462,8 +421,6 @@ impl WasmCpuSearchSession {
             WasmSearchSessionInner::ExtendedPcTiling(session) => {
                 session.checked_terminal_retained_bytes(result)
             }
-            #[cfg(feature = "webgpu-search")]
-            WasmSearchSessionInner::WebGpu(_) => None,
         }
     }
 
@@ -503,8 +460,6 @@ impl WasmCpuSearchSession {
                     Ok(None)
                 }
             }
-            #[cfg(feature = "webgpu-search")]
-            WasmSearchSessionInner::WebGpu(_) => Ok(None),
         }
     }
 }
@@ -544,10 +499,12 @@ impl WasmCpuSearchBackend {
     }
 
     pub fn selected_product_backend(problem: &SearchProblem) -> WasmProductSearchBackend {
-        if cfg!(feature = "webgpu-search") && should_use_webgpu(problem) {
-            WasmProductSearchBackend::WebGpu
-        } else {
-            WasmProductSearchBackend::Cpu
+        match problem.backend_policy().requested_backend() {
+            clearra_pc_graph::request::RequestedSearchBackend::Gpu
+            | clearra_pc_graph::request::RequestedSearchBackend::Hybrid => {
+                WasmProductSearchBackend::RetiredGpu
+            }
+            _ => WasmProductSearchBackend::Cpu,
         }
     }
 
@@ -648,8 +605,6 @@ impl WasmCpuSearchBackend {
             WasmSearchSessionInner::ExtendedPc(_) => {
                 unreachable!("explicit compact candidate verifier")
             }
-            #[cfg(feature = "webgpu-search")]
-            WasmSearchSessionInner::WebGpu(_) => unreachable!("explicit CPU candidate verifier"),
         };
         Ok((result?, session))
     }
@@ -776,6 +731,9 @@ impl WasmCpuSearchBackend {
         if control.is_cancelled() {
             return terminal(Err(WasmCpuSearchError::Cancelled), None);
         }
+        if let Err(error) = validate_product_backend(problem) {
+            return terminal(Err(error), None);
+        }
         #[cfg(test)]
         if let Err(error) = validate_strict_prefix_scope(problem, control) {
             return terminal(Err(error), None);
@@ -823,9 +781,7 @@ impl WasmCpuSearchBackend {
             }
         }
         #[cfg(not(feature = "parallel"))]
-        let gpu_selected = cfg!(feature = "webgpu-search") && should_use_webgpu(problem);
-        #[cfg(not(feature = "parallel"))]
-        if worker_count > 1 && !gpu_selected && Self::distributed_execution_is_worthwhile(problem) {
+        if worker_count > 1 && Self::distributed_execution_is_worthwhile(problem) {
             return terminal(Err(WasmCpuSearchError::WorkerPoolUnavailable), None);
         }
         #[cfg(not(target_family = "wasm"))]
@@ -1058,11 +1014,8 @@ fn validate_shared_terminal_problem(
         });
     }
     match problem.backend_policy().requested_backend() {
-        RequestedSearchBackend::Cpu => {}
-        RequestedSearchBackend::Auto if !should_use_webgpu(problem) => {}
-        RequestedSearchBackend::Auto
-        | RequestedSearchBackend::Gpu
-        | RequestedSearchBackend::Hybrid => {
+        RequestedSearchBackend::Cpu | RequestedSearchBackend::Auto => {}
+        RequestedSearchBackend::Gpu | RequestedSearchBackend::Hybrid => {
             return Err(WasmCpuSearchError::Unsupported {
                 reason: "shared_terminal_memory_authority_requires_cpu_backend",
             });
@@ -1079,17 +1032,6 @@ fn validate_shared_terminal_problem(
         });
     }
     Ok(())
-}
-
-fn should_use_webgpu(problem: &SearchProblem) -> bool {
-    if problem.backend_policy().precompute_build_dependencies()
-        || (cfg!(feature = "placement-dependency-pc") && problem.pc_placement_dependency_eligible())
-        || !problem.backend_policy().runtime_webgpu_available()
-    {
-        return false;
-    }
-    let requested = problem.backend_policy().requested_backend();
-    select_webgpu_for_workload(requested, required_piece_count(problem))
 }
 
 fn required_piece_count(problem: &SearchProblem) -> usize {
@@ -1118,31 +1060,15 @@ fn estimated_pre_geometry_parallel_work(
     pattern_count.saturating_mul(subset_states)
 }
 
-fn explicit_gpu_unavailable_reason(problem: &SearchProblem) -> Option<&'static str> {
+fn validate_product_backend(problem: &SearchProblem) -> Result<(), WasmCpuSearchError> {
     use clearra_pc_graph::request::RequestedSearchBackend;
-
-    if problem.backend_policy().requested_backend() != RequestedSearchBackend::Gpu {
-        return None;
-    }
-    if !problem.backend_policy().runtime_webgpu_available() {
-        return Some("gpu_device_not_found");
-    }
-    if !cfg!(feature = "webgpu-search") {
-        return Some("gpu_kernel_unavailable");
-    }
-    None
-}
-
-const fn select_webgpu_for_workload(
-    requested: clearra_pc_graph::request::RequestedSearchBackend,
-    required_piece_count: usize,
-) -> bool {
-    use clearra_pc_graph::request::RequestedSearchBackend;
-
-    match requested {
-        RequestedSearchBackend::Cpu => false,
-        RequestedSearchBackend::Gpu | RequestedSearchBackend::Hybrid => true,
-        RequestedSearchBackend::Auto => required_piece_count >= 7,
+    match problem.backend_policy().requested_backend() {
+        RequestedSearchBackend::Cpu | RequestedSearchBackend::Auto => Ok(()),
+        RequestedSearchBackend::Gpu | RequestedSearchBackend::Hybrid => {
+            Err(WasmCpuSearchError::Unsupported {
+                reason: "webgpu_backend_retired",
+            })
+        }
     }
 }
 
@@ -1686,7 +1612,10 @@ mod coverage_summary_tests {
                 ))
                 .unwrap();
             assert!(problem.pc_placement_dependency_eligible());
-            assert!(!super::should_use_webgpu(&problem));
+            assert_eq!(
+                WasmCpuSearchBackend::selected_product_backend(&problem),
+                super::WasmProductSearchBackend::Cpu
+            );
         }
         let explicit_gpu = ProblemCompiler::compile_scenario_pc(
             &query.clone().with_execution_policy(
@@ -1697,7 +1626,10 @@ mod coverage_summary_tests {
         )
         .unwrap();
         assert!(!explicit_gpu.pc_placement_dependency_eligible());
-        assert!(super::should_use_webgpu(&explicit_gpu));
+        assert_eq!(
+            WasmCpuSearchBackend::selected_product_backend(&explicit_gpu),
+            super::WasmProductSearchBackend::RetiredGpu
+        );
         let counted = ProblemCompiler::compile_scenario_pc(
             &query
                 .with_count_policy(PcCountPolicy::CountAll)
@@ -1706,7 +1638,10 @@ mod coverage_summary_tests {
         )
         .unwrap();
         assert!(!counted.pc_placement_dependency_eligible());
-        assert!(super::should_use_webgpu(&counted));
+        assert_eq!(
+            WasmCpuSearchBackend::selected_product_backend(&counted),
+            super::WasmProductSearchBackend::Cpu
+        );
     }
 
     fn one_piece_default_auto_score_problem() -> clearra_problem::SearchProblem {
@@ -2146,13 +2081,8 @@ mod coverage_summary_tests {
         assert!(session.shares_problem_arc(&auto_cpu));
         drop(session);
 
-        let auto_gpu = Arc::new(ten_piece_auto_gpu_problem());
-        assert!(matches!(
-            WasmCpuSearchSession::new_shared(auto_gpu),
-            Err(WasmCpuSearchError::Unsupported {
-                reason: "shared_terminal_memory_authority_requires_cpu_backend"
-            })
-        ));
+        super::validate_shared_terminal_problem(&ten_piece_auto_gpu_problem(), false, false)
+            .expect("Auto remains CPU even for a large workload and an advertised GPU");
 
         let parallel_cpu = Arc::new(one_piece_exact_problem_with_policy(
             true,
@@ -2212,239 +2142,47 @@ mod coverage_summary_tests {
     }
 
     #[test]
-    fn unavailable_explicit_gpu_uses_an_explicit_cpu_fallback() {
+    fn retired_gpu_and_hybrid_reject_before_search_even_when_fallback_is_allowed() {
         let _resource_guard = score_resource_test_guard();
-        let problem = one_piece_problem(RequestedSearchBackend::Gpu, true, false);
-        let control = ExecutionControl::new(ExecutionCancellationToken::new());
-
-        let result =
-            WasmCpuSearchBackend::execute_with_control(&problem, &control).expect("GPU fallback");
-
-        assert_eq!(result.field("backend_selected"), Some("wasm-cpu"));
-        assert_eq!(result.field("backend_fallback_used"), Some("true"));
-        assert_eq!(result.field("gpu_available"), Some("false"));
-        assert_eq!(
-            result.field("gpu_disabled_reason"),
-            Some("gpu_device_not_found")
-        );
-        assert_eq!(
-            result.field("backend_fallback_reason"),
-            Some("gpu_device_not_found")
-        );
-        assert_eq!(result.field("fallback_backend"), Some("wasm-cpu"));
-    }
-
-    #[test]
-    fn selected_cpu_keeps_the_exact_legacy_scenario_extent() {
-        let _resource_guard = score_resource_test_guard();
-        let control = ExecutionControl::default();
-        let query_for = |backend, allow_fallback| {
-            PcScenarioQuery::new(
-                PcScenarioBoard::standard_10(4, 0x3f0),
-                PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::I])),
-                PieceWindow::new(1),
-            )
-            .with_rule(clearra_rules::profile::builtin_rules::srs())
-            .with_exact_pieces(Some(1))
-            .with_count_policy(PcCountPolicy::CountAll)
-            .with_retained_trace_limit(1)
-            .with_execution_policy(
-                PcExecutionPolicy::mvp_default()
-                    .with_requested_backend(backend)
-                    .with_allow_backend_fallback(allow_fallback)
-                    .with_runtime_webgpu_available(false)
-                    .with_workers(1),
-            )
-        };
-        let cpu = ProblemCompiler::compile_legacy_scenario_pc(&query_for(
-            RequestedSearchBackend::Cpu,
-            false,
-        ))
-        .expect("legacy CPU problem");
-        assert_eq!(cpu.compact_pc_geometry_height(), 1);
-        let expected = WasmCpuSearchBackend::execute_with_control(&cpu, &control)
-            .expect("legacy CPU baseline");
-        assert_eq!(
-            expected.field("normalized_unique_solution_count"),
-            Some("1")
-        );
-        let expected_hash = expected
-            .field("normalized_solution_set_hash")
-            .filter(|hash| hash.starts_with("cts1:"))
-            .expect("canonical solution family hash");
-        assert_eq!(expected.path_steps().len(), 1);
-
         for backend in [RequestedSearchBackend::Gpu, RequestedSearchBackend::Hybrid] {
-            let uses_fallback = backend == RequestedSearchBackend::Gpu;
-            let query = query_for(backend, uses_fallback);
-            let problem =
-                ProblemCompiler::compile_legacy_scenario_pc(&query).expect("legacy problem");
-            assert_eq!(problem.compact_pc_geometry_height(), 4);
-            let modern = ProblemCompiler::compile_scenario_pc(&query)
-                .expect("modern problem")
-                .into_selected_compact_exact_execution();
-            assert_eq!(modern.compact_pc_geometry_height(), 4);
-
-            let result = WasmCpuSearchBackend::execute_with_control(&problem, &control)
-                .expect("legacy scenario selected the CPU solver");
-            assert_eq!(result.field("backend_requested"), Some(backend.as_str()));
-            assert_eq!(result.field("backend_selected"), Some("wasm-cpu"));
-            assert_eq!(
-                result.field("backend_fallback_used"),
-                Some(if uses_fallback { "true" } else { "false" })
-            );
-            assert_eq!(
-                result.field("backend_fallback_reason"),
-                Some(if uses_fallback {
-                    "gpu_device_not_found"
-                } else {
-                    "none"
-                })
-            );
-            assert_eq!(result.field("count_complete"), Some("true"));
-            assert_eq!(result.field("probability_complete"), Some("true"));
-            assert_eq!(result.field("coverage_probability"), Some("1"));
-            assert_eq!(
-                result.field("normalized_solution_set_hash"),
-                Some(expected_hash)
-            );
-            assert_eq!(
-                result.normalized_solution_identities(),
-                expected.normalized_solution_identities()
-            );
-            assert_eq!(result.path_steps(), expected.path_steps());
-        }
-
-        let denied = ProblemCompiler::compile_legacy_scenario_pc(&query_for(
-            RequestedSearchBackend::Gpu,
-            false,
-        ))
-        .expect("legacy problem with denied fallback");
-        assert!(matches!(
-            WasmCpuSearchSession::new(&denied),
-            Err(WasmCpuSearchError::Unsupported {
-                reason: "webgpu_backend_unavailable"
-            })
-        ));
-    }
-
-    #[test]
-    fn unavailable_explicit_gpu_rejects_a_denied_fallback() {
-        let _resource_guard = score_resource_test_guard();
-        let problem = one_piece_problem(RequestedSearchBackend::Gpu, false, false);
-
-        assert!(matches!(
-            WasmCpuSearchSession::new(&problem),
-            Err(WasmCpuSearchError::Unsupported {
-                reason: "webgpu_backend_unavailable"
-            })
-        ));
-    }
-
-    #[cfg(feature = "webgpu-search")]
-    #[test]
-    fn unavailable_selected_adapter_is_not_reported_available_after_native_cpu_fallback() {
-        use super::{ExactSearchAdvance, WasmExactSearchSession};
-
-        let _resource_guard = score_resource_test_guard();
-        let problem = one_piece_problem(RequestedSearchBackend::Gpu, true, true);
-        let mut fallback = WasmExactSearchSession::new(&problem).expect("CPU replacement session");
-        fallback.mark_cpu_fallback(
-            "gpu_device_not_found",
-            "unavailable",
-            "capability-query",
-            false,
-            false,
-        );
-        let control = ExecutionControl::default();
-        let result = loop {
-            match fallback.advance(4096, &control).expect("CPU replacement") {
-                ExactSearchAdvance::Completed(result) => break result,
-                ExactSearchAdvance::Pending => {}
-                ExactSearchAdvance::Cancelled => panic!("CPU replacement cancelled"),
+            for allow_fallback in [false, true] {
+                for advertised_gpu in [false, true] {
+                    let problem = one_piece_problem(backend, allow_fallback, advertised_gpu);
+                    assert!(matches!(
+                        WasmCpuSearchSession::new(&problem),
+                        Err(WasmCpuSearchError::Unsupported {
+                            reason: "webgpu_backend_retired"
+                        })
+                    ));
+                    assert!(matches!(
+                        WasmCpuSearchBackend::execute_with_control(
+                            &problem,
+                            &ExecutionControl::default()
+                        ),
+                        Err(WasmCpuSearchError::Unsupported {
+                            reason: "webgpu_backend_retired"
+                        })
+                    ));
+                }
             }
-        };
-        assert_eq!(result.field("backend_selected"), Some("wasm-cpu"));
-        assert_eq!(result.field("gpu_available"), Some("false"));
-        assert_eq!(
-            result.field("gpu_disabled_reason"),
-            Some("gpu_device_not_found")
-        );
-        assert_eq!(result.field("gpu_trust_state"), Some("fallback-used"));
+        }
     }
 
     #[test]
-    fn unavailable_hybrid_selects_cpu_without_using_fallback() {
+    fn automatic_cpu_execution_ignores_historical_gpu_availability() {
         let _resource_guard = score_resource_test_guard();
-        for allow_fallback in [false, true] {
-            let problem = one_piece_problem(RequestedSearchBackend::Hybrid, allow_fallback, false);
-            let control = ExecutionControl::new(ExecutionCancellationToken::new());
-
-            let result = WasmCpuSearchBackend::execute_with_control(&problem, &control)
-                .expect("hybrid CPU selection");
-
+        for advertised_gpu in [false, true] {
+            let problem = one_piece_problem(RequestedSearchBackend::Auto, false, advertised_gpu);
+            assert_eq!(
+                WasmCpuSearchBackend::selected_product_backend(&problem),
+                super::WasmProductSearchBackend::Cpu
+            );
+            let result =
+                WasmCpuSearchBackend::execute_with_control(&problem, &ExecutionControl::default())
+                    .expect("CPU search");
             assert_eq!(result.field("backend_selected"), Some("wasm-cpu"));
             assert_eq!(result.field("backend_fallback_used"), Some("false"));
-            assert_eq!(result.field("backend_fallback_reason"), Some("none"));
-            assert_eq!(result.field("fallback_backend"), Some("none"));
-            assert_eq!(result.field("hybrid_status"), Some("cpu-selected"));
-            assert_eq!(
-                result.field("hybrid_disabled_reason"),
-                Some("gpu_device_not_found")
-            );
+            assert!(result.solution_found());
         }
-    }
-
-    #[cfg(not(feature = "webgpu-search"))]
-    #[test]
-    fn explicit_gpu_without_a_compiled_kernel_uses_the_kernel_unavailable_contract() {
-        let _resource_guard = score_resource_test_guard();
-        let problem = one_piece_problem(RequestedSearchBackend::Gpu, true, true);
-        let control = ExecutionControl::new(ExecutionCancellationToken::new());
-        let result =
-            WasmCpuSearchBackend::execute_with_control(&problem, &control).expect("GPU fallback");
-
-        assert_eq!(result.field("backend_selected"), Some("wasm-cpu"));
-        assert_eq!(result.field("backend_fallback_used"), Some("true"));
-        assert_eq!(result.field("gpu_available"), Some("false"));
-        assert_eq!(
-            result.field("gpu_disabled_reason"),
-            Some("gpu_kernel_unavailable")
-        );
-        assert_eq!(
-            result.field("backend_fallback_reason"),
-            Some("gpu_kernel_unavailable")
-        );
-
-        let denied = one_piece_problem(RequestedSearchBackend::Gpu, false, true);
-        assert!(matches!(
-            WasmCpuSearchSession::new(&denied),
-            Err(WasmCpuSearchError::Unsupported {
-                reason: "webgpu_backend_unavailable"
-            })
-        ));
-    }
-}
-
-#[cfg(all(test, feature = "webgpu-search"))]
-mod tests {
-    use clearra_pc_graph::request::RequestedSearchBackend;
-
-    use super::select_webgpu_for_workload;
-
-    #[test]
-    fn auto_uses_cpu_for_small_geometry_and_gpu_for_large_geometry() {
-        assert!(!select_webgpu_for_workload(RequestedSearchBackend::Auto, 5));
-        assert!(select_webgpu_for_workload(RequestedSearchBackend::Auto, 7));
-    }
-
-    #[test]
-    fn explicit_backend_selection_is_not_overridden_by_workload_size() {
-        assert!(!select_webgpu_for_workload(RequestedSearchBackend::Cpu, 20));
-        assert!(select_webgpu_for_workload(RequestedSearchBackend::Gpu, 1));
-        assert!(select_webgpu_for_workload(
-            RequestedSearchBackend::Hybrid,
-            1
-        ));
     }
 }

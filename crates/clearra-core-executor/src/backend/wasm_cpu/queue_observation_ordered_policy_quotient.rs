@@ -77,7 +77,7 @@ struct Staging {
     heads: [u32; MAX_BOARD64_PIECES + 1],
     depth_next: Vec<u32>,
     // (raw node * 8 + actual kind) is an exact generation marker. Child
-    // classes are representative raw IDs, bounded by the original node cap.
+    // classes are representative raw IDs in the original encoded namespace.
     seen: Vec<u32>,
     buckets: Vec<u32>,
     entries: Vec<SignatureEntry>,
@@ -173,13 +173,15 @@ impl BoardActionFamily {
         }
         let node_count = self.nodes.len();
         if node_count == 0
-            || node_count > MAX_NODES
+            || node_count > self.limits.nodes(BOARD_NODE_CAPACITY)
             || self.metrics.nodes != node_count
             || self.root.is_none_or(|root| root as usize >= node_count)
         {
             return Err(invalid("wasm_observation_physical_root_invalid"));
         }
-        let remaining_members = MAX_UNION_MEMBERS
+        let remaining_members = self
+            .limits
+            .members()
             .checked_sub(self.metrics.suffix_roots)
             .ok_or_else(|| invalid("wasm_observation_physical_union_limit"))?;
 
@@ -209,7 +211,12 @@ impl BoardActionFamily {
         self.observe_ordered_staging(stage, 0);
         // Four initialized metadata entries per original node. The physical
         // graph already owns the boards and edges; no physical work is undone.
-        self.ordered_charge(node_count.saturating_mul(4), control)?;
+        self.ordered_charge(
+            node_count
+                .checked_mul(4)
+                .ok_or_else(|| invalid("wasm_observation_physical_work_limit"))?,
+            control,
+        )?;
         let horizon = self.plan.hidden_horizon;
         for index in 0..node_count {
             let node = &self.nodes[index];
@@ -250,10 +257,14 @@ impl BoardActionFamily {
             stage.depth_next.push(next);
         }
         let physical_nodes = self.ordered_class_metrics[0];
-        if physical_nodes == 0 || self.ordered_class_metrics[3] > MAX_EDGES {
+        if physical_nodes == 0 || self.ordered_class_metrics[3] > self.limits.edges(usize::MAX) {
             return Err(invalid("wasm_observation_ordered_class_scope_invalid"));
         }
-        stage.index_capacity_limit = self.ordered_class_metrics[3].min(remaining_members);
+        // ChoiceRange stores a u32 start and reserves NO_NODE for identity
+        // slices. This bound belongs to that representation, not the budget.
+        stage.index_capacity_limit = self.ordered_class_metrics[3]
+            .min(remaining_members)
+            .min(NO_NODE as usize);
         let bucket_count = physical_nodes
             .checked_next_power_of_two()
             .ok_or_else(|| invalid("wasm_observation_physical_node_limit"))?;
@@ -909,6 +920,7 @@ mod tests {
         assert!(cancelled.prepare_ordered_policy_quotient(&control).is_err());
 
         let (mut limited, _) = fixture(true, false);
+        limited.limits = GenerationLimits::DEVELOPMENT;
         limited.metrics.work = MAX_WORK - 1;
         assert!(matches!(
             limited.prepare_ordered_policy_quotient(&control),
@@ -921,6 +933,7 @@ mod tests {
         assert!(limited.ordered_class_metrics()[7] > 0);
 
         let (mut members, _) = fixture(true, false);
+        members.limits = GenerationLimits::DEVELOPMENT;
         members.metrics.suffix_roots = MAX_UNION_MEMBERS;
         assert!(matches!(
             members.prepare_ordered_policy_quotient(&control),

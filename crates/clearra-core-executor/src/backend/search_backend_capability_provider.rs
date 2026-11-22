@@ -1,4 +1,3 @@
-#[cfg(not(feature = "webgpu-search"))]
 use clearra_core_ffi::NativeGpuCapabilityQuery;
 use clearra_core_ffi::{NativeGpuCapabilityQueryError, NativeGpuUnavailableReason};
 use clearra_pc_graph::request::GpuDeviceSelection;
@@ -77,31 +76,6 @@ impl SearchBackendCapabilityProvider for NativeSearchBackendCapabilityProvider {
         &self,
         device: GpuDeviceSelection,
     ) -> Result<GpuSearchCapability, CapabilityQueryError> {
-        #[cfg(all(feature = "webgpu-search", feature = "native-c-core"))]
-        {
-            Ok(
-                match super::search_backend_warmup::connect_webgpu_session_for_device(device) {
-                    clearra_webgpu::WebGpuGeometryExactCoverSessionOutcome::Connected(session) => {
-                        let device_index = session.adapter().index();
-                        session.recycle();
-                        GpuSearchCapability::available(device_index)
-                    }
-                    clearra_webgpu::WebGpuGeometryExactCoverSessionOutcome::Unavailable(_) => {
-                        GpuSearchCapability::unavailable(GpuUnavailableReason::DeviceNotFound)
-                    }
-                },
-            )
-        }
-
-        #[cfg(all(feature = "webgpu-search", not(feature = "native-c-core")))]
-        {
-            let _ = device;
-            Ok(GpuSearchCapability::unavailable(
-                GpuUnavailableReason::BackendNotConnected,
-            ))
-        }
-
-        #[cfg(not(feature = "webgpu-search"))]
         {
             let requested_index = match device {
                 GpuDeviceSelection::Auto => None,
@@ -136,35 +110,7 @@ impl SearchBackendCapabilityProvider for NativeSearchBackendCapabilityProvider {
         &self,
         device: GpuDeviceSelection,
     ) -> Result<GpuSearchCapability, CapabilityQueryError> {
-        #[cfg(all(feature = "webgpu-search", feature = "native-c-core"))]
-        {
-            Ok(
-                match super::search_backend_warmup::take_prepared_webgpu_session_for_device(device)
-                {
-                    Some(session) => {
-                        let device_index = session.adapter().index();
-                        session.recycle();
-                        GpuSearchCapability::available(device_index)
-                    }
-                    None => {
-                        GpuSearchCapability::unavailable(GpuUnavailableReason::BackendNotConnected)
-                    }
-                },
-            )
-        }
-
-        #[cfg(all(feature = "webgpu-search", not(feature = "native-c-core")))]
-        {
-            let _ = device;
-            Ok(GpuSearchCapability::unavailable(
-                GpuUnavailableReason::BackendNotConnected,
-            ))
-        }
-
-        #[cfg(not(feature = "webgpu-search"))]
-        {
-            self.gpu_capability(device)
-        }
+        self.gpu_capability(device)
     }
 }
 

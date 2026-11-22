@@ -31,16 +31,17 @@ mod assignment_solver {
         query: &BuildCoverageQuery,
     ) -> Result<ExactCoverSummary, BuildCoverageExecutionError> {
         let limits = query.limits();
-        let max_nodes = limits
-            .max_assignments()
-            .saturating_mul(query.domains().len().max(1))
-            .max(1);
+        // An assignment budget is not a node budget. In particular, a
+        // difficult unsatisfiable template must not be truncated merely
+        // because it has few requested output assignments.
+        let search_limits = if limits.max_assignments() == 0 {
+            DlxSearchLimits::unlimited()
+        } else {
+            DlxSearchLimits::new(limits.max_assignments(), usize::MAX)
+        };
         let report =
             AssignmentExactCoverBridge::new(query.domains().to_vec(), query.constraints().to_vec())
-                .solve(DlxSearchLimits::new(
-                    limits.max_assignments().max(1),
-                    max_nodes,
-                ))?;
+                .solve(search_limits)?;
         Ok(ExactCoverSummary {
             assignments: report.assignments().to_vec(),
             complete: report.complete(),

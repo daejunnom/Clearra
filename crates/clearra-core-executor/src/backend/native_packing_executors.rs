@@ -19,7 +19,6 @@ use super::{
     BackendTrustReport, PackingBackendOutcome, SearchBackendExecutor, SelectedSearchBackend,
 };
 
-#[cfg(not(all(feature = "webgpu-search", feature = "native-c-core")))]
 use super::{GpuExecutionFailure, GpuExecutionFailureStage, SearchBackendFallbackReason};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -505,25 +504,6 @@ pub(crate) fn merge_parallel_resource_report(target: &mut ResourceReport, source
         .saturating_add(source.coverage_rows_emitted);
 }
 
-#[cfg(all(feature = "webgpu-search", feature = "native-c-core"))]
-impl SearchBackendExecutor for NativeGpuPackingExecutor {
-    fn execute_packing(
-        &self,
-        problem: &CPackingProblem,
-        policy: &PcExecutionPolicy,
-        cancellation: &ExecutionCancellationToken,
-    ) -> Result<PackingBackendOutcome, PackingRunnerError> {
-        super::native_webgpu_packing_executor::execute_webgpu_packing(
-            problem,
-            policy,
-            cancellation,
-            SelectedSearchBackend::Gpu,
-            policy.workers(),
-        )
-    }
-}
-
-#[cfg(not(all(feature = "webgpu-search", feature = "native-c-core")))]
 impl SearchBackendExecutor for NativeGpuPackingExecutor {
     fn execute_packing(
         &self,

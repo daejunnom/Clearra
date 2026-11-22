@@ -9,7 +9,8 @@ fn assembles_canonical_build_coverage_query() {
     assert_eq!(query.template().slots().len(), 1);
     assert_eq!(query.domains().len(), 1);
     assert_eq!(query.domains()[0].pieces(), &[PieceKind::I]);
-    assert_eq!(query.limits().max_patterns(), 4096);
+    assert_eq!(query.limits().max_assignments(), 0);
+    assert_eq!(query.limits().max_patterns(), 0);
 }
 
 #[test]

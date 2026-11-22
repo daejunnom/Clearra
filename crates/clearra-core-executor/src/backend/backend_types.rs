@@ -257,30 +257,6 @@ impl GpuDeviceSummary {
             selected_device: None,
         }
     }
-
-    #[allow(clippy::too_many_arguments)]
-    // Native WebGPU execution is only compiled when both the WebGPU adapter and
-    // the native packing core are present.
-    #[cfg(all(feature = "webgpu-search", feature = "native-c-core"))]
-    pub(crate) fn from_execution(
-        selection: &GpuDeviceSelection,
-        selected_index: u8,
-        selected_name: String,
-        selected_device_type: String,
-        selected_backend: String,
-        selected_vendor: u32,
-        selected_device: u32,
-    ) -> Self {
-        Self {
-            requested: selection.as_display_string(),
-            selected_index: Some(selected_index),
-            selected_name: Some(selected_name),
-            selected_device_type: Some(selected_device_type),
-            selected_backend: Some(selected_backend),
-            selected_vendor: Some(selected_vendor),
-            selected_device: Some(selected_device),
-        }
-    }
 }
 impl GpuDeviceSummary {
     pub fn requested(&self) -> &str {

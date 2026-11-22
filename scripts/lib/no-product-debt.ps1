@@ -58,7 +58,7 @@ function Invoke-NoProductDebtMaxScoreProbe {
 
     Write-Output '[no-product-debt] Rust max-score library product probe'
     Invoke-NoProductDebtRustCase $CargoPath 'clearra-cli' `
-        @('--features', 'wasm-cpu-runtime,webgpu-search', '--lib') `
+        @('--features', 'wasm-cpu-runtime', '--lib') `
         'library_route_max_score_materializes_profile_specific_nonzero_matrix' `
         'library_route_max_score_materializes_profile_specific_nonzero_matrix' `
         'max_score_nonzero_profile_matrix'
@@ -70,7 +70,7 @@ function Invoke-NoProductDebtDesktopProbe {
 
     Write-Output '[no-product-debt] WASM CPU desktop AppRequest probe'
     Invoke-NoProductDebtRustCase $CargoPath 'clearra-gui-host' `
-        @('--features', 'wasm-cpu-runtime,webgpu-search', '--lib') `
+        @('--features', 'wasm-cpu-runtime', '--lib') `
         'tauri_command_calls_clearra_gui_host_only' `
         'tauri_command_calls_clearra_gui_host_only' `
         'desktop_real_app_request'

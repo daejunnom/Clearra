@@ -7,7 +7,6 @@ license.workspace = true
 [features]
 default = []
 wasm-cpu-runtime = ["dep:clearra-wasm", "clearra-app/parallel"]
-webgpu-search = ["clearra-app/webgpu-search"]
 
 [dependencies]
 clearra-app = { path = "../clearra-app" }

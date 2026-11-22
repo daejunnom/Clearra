@@ -16,7 +16,6 @@ function Invoke-GenericGpuDescriptorContractValidation() {
     $defaultSurface = @(
         Read-Text 'core-c/include/clr_gpu.h'
         Read-Text 'crates/clearra-core-ffi/src/gpu/mod.rs'
-        Read-Text 'crates/clearra-webgpu/src/lib.rs'
     ) -join "`n"
     foreach ($forbidden in @(
         'GenericGpuPackingDescriptor', 'GenericOperationTableGpuView',

@@ -91,7 +91,7 @@ mod tests {
             .map(DropdownOption::value)
             .collect::<Vec<_>>();
 
-        assert_eq!(options, ["auto", "cpu", "gpu", "hybrid"]);
+        assert_eq!(options, ["auto", "cpu"]);
         assert!(schema
             .result_contract_fields()
             .iter()

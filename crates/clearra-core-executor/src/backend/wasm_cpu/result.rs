@@ -995,8 +995,6 @@ pub(crate) struct WasmExactSearchSession {
     cpu_warmup_requested: bool,
     cpu_warmup_performed: bool,
     gpu_warmup_requested: bool,
-    gpu_warmup_performed: bool,
-    gpu_session_reused: bool,
     backend_selected: &'static str,
     backend_fallback_used: bool,
     backend_fallback_reason: &'static str,
@@ -1005,13 +1003,6 @@ pub(crate) struct WasmExactSearchSession {
     gpu_failure_stage: Option<&'static str>,
     discarded_partial_gpu_result: bool,
     gpu_original_result_incomplete: bool,
-    gpu_adapter_index: Option<u8>,
-    gpu_adapter_name: Option<String>,
-    gpu_adapter_type: Option<&'static str>,
-    gpu_adapter_backend: Option<String>,
-    gpu_peak_bytes: u64,
-    gpu_shader_hash: Option<String>,
-    gpu_shader_version: Option<&'static str>,
     tablebase_requested: bool,
     tablebase_status: &'static str,
     tablebase_artifact_bytes: usize,
@@ -1274,17 +1265,6 @@ impl WasmExactSearchSession {
 
     pub fn new_external_geometry(problem: &SearchProblem) -> Result<Self, WasmExactSearchError> {
         Self::new_with_external_geometry(problem, true)
-    }
-
-    #[cfg(feature = "webgpu-search")]
-    pub(super) fn new_external_geometry_for_webgpu(
-        problem: Arc<SearchProblem>,
-    ) -> Result<Self, WasmExactSearchError> {
-        Self::new_with_problem(
-            problem,
-            true,
-            SearchProblemRetention::SessionOwnedCloneUnaccounted,
-        )
     }
 
     pub(super) fn new_external_geometry_for_build_probability_on_board(
@@ -1923,13 +1903,7 @@ impl WasmExactSearchSession {
             cpu_warmup_requested: problem.backend_policy().cpu_warmup(),
             cpu_warmup_performed: false,
             gpu_warmup_requested: problem.backend_policy().gpu_warmup(),
-            gpu_warmup_performed: false,
-            gpu_session_reused: false,
-            backend_selected: if external_geometry {
-                "webgpu"
-            } else {
-                "wasm-cpu"
-            },
+            backend_selected: "wasm-cpu",
             backend_fallback_used: false,
             backend_fallback_reason: "none",
             fallback_backend: None,
@@ -1937,13 +1911,6 @@ impl WasmExactSearchSession {
             gpu_failure_stage: None,
             discarded_partial_gpu_result: false,
             gpu_original_result_incomplete: false,
-            gpu_adapter_index: None,
-            gpu_adapter_name: None,
-            gpu_adapter_type: None,
-            gpu_adapter_backend: None,
-            gpu_peak_bytes: 0,
-            gpu_shader_hash: None,
-            gpu_shader_version: None,
             tablebase_requested,
             tablebase_status,
             tablebase_artifact_bytes,
@@ -1977,32 +1944,6 @@ impl WasmExactSearchSession {
 
     pub(super) fn geometry_targets(&self) -> Option<&[super::geometry::TargetGroup]> {
         self.geometry.targets()
-    }
-
-    // Fields mirror the public backend report and are written atomically as one transition.
-    #[allow(clippy::too_many_arguments)]
-    pub fn mark_webgpu_execution(
-        &mut self,
-        adapter_index: u8,
-        adapter_name: String,
-        adapter_type: &'static str,
-        adapter_backend: String,
-        peak_gpu_bytes: u64,
-        shader_hash: String,
-        shader_version: &'static str,
-        warmup_performed: bool,
-        session_reused: bool,
-    ) {
-        self.backend_selected = "webgpu";
-        self.gpu_adapter_index = Some(adapter_index);
-        self.gpu_adapter_name = Some(adapter_name);
-        self.gpu_adapter_type = Some(adapter_type);
-        self.gpu_adapter_backend = Some(adapter_backend);
-        self.gpu_peak_bytes = peak_gpu_bytes;
-        self.gpu_shader_hash = Some(shader_hash);
-        self.gpu_shader_version = Some(shader_version);
-        self.gpu_warmup_performed = warmup_performed;
-        self.gpu_session_reused = session_reused;
     }
 
     pub fn mark_cpu_fallback(
@@ -3073,15 +3014,7 @@ impl WasmExactSearchSession {
             (self.representative_path.capacity() as u128)
                 .checked_mul(core::mem::size_of::<CorePathStep>() as u128)?,
         )?;
-        for value in [
-            self.gpu_adapter_name.as_ref(),
-            self.gpu_adapter_backend.as_ref(),
-            self.gpu_shader_hash.as_ref(),
-            self.tablebase_payload_sha256.as_ref(),
-        ]
-        .into_iter()
-        .flatten()
-        {
+        if let Some(value) = self.tablebase_payload_sha256.as_ref() {
             bytes = bytes.checked_add(value.capacity() as u128)?;
         }
         Some(bytes)
@@ -3581,32 +3514,6 @@ impl WasmExactSearchSession {
         Ok(Some(Arc::new(store)))
     }
 
-    // External GPU candidate ingestion is retained for the optional WebGPU backend.
-    #[cfg_attr(not(feature = "webgpu-search"), allow(dead_code))]
-    pub fn process_external_candidate(
-        &mut self,
-        target_index: u32,
-        row_ids: &[u32],
-        control: &ExecutionControl,
-    ) -> Result<Option<ExactSearchAdvance>, WasmExactSearchError> {
-        self.enter_external_observation_production()?;
-        self.execution_control = control.clone();
-        if self.finished {
-            return Err(WasmExactSearchError::InvalidProblem(
-                "wasm_search_session_already_finished",
-            ));
-        }
-        let candidate_budget = self.problem.backend_request().max_candidates();
-        if candidate_budget != 0 && self.packing_candidate_count >= candidate_budget {
-            self.mark_truncated("candidate_budget_exceeded");
-            return self.complete().map(Some);
-        }
-        let candidate = GeometryCandidate::from_rows(&self.catalog, target_index, row_ids).ok_or(
-            WasmExactSearchError::InvalidProblem("webgpu_geometry_candidate_invalid"),
-        )?;
-        self.process_candidate_ranked(candidate, None, control)
-    }
-
     pub(super) fn process_external_candidate_with_ordinal(
         &mut self,
         target_index: u32,
@@ -3659,20 +3566,6 @@ impl WasmExactSearchSession {
             ));
         }
         Ok(())
-    }
-
-    // External candidate identities bind distributed WebGPU result packets.
-    #[cfg_attr(not(feature = "webgpu-search"), allow(dead_code))]
-    pub(super) fn external_candidate_identity_hash(
-        &self,
-        target_index: u32,
-        row_ids: &[u32],
-    ) -> Result<u64, WasmExactSearchError> {
-        GeometryCandidate::from_rows(&self.catalog, target_index, row_ids)
-            .map(|candidate| candidate.identity.bucket_hash())
-            .ok_or(WasmExactSearchError::InvalidProblem(
-                "wasm_distributed_geometry_candidate_invalid",
-            ))
     }
 
     fn process_candidate(
@@ -4629,27 +4522,6 @@ impl WasmExactSearchSession {
             WasmDistributedBackendExecution::Cpu => {
                 self.backend_selected = "wasm-cpu";
             }
-            WasmDistributedBackendExecution::WebGpu {
-                adapter_index,
-                adapter_name,
-                adapter_type,
-                adapter_backend,
-                peak_gpu_bytes,
-                shader_hash,
-                shader_version,
-                warmup_performed,
-                session_reused,
-            } => self.mark_webgpu_execution(
-                *adapter_index,
-                adapter_name.clone(),
-                adapter_type,
-                adapter_backend.clone(),
-                *peak_gpu_bytes,
-                shader_hash.clone(),
-                shader_version,
-                *warmup_performed,
-                *session_reused,
-            ),
             WasmDistributedBackendExecution::CpuFallback {
                 reason,
                 failure_class,
@@ -4691,8 +4563,7 @@ impl WasmExactSearchSession {
             .is_none_or(|row| row.candidate_id() != 0)
     }
 
-    // External geometry completion is the optional WebGPU backend's finalization seam.
-    #[cfg_attr(not(any(feature = "webgpu-search", test)), allow(dead_code))]
+    // The CPU precomputed-candidate consumer retains the external completion seam.
     pub fn complete_external_geometry(
         &mut self,
         expanded_nodes: usize,
@@ -5709,35 +5580,22 @@ impl WasmExactSearchSession {
             requested_backend,
             RequestedSearchBackend::Gpu | RequestedSearchBackend::Hybrid
         );
-        let gpu_available = self.backend_selected == "webgpu"
-            || (explicit_gpu_backend
-                && runtime_webgpu_available
-                && cfg!(feature = "webgpu-search")
-                && self.gpu_failure_class != Some("unavailable"));
-        let gpu_disabled_reason = if self.backend_selected == "webgpu" {
-            "none"
-        } else if self.backend_fallback_used {
+        let gpu_disabled_reason = if self.backend_fallback_used {
             self.backend_fallback_reason
         } else if explicit_gpu_backend && !runtime_webgpu_available {
             "gpu_device_not_found"
-        } else if explicit_gpu_backend && !cfg!(feature = "webgpu-search") {
-            "gpu_kernel_unavailable"
         } else if explicit_gpu_backend {
-            "gpu_backend_not_connected"
+            "webgpu_backend_retired"
         } else {
             "not_requested"
         };
-        let gpu_trust_state = if self.backend_selected == "webgpu" {
-            "gpu-computed-cpu-confirmed"
-        } else if self.backend_fallback_used {
+        let gpu_trust_state = if self.backend_fallback_used {
             "fallback-used"
         } else {
             "not-used"
         };
         let hybrid_status = if requested_backend != RequestedSearchBackend::Hybrid {
             "not-requested"
-        } else if self.backend_selected == "webgpu" {
-            "gpu-ready"
         } else if self.backend_selected == "wasm-cpu" {
             "cpu-selected"
         } else {
@@ -5745,8 +5603,6 @@ impl WasmExactSearchSession {
         };
         let hybrid_disabled_reason = if requested_backend != RequestedSearchBackend::Hybrid {
             "not_requested"
-        } else if self.backend_selected == "webgpu" {
-            "none"
         } else {
             gpu_disabled_reason
         };
@@ -5781,7 +5637,7 @@ impl WasmExactSearchSession {
             field("fallback_used", self.backend_fallback_used),
             field("backend_fallback_reason", self.backend_fallback_reason),
             field("fallback_backend", self.fallback_backend.unwrap_or("none")),
-            field("gpu_available", gpu_available),
+            field("gpu_available", false),
             field("gpu_disabled_reason", gpu_disabled_reason),
             field("gpu_trust_state", gpu_trust_state),
             field("hybrid_status", hybrid_status),
@@ -5846,38 +5702,16 @@ impl WasmExactSearchSession {
             field("cpu_warmup_requested", self.cpu_warmup_requested),
             field("cpu_warmup_performed", self.cpu_warmup_performed),
             field("gpu_warmup_requested", self.gpu_warmup_requested),
-            field("gpu_warmup_performed", self.gpu_warmup_performed),
-            field("gpu_session_reused", self.gpu_session_reused),
-            field(
-                "gpu_adapter",
-                self.gpu_adapter_name.as_deref().unwrap_or("none"),
-            ),
-            field(
-                "gpu_device_selected_index",
-                self.gpu_adapter_index
-                    .map_or_else(|| "none".to_owned(), |index| index.to_string()),
-            ),
-            field(
-                "gpu_device_selected_name",
-                self.gpu_adapter_name.as_deref().unwrap_or("none"),
-            ),
-            field(
-                "gpu_device_selected_type",
-                self.gpu_adapter_type.unwrap_or("none"),
-            ),
-            field(
-                "gpu_device_selected_backend",
-                self.gpu_adapter_backend.as_deref().unwrap_or("none"),
-            ),
-            field("gpu_peak_bytes", self.gpu_peak_bytes),
-            field(
-                "gpu_shader_hash",
-                self.gpu_shader_hash.as_deref().unwrap_or("none"),
-            ),
-            field(
-                "gpu_shader_version",
-                self.gpu_shader_version.unwrap_or("none"),
-            ),
+            field("gpu_warmup_performed", false),
+            field("gpu_session_reused", false),
+            field("gpu_adapter", "none"),
+            field("gpu_device_selected_index", "none"),
+            field("gpu_device_selected_name", "none"),
+            field("gpu_device_selected_type", "none"),
+            field("gpu_device_selected_backend", "none"),
+            field("gpu_peak_bytes", 0),
+            field("gpu_shader_hash", "none"),
+            field("gpu_shader_version", "none"),
             field("gpu_cpu_duplicate_search", false),
             field(
                 "search_output_policy",
@@ -6142,7 +5976,7 @@ impl WasmExactSearchSession {
                 self.geometry.peak_frontier(),
             ),
             field("resource_peak_cpu_bytes", self.peak_cpu_bytes),
-            field("resource_peak_gpu_bytes", self.gpu_peak_bytes),
+            field("resource_peak_gpu_bytes", 0),
             field("peak_build_order_nodes", self.peak_build_nodes),
             field("total_build_order_nodes", self.total_build_nodes),
             field("coverage_product_words", self.coverage_product_words),
@@ -8778,6 +8612,13 @@ mod tests {
                 panic!("coordinator must complete")
             }
         };
+        // External CPU candidates must not inherit the retired backend's label.
+        assert_eq!(result.field("backend_selected"), Some("wasm-cpu"));
+        assert_eq!(result.field("actual_backend"), Some("wasm-cpu"));
+        assert_eq!(result.bool_field("gpu_available"), Some(false));
+        assert_eq!(result.field("gpu_trust_state"), Some("not-used"));
+        assert_eq!(result.field("gpu_shader_hash"), Some("none"));
+        assert_eq!(result.usize_field("resource_peak_gpu_bytes"), Some(0));
         let evidence = result
             .pc_chance_coverage_evidence()
             .expect("coordinator-bound chance evidence");

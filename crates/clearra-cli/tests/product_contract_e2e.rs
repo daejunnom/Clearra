@@ -51,88 +51,49 @@ fn backend_report_present_in_json() {
     assert_cpu_route(&opening_2l("cpu", None));
 }
 
-// No-WebGPU builds are the controlled unavailable device. Do not probe the
-// test runner for a hardware-dependent fallback and count that as coverage.
-#[cfg(not(feature = "webgpu-search"))]
-mod without_webgpu {
-    use super::product_backend_capability_assert::{
-        assert_cpu_selected_hybrid, assert_unavailable_gpu_fallback,
-    };
-    use super::product_contract_e2e_support::assert_same_pc;
-    use super::{opening_2l, scenario_4l};
-    use crate::{
-        error::CliErrorCode, execution_resource_test_support::execution_resource_test_guard,
-        exit::ExitCode, run_with_args,
-    };
-
-    #[test]
-    fn product_backend_cpu_gpu_hybrid_same_opening_2l() {
-        let cpu = opening_2l("cpu", None);
-        let gpu = opening_2l("gpu", Some("--allow-backend-fallback"));
-        let hybrid = opening_2l("hybrid", Some("--allow-backend-fallback"));
-        assert_same_pc(&cpu, &gpu);
-        assert_same_pc(&cpu, &hybrid);
-        assert_eq!(
-            gpu["summary"]["continuation_token"],
-            cpu["summary"]["continuation_token"]
-        );
-        assert_unavailable_gpu_fallback(&gpu);
-        assert_cpu_selected_hybrid(&hybrid);
-    }
-
-    #[test]
-    fn product_backend_cpu_gpu_hybrid_same_scenario_4l() {
-        let cpu = scenario_4l("cpu", None);
-        // This is deliberately the same padded legacy scenario as the
-        // verified CPU case. It must retain its one-line target when the
-        // unavailable GPU's request is executed by the Rust CPU.
-        let gpu = scenario_4l("gpu", Some("--allow-backend-fallback"));
-        let hybrid = scenario_4l("hybrid", Some("--allow-backend-fallback"));
-        assert_same_pc(&cpu, &gpu);
-        assert_same_pc(&cpu, &hybrid);
-        assert_unavailable_gpu_fallback(&gpu);
-        assert_cpu_selected_hybrid(&hybrid);
-    }
-
-    #[test]
-    fn product_gpu_no_fallback_returns_error_when_unavailable() {
-        let _guard = execution_resource_test_guard();
-        let output = run_with_args([
-            "clearra",
-            "--format",
-            "json",
-            "pc",
-            "--lines",
-            "2",
-            "--queue",
-            "IIOOO",
-            "--fixed",
-            "--no-hold",
-            "--backend",
-            "gpu",
-            "--no-backend-fallback",
-            "--workers",
-            "1",
-        ]);
-        assert_eq!(
-            output.exit_code(),
-            ExitCode::Unsupported,
-            "{}",
-            output.stderr()
-        );
-        assert!(output.stdout().is_empty(), "{}", output.stdout());
-        assert!(
-            output
-                .stderr()
-                .contains(CliErrorCode::BackendGpuUnavailable.as_str()),
-            "{}",
-            output.stderr()
-        );
-    }
-
-    #[test]
-    fn product_gpu_allow_fallback_reports_reason() {
-        assert_unavailable_gpu_fallback(&opening_2l("gpu", Some("--allow-backend-fallback")));
+#[test]
+fn product_gpu_and_hybrid_requests_are_retired_without_cpu_fallback() {
+    use crate::{error::CliErrorCode, exit::ExitCode};
+    let _guard = crate::execution_resource_test_support::execution_resource_test_guard();
+    for backend in ["gpu", "hybrid"] {
+        for fallback in ["--allow-backend-fallback", "--no-backend-fallback"] {
+            let output = run_with_args([
+                "clearra",
+                "--format",
+                "json",
+                "pc",
+                "--lines",
+                "2",
+                "--queue",
+                "IIOOO",
+                "--fixed",
+                "--no-hold",
+                "--backend",
+                backend,
+                fallback,
+                "--workers",
+                "1",
+            ]);
+            assert_eq!(
+                output.exit_code(),
+                ExitCode::Unsupported,
+                "{}",
+                output.stderr()
+            );
+            assert!(output.stdout().is_empty(), "{}", output.stdout());
+            assert!(
+                output
+                    .stderr()
+                    .contains(CliErrorCode::BackendGpuUnavailable.as_str()),
+                "{}",
+                output.stderr()
+            );
+            assert!(
+                output.stderr().contains("webgpu_backend_retired"),
+                "{}",
+                output.stderr()
+            );
+        }
     }
 }
 

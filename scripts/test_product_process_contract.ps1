@@ -232,7 +232,7 @@ try {
     Assert-ProductProcessCondition `
         ($script:NativeProgressCalls.Count -eq ($buildCallCount + 1) -and
             ($script:NativeProgressCalls[$buildCallCount].Arguments -join ' ') -ceq
-                'build --locked --release -p clearra-cli --features wasm-cpu-runtime,webgpu-search --bin clearra') `
+                'build --locked --release -p clearra-cli --features wasm-cpu-runtime --bin clearra') `
         'local_built_product_uses_the_shipped_rust_build_recipe'
 
     $env:CARGO_TARGET_DIR = $script:TestCargoTargetDir
@@ -245,7 +245,7 @@ try {
         'non_built_product_command_preserves_the_typed_result_contract'
     Assert-ProductProcessCondition `
         (($script:NativeProgressCalls[$script:NativeProgressCalls.Count - 1].Arguments -join ' ') -ceq
-            'run --quiet --locked --release -p clearra-cli --features wasm-cpu-runtime,webgpu-search --bin clearra -- help') `
+            'run --quiet --locked --release -p clearra-cli --features wasm-cpu-runtime --bin clearra -- help') `
         'local_direct_probe_uses_the_shipped_rust_build_recipe'
 
     $nativeCallCountBeforeExactProbe = $script:NativeProgressCalls.Count

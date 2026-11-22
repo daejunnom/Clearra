@@ -1,10 +1,8 @@
 //! Connected post-processing for buildable execution evidence.
 //!
 //! Search proves PC/buildability. This crate evaluates owned replay traces into
-//! score cells and may offload PatternBitSet union to a CPU-confirmed WebGPU
-//! backend. Neither path can change PC search coverage truth.
+//! score cells. Post-processing cannot change PC search coverage truth.
 
-pub mod coverage_batch;
 pub mod pc_scoring;
 pub mod score_batch;
 mod score_profile_selection;
@@ -14,8 +12,6 @@ pub use score_profile_selection::{
     ScoreProfileMemoryGuardError, ScoreProfileMemoryProjection, ScoreProfileMemoryReport,
 };
 
-#[cfg(feature = "webgpu-postprocess")]
-pub use coverage_batch::{PostProcessCoverageUnion, PostProcessCoverageUnionError};
 pub use pc_scoring::{
     PcPostProcessCancelled, PcScoringMemoryGuardError, PcScoringMemoryProjection,
     PcScoringMemoryReport, PcScoringPostProcessInput, PcScoringPostProcessResult,

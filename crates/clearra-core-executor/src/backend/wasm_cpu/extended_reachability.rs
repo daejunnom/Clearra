@@ -5,9 +5,81 @@ use clearra_rules::kicks::{
     normalized_kick_delta, KickTableProfile, KickTableProfileId, KickTransition,
 };
 
-use super::{extended_board::ExtendedBoard, kick_profiles::builtin_kick_profile, piece_index};
+use super::{
+    extended_board::ExtendedBoard, extended_inverse_catalog::ExtendedInstantiation,
+    kick_profiles::builtin_kick_profile, piece_index,
+};
 
 const INVALID_STATE: u16 = u16::MAX;
+
+/// A translation-only membership proof for catalog-instantiated locks.
+///
+/// The exact search seeds every valid pose at or above the field height. A
+/// grounded lock whose upward sweep is empty is therefore reachable from the
+/// same rotation/x sky seed using only downward translations. No kick ordering
+/// is bypassed: this proves one path that contains no rotation at all. The
+/// caller still owns shape validity and requests the full search for evidence
+/// about rotations, finesse, or a pose that this sufficient condition rejects.
+pub(super) struct ExtendedHarddropReachability {
+    width: u8,
+    board: ExtendedBoard,
+    blocked_descent: ExtendedBoard,
+}
+
+impl ExtendedHarddropReachability {
+    pub fn new(width: u8, board: ExtendedBoard) -> Self {
+        debug_assert!((1..=10).contains(&width));
+        // Reflect the upward sweep test through the intersection: every
+        // occupied cell blocks all lower cells in its column. Reuse that
+        // shadow for every candidate realization on this physical board.
+        let mut shadow = board.words();
+        let mut shift = usize::from(width);
+        while shift < 256 {
+            let below = shift_words_down(shadow, shift);
+            for (word, below) in shadow.iter_mut().zip(below) {
+                *word |= below;
+            }
+            shift *= 2;
+        }
+        Self {
+            width,
+            board,
+            blocked_descent: ExtendedBoard::from_words(shadow),
+        }
+    }
+
+    pub fn contains(&self, realization: ExtendedInstantiation) -> bool {
+        if self.blocked_descent.intersects(realization.lock_mask) {
+            return false;
+        }
+        realization.lock_y == 0
+            || self
+                .board
+                .intersects(ExtendedBoard::from_words(shift_words_down(
+                    realization.lock_mask.words(),
+                    usize::from(self.width),
+                )))
+    }
+}
+
+#[inline]
+fn shift_words_down(words: [u64; 4], shift: usize) -> [u64; 4] {
+    debug_assert!(shift > 0 && shift < 256);
+    let whole_words = shift / 64;
+    let bits = shift % 64;
+    std::array::from_fn(|index| {
+        let source = index + whole_words;
+        let Some(&word) = words.get(source) else {
+            return 0;
+        };
+        let upper = if bits == 0 {
+            0
+        } else {
+            words.get(source + 1).copied().unwrap_or(0) << (64 - bits)
+        };
+        (word >> bits) | upper
+    })
+}
 
 #[derive(Clone, Copy)]
 struct State {
@@ -613,4 +685,105 @@ fn source_ceiling(height: u8, piece: PieceKind, allow_180: bool, profile: &KickT
         .max()
         .unwrap_or(0);
     height.saturating_add(maximum_downward as u8) as i8
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extended_harddrop_proof_matches_swept_cells_and_full_search_across_words() {
+        let mut positive_words = 0_u8;
+        let mut proved = 0_usize;
+        let mut fallback_reachable = 0_usize;
+        for (width, height) in [(4, 8), (10, 7), (10, 10), (10, 14), (10, 20), (10, 24)] {
+            let mut stairs = ExtendedBoard::EMPTY;
+            let mut shelf = ExtendedBoard::EMPTY;
+            for x in 0..width {
+                for y in 0..(x * 3 + 1) % height {
+                    stairs.insert(u16::from(y) * u16::from(width) + u16::from(x));
+                }
+                if x > 0 && x + 1 < width {
+                    shelf.insert(u16::from(height - 2) * u16::from(width) + u16::from(x));
+                }
+            }
+            for profile in [KickTableProfileId::Srs90, KickTableProfileId::SrsPlus] {
+                let mut workspace = ExtendedReachabilityWorkspace::new(width, height, profile);
+                for board in [ExtendedBoard::EMPTY, stairs, shelf] {
+                    let proof = ExtendedHarddropReachability::new(width, board);
+                    for piece in PieceKind::STANDARD_TETROMINOES {
+                        let locks = workspace.reachable_locks_with_scoring(board, piece, false);
+                        let definition = standard_tetromino_registry().get(piece).unwrap();
+                        for rotation in RotationState::ALL {
+                            let shape = definition.shape(rotation);
+                            for y in 0..height as i8 {
+                                for x in 0..width as i8 {
+                                    let mut mask = ExtendedBoard::EMPTY;
+                                    let valid = shape.cells().iter().all(|cell| {
+                                        let cell_x = x + cell.x();
+                                        let cell_y = y + cell.y();
+                                        if cell_x < 0
+                                            || cell_x >= width as i8
+                                            || cell_y < 0
+                                            || cell_y >= height as i8
+                                        {
+                                            return false;
+                                        }
+                                        mask.insert(
+                                            cell_y as u16 * u16::from(width) + cell_x as u16,
+                                        )
+                                    });
+                                    if !valid {
+                                        continue;
+                                    }
+                                    let realization = ExtendedInstantiation {
+                                        lock_mask: mask,
+                                        rotation,
+                                        x,
+                                        lock_y: y,
+                                    };
+                                    // An independent cell-wise upward sweep checks both
+                                    // word carries and the floor/support boundary.
+                                    let grounded = y == 0
+                                        || mask.cells().any(|cell| {
+                                            cell >= u16::from(width)
+                                                && board.contains(cell - u16::from(width))
+                                        });
+                                    let blocked = mask.cells().any(|cell| {
+                                        let column = cell % u16::from(width);
+                                        (cell / u16::from(width)..u16::from(height)).any(|row| {
+                                            board.contains(row * u16::from(width) + column)
+                                        })
+                                    });
+                                    let actual = proof.contains(realization);
+                                    assert_eq!(actual, grounded && !blocked);
+                                    let full = locks.contains(rotation, x, y);
+                                    if actual {
+                                        assert!(
+                                            full,
+                                            "proof must be a real BFS lock: {profile:?} {piece:?} {rotation:?} {x},{y}"
+                                        );
+                                        proved += 1;
+                                        for (word, bits) in mask.words().into_iter().enumerate() {
+                                            if bits != 0 {
+                                                positive_words |= 1 << word;
+                                            }
+                                        }
+                                    } else if full {
+                                        fallback_reachable += 1;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(proved > 0);
+        assert_eq!(positive_words, 0b1111);
+        assert!(
+            fallback_reachable > 0,
+            "overhang locks still need the full search"
+        );
+    }
 }

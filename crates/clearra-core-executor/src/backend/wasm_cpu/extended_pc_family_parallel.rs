@@ -171,8 +171,7 @@ impl WorkerResult {
         self.engine.ensure_memory_bound(rows.growth())?;
         let row = self
             .engine
-            .buildable_tilings
-            .take(&probe)
+            .take_buildable_tiling(&probe)?
             .ok_or_else(contract_error)?;
         drop(probe);
         rows.push_admitted(row)
@@ -754,8 +753,9 @@ impl ExtendedBuildProbabilitySession {
         self.covered_patterns
             .union_with(&worker.covered_patterns)
             .map_err(|_| contract_error())?;
-        self.buildable_tilings
-            .extend(worker.buildable_tilings.drain());
+        for tiling in worker.drain_buildable_tilings() {
+            self.insert_admitted_buildable_tiling(tiling)?;
+        }
         // Transfer concrete lock evidence, never a compact Board64 surrogate
         // or only the worker's representative path. Canonical IDs are rebound
         // once after the complete source family has been merged and sorted.
@@ -2131,7 +2131,7 @@ pub(in crate::backend::wasm_cpu) mod cooperative {
                 empty_workspace,
             ));
             drop(core::mem::take(&mut worker.engine.coverage_evaluator));
-            drop(core::mem::take(&mut worker.engine.buildable_tilings));
+            drop(worker.engine.take_buildable_tilings());
             drop(core::mem::take(&mut worker.digests));
             // One source inventory phase per worker after all digest ranges
             // are gone. Bind validated shared immutable ownership, so there

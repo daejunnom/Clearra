@@ -76,7 +76,7 @@ function Invoke-ProductE2EClearra {
             }
             $cargoArgs = @(
                 "run", "--quiet", "--locked", "--release", "-p", "clearra-cli",
-                "--features", "wasm-cpu-runtime,webgpu-search", "--bin", "clearra", "--"
+                "--features", "wasm-cpu-runtime", "--bin", "clearra", "--"
             ) + $CommandArgs
             try {
                 $nativeResult = Invoke-NativeWithProgress `
@@ -256,319 +256,53 @@ function Get-ProductE2EScenario4LSearchArgs([string]$Backend) {
     return $commandArgs
 }
 
-function Get-ProductE2EMissingAdapterArgs([switch]$DenyFallback) {
-    # The maximum representable device index is intentionally absent on the
-    # product runners. Supplying it tests adapter selection, not compile flags.
-    $commandArgs = @(Get-ProductE2EOpeningSearchArgs "gpu")
-    $commandArgs[-1] = if ($DenyFallback.IsPresent) { "--no-backend-fallback" } else { "--allow-backend-fallback" }
-    return $commandArgs + @("--gpu-device", "255")
-}
-
 function Invoke-ProductE2EBackendCapabilityReportCase {
-    Invoke-ClearraProgressCase -Scope $script:ProductE2EProgressScope -Name "backend_report_present_in_json" -Body {
-        $script:ProductE2ECurrentCaseName = "backend_report_present_in_json"
-        $started = Get-Date
-        $status = "passed"
-        $errorMessage = $null
-        $commands = @(
-            [pscustomobject]@{
-                Label = "cpu"
-                Args = @(Get-ProductE2EOpeningSearchArgs "cpu")
-            },
-            [pscustomobject]@{
-                Label = "gpu"
-                Args = @(Get-ProductE2EOpeningSearchArgs "gpu")
-            },
-            [pscustomobject]@{
-                Label = "hybrid"
-                Args = @(Get-ProductE2EOpeningSearchArgs "hybrid")
-            }
-        )
-        $json = @{}
-        $lastOutput = ""
-
-        try {
-            foreach ($command in $commands) {
-                $result = Invoke-ProductE2EClearra `
-                    -CommandArgs $command.Args `
-                    -ReuseExactReadOnlyProbe
-                $lastOutput = $result.Output
-                if ($result.ExitCode -ne 0) {
-                    throw "$($command.Label) backend command failed with exit $($result.ExitCode)"
-                }
-                $json[$command.Label] = ConvertFrom-ProductE2EJsonOutput $result.Output
-            }
-
-            Assert-ProductE2EU0BackendCapabilityReport $json["cpu"] $json["gpu"] $json["hybrid"]
-        } catch {
-            $status = "failed"
-            $errorMessage = New-ProductE2EFailureMessage `
-                -CaseName "backend_report_present_in_json" `
-                -Reason $_.Exception.Message `
-                -Command "clearra pc --backend cpu|gpu|hybrid" `
-                -FixturePath "tests/fixtures/pc/opening_2l_empty.json" `
-                -GoldenPath "" `
-                -Output $lastOutput
-            throw $errorMessage
-        } finally {
-            $ProductResults.Add([pscustomobject]@{
-                name = "backend_report_present_in_json"
-                kind = "cli-product"
-                status = $status
-                command = "clearra pc --backend cpu|gpu|hybrid"
-                exit_code = $null
-                fixture = "tests/fixtures/pc/opening_2l_empty.json"
-                golden = $null
-                marker_count = 0
-                duration_ms = [int][math]::Round(((Get-Date) - $started).TotalMilliseconds)
-                error = $errorMessage
-            })
-        }
-    }
-}
-
-function Invoke-ProductE2EBackendEquivalenceCase(
-    [string]$Name,
-    [string[]]$CpuArgs,
-    [string[]]$GpuArgs,
-    [string[]]$HybridArgs,
-    [string]$FixturePath,
-    [string[]]$ExtraEquivalenceFields,
-    [switch]$ReuseExactReadOnlyProbes
-) {
-    Invoke-ClearraProgressCase -Scope $script:ProductE2EProgressScope -Name $Name -Body {
-        $script:ProductE2ECurrentCaseName = $Name
-        $started = Get-Date
-        $status = "passed"
-        $errorMessage = $null
-        $commands = @(
-            [pscustomobject]@{
-                Label = "cpu"
-                Args = $CpuArgs
-            },
-            [pscustomobject]@{
-                Label = "gpu"
-                Args = $GpuArgs
-            },
-            [pscustomobject]@{
-                Label = "hybrid"
-                Args = $HybridArgs
-            }
-        )
-        $json = @{}
-        $lastOutput = ""
-
-        try {
-            foreach ($command in $commands) {
-                $result = Invoke-ProductE2EClearra `
-                    -CommandArgs $command.Args `
-                    -ReuseExactReadOnlyProbe:$ReuseExactReadOnlyProbes.IsPresent
-                $lastOutput = $result.Output
-                if ($result.ExitCode -ne 0) {
-                    throw "$($command.Label) backend command failed with exit $($result.ExitCode)"
-                }
-                $json[$command.Label] = ConvertFrom-ProductE2EJsonOutput $result.Output
-            }
-
-            $exactFields = @(
-                "count_complete", "probability_complete", "resource_truncated",
-                "coverage_probability", "covered_pattern_count",
-                "normalized_unique_solution_count", "normalized_solution_set_hash"
-            ) + $ExtraEquivalenceFields
-            Assert-ProductE2EJsonFieldUniqueEquals $json["cpu"] "count_complete" $true
-            Assert-ProductE2EJsonFieldUniqueEquals $json["cpu"] "probability_complete" $true
-            Assert-ProductE2EJsonFieldUniqueEquals $json["cpu"] "resource_truncated" $false
-            foreach ($field in $exactFields) {
-                Assert-ProductE2EJsonFieldSame $json["cpu"] $json["gpu"] $field
-                Assert-ProductE2EJsonFieldSame $json["cpu"] $json["hybrid"] $field
-            }
-
-            Assert-ProductE2ECpuSelectionReport $json["cpu"]
-            Assert-ProductE2EGpuSelectionReport $json["gpu"] "gpu"
-            Assert-ProductE2EGpuSelectionReport $json["hybrid"] "hybrid"
-        } catch {
-            $status = "failed"
-            $errorMessage = New-ProductE2EFailureMessage `
-                -CaseName $Name `
-                -Reason $_.Exception.Message `
-                -Command "clearra product backend equivalence cpu|gpu|hybrid" `
-                -FixturePath $FixturePath `
-                -GoldenPath "" `
-                -Output $lastOutput
-            throw $errorMessage
-        } finally {
-            $ProductResults.Add([pscustomobject]@{
-                name = $Name
-                kind = "cli-product-backend-equivalence"
-                status = $status
-                command = "clearra product backend equivalence cpu|gpu|hybrid"
-                exit_code = $null
-                fixture = $FixturePath
-                golden = $null
-                marker_count = 0
-                duration_ms = [int][math]::Round(((Get-Date) - $started).TotalMilliseconds)
-                error = $errorMessage
-            })
-        }
-    }
-}
-
-function Invoke-ProductE2EOpening2LBackendEquivalenceCase {
-    Invoke-ProductE2EBackendEquivalenceCase `
-        -Name "product_backend_cpu_gpu_hybrid_same_opening_2l" `
+    Invoke-ProductE2ECommandCase `
+        -Name "backend_report_present_in_json" `
         -FixturePath "tests/fixtures/pc/opening_2l_empty.json" `
-        -CpuArgs @(Get-ProductE2EOpeningSearchArgs "cpu") `
-        -GpuArgs @(Get-ProductE2EOpeningSearchArgs "gpu") `
-        -HybridArgs @(Get-ProductE2EOpeningSearchArgs "hybrid") `
-        -ExtraEquivalenceFields @("next_pc_available", "continuation_token_available", "continuation_token_version", "continuation_token", "continue_hint") `
-        -ReuseExactReadOnlyProbes
+        -CommandArgs @(Get-ProductE2EOpeningSearchArgs "cpu") `
+        -ReuseExactReadOnlyProbe `
+        -CheckOutput { param($json) Assert-ProductE2ECpuSelectionReport $json }
 }
 
-function Invoke-ProductE2EScenario4LBackendEquivalenceCase {
-    Invoke-ProductE2EBackendEquivalenceCase `
-        -Name "product_backend_cpu_gpu_hybrid_same_scenario_4l" `
-        -FixturePath "tests/fixtures/pc/scenario_simple_4l.json" `
-        -CpuArgs @(Get-ProductE2EScenario4LSearchArgs "cpu") `
-        -GpuArgs @(Get-ProductE2EScenario4LSearchArgs "gpu") `
-        -HybridArgs @(Get-ProductE2EScenario4LSearchArgs "hybrid") `
-        -ExtraEquivalenceFields @("scenario_replay_token_version", "scenario_replay_token") `
-        -ReuseExactReadOnlyProbes
-}
-
-function Invoke-ProductE2EGpuNoFallbackUnavailableCase {
-    Invoke-ClearraProgressCase -Scope $script:ProductE2EProgressScope -Name "product_gpu_no_fallback_returns_error_when_unavailable" -Body {
-        $script:ProductE2ECurrentCaseName = "product_gpu_no_fallback_returns_error_when_unavailable"
+function Invoke-ProductE2ERetiredBackendCase {
+    Invoke-ClearraProgressCase -Scope $script:ProductE2EProgressScope -Name "product_gpu_and_hybrid_retired_without_fallback" -Body {
+        $script:ProductE2ECurrentCaseName = "product_gpu_and_hybrid_retired_without_fallback"
         $started = Get-Date
         $status = "passed"
         $errorMessage = $null
-        $commandArgs = @(Get-ProductE2EMissingAdapterArgs -DenyFallback)
-        $result = $null
-
+        $lastOutput = ""
         try {
-            $result = Invoke-ProductE2EClearra $commandArgs
-            if ($result.ExitCode -ne 3) {
-                throw "expected exit 3 but got $($result.ExitCode)"
+            foreach ($backend in @("gpu", "hybrid")) {
+                foreach ($fallback in @("--allow-backend-fallback", "--no-backend-fallback")) {
+                    foreach ($baseArgs in @(
+                        ,@(Get-ProductE2EOpeningSearchArgs $backend)
+                        ,@(Get-ProductE2EScenario4LSearchArgs $backend)
+                    )) {
+                        $commandArgs = @($baseArgs)
+                        $commandArgs[-1] = $fallback
+                        $result = Invoke-ProductE2EClearra -CommandArgs $commandArgs -ReuseExactReadOnlyProbe
+                        $lastOutput = $result.Output
+                        if ($result.ExitCode -ne 3 -or
+                            $result.Output -notlike "*E_BACKEND_GPU_UNAVAILABLE*" -or
+                            $result.Output -notlike "*webgpu_backend_retired*") {
+                            throw "retired $backend request must return unsupported without CPU fallback: $lastOutput"
+                        }
+                    }
+                }
             }
-            Assert-ProductE2EMissingGpuDenial $result.Output
         } catch {
             $status = "failed"
-            $errorMessage = New-ProductE2EFailureMessage `
-                -CaseName "product_gpu_no_fallback_returns_error_when_unavailable" `
-                -Reason $_.Exception.Message `
-                -Command "clearra $($commandArgs -join ' ')" `
-                -FixturePath "tests/fixtures/pc/opening_2l_empty.json" `
-                -GoldenPath "" `
-                -Output $(if ($null -eq $result) { "" } else { $result.Output })
-            throw $errorMessage
+            $errorMessage = $_.Exception.Message
+            throw
         } finally {
             $ProductResults.Add([pscustomobject]@{
-                name = "product_gpu_no_fallback_returns_error_when_unavailable"
+                name = "product_gpu_and_hybrid_retired_without_fallback"
                 kind = "cli-product-error"
                 status = $status
-                command = "clearra $($commandArgs -join ' ')"
-                exit_code = if ($null -eq $result) { $null } else { $result.ExitCode }
-                fixture = "tests/fixtures/pc/opening_2l_empty.json"
-                golden = $null
-                marker_count = 0
-                duration_ms = [int][math]::Round(((Get-Date) - $started).TotalMilliseconds)
-                error = $errorMessage
-            })
-        }
-    }
-}
-
-function Invoke-ProductE2EGpuAllowFallbackReasonCase {
-    Invoke-ClearraProgressCase -Scope $script:ProductE2EProgressScope -Name "product_gpu_allow_fallback_reports_reason" -Body {
-        $script:ProductE2ECurrentCaseName = "product_gpu_allow_fallback_reports_reason"
-        $started = Get-Date
-        $status = "passed"
-        $errorMessage = $null
-        $commandArgs = @(Get-ProductE2EMissingAdapterArgs)
-        $result = $null
-
-        try {
-            $result = Invoke-ProductE2EClearra `
-                -CommandArgs $commandArgs `
-                -ReuseExactReadOnlyProbe
-            if ($result.ExitCode -ne 0) {
-                throw "expected exit 0 but got $($result.ExitCode)"
-            }
-            $json = ConvertFrom-ProductE2EJsonOutput $result.Output
-            Assert-ProductE2EGpuCpuFallbackReport $json -MissingDevice
-            $cpu = Invoke-ProductE2EClearra `
-                -CommandArgs @(Get-ProductE2EOpeningSearchArgs "cpu") `
-                -ReuseExactReadOnlyProbe
-            if ($cpu.ExitCode -ne 0) {
-                throw "CPU reference failed with exit $($cpu.ExitCode)"
-            }
-            $cpuJson = ConvertFrom-ProductE2EJsonOutput $cpu.Output
-            Assert-ProductE2ECpuSelectionReport $cpuJson
-            foreach ($field in @("count_complete", "probability_complete", "resource_truncated", "coverage_probability", "covered_pattern_count", "normalized_unique_solution_count", "normalized_solution_set_hash", "continuation_token")) {
-                Assert-ProductE2EJsonFieldSame $cpuJson $json $field
-            }
-        } catch {
-            $status = "failed"
-            $errorMessage = New-ProductE2EFailureMessage `
-                -CaseName "product_gpu_allow_fallback_reports_reason" `
-                -Reason $_.Exception.Message `
-                -Command "clearra $($commandArgs -join ' ')" `
-                -FixturePath "tests/fixtures/pc/opening_2l_empty.json" `
-                -GoldenPath "" `
-                -Output $(if ($null -eq $result) { "" } else { $result.Output })
-            throw $errorMessage
-        } finally {
-            $ProductResults.Add([pscustomobject]@{
-                name = "product_gpu_allow_fallback_reports_reason"
-                kind = "cli-product"
-                status = $status
-                command = "clearra $($commandArgs -join ' ')"
-                exit_code = if ($null -eq $result) { $null } else { $result.ExitCode }
-                fixture = "tests/fixtures/pc/opening_2l_empty.json"
-                golden = $null
-                marker_count = 0
-                duration_ms = [int][math]::Round(((Get-Date) - $started).TotalMilliseconds)
-                error = $errorMessage
-            })
-        }
-    }
-}
-
-function Invoke-ProductE2EGpuBackendTrustStateCase {
-    Invoke-ClearraProgressCase -Scope $script:ProductE2EProgressScope -Name "product_gpu_backend_report_includes_trust_state" -Body {
-        $script:ProductE2ECurrentCaseName = "product_gpu_backend_report_includes_trust_state"
-        $started = Get-Date
-        $status = "passed"
-        $errorMessage = $null
-        $commandArgs = @(Get-ProductE2EMissingAdapterArgs)
-        $result = $null
-
-        try {
-            $result = Invoke-ProductE2EClearra `
-                -CommandArgs $commandArgs `
-                -ReuseExactReadOnlyProbe
-            if ($result.ExitCode -ne 0) {
-                throw "expected exit 0 but got $($result.ExitCode)"
-            }
-            $json = ConvertFrom-ProductE2EJsonOutput $result.Output
-            Assert-ProductE2EGpuCpuFallbackReport $json -MissingDevice
-        } catch {
-            $status = "failed"
-            $errorMessage = New-ProductE2EFailureMessage `
-                -CaseName "product_gpu_backend_report_includes_trust_state" `
-                -Reason $_.Exception.Message `
-                -Command "clearra $($commandArgs -join ' ')" `
-                -FixturePath "tests/fixtures/pc/opening_2l_empty.json" `
-                -GoldenPath "" `
-                -Output $(if ($null -eq $result) { "" } else { $result.Output })
-            throw $errorMessage
-        } finally {
-            $ProductResults.Add([pscustomobject]@{
-                name = "product_gpu_backend_report_includes_trust_state"
-                kind = "cli-product"
-                status = $status
-                command = "clearra $($commandArgs -join ' ')"
-                exit_code = if ($null -eq $result) { $null } else { $result.ExitCode }
-                fixture = "tests/fixtures/pc/opening_2l_empty.json"
+                command = "clearra pc/pc-scenario --backend gpu|hybrid"
+                exit_code = $null
+                fixture = $null
                 golden = $null
                 marker_count = 0
                 duration_ms = [int][math]::Round(((Get-Date) - $started).TotalMilliseconds)

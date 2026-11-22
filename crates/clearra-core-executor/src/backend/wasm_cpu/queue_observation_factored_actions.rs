@@ -33,19 +33,19 @@ use crate::backend::wasm_cpu::{
     },
 };
 
+#[cfg(test)]
+use super::MAX_WORK;
 use super::{
-    invalid, piece_code, storage, ObservationLanguageNode, ObservationPieceLanguage,
-    PhysicalActionEdge, WasmExactSearchError, MAX_EDGES, MAX_NODES, MAX_UNION_MEMBERS, MAX_WORK,
-    NO_NODE,
+    checked_work, invalid, piece_code, storage, GenerationLimits, ObservationLanguageNode,
+    ObservationPieceLanguage, PhysicalActionEdge, WasmExactSearchError, NO_NODE,
 };
 
-// Lazy residual nodes remain below MAX_NODES. The high-bit namespace reads
+// Lazy residual nodes remain below KIND_NODE_TAG. The high-bit namespace reads
 // the pinned kind arena directly; all-ones stays unavailable as a sentinel.
 // CanonicalPieceEdge limits *children* to 29 bits, but root allocation has a
 // wider u32 bound, so view admission also checks the actual arena size.
 const KIND_NODE_TAG: u32 = 1_u32 << 31;
 const KIND_NODE_MASK: u32 = KIND_NODE_TAG - 1;
-const _: () = assert!(MAX_NODES < KIND_NODE_TAG as usize);
 
 fn tagged_kind_node(kind: u32) -> Option<u32> {
     (kind < KIND_NODE_MASK).then_some(kind | KIND_NODE_TAG)
@@ -204,6 +204,7 @@ fn relation_hash(proof: &ExactPrefixRelation) -> u64 {
 
 #[derive(Default)]
 pub(super) struct FactoredActionRelations {
+    limits: GenerationLimits,
     relations: Vec<SharedRelation>,
     relation_heads: HashMap<u64, u32>,
     candidates: Vec<Candidate>,
@@ -282,7 +283,7 @@ impl FactoredActionRelations {
                 return Err(invalid("wasm_observation_physical_depth_mismatch"));
             }
         }
-        if self.candidates.len() >= MAX_NODES {
+        if self.candidates.len() >= self.limits.nodes(NO_NODE as usize) {
             return Err(invalid("wasm_observation_physical_relation_limit"));
         }
         if let Some(relation) = reused_relation {
@@ -321,7 +322,7 @@ impl FactoredActionRelations {
             relation = existing.next_same_hash;
         }
         if relation == NO_NODE {
-            if self.relations.len() >= MAX_NODES {
+            if self.relations.len() >= self.limits.nodes(NO_NODE as usize) {
                 return Err(invalid("wasm_observation_physical_relation_limit"));
             }
             let mut retained = Vec::new();
@@ -386,7 +387,7 @@ impl FactoredActionRelations {
         rebound: &[u32],
         control: &ExecutionControl,
     ) -> Result<(), WasmExactSearchError> {
-        self.charge(source.work.saturating_add(1), control)?;
+        self.charge(checked_work(source.work, 1)?, control)?;
         let Some(depth) = source.total_depth else {
             return Ok(());
         };
@@ -401,14 +402,14 @@ impl FactoredActionRelations {
         self.candidates
             .len()
             .checked_add(source.candidates.len())
-            .filter(|count| *count <= MAX_NODES)
+            .filter(|count| *count <= self.limits.nodes(NO_NODE as usize))
             .ok_or_else(|| invalid("wasm_observation_physical_relation_limit"))?;
         let mut relations = Vec::new();
         relations
             .try_reserve_exact(source.relations.len())
             .map_err(|_| storage())?;
         for mut incoming in source.relations {
-            self.charge(incoming.suffixes.len().saturating_add(1), control)?;
+            self.charge(checked_work(incoming.suffixes.len(), 1)?, control)?;
             let head = self
                 .relation_heads
                 .get(&incoming.hash)
@@ -427,7 +428,7 @@ impl FactoredActionRelations {
                 for suffix in &mut incoming.suffixes {
                     suffix.language = rebound_suffix(rebound, suffix.language)?;
                 }
-                if self.relations.len() >= MAX_NODES {
+                if self.relations.len() >= self.limits.nodes(NO_NODE as usize) {
                     return Err(invalid("wasm_observation_physical_relation_limit"));
                 }
                 self.relations.try_reserve(1).map_err(|_| storage())?;
@@ -497,6 +498,7 @@ impl FactoredActionRelations {
             return Err(invalid("wasm_observation_kind_namespace_exhausted"));
         }
         let mut arena = ResidualArena {
+            limits: self.limits,
             work: self.work,
             ..Default::default()
         };
@@ -507,7 +509,12 @@ impl FactoredActionRelations {
             roots
                 .try_reserve_exact(self.candidates.len())
                 .map_err(|_| storage())?;
-            charge(&mut arena.work, self.candidates.len(), control)?;
+            charge(
+                arena.limits,
+                &mut arena.work,
+                self.candidates.len(),
+                control,
+            )?;
             for (index, candidate) in self.candidates.iter().enumerate() {
                 if index & 255 == 0 && control.is_cancelled() {
                     return Err(WasmExactSearchError::Cancelled);
@@ -550,7 +557,7 @@ impl FactoredActionRelations {
         steps: usize,
         control: &ExecutionControl,
     ) -> Result<(), WasmExactSearchError> {
-        let result = charge(&mut self.work, steps, control);
+        let result = charge(self.limits, &mut self.work, steps, control);
         #[cfg(feature = "local-search-ab")]
         if matches!(
             result,
@@ -669,6 +676,7 @@ struct ResidualNode {
 
 #[derive(Default)]
 struct ResidualArena {
+    limits: GenerationLimits,
     nodes: Vec<ResidualNode>,
     heads: HashMap<u64, u32>,
     members: usize,
@@ -686,7 +694,12 @@ impl ResidualArena {
         mut sources: Sources,
         control: &ExecutionControl,
     ) -> Result<u32, WasmExactSearchError> {
-        charge(&mut self.work, sources.len().saturating_add(1), control)?;
+        charge(
+            self.limits,
+            &mut self.work,
+            checked_work(sources.len(), 1)?,
+            control,
+        )?;
         sources.canonicalize();
         if sources.len() == 0 {
             return Err(invalid("wasm_observation_physical_root_invalid"));
@@ -698,7 +711,7 @@ impl ResidualArena {
         let head = self.heads.get(&hash).copied().unwrap_or(NO_NODE);
         let mut existing = head;
         while existing != NO_NODE {
-            charge(&mut self.work, 1, control)?;
+            charge(self.limits, &mut self.work, 1, control)?;
             let node = &self.nodes[existing as usize];
             if node.remaining_depth == remaining_depth && node.sources == sources {
                 return Ok(existing);
@@ -712,9 +725,9 @@ impl ResidualArena {
         let members = self
             .members
             .checked_add(sources.capacity())
-            .filter(|members| *members <= MAX_UNION_MEMBERS)
+            .filter(|members| *members <= self.limits.members())
             .ok_or_else(|| invalid("wasm_observation_physical_union_limit"))?;
-        if self.nodes.len() >= MAX_NODES {
+        if self.nodes.len() >= self.limits.nodes(KIND_NODE_MASK as usize) {
             return Err(invalid("wasm_observation_physical_relation_limit"));
         }
         self.nodes.try_reserve(1).map_err(|_| storage())?;
@@ -742,7 +755,7 @@ impl ResidualArena {
         let total = self
             .edges
             .checked_add(edges.len())
-            .filter(|count| *count <= MAX_EDGES)
+            .filter(|count| *count <= self.limits.edges(usize::MAX))
             .ok_or_else(|| invalid("wasm_observation_physical_relation_limit"))?;
         let target = self
             .nodes
@@ -1011,7 +1024,12 @@ impl ObservationPieceLanguage for FactoredPhysicalActionLanguageView<'_> {
             pending ^= bit;
             let piece = index + 1;
             let members = arena.nodes[node as usize].sources.len();
-            charge(&mut arena.work, members.saturating_add(1), control)?;
+            charge(
+                arena.limits,
+                &mut arena.work,
+                checked_work(members, 1)?,
+                control,
+            )?;
             match arena.nodes[node as usize].sources {
                 Sources::Physical(_) => {
                     arena.physical_source_visits =
@@ -1269,6 +1287,7 @@ fn intern_physical_groups<T: Copy>(
 }
 
 fn charge(
+    limits: GenerationLimits,
     work: &mut usize,
     steps: usize,
     control: &ExecutionControl,
@@ -1278,7 +1297,7 @@ fn charge(
     }
     *work = work
         .checked_add(steps)
-        .filter(|work| *work <= MAX_WORK)
+        .filter(|work| *work <= limits.work())
         .ok_or_else(|| invalid("wasm_observation_physical_work_limit"))?;
     Ok(())
 }
@@ -1736,6 +1755,7 @@ mod tests {
     fn hidden_cutoff_and_resource_refusal_cannot_be_empty_languages() {
         let control = ExecutionControl::default();
         let mut source = FactoredActionRelations::default();
+        source.limits = GenerationLimits::DEVELOPMENT;
         let mut kinds = PieceOrderLanguageCache::default();
         register(&mut source, &mut kinds, 0);
         let view = source.view(&kinds, &control).unwrap().unwrap();

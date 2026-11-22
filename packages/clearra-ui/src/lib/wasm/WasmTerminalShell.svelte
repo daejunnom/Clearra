@@ -109,47 +109,7 @@
       </dl>
     </div>
 
-    <div class="panel">
-      <h2>WebGPU</h2>
-      <dl>
-        <div>
-          <dt>{copy.connected}</dt>
-          <dd>{state.webgpuBackend
-              ? runtimeShellValue(locale, state.webgpuBackend.outcome_state === 'Connected')
-              : copy.pending}</dd>
-        </div>
-        <div>
-          <dt>{copy.fallback}</dt>
-          <dd>{state.webgpuBackend
-              ? state.webgpuBackend.fallback_used
-                ? runtimeShellValue(locale, state.webgpuBackend.fallback_backend ?? 'unknown')
-                : copy.false
-              : copy.pending}</dd>
-        </div>
-        <div>
-          <dt>{copy.trust}</dt>
-          <dd>{runtimeShellValue(locale, state.webgpuBackend?.gpu_trust_state ?? copy.pending)}</dd>
-        </div>
-        <div>
-          <dt>{copy.reason}</dt>
-          <dd>{state.webgpuBackend
-              ? runtimeShellValue(locale, state.webgpuBackend.webgpu_unavailable_reason ?? 'none')
-              : copy.pending}</dd>
-        </div>
-        <div>
-          <dt>{copy.shader}</dt>
-          <dd>{state.webgpuBackend?.shader.shader_hash || copy.pending}</dd>
-        </div>
-        <div>
-          <dt>{copy.warmup}</dt>
-          <dd>{state.webgpuBackend ? runtimeShellValue(locale, state.webgpuBackend.gpu_warmup_performed) : copy.pending}</dd>
-        </div>
-        <div>
-          <dt>{copy.sessionReused}</dt>
-          <dd>{state.webgpuBackend ? runtimeShellValue(locale, state.webgpuBackend.gpu_session_reused) : copy.pending}</dd>
-        </div>
-      </dl>
-    </div>
+
   </section>
 
   <section class="terminal" aria-label={copy.terminalOutput}>

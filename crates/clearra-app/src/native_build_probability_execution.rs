@@ -395,17 +395,20 @@ fn run_native_build_probability_with_workers_inner(
                 return Err(error);
             }
         };
+        let worker_profile = clearra_core_executor::performance::WorkerSearchProfile::capture();
         let handle = match thread::Builder::new()
             .name(thread_name)
             .stack_size(NATIVE_BUILD_WORKER_STACK_BYTES)
             .spawn(move || {
-                build_probability_worker_main(
-                    worker_index,
-                    verifier,
-                    request_receiver,
-                    worker_completion_sender,
-                    worker_control,
-                );
+                worker_profile.measure(|| {
+                    build_probability_worker_main(
+                        worker_index,
+                        verifier,
+                        request_receiver,
+                        worker_completion_sender,
+                        worker_control,
+                    );
+                });
             }) {
             Ok(handle) => handle,
             Err(_) => {
@@ -483,6 +486,7 @@ fn drive_native_build_probability(
     available.extend(0..request_senders.len());
     let mut in_flight = 0_usize;
     let mut summary = None;
+    let mut candidates_dispatched = 0_u64;
     while summary.is_none() || in_flight != 0 {
         while summary.is_none() {
             let Some(worker_index) = available.pop_front() else {
@@ -515,7 +519,8 @@ fn drive_native_build_probability(
                     component: "wasm_cpu_worker_pool_unavailable",
                 })?;
             in_flight = in_flight.saturating_add(1);
-            control.report_progress("build-probability-candidates", count as u64, None);
+            candidates_dispatched = candidates_dispatched.saturating_add(count as u64);
+            control.report_progress("build-probability-candidates", candidates_dispatched, None);
         }
         if in_flight == 0 {
             if summary.is_some() {

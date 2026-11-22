@@ -206,7 +206,7 @@ impl BoardActionFamily {
             }
             return Ok(class);
         }
-        if self.nodes.len() >= MAX_NODES {
+        if self.nodes.len() >= self.limits.nodes(BOARD_NODE_CAPACITY) {
             return Err(invalid("wasm_observation_physical_node_limit"));
         }
         let added = if already_retained {
@@ -218,7 +218,7 @@ impl BoardActionFamily {
             .metrics
             .suffix_roots
             .checked_add(added)
-            .filter(|&count| count <= MAX_UNION_MEMBERS)
+            .filter(|&count| count <= self.limits.members())
             .ok_or_else(|| invalid("wasm_observation_physical_union_limit"))?;
         stage.links.try_reserve(1).map_err(|_| storage())?;
         self.observe_boundary_staging(incoming, stage);
@@ -380,9 +380,9 @@ impl BoardActionFamily {
         // Counts already include every staged edge and root. Moving an edge
         // into its executable parent does not count or charge it twice. Exact
         // class reuse may discard equivalent root references, never work.
-        if self.metrics.nodes > MAX_NODES
-            || self.metrics.edges > MAX_EDGES
-            || self.metrics.suffix_roots > MAX_UNION_MEMBERS
+        if self.metrics.nodes > self.limits.nodes(BOARD_NODE_CAPACITY)
+            || self.metrics.edges > self.limits.edges(usize::MAX)
+            || self.metrics.suffix_roots > self.limits.members()
         {
             return Err(invalid("wasm_observation_shared_resource_count_invalid"));
         }
@@ -975,6 +975,7 @@ mod tests {
         source.metrics.work = MAX_WORK;
         let rebound: Vec<_> = (0..kinds.node_count() as u32).collect();
         let mut destination = BoardActionFamily::new(scope);
+        destination.limits = GenerationLimits::DEVELOPMENT;
         assert!(matches!(
             destination.merge_completed_boundaries(
                 vec![source],

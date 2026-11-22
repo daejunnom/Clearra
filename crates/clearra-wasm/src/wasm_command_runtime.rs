@@ -2963,36 +2963,6 @@ fn try_pc_path_mask(
     try_owned_string(value, ledger)
 }
 
-fn try_join_three(
-    first: &str,
-    middle: &str,
-    last: &str,
-    ledger: &mut WasmFiniteMemoryLedger,
-) -> Result<String, WasmCommandRuntimeError> {
-    let len = first
-        .len()
-        .checked_add(middle.len())
-        .and_then(|len| len.checked_add(last.len()))
-        .ok_or_else(finite_projection_error)?;
-    ledger.authorize_requested(len as u128)?;
-    let mut output = String::new();
-    output
-        .try_reserve_exact(len)
-        .map_err(|_| finite_allocation_error())?;
-    let actual_capacity = output.capacity();
-    ledger.retain_actual(actual_capacity as u128)?;
-    if actual_capacity < len {
-        return Err(finite_projection_error());
-    }
-    output.push_str(first);
-    output.push_str(middle);
-    output.push_str(last);
-    if output.len() != len || output.capacity() != actual_capacity {
-        return Err(finite_projection_error());
-    }
-    Ok(output)
-}
-
 fn try_unavailable_webgpu_report(
     reason: Option<String>,
     fallback_to_wasm_cpu: bool,
@@ -3039,114 +3009,32 @@ fn try_unavailable_webgpu_report(
 }
 
 fn try_webgpu_report(
-    response: &clearra_app::AppResponse,
+    _response: &clearra_app::AppResponse,
     requested: bool,
     ledger: &mut WasmFiniteMemoryLedger,
 ) -> Result<WebGpuBackendReport, WasmCommandRuntimeError> {
-    if !requested {
-        return try_unavailable_webgpu_report(
-            None,
-            false,
-            "not-requested",
-            WebGpuBackendOutcomeState::NotRequested,
-            ledger,
-        );
-    }
-    let Some(result) = response
-        .render_model()
-        .and_then(|model| model.core_result())
-    else {
-        let backend = response.backend_report();
-        let reason = match (
-            backend.backend_fallback_reason(),
-            backend.gpu_failure_class(),
-            backend.gpu_failure_stage(),
-        ) {
-            (Some(reason), _, _) => try_owned_string(reason, ledger)?,
-            (None, Some(class), Some(stage)) => try_join_three(class, ":", stage, ledger)?,
-            (None, Some(class), None) => try_owned_string(class, ledger)?,
-            (None, None, Some(stage)) => try_owned_string(stage, ledger)?,
-            (None, None, None) => try_owned_string("webgpu_result_not_materialized", ledger)?,
-        };
-        return try_unavailable_webgpu_report(
-            Some(reason),
-            backend.fallback_used(),
-            "search-backend-unavailable",
-            WebGpuBackendOutcomeState::Unavailable,
-            ledger,
-        );
+    // Preserve the report shape for ABI readers without manufacturing an
+    // adapter, a GPU result, or a CPU fallback for a retired backend.
+    let reason = if requested {
+        Some(try_owned_string("webgpu_backend_retired", ledger)?)
+    } else {
+        None
     };
-    if result.field("backend_selected") == Some("webgpu") {
-        return Ok(WebGpuBackendReport {
-            outcome_state: WebGpuBackendOutcomeState::Connected,
-            webgpu_available: true,
-            webgpu_adapter_label_or_redacted: try_owned_string(
-                result.field("gpu_adapter").unwrap_or("redacted"),
-                ledger,
-            )?,
-            webgpu_limits: crate::WebGpuLimitsReport::default(),
-            webgpu_required_limits: crate::WebGpuLimitsReport::default(),
-            webgpu_unavailable_reason: None,
-            expected_digest: try_optional_owned_string(
-                result.field("packing_candidate_set_digest"),
-                ledger,
-            )?,
-            actual_digest: try_optional_owned_string(
-                result.field("packing_candidate_set_digest"),
-                ledger,
-            )?,
-            shader: crate::WebGpuShaderReport {
-                shader_compile_status: try_owned_string("connected", ledger)?,
-                shader_hash: try_optional_owned_string(result.field("gpu_shader_hash"), ledger)?,
-                shader_version: try_optional_owned_string(
-                    result.field("gpu_shader_version"),
-                    ledger,
-                )?,
-                embedded_reviewed: true,
-                user_shader_allowed: false,
-                runtime_shader_injection_allowed: false,
-            },
-            memory: crate::WebGpuMemoryReport {
-                wasm_memory_usage: try_owned_string(
-                    result.field("gpu_peak_bytes").unwrap_or("0"),
-                    ledger,
-                )?,
-                wasm_memory_pressure: try_owned_string("within-reported-budget", ledger)?,
-            },
-            fallback_used: false,
-            fallback_backend: None,
-            gpu_warmup_requested: result.bool_field("gpu_warmup_requested").unwrap_or(false),
-            gpu_warmup_performed: result.bool_field("gpu_warmup_performed").unwrap_or(false),
-            gpu_session_reused: result.bool_field("gpu_session_reused").unwrap_or(false),
-            gpu_trust_state: crate::WebGpuReportTrustState::TrustedCpuSampleConfirmed,
-            cpu_confirmed: true,
-            can_source_exact_probability: result
-                .bool_field("probability_complete")
-                .unwrap_or(false),
-        });
-    }
-    let fallback_used = result.bool_field("backend_fallback_used").unwrap_or(false);
-    let reason = result
-        .field("gpu_disabled_reason")
-        .filter(|reason| !matches!(*reason, "none" | "not_requested"))
-        .or_else(|| {
-            result
-                .field("backend_fallback_reason")
-                .filter(|reason| *reason != "none")
-        })
-        .unwrap_or("webgpu_not_selected");
-    let reason = try_owned_string(reason, ledger)?;
-    let mut report = try_unavailable_webgpu_report(
-        Some(reason),
-        fallback_used,
-        "search-backend-unavailable",
-        WebGpuBackendOutcomeState::Unavailable,
+    try_unavailable_webgpu_report(
+        reason,
+        false,
+        if requested {
+            "retired"
+        } else {
+            "not-requested"
+        },
+        if requested {
+            WebGpuBackendOutcomeState::Unavailable
+        } else {
+            WebGpuBackendOutcomeState::NotRequested
+        },
         ledger,
-    )?;
-    report.gpu_warmup_requested = result.bool_field("gpu_warmup_requested").unwrap_or(false);
-    report.gpu_warmup_performed = result.bool_field("gpu_warmup_performed").unwrap_or(false);
-    report.gpu_session_reused = result.bool_field("gpu_session_reused").unwrap_or(false);
-    Ok(report)
+    )
 }
 
 fn try_canonical_probability(

@@ -6,6 +6,11 @@ Geometry, candidate verification, supply coverage and requested execution
 evidence are produced by the existing Rust kernels. Supported request contracts
 and host qualification remain explicit.
 
+WebGPU search and GPU postprocess have been retired. Explicit `gpu` and `hybrid`
+product requests return unsupported without CPU fallback. The current
+[GPU contract](gpu-pipeline.md) supersedes the historical connected-GPU
+milestones below; compatibility report fields do not register an executor.
+
 The preserved C geometry and BuildUp implementation is an independent reference,
 not a product fallback. Explicit reference builds use `native-c-core` and the
 statically linked implementation through `clearra-core-ffi`. Retaining this
@@ -59,14 +64,8 @@ Connected post-processing accepts owned `CandidateExecutionAggregate` values,
 each containing candidate identity and real `ReplayTrace` executions. It
 materializes a `ScoreMatrix` from those traces and the selected score profile;
 field-average scoring is complete only when that matrix and its pattern weights
-are complete. Optional PostProcess GPU work is isolated behind the
-`webgpu-postprocess` feature and currently performs PatternBitSet union only.
-`PostGpuCapabilityState` reports `Connected`, `Unavailable`, or
-`RejectedMismatch`; a connected result must be `TrustedDeterministic` or
-`TrustedCpuSampleConfirmed` before it is exact. Fallback stays attached to an
-unavailable PostProcess GPU outcome with its reason. The search and postprocess
-backend reports remain separate, and postprocess does not change PC coverage
-probability. Count-only replay/evidence/spin batch constructors are not product
+are complete. CPU coverage reduction and postprocess scoring preserve their
+separate evidence owners. Count-only replay/evidence/spin batch constructors are not product
 APIs.
 
 Internal field data is occupancy-only. Rust uses `OccupancyField { width, height, mask }`
