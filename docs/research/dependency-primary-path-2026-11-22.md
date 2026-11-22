@@ -301,7 +301,55 @@ capture를 버리는 같은 출력 계약으로 위의 별도 반복 시간을 �
 - see-7은 실제 P7 전체와 실제 10-operation identity의 24개 가중 큐에서
   hold on/off 및 concrete physical-action 기준을 검산했다. kind-only 늦은 선택
   반례와 자원 한계 오류도 회귀에 포함한다. 전체 P7P4 see-7의 완주·속도는 별도 항목이다.
-  이 문서의 첫 게시 시점에는 일반 CLI의 release 빌드 및 전체 입력 확인이 진행 중이다.
+
+### 전체 P7P4 see-7 제품 실행: 관계 한도로 미완료
+
+추가로 동일 Rust 소스의 일반 제품 CLI를 release로 빌드하여 아래 요청을 실행했다.
+`local-search-ab`를 켜지 않고, 과거 의존성 opt-in 인자도 주지 않았다.
+`--queue` 생략은 fresh standard bag이며 빈 4L+hold 요청의 공급은 P7P4 전체 우주다.
+
+```sh
+clearra pc --lines 4 --hold --objective unique \
+  --rule jstris-180 --queue-knowledge visible-7 --backend cpu \
+  --use-all-cpu-threads --no-backend-fallback --no-tablebase --no-legal-board \
+  --no-conditioned-reachability --format json
+```
+
+**이 실행은 완주하지 못했다.** 감독자의 관측 시간 28.392초에 종료 코드 1을 반환했다.
+
+| 관측 항목 | 결과 |
+| --- | --- |
+| CLI 결과 종류 | `execution-failed` |
+| 표면 오류 코드 | `E_PC_SEARCH_INTERNAL` |
+| 내부 원인 | `wasm_observation_physical_relation_limit` |
+| `result_completeness` | `incomplete` |
+| `probability_complete` | `false` |
+| 감독자 샘플 RSS 최대 | 566,501,376바이트, 약 540MiB |
+| 감독자 메모리 pressure / timeout | 0회 / 발생하지 않음 |
+
+따라서 이는 OS 메모리 부족이나 timeout이 아니라 물리 행동 관계 owner의
+명시적 상한 거부다. 현재 관계 상한은 nodes 1,000,000 / edges 8,000,000이며
+오류 코드는 둘을 구분하지 않으므로 어느 카운터가 먼저 닿았는지 이 결과만으로
+단정하지 않는다. work 64,000,000과 union members 8,000,000도 별도 상한이다.
+성공률 0이나 완료된 coverage로 바뀌지 않았다는 오류 경계는 실제 제품에서도 확인했다.
+
+일반 CLI는 내부 출력이 `Trace`이며 benchmark의 `CoverageSummary`와 다르다.
+현재 `requires_observation_policy()` 요청은 전역 정책 owner 때문에 분산 실행을
+선택하지 않는다. 전체 CPU를 요청한 그대로 실행했지만 oracle의 9-worker 시간과
+같은 병렬 폭의 성능 수치로 비교할 수 없다. 위 28.392초는 실패까지의 시간이며
+완성 탐색의 성능 수치가 아니다.
+
+진단 CLI의 SHA-256은
+`7f5c60245562580de49f1332a4d9254e8e927055b985a8594751c0b5d2a58e18`이다.
+CLI의 `runtime_identity`는 일반 로컬 빌드의 `unverified-local-build`였으며,
+이를 배포 또는 canonical acceptance 증거로 사용하지 않는다.
+감독자 run ID는 `1795310000189778630-553`이다.
+
+**결론적으로 oracle P7P4의 정확 집합 보존과 시간 감소는 확인했지만, 대규모 see-7까지
+포함한 제품 전환 완료 조건은 충족하지 못했다.** 다음 구조적 성능 작업은 동일 물리
+행동 이력이라는 동치 조건을 보존하면서 전역 관계의 생성·보유량을 줄이고 이 전체
+입력을 완주시키는 것이다. 과거 kind-only 합집합은 늦은 선택 반례가 있으므로
+이 입력의 정확한 정책 기준으로 사용할 수 없다.
 
 코어 검사는 `--test-threads=1`로 전역 자원 admission 충돌을 분리했다.
 이는 libtest의 동시 테스트 수이며 solver의 논리 CPU 사용 수는 줄이지 않았다.
@@ -361,6 +409,9 @@ physical-action owner는 node·edge·union·work에 유한 자원 한계를 둔�
 - [x] 수정 파일: `symbolic_prefix_orders.rs`, 구현 내용: 이미 증명한 관계와 원래 행 projection을 재사용하여 oracle/see-7 소비자를 연결한다.
 - [x] 수정 파일: `search_problem.rs`, 구현 내용: 검증된 PC 범위에서 과거 opt-in 값과 무관하게 의존성 주 경로를 선택한다.
 - [x] 수정 파일: `SearchControls.svelte`, 구현 내용: 의존성 사전 분석 토글을 제거하고 기본 경로를 제품 요청에 반영한다.
+- [x] 일반 제품 CLI에서 전체 P7P4 see-7을 실행하고 관계 상한의 미완료 결과를 기록한다.
+- [ ] 전체 P7P4 see-7이 관계 한도 안에서 완주하도록 만드는 후속 구조적 작업과 재검산.
+- [ ] 정확한 게시 SHA의 필요한 원격 CI 확인과 제품 승격 판단.
 
 ## 7. 게시와 제품 승격
 
@@ -371,5 +422,5 @@ physical-action owner는 node·edge·union·work에 유한 자원 한계를 둔�
 표시하지 않는다.
 
 `AGENTS.md`의 승격 규약은 필요한 CI를 확인한 정확한 SHA의 fast-forward다.
-이번 작업은 `main`이나 배포 트래픽을 변경하지 않았다. 원격 CI와 큰 see-7의
-완주 여부는 제품 승격 판단에서 별도로 확인해야 한다.
+이번 작업은 `main`이나 배포 트래픽을 변경하지 않았다. 큰 see-7에서 확인한 관계
+상한과 아직 없는 원격 CI 증거를 해결하기 전에는 전체 제품 전환 완료로 판정하지 않는다.
