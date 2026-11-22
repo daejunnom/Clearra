@@ -16,8 +16,8 @@ use crate::backend::wasm_cpu::{
     catalog::{GeometryCatalog, InstantiatedRealization},
     exact_collections::ExactHashSet,
     geometry::GeometryCandidate,
-    placement_poset::CandidateGeometry,
     reachability::{harddrop_path_mask, PrefixPoseWork, ReachabilityWorkspace},
+    symbolic_prefix_domain::MAX_OPERATIONS,
     symbolic_prefix_orders::SymbolicPrefixOrders,
     WasmExactSearchError,
 };
@@ -30,11 +30,19 @@ struct LockChoice {
     hold: &'static str,
 }
 
+#[derive(Clone, Copy)]
+struct WitnessChoice {
+    lock: LockChoice,
+    next: CoverageState,
+    supply_priority: u8,
+}
+
 struct PatternWitness<'a> {
     orders: &'a SymbolicPrefixOrders,
     problem: &'a SearchProblem,
     sequence: &'a [PieceKind],
     control: &'a ExecutionControl,
+    supply_first: bool,
     seen: ExactHashSet<CoverageState>,
     choices: Vec<LockChoice>,
 }
@@ -59,6 +67,12 @@ impl PatternWitness<'_> {
             return Ok(false);
         }
 
+        // The ordinary graph representative orders operations before hold
+        // choices. The former fixed-source shortcut orders Current before
+        // Hold across all operations. Generate both from the same existing
+        // supply transitions, changing only that bounded choice ordering.
+        let mut choices = [None; MAX_OPERATIONS * 3];
+        let mut choice_count = 0;
         for (operation, piece) in self.orders.live_operations_after(subset) {
             let next = subset | (1_u16 << operation);
             if next == terminal
@@ -71,12 +85,20 @@ impl PatternWitness<'_> {
                     piece,
                 )
             {
-                self.choices.push(LockChoice {
-                    operation,
-                    piece,
-                    hold: "release-held-at-terminal",
+                choices[choice_count] = Some(WitnessChoice {
+                    lock: LockChoice {
+                        operation,
+                        piece,
+                        hold: "release-held-at-terminal",
+                    },
+                    next: CoverageState {
+                        node: u32::from(next),
+                        hold: None,
+                        ..state
+                    },
+                    supply_priority: 0,
                 });
-                return Ok(true);
+                choice_count += 1;
             }
             for (hold, supply_state) in hold_successors(
                 self.sequence,
@@ -88,19 +110,36 @@ impl PatternWitness<'_> {
                 piece,
                 None,
             ) {
-                self.choices.push(LockChoice {
-                    operation,
-                    piece,
-                    hold,
+                choices[choice_count] = Some(WitnessChoice {
+                    lock: LockChoice {
+                        operation,
+                        piece,
+                        hold,
+                    },
+                    next: CoverageState {
+                        node: u32::from(next),
+                        ..supply_state
+                    },
+                    supply_priority: u8::from(!matches!(
+                        hold,
+                        "use-current" | "use-unplaced-lookahead"
+                    )),
                 });
-                if self.select_locks(CoverageState {
-                    node: u32::from(next),
-                    ..supply_state
-                })? {
-                    return Ok(true);
-                }
-                self.choices.pop();
+                choice_count += 1;
             }
+        }
+        if self.supply_first {
+            choices[..choice_count].sort_unstable_by_key(|choice| {
+                let choice = choice.expect("populated witness choice");
+                (choice.supply_priority, choice.lock.operation)
+            });
+        }
+        for choice in choices[..choice_count].iter().flatten().copied() {
+            self.choices.push(choice.lock);
+            if self.select_locks(choice.next)? {
+                return Ok(true);
+            }
+            self.choices.pop();
         }
         Ok(false)
     }
@@ -113,6 +152,7 @@ pub(super) fn materialize(
     candidate: &GeometryCandidate,
     orders: &SymbolicPrefixOrders,
     pattern_id: u32,
+    supply_first: bool,
     reachability: &mut ReachabilityWorkspace,
     control: &ExecutionControl,
     work: &mut PrefixPoseWork,
@@ -129,6 +169,9 @@ pub(super) fn materialize(
         problem,
         sequence: sequence.as_ref(),
         control,
+        // The old fixed shortcut excluded inferred standard-bag current
+        // pieces; those requests retain ordinary operation-first ordering.
+        supply_first: supply_first && !problem.supply().projects_standard_bag_lookahead(),
         seen: ExactHashSet::default(),
         choices: Vec::with_capacity(candidate.row_ids().len()),
     };
@@ -142,9 +185,7 @@ pub(super) fn materialize(
         ));
     }
 
-    let geometry = CandidateGeometry::for_symbolic_prefix(catalog, candidate).ok_or(
-        WasmExactSearchError::InvalidProblem("wasm_placement_dependency_witness_frame_invalid"),
-    )?;
+    let geometry = orders.geometry();
     let mut path = Vec::with_capacity(witness.choices.len());
     let mut executed = 0_u16;
     for choice in witness.choices {
@@ -221,4 +262,95 @@ fn representative_lock(
     selected.ok_or(WasmExactSearchError::InvalidProblem(
         "wasm_placement_dependency_witness_pose_missing",
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use clearra_pc_graph::request::{
+        PcCountPolicy, PcQueueInput, PcScenarioBoard, PcScenarioQuery, PieceWindow,
+        SupplyWindowSize,
+    };
+    use clearra_problem::ProblemCompiler;
+    use clearra_rules::profile::builtin_rules::srs_plus;
+    use clearra_supply::queue::fixed_sequence::FixedSequence;
+
+    use super::*;
+    use crate::backend::wasm_cpu::symbolic_prefix_orders::SymbolicPrefixWork;
+
+    #[test]
+    fn fixed_witness_retains_supply_first_order_without_changing_graph_order() {
+        let i = 0xf;
+        let o = (3 << 6) | (3 << 16);
+        let target = i | o;
+        let catalog = GeometryCatalog::compile_build_stage(2, 0, target).unwrap();
+        let rows = [
+            catalog.skeleton_id(PieceKind::I, i).unwrap(),
+            catalog.skeleton_id(PieceKind::O, o).unwrap(),
+        ];
+        let candidate = GeometryCandidate::from_rows(&catalog, 0, &rows).unwrap();
+        let held = catalog.skeleton(candidate.row_ids()[0]).piece;
+        let current = catalog.skeleton(candidate.row_ids()[1]).piece;
+        assert_ne!(held, current);
+        let problem = ProblemCompiler::compile_scenario_pc(
+            &PcScenarioQuery::new(
+                PcScenarioBoard::standard_10(2, ((1 << 20) - 1) & !target),
+                PcQueueInput::fixed_sequence(FixedSequence::new(vec![current, held])),
+                PieceWindow::new(2),
+            )
+            .with_rule(srs_plus())
+            .with_allow_hold(true)
+            .with_hold_piece(Some(held))
+            .with_exact_pieces(Some(2))
+            .with_supply_window_size(SupplyWindowSize::new(2))
+            .with_count_policy(PcCountPolicy::CountUnique),
+        )
+        .unwrap();
+        let control = ExecutionControl::default();
+        let mut reachability = ReachabilityWorkspace::default();
+        let mut work = SymbolicPrefixWork::default();
+        let orders = SymbolicPrefixOrders::compile_product_completion_with_workspace(
+            &catalog,
+            &candidate,
+            problem.kick_profile().profile_id(),
+            &control,
+            &mut reachability,
+            &mut work,
+            0,
+            target,
+        )
+        .unwrap();
+        assert_eq!(orders.live_operations_after(0).count(), 2);
+
+        let mut trace = |supply_first| {
+            materialize(
+                &problem,
+                &catalog,
+                &candidate,
+                &orders,
+                0,
+                supply_first,
+                &mut reachability,
+                &control,
+                &mut work.pose,
+            )
+            .unwrap()
+        };
+        let fixed = trace(true);
+        let ordinary = trace(false);
+        assert_eq!(fixed.len(), 2);
+        assert_eq!(ordinary.len(), 2);
+        assert_eq!(
+            (fixed[0].piece(), fixed[0].hold()),
+            (current, "use-current")
+        );
+        assert_eq!((fixed[1].piece(), fixed[1].hold()), (held, "use-current"));
+        assert_eq!(
+            (ordinary[0].piece(), ordinary[0].hold()),
+            (held, "swap-held")
+        );
+        assert_eq!(
+            (ordinary[1].piece(), ordinary[1].hold()),
+            (current, "swap-held")
+        );
+    }
 }

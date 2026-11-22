@@ -13,7 +13,6 @@ use clearra_problem::SearchProblem;
 
 use crate::performance::{profile_sample_scale, ExecutorSearchStage, SearchStageSpan};
 
-#[cfg(feature = "placement-dependency-pc")]
 use super::buildup::ObservationProducerShard;
 #[cfg(any(test, feature = "local-search-ab"))]
 use super::result::{capture_candidate_solution_coverage, SolutionCoverageCapture};
@@ -594,7 +593,6 @@ pub(super) struct ParallelWorkerResult {
     pub branches: Vec<BranchSearchOutcome>,
     pub aggregate: WorkerAggregate,
     pub candidate_count: usize,
-    #[cfg(feature = "placement-dependency-pc")]
     pub observation_producer_shards: Vec<ObservationProducerShard>,
 }
 
@@ -824,9 +822,7 @@ fn run_branch_worker_inner(
     // their concrete actions and make one global choice before each reveal.
     aggregate.piece_language_cache_hits = workspace.piece_language_coverage_hits();
     aggregate.piece_language_cache_misses = workspace.piece_language_coverage_misses();
-    #[cfg(feature = "placement-dependency-pc")]
     let mut observation_producer_shards = Vec::new();
-    #[cfg(feature = "placement-dependency-pc")]
     if let Some(shard) = workspace.take_observation_producer_shard() {
         observation_producer_shards
             .try_reserve_exact(1)
@@ -837,13 +833,10 @@ fn run_branch_worker_inner(
             })?;
         observation_producer_shards.push(shard);
     }
-    #[cfg(feature = "placement-dependency-pc")]
     let observation_producer_bytes = observation_producer_shards.iter().fold(
         observation_producer_shards.capacity() * core::mem::size_of::<ObservationProducerShard>(),
         |bytes, shard| bytes.saturating_add(shard.retained_bytes()),
     );
-    #[cfg(not(feature = "placement-dependency-pc"))]
-    let observation_producer_bytes = 0;
     aggregate.candidate_digest_retained_bytes = outcomes
         .iter()
         .map(|branch: &BranchSearchOutcome| branch.candidate_digest.retained_bytes())
@@ -919,7 +912,6 @@ fn run_branch_worker_inner(
         branches: outcomes,
         aggregate,
         candidate_count: worker_candidate_count,
-        #[cfg(feature = "placement-dependency-pc")]
         observation_producer_shards,
     })
 }
@@ -1739,7 +1731,6 @@ mod tests {
             buildable: true,
             covered_patterns: Some(coverage.clone()),
             symbolic_coverage_root: None,
-            observation_language_root: None,
             symbolic_covered_pattern_count: 0,
             witness_pattern_id: Some(0),
             build_variant_count: 1,

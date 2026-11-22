@@ -115,6 +115,7 @@ impl CompactPrefixRelation {
 struct SharedRelation {
     proof: CompactPrefixRelation,
     suffixes: Vec<PrefixSuffix>,
+    #[cfg(any(test, feature = "parallel"))]
     hash: u64,
     next_same_hash: u32,
 }
@@ -134,6 +135,17 @@ struct Candidate {
     relation: u32,
 }
 
+fn relation_hash(proof: &ExactPrefixRelation) -> u64 {
+    let mut hash = DefaultHasher::new();
+    proof.operation_count().hash(&mut hash);
+    proof.pieces().hash(&mut hash);
+    for operation in 0..proof.operation_count() {
+        proof.parent_words(operation).hash(&mut hash);
+    }
+    proof.active_words().hash(&mut hash);
+    hash.finish()
+}
+
 #[derive(Default)]
 pub(super) struct FactoredActionRelations {
     relations: Vec<SharedRelation>,
@@ -145,6 +157,33 @@ pub(super) struct FactoredActionRelations {
 }
 
 impl FactoredActionRelations {
+    /// A hit reuses the complete suffix binding of this exact labelled
+    /// relation. The caller pins the kind arena before asking for reuse.
+    /// Coordinates are intentionally absent here: they remain per candidate
+    /// and are consulted when each physical derivative is requested.
+    pub(super) fn registered_language(
+        &mut self,
+        proof: &ExactPrefixRelation,
+        control: &ExecutionControl,
+    ) -> Result<Option<(u32, u32)>, WasmExactSearchError> {
+        self.charge(1, control)?;
+        let hash = relation_hash(proof);
+        let mut relation = self.relation_heads.get(&hash).copied().unwrap_or(NO_NODE);
+        while relation != NO_NODE {
+            self.charge(1, control)?;
+            let existing = &self.relations[relation as usize];
+            if existing.proof.matches(proof) {
+                let root = existing
+                    .suffix(0)
+                    .ok_or_else(|| invalid("wasm_observation_suffix_language_missing"))?;
+                return Ok(Some((relation, root)));
+            }
+            relation = existing.next_same_hash;
+        }
+        Ok(None)
+    }
+
+    #[cfg(test)]
     pub(super) fn register(
         &mut self,
         orders: SymbolicPrefixOrders,
@@ -152,12 +191,23 @@ impl FactoredActionRelations {
         hidden_horizon: u8,
         control: &ExecutionControl,
     ) -> Result<(), WasmExactSearchError> {
+        self.register_prepared(orders, suffixes, hidden_horizon, None, control)
+    }
+
+    pub(super) fn register_prepared(
+        &mut self,
+        orders: SymbolicPrefixOrders,
+        suffixes: &[u32],
+        hidden_horizon: u8,
+        reused_relation: Option<u32>,
+        control: &ExecutionControl,
+    ) -> Result<(), WasmExactSearchError> {
         self.charge(1, control)?;
         let (proof, geometry) = orders.into_observation_parts()?;
         if !proof.contains_prefix(0) {
             return Ok(());
         }
-        if suffixes.len() != usize::from(proof.terminal_prefix()) + 1 {
+        if reused_relation.is_none() && suffixes.len() != usize::from(proof.terminal_prefix()) + 1 {
             return Err(invalid("wasm_observation_suffix_language_missing"));
         }
         let depth = u8::try_from(proof.operation_count())
@@ -171,14 +221,21 @@ impl FactoredActionRelations {
         if self.candidates.len() >= MAX_NODES {
             return Err(invalid("wasm_observation_physical_relation_limit"));
         }
-        let mut hash = DefaultHasher::new();
-        proof.operation_count().hash(&mut hash);
-        proof.pieces().hash(&mut hash);
-        for operation in 0..proof.operation_count() {
-            proof.parent_words(operation).hash(&mut hash);
+        if let Some(relation) = reused_relation {
+            let existing = self
+                .relations
+                .get(relation as usize)
+                .ok_or_else(|| invalid("wasm_observation_physical_root_invalid"))?;
+            // Preparing one proof cannot authorize a later, different
+            // candidate's operation relation, even if numeric roots agree.
+            if !existing.proof.matches(&proof) {
+                return Err(invalid("wasm_observation_prepared_relation_changed"));
+            }
+            self.candidates.try_reserve(1).map_err(|_| storage())?;
+            self.candidates.push(Candidate { geometry, relation });
+            return Ok(());
         }
-        proof.active_words().hash(&mut hash);
-        let hash = hash.finish();
+        let hash = relation_hash(&proof);
         let head = self.relation_heads.get(&hash).copied().unwrap_or(NO_NODE);
         let mut relation = head;
         while relation != NO_NODE {
@@ -228,6 +285,7 @@ impl FactoredActionRelations {
             self.relations.push(SharedRelation {
                 proof: CompactPrefixRelation::new(&proof)?,
                 suffixes: retained,
+                #[cfg(any(test, feature = "parallel"))]
                 hash,
                 next_same_hash: head,
             });
@@ -248,6 +306,7 @@ impl FactoredActionRelations {
     /// was produced by exactly importing the source worker's kind arena.
     /// Candidate geometry moves unchanged and shared proofs are re-interned
     /// after all numeric suffix IDs have been rebound.
+    #[cfg(any(test, feature = "parallel"))]
     pub(super) fn merge(
         &mut self,
         source: Self,
@@ -958,13 +1017,19 @@ mod tests {
     use super::*;
 
     fn two_grounded_os() -> SymbolicPrefixOrders {
+        two_os(false)
+    }
+
+    fn two_os(stacked: bool) -> SymbolicPrefixOrders {
         let left = 3 | (3 << 10);
-        let right = left << 2;
+        let right = left << if stacked { 20 } else { 2 };
+        let height = if stacked { 4 } else { 2 };
         let required = left | right;
-        let initial = ((1_u64 << 20) - 1) & !required;
-        let catalog =
-            GeometryCatalog::compile_for_required_cells_on_dimensions(10, 2, initial, required)
-                .unwrap();
+        let initial = ((1_u64 << (10 * height)) - 1) & !required;
+        let catalog = GeometryCatalog::compile_for_required_cells_on_dimensions(
+            10, height, initial, required,
+        )
+        .unwrap();
         let rows = [left, right].map(|cells| catalog.skeleton_id(PieceKind::O, cells).unwrap());
         let candidate = GeometryCandidate::from_rows(&catalog, 0, &rows).unwrap();
         SymbolicPrefixOrders::compile_product_with_workspace(
@@ -1039,6 +1104,153 @@ mod tests {
         assert_eq!(view.edge_count(revealed), Some(1));
         assert_eq!(view.node(revealed).unwrap().depth, 0);
         assert_eq!(view.fixed_horizon(), Some(2));
+    }
+
+    #[test]
+    fn registered_relation_reuses_suffix_work_without_merging_physical_locks() {
+        use super::super::PhysicalActionLanguage;
+
+        let control = ExecutionControl::default();
+        let mut owner = PhysicalActionLanguage::default();
+        let mut kinds = PieceOrderLanguageCache::default();
+        let mut work = SymbolicPrefixWork::default();
+        let first = two_grounded_os();
+        let root = owner
+            .compile_relation_language(&first, &mut kinds, &mut work, &control)
+            .unwrap()
+            .unwrap();
+        let compiled_edges = work.language_transitions;
+        assert!(compiled_edges > 0);
+        owner.register_relation(first, 2, &control).unwrap();
+        let node_count = kinds.node_count();
+        // Moving an arena preserves its identity; rebuilding an identical
+        // relation must reuse its previous root, without visiting suffixes.
+        let mut moved_kinds = kinds;
+        for _ in 0..3 {
+            let repeated = two_grounded_os();
+            assert_eq!(
+                owner
+                    .compile_relation_language(&repeated, &mut moved_kinds, &mut work, &control,)
+                    .unwrap(),
+                Some(root),
+            );
+            assert!(owner.prefix_suffix_scratch.is_empty());
+            owner.register_relation(repeated, 2, &control).unwrap();
+        }
+        assert_eq!(work.language_transitions, compiled_edges);
+        assert_eq!(moved_kinds.node_count(), node_count);
+        let view = owner
+            .factored_view(&moved_kinds, &control)
+            .unwrap()
+            .unwrap();
+        assert_eq!(view.metrics().candidate_factors, 4);
+        assert_eq!(view.metrics().proof_factors, 1);
+        view.prepare_edges(view.root(), 1 << 1, &control).unwrap();
+        assert_eq!(view.edge_count(view.root()), Some(2));
+        let left = view.edge(view.root(), 0).unwrap();
+        let right = view.edge(view.root(), 1).unwrap();
+        assert_ne!(
+            left.1, right.1,
+            "different lock commitments remain distinct"
+        );
+        for (_, child) in [left, right] {
+            view.prepare_edges(child, 1 << 1, &control).unwrap();
+            let (_, terminal) = view.edge(child, 0).unwrap();
+            assert!(view.node(terminal).unwrap().accepting);
+        }
+    }
+
+    #[test]
+    fn relation_reuse_rejects_replaced_or_reset_kind_arenas() {
+        use super::super::PhysicalActionLanguage;
+
+        let control = ExecutionControl::default();
+        let mut owner = PhysicalActionLanguage::default();
+        let mut kinds = PieceOrderLanguageCache::default();
+        let mut work = SymbolicPrefixWork::default();
+        let first = two_grounded_os();
+        owner
+            .compile_relation_language(&first, &mut kinds, &mut work, &control)
+            .unwrap();
+        owner.register_relation(first, 2, &control).unwrap();
+        let repeated = two_grounded_os();
+        let mut replacement = PieceOrderLanguageCache::default();
+        // Matching numeric histories do not make two request arenas equal.
+        repeated
+            .compile_product_language(&mut replacement, &mut work)
+            .unwrap();
+        assert_eq!(replacement.node_count(), kinds.node_count());
+        assert!(matches!(
+            owner.compile_relation_language(&repeated, &mut replacement, &mut work, &control),
+            Err(WasmExactSearchError::InvalidProblem(
+                "wasm_observation_suffix_arena_changed"
+            )),
+        ));
+        assert!(owner.factored_view(&replacement, &control).is_err());
+        kinds.clear_retain_capacity();
+        repeated
+            .compile_product_language(&mut kinds, &mut work)
+            .unwrap();
+        assert!(matches!(
+            owner.compile_relation_language(&repeated, &mut kinds, &mut work, &control),
+            Err(WasmExactSearchError::InvalidProblem(
+                "wasm_observation_suffix_arena_changed"
+            )),
+        ));
+    }
+
+    #[test]
+    fn unregistered_supply_failure_does_not_pin_a_recycled_arena() {
+        use super::super::PhysicalActionLanguage;
+
+        let control = ExecutionControl::default();
+        let mut owner = PhysicalActionLanguage::default();
+        let mut kinds = PieceOrderLanguageCache::default();
+        let mut work = SymbolicPrefixWork::default();
+        let orders = two_grounded_os();
+        owner
+            .compile_relation_language(&orders, &mut kinds, &mut work, &control)
+            .unwrap();
+        // Match the product lifecycle: a failed supply intersection retains
+        // no candidate, so recycling the arena remains permitted.
+        kinds.clear_retain_capacity();
+        owner
+            .compile_relation_language(&orders, &mut kinds, &mut work, &control)
+            .unwrap();
+        owner.register_relation(orders, 2, &control).unwrap();
+        assert!(owner.factored_view(&kinds, &control).unwrap().is_some());
+    }
+
+    #[test]
+    fn prepared_relation_cannot_authorize_a_different_operation_dependency() {
+        use super::super::PhysicalActionLanguage;
+
+        let control = ExecutionControl::default();
+        let mut owner = PhysicalActionLanguage::default();
+        let mut kinds = PieceOrderLanguageCache::default();
+        let mut work = SymbolicPrefixWork::default();
+        let first = two_grounded_os();
+        owner
+            .compile_relation_language(&first, &mut kinds, &mut work, &control)
+            .unwrap();
+        owner.register_relation(first, 2, &control).unwrap();
+        owner
+            .compile_relation_language(&two_grounded_os(), &mut kinds, &mut work, &control)
+            .unwrap();
+        // Both candidates have kind word OO, but the stacked candidate has
+        // a physical predecessor constraint. A kind-root match is insufficient.
+        assert!(matches!(
+            owner.register_relation(two_os(true), 2, &control),
+            Err(WasmExactSearchError::InvalidProblem(
+                "wasm_observation_prepared_relation_changed"
+            )),
+        ));
+        assert_eq!(owner.factored.candidates.len(), 1);
+        control.cancellation.handle().cancel();
+        assert!(matches!(
+            owner.compile_relation_language(&two_grounded_os(), &mut kinds, &mut work, &control),
+            Err(WasmExactSearchError::Cancelled),
+        ));
     }
 
     #[test]

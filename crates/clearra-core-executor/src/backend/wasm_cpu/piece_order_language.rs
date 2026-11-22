@@ -77,6 +77,11 @@ struct CoverageCacheKey {
 /// hashes never authorize merging.
 #[derive(Default)]
 pub(super) struct PieceOrderLanguageCache {
+    // Numeric suffix IDs survive arena moves and appends, but never a reset.
+    // A retained Arc prevents an old owner identity from being reused after
+    // its cache has been dropped or replaced by another request's cache.
+    #[cfg(feature = "placement-dependency-pc")]
+    arena_identity: Arc<()>,
     nodes: Vec<CanonicalPieceNode>,
     edges: Vec<CanonicalPieceEdge>,
     piece_range_ends: Vec<[u8; 7]>,
@@ -188,6 +193,11 @@ pub struct DistinctNoHoldOneBagCount {
 }
 
 impl PieceOrderLanguageCache {
+    #[cfg(feature = "placement-dependency-pc")]
+    pub(super) fn arena_identity(&self) -> &Arc<()> {
+        &self.arena_identity
+    }
+
     pub fn node_count(&self) -> usize {
         self.nodes.len()
     }
@@ -901,7 +911,6 @@ impl PieceOrderLanguageCache {
     /// The returned ID belongs to this worker's language arena and is consumed
     /// before that arena can be recycled. CountAll continues to use operation
     /// edges and its separate weighted product instead of this quotient.
-    #[cfg(any(test, feature = "local-search-ab"))]
     pub fn canonicalize_and_mark_live(
         &mut self,
         graph: &mut BuildOrderGraph,
@@ -1063,7 +1072,6 @@ impl PieceOrderLanguageCache {
             .get(edge_start + relative_start..edge_start + relative_end)
     }
 
-    #[cfg(any(test, feature = "placement-dependency-pc"))]
     pub fn node_edge_count(&self, reference: u32) -> Option<usize> {
         self.nodes
             .get(reference as usize)
@@ -1073,7 +1081,6 @@ impl PieceOrderLanguageCache {
     /// Direct immutable access for a known-source membership consumer. This
     /// reads the existing exact suffix graph without constructing a union
     /// automaton or allocating another edge representation.
-    #[cfg(any(test, feature = "placement-dependency-pc"))]
     pub fn edge_at(&self, reference: u32, index: usize) -> Option<CanonicalPieceEdge> {
         let node = self.nodes.get(reference as usize).copied()?;
         self.node_edges(node).get(index).copied()
@@ -1099,6 +1106,11 @@ impl PieceOrderLanguageCache {
                 .values()
                 .map(|words| words.len() * core::mem::size_of::<u64>())
                 .sum::<usize>();
+        // The zero-sized arena token still owns the Arc's two reference
+        // counters. Charge that allocation once here; physical observers
+        // only borrow its identity through additional Arc handles.
+        #[cfg(feature = "placement-dependency-pc")]
+        let base = base + 2 * core::mem::size_of::<usize>();
         #[cfg(any(
             test,
             all(
@@ -1121,6 +1133,10 @@ impl PieceOrderLanguageCache {
     }
 
     pub fn clear_retain_capacity(&mut self) {
+        #[cfg(feature = "placement-dependency-pc")]
+        {
+            self.arena_identity = Arc::default();
+        }
         self.nodes.clear();
         self.edges.clear();
         self.piece_range_ends.clear();

@@ -11,9 +11,9 @@ use clearra_core_domain::execution_cancellation::ExecutionControl;
 use clearra_core_domain::piece::{piece_kind::PieceKind, rotation::RotationState};
 use clearra_piece_registry::standard::tetromino_registry::standard_tetromino_registry;
 use clearra_replay::{RotationRequest, ScoringLockEvidence};
-use clearra_rules::kicks::{
-    normalized_kick_delta, KickTableProfile, KickTableProfileId, KickTransition,
-};
+#[cfg(test)]
+use clearra_rules::kicks::normalized_kick_delta;
+use clearra_rules::kicks::{KickTableProfile, KickTableProfileId, KickTransition};
 use std::sync::{Arc, OnceLock};
 
 use crate::conditioned_local_product::LocalRelationProductLookup;
@@ -2278,6 +2278,18 @@ pub(super) struct ReachabilityTemplate {
     reverse_rotation_sources: Vec<ReverseRotationSource>,
     // Impossible on every occupancy, removed once from the reverse index.
     // Forward candidates remain intact for first-success guard reads.
+    #[cfg_attr(
+        not(any(
+            test,
+            feature = "placement-dependency-pc",
+            all(
+                feature = "local-search-ab",
+                feature = "parallel",
+                not(target_family = "wasm")
+            )
+        )),
+        allow(dead_code)
+    )]
     globally_pruned_rotation_sources: usize,
     // Shared immutable per-target proof, compiled before an occupancy search.
     // None is an unsupported proof, never an unreachable target.

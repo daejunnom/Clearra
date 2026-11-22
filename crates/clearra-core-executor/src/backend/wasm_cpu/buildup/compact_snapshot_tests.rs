@@ -181,6 +181,68 @@ fn rust_compact_snapshot_preserves_physical_and_original_clear_masks() {
     )));
 }
 
+#[test]
+fn rust_compact_snapshot_requires_full_table_identity_beyond_fixed_pc_supply() {
+    use clearra_pc_graph::request::{PcCountPolicy, PcExecutionPolicy, RequestedSearchBackend};
+    use clearra_rules::kicks::{
+        KickOffsetSequence, KickTableEntry, KickTableProfile, KickTransition, SrsKicks,
+        VerifiedKickTableProfile,
+    };
+
+    let builtin = SrsKicks::profile();
+    let selected = KickTransition::new(PieceKind::T, RotationState::Right, RotationState::Zero);
+    for change_unqueued_t in [false, true] {
+        let mut entries = builtin.entries().to_vec();
+        if change_unqueued_t {
+            let entry = entries
+                .iter_mut()
+                .find(|entry| entry.transition() == selected)
+                .unwrap();
+            let mut offsets = entry.sequence().offsets().to_vec();
+            offsets[..=2].rotate_right(1);
+            *entry = KickTableEntry::new(selected, KickOffsetSequence::new(offsets));
+        }
+        let verified = VerifiedKickTableProfile::try_new(KickTableProfile::new(
+            builtin.id(),
+            builtin.source_rule(),
+            entries,
+        ))
+        .unwrap();
+        let query = PcScenarioQuery::new(
+            PcScenarioBoard::standard_10(2, TWO_O_HOLES),
+            PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::O, PieceKind::O])),
+            PieceWindow::new(2),
+        )
+        .with_exact_pieces(Some(2))
+        .with_allow_hold(false)
+        .with_count_policy(PcCountPolicy::CountAll)
+        .with_verified_kick_table_profile(verified)
+        .with_execution_policy(
+            PcExecutionPolicy::mvp_default()
+                .with_requested_backend(RequestedSearchBackend::Cpu)
+                .with_workers(1)
+                .with_tablebase_requested(false)
+                .with_precompute_build_dependencies(false),
+        );
+        let problem = ProblemCompiler::compile_scenario_pc(&query).unwrap();
+        // Whole fixed PC only consumes O and may keep its existing narrow
+        // playable-piece equivalence. Snapshot input is an independent set
+        // of placements, so its builtin evidence needs full table identity.
+        assert!(crate::backend::wasm_cpu::ensure_connected_kick_profile(&problem).is_ok());
+        let snapshot = RustCompactBuildUpWorkspace::new(&problem);
+        if change_unqueued_t {
+            assert!(matches!(
+                snapshot,
+                Err(CompactBuildUpSnapshotError::Engine(
+                    "wasm_exact_backend_requires_canonical_ordered_kick_profile"
+                ))
+            ));
+        } else {
+            assert!(snapshot.is_ok());
+        }
+    }
+}
+
 #[cfg(feature = "native-c-core")]
 #[test]
 fn rust_compact_snapshot_matches_native_physical_dag_and_classic_cost() {

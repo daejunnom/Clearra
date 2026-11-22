@@ -3,11 +3,11 @@
 use clearra_core_domain::execution_cancellation::ExecutionControl;
 use clearra_problem::SearchProblem;
 
-#[cfg(feature = "placement-dependency-pc")]
-use super::super::geometry::TargetGroup;
 use super::super::{
-    catalog::GeometryCatalog, geometry::GeometryCandidate,
-    standard_bag_coverage::StandardBagCoverage, WasmExactSearchError,
+    catalog::GeometryCatalog,
+    coverage_product::CoverageProductEvaluator,
+    geometry::{GeometryCandidate, TargetGroup},
+    WasmExactSearchError,
 };
 use super::{certified_language_result, BuildUpWorkspace, CandidateBuildResult};
 use crate::performance::{ExecutorSearchStage, SearchStageSpan};
@@ -21,8 +21,12 @@ pub(super) fn verify_product(
     problem: &SearchProblem,
     catalog: &GeometryCatalog,
     candidate: &GeometryCandidate,
+    target: &TargetGroup,
     workspace: &mut BuildUpWorkspace,
+    evaluator: &mut CoverageProductEvaluator,
     retain_trace: bool,
+    supply_first: bool,
+    expected_final_board: u64,
     control: &ExecutionControl,
     profile_scale: u64,
 ) -> Result<CandidateBuildResult, WasmExactSearchError> {
@@ -37,11 +41,17 @@ pub(super) fn verify_product(
             problem,
             catalog,
             candidate,
+            target,
             workspace,
+            evaluator,
             control,
             profile_scale,
             work,
-            PrefixEvaluation::Product { retain_trace },
+            PrefixEvaluation::Product {
+                retain_trace,
+                supply_first,
+                expected_final_board,
+            },
         )
     });
     span.finish(u64::from(result.is_ok()));
@@ -51,22 +61,10 @@ pub(super) fn verify_product(
 }
 
 #[cfg(feature = "placement-dependency-pc")]
-pub(super) fn validate_candidate_scope(
-    catalog: &GeometryCatalog,
-    candidate: &GeometryCandidate,
-    target: &TargetGroup,
-) -> Result<(), WasmExactSearchError> {
-    if catalog.width() == 10
+pub(super) fn supports_candidate(catalog: &GeometryCatalog, candidate: &GeometryCandidate) -> bool {
+    catalog.width() == 10
         && (1..=6).contains(&catalog.height())
         && (1..=11).contains(&candidate.row_ids().len())
-        && target.pattern_index.is_none()
-    {
-        Ok(())
-    } else {
-        Err(WasmExactSearchError::InvalidProblem(
-            "wasm_placement_dependency_candidate_unsupported",
-        ))
-    }
 }
 
 #[cfg(any(
@@ -81,7 +79,9 @@ pub(super) fn verify_strict(
     problem: &SearchProblem,
     catalog: &GeometryCatalog,
     candidate: &GeometryCandidate,
+    target: &TargetGroup,
     workspace: &mut BuildUpWorkspace,
+    evaluator: &mut CoverageProductEvaluator,
     control: &ExecutionControl,
     profile_scale: u64,
 ) -> Result<CandidateBuildResult, WasmExactSearchError> {
@@ -92,7 +92,9 @@ pub(super) fn verify_strict(
             problem,
             catalog,
             candidate,
+            target,
             workspace,
+            evaluator,
             control,
             profile_scale,
             work,
@@ -136,7 +138,11 @@ fn map_prefix_error(error: PrefixEvaluationError) -> WasmExactSearchError {
 #[derive(Clone, Copy)]
 enum PrefixEvaluation {
     #[cfg(feature = "placement-dependency-pc")]
-    Product { retain_trace: bool },
+    Product {
+        retain_trace: bool,
+        supply_first: bool,
+        expected_final_board: u64,
+    },
     #[cfg(any(
         test,
         all(
@@ -177,7 +183,9 @@ fn evaluate_prefix_order(
     problem: &SearchProblem,
     catalog: &GeometryCatalog,
     candidate: &GeometryCandidate,
+    _target: &TargetGroup,
     workspace: &mut BuildUpWorkspace,
+    _evaluator: &mut CoverageProductEvaluator,
     control: &ExecutionControl,
     profile_scale: u64,
     work: &mut super::super::symbolic_prefix_orders::SymbolicPrefixWork,
@@ -185,17 +193,13 @@ fn evaluate_prefix_order(
 ) -> Result<CandidateBuildResult, PrefixEvaluationError> {
     use super::super::symbolic_prefix_orders::SymbolicPrefixOrders;
 
-    if !problem
+    let _universe = problem
         .piece_source()
         .materialized_universe()
-        .is_some_and(|universe| StandardBagCoverage::supports(universe, problem.initial_hold()))
-    {
-        return Err(PrefixEvaluationError::UnsupportedSupply);
-    }
-    work.candidates_attempted += 1;
-    let compile_orders = match evaluation {
+        .ok_or(PrefixEvaluationError::UnsupportedSupply)?;
+    let supported = match evaluation {
         #[cfg(feature = "placement-dependency-pc")]
-        PrefixEvaluation::Product { .. } => SymbolicPrefixOrders::compile_product_with_workspace,
+        PrefixEvaluation::Product { .. } => true,
         #[cfg(any(
             test,
             all(
@@ -204,17 +208,50 @@ fn evaluate_prefix_order(
                 not(target_family = "wasm")
             )
         ))]
-        PrefixEvaluation::NativeExperiment => SymbolicPrefixOrders::compile_with_workspace,
+        PrefixEvaluation::NativeExperiment => {
+            super::super::standard_bag_coverage::StandardBagCoverage::supports(
+                _universe,
+                problem.initial_hold(),
+            )
+        }
     };
-    let orders = compile_orders(
-        catalog,
-        candidate,
-        problem.kick_profile().profile_id(),
-        control,
-        &mut workspace.reachability,
-        work,
-        profile_scale,
-    )
+    if !supported {
+        return Err(PrefixEvaluationError::UnsupportedSupply);
+    }
+    work.candidates_attempted += 1;
+    let orders = match evaluation {
+        #[cfg(feature = "placement-dependency-pc")]
+        PrefixEvaluation::Product {
+            expected_final_board,
+            ..
+        } => SymbolicPrefixOrders::compile_product_completion_with_workspace(
+            catalog,
+            candidate,
+            problem.kick_profile().profile_id(),
+            control,
+            &mut workspace.reachability,
+            work,
+            profile_scale,
+            expected_final_board,
+        ),
+        #[cfg(any(
+            test,
+            all(
+                feature = "local-search-ab",
+                feature = "parallel",
+                not(target_family = "wasm")
+            )
+        ))]
+        PrefixEvaluation::NativeExperiment => SymbolicPrefixOrders::compile_with_workspace(
+            catalog,
+            candidate,
+            problem.kick_profile().profile_id(),
+            control,
+            &mut workspace.reachability,
+            work,
+            profile_scale,
+        ),
+    }
     .map_err(PrefixEvaluationError::Refused)?;
     let compile_language = match evaluation {
         #[cfg(feature = "placement-dependency-pc")]
@@ -250,10 +287,11 @@ fn evaluate_prefix_order(
             .requires_observation_policy();
     #[cfg(feature = "placement-dependency-pc")]
     let language = if observation_requested {
-        orders.compile_product_language_with_residuals(
+        workspace.dependency_observation.compile_relation_language(
+            &orders,
             &mut workspace.piece_order_languages,
             work,
-            workspace.dependency_observation.prefix_suffix_scratch(),
+            control,
         )
     } else {
         compile_language(&orders, &mut workspace.piece_order_languages, work)
@@ -263,7 +301,7 @@ fn evaluate_prefix_order(
     let language = compile_language(&orders, &mut workspace.piece_order_languages, work)
         .map_err(PrefixEvaluationError::Execution)?;
     language_span.finish(1);
-    let coverage = match language {
+    let result = match language {
         Some(root) => {
             let product_span = SearchStageSpan::begin_scaled(
                 ExecutorSearchStage::WasmCoverageLanguageProduct,
@@ -274,24 +312,49 @@ fn evaluate_prefix_order(
                 feature = "parallel",
                 not(target_family = "wasm")
             ))]
-            let bag_product_span = SearchStageSpan::begin_scaled(
-                ExecutorSearchStage::StrictStandardBagProduct,
-                profile_scale,
-            );
-            let coverage = workspace
-                .cover_standard_bag_language(problem, root, control)
-                .map_err(PrefixEvaluationError::Execution)?
-                .ok_or(PrefixEvaluationError::UnsupportedSupply)?;
+            let bag_product_span =
+                super::super::standard_bag_coverage::StandardBagCoverage::supports(
+                    _universe,
+                    problem.initial_hold(),
+                )
+                .then(|| {
+                    SearchStageSpan::begin_scaled(
+                        ExecutorSearchStage::StrictStandardBagProduct,
+                        profile_scale,
+                    )
+                });
+            let result = match evaluation {
+                #[cfg(feature = "placement-dependency-pc")]
+                PrefixEvaluation::Product { .. } => workspace
+                    .cover_piece_language(problem, _target, root, _evaluator, control)
+                    .map_err(PrefixEvaluationError::Execution)?,
+                #[cfg(any(
+                    test,
+                    all(
+                        feature = "local-search-ab",
+                        feature = "parallel",
+                        not(target_family = "wasm")
+                    )
+                ))]
+                PrefixEvaluation::NativeExperiment => certified_language_result(Some(
+                    workspace
+                        .cover_standard_bag_language(problem, root, control)
+                        .map_err(PrefixEvaluationError::Execution)?
+                        .ok_or(PrefixEvaluationError::UnsupportedSupply)?,
+                )),
+            };
             #[cfg(all(
                 feature = "local-search-ab",
                 feature = "parallel",
                 not(target_family = "wasm")
             ))]
-            bag_product_span.finish(coverage.edge_checks as u64);
-            product_span.finish(coverage.edge_checks as u64);
-            Some(coverage)
+            if let Some(span) = bag_product_span {
+                span.finish(result.coverage_product_edge_checks as u64);
+            }
+            product_span.finish(result.coverage_product_edge_checks as u64);
+            result
         }
-        None => None,
+        None => certified_language_result(None),
     };
     if control.is_cancelled() {
         return Err(PrefixEvaluationError::Execution(
@@ -299,10 +362,13 @@ fn evaluate_prefix_order(
         ));
     }
     work.candidates_certified += 1;
-    let result = certified_language_result(coverage);
     #[cfg(feature = "placement-dependency-pc")]
     let result = match evaluation {
-        PrefixEvaluation::Product { retain_trace: true } if result.buildable => {
+        PrefixEvaluation::Product {
+            retain_trace: true,
+            supply_first,
+            ..
+        } if result.buildable => {
             let mut result = result;
             let pattern_id = result
                 .witness_pattern_id
@@ -317,6 +383,7 @@ fn evaluate_prefix_order(
                 candidate,
                 &orders,
                 pattern_id,
+                supply_first,
                 &mut workspace.reachability,
                 control,
                 &mut work.pose,

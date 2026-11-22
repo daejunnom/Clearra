@@ -2,7 +2,7 @@ use clearra_core_domain::piece::{piece_kind::PieceKind, rotation::RotationState}
 use clearra_piece_registry::standard::tetromino_registry::standard_tetromino_registry;
 use clearra_replay::{RotationRequest as ReplayRotationRequest, ScoringLockEvidence};
 use clearra_rules::{
-    kicks::{KickTableProfile, KickTransition, NoKick, SrsKicks},
+    kicks::{normalized_kick_delta, KickTableProfile, KickTransition, NoKick, SrsKicks},
     profile::rule_profile::RuleProfileId,
 };
 
@@ -737,29 +737,6 @@ fn source_ceiling(height: u8, piece: PieceKind, allow_180: bool, profile: &KickT
         .max()
         .unwrap_or(0);
     height.saturating_add(downward as u8) as i8
-}
-
-fn normalized_kick_delta(
-    piece: PieceKind,
-    from: RotationState,
-    to: RotationState,
-    kick_dx: i8,
-    kick_dy: i8,
-) -> (i8, i8) {
-    let (from_x, from_y) = normalized_rotation_center(piece, from);
-    let (to_x, to_y) = normalized_rotation_center(piece, to);
-    (kick_dx + from_x - to_x, kick_dy + from_y - to_y)
-}
-
-fn normalized_rotation_center(piece: PieceKind, rotation: RotationState) -> (i8, i8) {
-    const JLSTZ: [(i8, i8); 4] = [(1, 0), (0, 1), (1, 1), (1, 1)];
-    const I: [(i8, i8); 4] = [(0, 0), (-2, 2), (0, 1), (-1, 2)];
-    let index = rotation.quarter_turns() as usize;
-    match piece {
-        PieceKind::I => I[index],
-        PieceKind::O => (0, 0),
-        PieceKind::T | PieceKind::S | PieceKind::Z | PieceKind::J | PieceKind::L => JLSTZ[index],
-    }
 }
 
 fn replay_rotation_request(slot: usize) -> RotationMove {

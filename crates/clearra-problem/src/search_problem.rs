@@ -694,7 +694,7 @@ mod model {
 mod pc_placement_dependency {
     use clearra_core_domain::objective::objective_kind::ObjectiveKind;
     use clearra_pc_graph::request::RequestedSearchBackend;
-    use clearra_supply::{bag::BagState, QueueObservationPolicy};
+    use clearra_supply::QueueObservationPolicy;
 
     use crate::goal::SearchGoal;
 
@@ -780,16 +780,11 @@ mod pc_placement_dependency {
             {
                 return false;
             }
-            let initial_hold = self.initial_hold();
-            initial_hold.cursor() == 0
-                && initial_hold.bag_epoch() == 0
-                && initial_hold.bag_remainder_key()
-                    == BagState::fresh_standard_7_bag().packed_remainder_key()
-                && self
-                    .piece_source()
-                    .materialized_universe()
-                    .and_then(|universe| universe.complete_standard_bag_ordinals())
-                    .is_some()
+            // Placement feasibility is independent of the supply model.
+            // Preserve arbitrary materialized ordinals and initial hold/cursor
+            // through the existing exact supply product; complete bags merely
+            // select its symbolic representation.
+            self.piece_source().materialized_universe().is_some()
         }
     }
 }
@@ -1414,8 +1409,6 @@ mod retained_capacity {
                 base.clone()
                     .with_execution_policy(policy.clone().with_max_memory_mib(Some(16))),
                 base.clone()
-                    .with_execution_policy(policy.clone().with_max_patterns(1)),
-                base.clone()
                     .with_execution_policy(policy.clone().with_tablebase_requested(true)),
                 base.clone().with_execution_policy(
                     policy
@@ -1423,14 +1416,6 @@ mod retained_capacity {
                         .with_requested_backend(RequestedSearchBackend::Gpu),
                 ),
                 base.clone().with_objective(ObjectivePolicy::all()),
-                base.clone()
-                    .with_queue(PcQueueInput::fixed_sequence(FixedSequence::new(vec![
-                        PieceKind::I,
-                        PieceKind::O,
-                        PieceKind::T,
-                        PieceKind::S,
-                        PieceKind::Z,
-                    ]))),
                 OpeningPcSearchQuery::new(PcTarget::six_lines())
                     .with_queue(PcQueueInput::standard_7_bag())
                     .with_objective(ObjectivePolicy::unique())
@@ -1446,6 +1431,19 @@ mod retained_capacity {
                 ProblemCompiler::compile_opening_pc(&base.clone().with_rule(srs())).unwrap();
             assert!(quarter_turns.pc_placement_dependency_eligible());
             assert!(quarter_turns.pc_placement_dependency_requested());
+
+            let fixed = ProblemCompiler::compile_opening_pc(&base.clone().with_queue(
+                PcQueueInput::fixed_sequence(FixedSequence::new(vec![
+                    PieceKind::I,
+                    PieceKind::O,
+                    PieceKind::T,
+                    PieceKind::S,
+                    PieceKind::Z,
+                ])),
+            ))
+            .unwrap();
+            assert!(fixed.pc_placement_dependency_eligible());
+            assert!(fixed.pc_placement_dependency_requested());
 
             let ready = ProblemCompiler::compile_opening_pc(&base).unwrap();
             assert!(!ready

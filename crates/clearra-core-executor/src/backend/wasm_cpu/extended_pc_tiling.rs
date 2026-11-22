@@ -97,7 +97,7 @@ impl ExtendedPcTilingSession {
                 "extended_pc_tiling_contract_invalid",
             ));
         }
-        super::ensure_connected_kick_profile(&problem)?;
+        super::ensure_canonical_kick_profile(&problem)?;
         let height = problem.visible_height() as u8;
         let initial = Board256Mask::from_words(problem.initial_board().occupied_words());
         let full = Board256Mask::all_cells(u16::from(height) * 10).map_err(|_| {

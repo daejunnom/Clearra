@@ -25,7 +25,7 @@ use super::{
     FrozenFinesseTargetGroups, GeometryCandidate, GeometryCatalog, GroupedFinesseTarget,
     WasmExactSearchError,
 };
-use crate::backend::wasm_cpu::{ensure_connected_kick_profile, kick_profiles, MAX_BOARD64_PIECES};
+use crate::backend::wasm_cpu::{ensure_canonical_kick_profile, kick_profiles, MAX_BOARD64_PIECES};
 use crate::row_frame::CompactedRowFrame;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -264,7 +264,11 @@ impl<'a> RustCompactBuildUpWorkspace<'a> {
         {
             return Err(CompactBuildUpSnapshotError::UnsupportedProblem);
         }
-        ensure_connected_kick_profile(problem)?;
+        // A snapshot may contain pieces outside the request's supply and
+        // retains concrete pose/finesse evidence under its builtin profile.
+        // PC's supply-restricted or Boolean ordered-table authority cannot
+        // certify this separate consumer.
+        ensure_canonical_kick_profile(problem)?;
         let size = BoardSize::new(10, problem.compact_pc_geometry_height())
             .map_err(|_| CompactBuildUpSnapshotError::UnsupportedProblem)?;
         let layout = Board64Layout::new(size)

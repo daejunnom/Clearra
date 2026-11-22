@@ -9,8 +9,10 @@ use clearra_rules::{
     profile::rule_profile::RuleProfileId,
 };
 
+#[cfg(any(test, not(target_family = "wasm")))]
+use super::kick_profiles::builtin_kick_profile;
 use super::{
-    kick_profiles::{builtin_kick_profile, normalized_kick_delta_wide, KickSkyBounds},
+    kick_profiles::{normalized_kick_delta_wide, KickSkyBounds},
     piece_index,
 };
 
@@ -155,6 +157,7 @@ impl CompactKickAuthority {
         )
     }
 
+    #[cfg(any(test, not(target_family = "wasm")))]
     pub(super) fn admit_local_order_variant(
         width: u8,
         height: u8,

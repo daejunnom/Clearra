@@ -343,7 +343,7 @@ impl SetupGraphBuildSession {
                     .ok_or(WasmExactSearchError::InvalidProblem(
                         "setup_residue_has_no_hold_condition",
                     ))?;
-                super::ensure_connected_kick_profile(first.problem())?;
+                super::ensure_canonical_kick_profile(first.problem())?;
                 self.conditions = conditions;
                 if let Some(cached) = cached {
                     if !cached.compact_continuation {

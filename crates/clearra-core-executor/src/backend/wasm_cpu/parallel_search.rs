@@ -16,7 +16,6 @@ use crate::{
     CorePathStep,
 };
 
-#[cfg(feature = "placement-dependency-pc")]
 use super::buildup::ObservationProducerShard;
 #[cfg(all(feature = "local-search-ab", target_os = "linux"))]
 use super::parallel_memory_peak::{self, CoordinatorStorage};
@@ -88,7 +87,6 @@ pub(super) struct ParallelSearchOutcome {
     pub active_workers: usize,
     pub minimum_worker_candidates: usize,
     pub maximum_worker_candidates: usize,
-    #[cfg(feature = "placement-dependency-pc")]
     pub observation_producer_shards: Vec<ObservationProducerShard>,
 }
 
@@ -729,10 +727,8 @@ fn merge_results(
         count_complete: true,
         ..WorkerAggregate::default()
     };
-    #[cfg(feature = "placement-dependency-pc")]
     let mut observation_producer_shards = Vec::new();
     for worker in worker_results {
-        #[cfg(feature = "placement-dependency-pc")]
         {
             observation_producer_shards
                 .try_reserve(worker.observation_producer_shards.len())
@@ -848,7 +844,6 @@ fn merge_results(
         active_workers,
         minimum_worker_candidates,
         maximum_worker_candidates,
-        #[cfg(feature = "placement-dependency-pc")]
         observation_producer_shards,
     })
 }

@@ -17,6 +17,8 @@ mod compact_kick_authority;
 #[cfg(test)]
 mod compact_pc2_completion_ledger;
 mod coverage_product;
+#[cfg(all(test, feature = "placement-dependency-pc"))]
+mod dependency_consumers_tests;
 mod distributed;
 #[cfg(test)]
 mod distributed_pc2_replay_proof;
@@ -386,6 +388,23 @@ fn ensure_connected_kick_profile(
     if dependency_kick_authority(problem)?.is_some() {
         return Ok(());
     }
+    ensure_builtin_kick_profile(problem, true)
+}
+
+/// Consumers without a bound ordered-table owner may only use the complete
+/// canonical table. In particular, their graph can include placements outside
+/// the submitted fixed queue, so the PC-only playable-piece projection is not
+/// sufficient authority for these consumers.
+fn ensure_canonical_kick_profile(
+    problem: &clearra_problem::SearchProblem,
+) -> Result<(), WasmExactSearchError> {
+    ensure_builtin_kick_profile(problem, false)
+}
+
+fn ensure_builtin_kick_profile(
+    problem: &clearra_problem::SearchProblem,
+    allow_fixed_scenario_projection: bool,
+) -> Result<(), WasmExactSearchError> {
     let Some(builtin) = kick_profiles::builtin_kick_profile(problem.kick_profile().profile_id())
     else {
         return Err(WasmExactSearchError::InvalidProblem(
@@ -395,7 +414,12 @@ fn ensure_connected_kick_profile(
     let rule_selection = problem.rule_profile();
     if let Some(verified) = rule_selection.verified_kick_profile() {
         if !matches_builtin_order(rule_selection.rule().id(), verified, builtin)
-            && !fixed_compact_scenario_has_same_playable_kicks(problem, verified.profile(), builtin)
+            && !(allow_fixed_scenario_projection
+                && fixed_compact_scenario_has_same_playable_kicks(
+                    problem,
+                    verified.profile(),
+                    builtin,
+                ))
         {
             return Err(WasmExactSearchError::InvalidProblem(
                 "wasm_exact_backend_requires_canonical_ordered_kick_profile",
@@ -411,34 +435,46 @@ fn ensure_connected_kick_profile(
 fn dependency_kick_authority(
     problem: &clearra_problem::SearchProblem,
 ) -> Result<Option<compact_kick_authority::CompactKickAuthority>, WasmExactSearchError> {
-    use compact_kick_authority::{CompactKickAdmission, CompactKickAuthority};
-
     if !cfg!(feature = "placement-dependency-pc") || !problem.pc_placement_dependency_eligible() {
         return Ok(None);
     }
-    let rule = problem.rule_profile();
-    let Some(verified) = rule.verified_kick_profile() else {
-        return Ok(None);
-    };
     let height = u8::try_from(problem.compact_pc_geometry_height()).map_err(|_| {
         WasmExactSearchError::InvalidProblem("wasm_ordered_kick_height_out_of_range")
     })?;
-    CompactKickAuthority::admit_profile(
+    ordered_kick_authority(
+        problem,
         u8::try_from(problem.initial_board().width()).map_err(|_| {
             WasmExactSearchError::InvalidProblem("wasm_ordered_kick_width_out_of_range")
         })?,
         height,
-        rule.rule().id(),
-        verified,
     )
-    .map(Some)
-    .map_err(|error| {
-        WasmExactSearchError::InvalidProblem(match error {
-            CompactKickAdmission::Unsupported => "wasm_ordered_kick_profile_unsupported",
-            CompactKickAdmission::IndexOrCoordinateOverflow => "wasm_ordered_kick_bounds_exceeded",
-            CompactKickAdmission::BudgetExceeded => "wasm_ordered_kick_compile_budget",
+}
+
+/// Admit the submitted ordered contents for a consumer's actual geometry.
+/// The caller must establish its Boolean scope and bind the returned owner to
+/// its reachability workspace before it can use that imported table.
+fn ordered_kick_authority(
+    problem: &clearra_problem::SearchProblem,
+    width: u8,
+    height: u8,
+) -> Result<Option<compact_kick_authority::CompactKickAuthority>, WasmExactSearchError> {
+    use compact_kick_authority::{CompactKickAdmission, CompactKickAuthority};
+
+    let rule = problem.rule_profile();
+    let Some(verified) = rule.verified_kick_profile() else {
+        return Ok(None);
+    };
+    CompactKickAuthority::admit_profile(width, height, rule.rule().id(), verified)
+        .map(Some)
+        .map_err(|error| {
+            WasmExactSearchError::InvalidProblem(match error {
+                CompactKickAdmission::Unsupported => "wasm_ordered_kick_profile_unsupported",
+                CompactKickAdmission::IndexOrCoordinateOverflow => {
+                    "wasm_ordered_kick_bounds_exceeded"
+                }
+                CompactKickAdmission::BudgetExceeded => "wasm_ordered_kick_compile_budget",
+            })
         })
-    })
 }
 
 /// In a whole fixed no-hold Scenario only the submitted queue pieces can

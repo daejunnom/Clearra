@@ -1182,7 +1182,7 @@ impl WasmTilingRootWorker {
         {
             return Err("wasm_tiling_root_worker_requires_tiling_objective");
         }
-        super::ensure_connected_kick_profile(problem).map_err(super::distributed::map_error)?;
+        super::ensure_canonical_kick_profile(problem).map_err(super::distributed::map_error)?;
         let catalog =
             Arc::new(GeometryCatalog::compile(problem).map_err(super::distributed::map_error)?);
         Self::with_tiling_catalogs(problem, vec![catalog])
@@ -1219,7 +1219,7 @@ impl WasmTilingRootWorker {
         {
             return Err("wasm_tiling_root_worker_requires_tiling_objective");
         }
-        super::ensure_connected_kick_profile(problem).map_err(super::distributed::map_error)?;
+        super::ensure_canonical_kick_profile(problem).map_err(super::distributed::map_error)?;
         let mirror_included = field.includes_applicable_horizontal_mirror();
         let original = field.original_only();
         let mut fields = vec![original];

@@ -7,6 +7,8 @@ use clearra_supply::{
 
 use super::{
     buildup::{BuildOrderGraph, PreparedFinesseNode},
+    exact_collections::ExactHashMap,
+    piece_order_language::PieceOrderLanguageCache,
     terminal_hold_projection::terminal_release_pattern_word,
     WasmExactSearchError,
 };
@@ -15,6 +17,219 @@ pub(super) const HOLD_STATE_COUNT: usize = 8;
 pub(super) const EXTRA_DRAW_STATE_COUNT: usize = 2;
 const PATTERNS_PER_WORD: usize = u64::BITS as usize;
 const CANCELLATION_POLL_MASK: u32 = 0xff;
+
+#[derive(Clone, Copy)]
+struct CoverageNode {
+    depth: u8,
+    live: bool,
+    accepting: bool,
+}
+
+#[derive(Clone, Copy)]
+struct CoverageEdge {
+    to: usize,
+    piece_code: u8,
+}
+
+/// The product consumes an already exact ranked language. Physical evidence
+/// and multiplicities remain owned by the graph producer; the Boolean suffix
+/// adapter supplies neither. Both use the same supply/hold transition kernel.
+trait CoverageLanguage {
+    const DYNAMIC_SLOTS: bool;
+    fn root(&self) -> usize;
+    fn node_count(&self) -> usize;
+    fn max_depth(&self) -> usize;
+    fn node(&self, node: usize) -> Option<CoverageNode>;
+    fn edge_count(&self, node: usize, count_paths: bool) -> Option<usize>;
+    fn edge(
+        &mut self,
+        node: usize,
+        edge: usize,
+        count_paths: bool,
+    ) -> Result<CoverageEdge, WasmExactSearchError>;
+}
+
+struct BuildGraphLanguage<'a> {
+    graph: &'a BuildOrderGraph,
+}
+
+impl<'a> BuildGraphLanguage<'a> {
+    fn new(graph: &'a BuildOrderGraph) -> Self {
+        Self { graph }
+    }
+}
+
+impl CoverageLanguage for BuildGraphLanguage<'_> {
+    const DYNAMIC_SLOTS: bool = false;
+
+    fn root(&self) -> usize {
+        self.graph.root as usize
+    }
+
+    fn node_count(&self) -> usize {
+        self.graph.nodes.len()
+    }
+
+    fn max_depth(&self) -> usize {
+        self.graph.max_depth()
+    }
+
+    fn node(&self, node: usize) -> Option<CoverageNode> {
+        self.graph.nodes.get(node).map(|node| CoverageNode {
+            depth: node.depth,
+            live: node.live,
+            accepting: node.accepting(),
+        })
+    }
+
+    fn edge_count(&self, node: usize, count_paths: bool) -> Option<usize> {
+        self.graph.nodes.get(node)?;
+        Some(if count_paths {
+            self.graph.edges(node).len()
+        } else {
+            self.graph.piece_edges(node).len()
+        })
+    }
+
+    fn edge(
+        &mut self,
+        node: usize,
+        edge: usize,
+        count_paths: bool,
+    ) -> Result<CoverageEdge, WasmExactSearchError> {
+        let edges = if count_paths {
+            self.graph.edges(node)
+        } else {
+            self.graph.piece_edges(node)
+        };
+        let edge = edges.get(edge).ok_or(WasmExactSearchError::InvalidProblem(
+            "wasm_coverage_product_edge_out_of_range",
+        ))?;
+        Ok(CoverageEdge {
+            to: edge.to as usize,
+            piece_code: piece_code(edge.piece),
+        })
+    }
+}
+
+/// Only nodes visited by the actual product receive a private dense slot.
+/// The query-wide language arena and its edges are borrowed, never copied or
+/// scanned to construct another graph. Slots are reset when the root/owner
+/// changes and their allocation is reused across candidates.
+#[derive(Default)]
+struct LanguageNodeSlots {
+    ids: Vec<u32>,
+    slots: ExactHashMap<u32, usize>,
+}
+
+impl LanguageNodeSlots {
+    fn reset(&mut self, root: u32) -> Result<(), WasmExactSearchError> {
+        self.ids.clear();
+        self.slots.clear();
+        self.insert(root).map(|_| ())
+    }
+
+    fn insert(&mut self, id: u32) -> Result<usize, WasmExactSearchError> {
+        if let Some(&slot) = self.slots.get(&id) {
+            return Ok(slot);
+        }
+        let error = || {
+            WasmExactSearchError::InvalidProblem("wasm_coverage_language_index_storage_unavailable")
+        };
+        self.ids.try_reserve(1).map_err(|_| error())?;
+        self.slots.try_reserve(1).map_err(|_| error())?;
+        let slot = self.ids.len();
+        self.ids.push(id);
+        self.slots.insert(id, slot);
+        Ok(slot)
+    }
+
+    fn retained_bytes(&self) -> usize {
+        // Hash-table load-factor/control storage is conservatively bounded by
+        // the next bucket power of two; this is not an allocator RSS claim.
+        let capacity = self.slots.capacity();
+        let buckets = if capacity == 0 {
+            0
+        } else {
+            capacity
+                .checked_add(1)
+                .and_then(usize::checked_next_power_of_two)
+                .unwrap_or(usize::MAX)
+        };
+        self.ids
+            .capacity()
+            .saturating_mul(core::mem::size_of::<u32>())
+            .saturating_add(buckets.saturating_mul(core::mem::size_of::<(u32, usize)>() + 1))
+            .saturating_add(usize::from(capacity != 0) * 16)
+    }
+}
+
+struct RootedPieceLanguage<'a> {
+    cache: &'a PieceOrderLanguageCache,
+    slots: &'a mut LanguageNodeSlots,
+    root_depth: u8,
+}
+
+impl CoverageLanguage for RootedPieceLanguage<'_> {
+    const DYNAMIC_SLOTS: bool = true;
+
+    fn root(&self) -> usize {
+        0
+    }
+
+    fn node_count(&self) -> usize {
+        self.slots.ids.len()
+    }
+
+    fn max_depth(&self) -> usize {
+        usize::from(self.root_depth)
+    }
+
+    fn node(&self, slot: usize) -> Option<CoverageNode> {
+        let node = self.cache.node(*self.slots.ids.get(slot)?)?;
+        if node.accepting && node.remaining_depth != 0 {
+            return None;
+        }
+        Some(CoverageNode {
+            depth: self.root_depth.checked_sub(node.remaining_depth)?,
+            live: true,
+            accepting: node.accepting,
+        })
+    }
+
+    fn edge_count(&self, slot: usize, count_paths: bool) -> Option<usize> {
+        if count_paths {
+            return None;
+        }
+        self.cache.node_edge_count(*self.slots.ids.get(slot)?)
+    }
+
+    fn edge(
+        &mut self,
+        slot: usize,
+        index: usize,
+        count_paths: bool,
+    ) -> Result<CoverageEdge, WasmExactSearchError> {
+        let invalid =
+            || WasmExactSearchError::InvalidProblem("wasm_coverage_language_not_fixed_horizon");
+        if count_paths {
+            return Err(invalid());
+        }
+        let source = *self.slots.ids.get(slot).ok_or_else(invalid)?;
+        let parent = self.cache.node(source).ok_or_else(invalid)?;
+        let edge = self.cache.edge_at(source, index).ok_or_else(invalid)?;
+        let child = self.cache.node(edge.child()).ok_or_else(invalid)?;
+        if child.remaining_depth.checked_add(1) != Some(parent.remaining_depth)
+            || (child.accepting && child.remaining_depth != 0)
+        {
+            return Err(invalid());
+        }
+        Ok(CoverageEdge {
+            to: self.slots.insert(edge.child())?,
+            piece_code: edge.piece_code(),
+        })
+    }
+}
 
 #[derive(Clone, Copy)]
 struct FinesseCoverageGuard<'a> {
@@ -55,6 +270,7 @@ pub(super) struct CoverageProductEvaluator {
     coverage_words: Vec<u64>,
     path_counts: Vec<u128>,
     cancellation_poll_counter: u32,
+    language_slots: LanguageNodeSlots,
 }
 
 impl CoverageProductEvaluator {
@@ -73,7 +289,7 @@ impl CoverageProductEvaluator {
         control: &ExecutionControl,
     ) -> Result<CoverageProductResult, WasmExactSearchError> {
         self.evaluate_mode(
-            graph,
+            &mut BuildGraphLanguage::new(graph),
             pattern_index,
             initial_hold,
             hold_enabled,
@@ -102,7 +318,7 @@ impl CoverageProductEvaluator {
         control: &ExecutionControl,
     ) -> Result<CoverageProductResult, WasmExactSearchError> {
         self.evaluate_mode(
-            graph,
+            &mut BuildGraphLanguage::new(graph),
             pattern_index,
             initial_hold,
             hold_enabled,
@@ -118,10 +334,58 @@ impl CoverageProductEvaluator {
         )
     }
 
+    /// Consume an exact fixed-horizon kind language for Boolean queue
+    /// existence. No physical BuildUp graph or movement search is generated.
+    /// This projection does not authorize CountAll, finesse, or hidden-state
+    /// action choices; those consumers keep their richer existing contracts.
     #[allow(clippy::too_many_arguments)]
-    fn evaluate_mode(
+    pub(super) fn evaluate_language(
         &mut self,
-        graph: &BuildOrderGraph,
+        cache: &PieceOrderLanguageCache,
+        root: u32,
+        pattern_index: &PatternPiecePositionIndex,
+        initial_hold: HoldAutomatonState,
+        hold_enabled: bool,
+        projects_unplaced_lookahead: bool,
+        projects_standard_bag_lookahead: bool,
+        control: &ExecutionControl,
+    ) -> Result<CoverageProductResult, WasmExactSearchError> {
+        let root_depth = cache
+            .node(root)
+            .ok_or(WasmExactSearchError::InvalidProblem(
+                "wasm_coverage_language_root_invalid",
+            ))?
+            .remaining_depth;
+        if control.is_cancelled() {
+            return Err(WasmExactSearchError::Cancelled);
+        }
+        let mut slots = core::mem::take(&mut self.language_slots);
+        let result = slots.reset(root).and_then(|()| {
+            self.evaluate_mode(
+                &mut RootedPieceLanguage {
+                    cache,
+                    slots: &mut slots,
+                    root_depth,
+                },
+                pattern_index,
+                initial_hold,
+                hold_enabled,
+                projects_unplaced_lookahead,
+                projects_standard_bag_lookahead,
+                false,
+                false,
+                None,
+                control,
+            )
+        });
+        self.language_slots = slots;
+        result
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn evaluate_mode<G: CoverageLanguage>(
+        &mut self,
+        graph: &mut G,
         pattern_index: &PatternPiecePositionIndex,
         initial_hold: HoldAutomatonState,
         hold_enabled: bool,
@@ -132,12 +396,12 @@ impl CoverageProductEvaluator {
         finesse_guard: Option<FinesseCoverageGuard<'_>>,
         control: &ExecutionControl,
     ) -> Result<CoverageProductResult, WasmExactSearchError> {
-        if graph.nodes.is_empty() || graph.root as usize >= graph.nodes.len() {
+        if graph.node_count() == 0 || graph.root() >= graph.node_count() {
             return Err(WasmExactSearchError::InvalidProblem(
                 "wasm_build_order_language_invalid",
             ));
         }
-        if finesse_guard.is_some_and(|guard| guard.nodes.len() != graph.nodes.len()) {
+        if finesse_guard.is_some_and(|guard| guard.nodes.len() != graph.node_count()) {
             return Err(WasmExactSearchError::InvalidProblem(
                 "wasm_finesse_coverage_node_count_mismatch",
             ));
@@ -155,8 +419,7 @@ impl CoverageProductEvaluator {
             }
         };
         let state_capacity = graph
-            .nodes
-            .len()
+            .node_count()
             .checked_mul(EXTRA_DRAW_STATE_COUNT)
             .and_then(|count| count.checked_mul(HOLD_STATE_COUNT))
             .ok_or(WasmExactSearchError::InvalidProblem(
@@ -187,7 +450,7 @@ impl CoverageProductEvaluator {
                 continue;
             }
             self.activate_root(
-                graph.root as usize,
+                graph.root(),
                 initial_hold_code,
                 root_bits,
                 graph,
@@ -206,12 +469,11 @@ impl CoverageProductEvaluator {
                     let (node_index, extra_draw, hold_code) = decode_state_index(state_index);
                     let node =
                         graph
-                            .nodes
-                            .get(node_index)
+                            .node(node_index)
                             .ok_or(WasmExactSearchError::InvalidProblem(
                                 "wasm_coverage_product_node_out_of_range",
                             ))?;
-                    if node.accepting() {
+                    if node.accepting {
                         covered_word |= active;
                         if count_paths {
                             let source_base = state_index * PATTERNS_PER_WORD;
@@ -236,21 +498,28 @@ impl CoverageProductEvaluator {
                             "wasm_coverage_queue_position_overflow",
                         ))?;
 
-                    let language_edges = if count_paths {
-                        graph.edges(node_index)
-                    } else {
-                        graph.piece_edges(node_index)
-                    };
-                    for edge in language_edges
-                        .iter()
-                        .filter(|edge| graph.nodes[edge.to as usize].live)
-                    {
+                    let edge_count = graph.edge_count(node_index, count_paths).ok_or(
+                        WasmExactSearchError::InvalidProblem(
+                            "wasm_coverage_product_node_out_of_range",
+                        ),
+                    )?;
+                    for edge_index in 0..edge_count {
+                        let edge = graph.edge(node_index, edge_index, count_paths)?;
+                        let child =
+                            graph
+                                .node(edge.to)
+                                .ok_or(WasmExactSearchError::InvalidProblem(
+                                    "wasm_coverage_product_node_out_of_range",
+                                ))?;
+                        if !child.live {
+                            continue;
+                        }
                         edge_checks = edge_checks.saturating_add(1);
-                        let desired_piece = piece_code(edge.piece);
+                        let desired_piece = edge.piece_code;
                         if projects_unplaced_lookahead
                             && hold_enabled
                             && hold_code == desired_piece
-                            && graph.nodes[edge.to as usize].accepting()
+                            && child.accepting
                         {
                             // Releasing the held piece is terminal only when
                             // there is no current piece to spawn. A six-piece
@@ -266,7 +535,7 @@ impl CoverageProductEvaluator {
                                 projects_standard_bag_lookahead,
                             );
                             self.activate_transition(
-                                edge.to as usize,
+                                edge.to,
                                 extra_draw,
                                 hold_code,
                                 terminal_patterns,
@@ -284,7 +553,7 @@ impl CoverageProductEvaluator {
                                 projects_standard_bag_lookahead,
                             );
                         self.activate_transition(
-                            edge.to as usize,
+                            edge.to,
                             extra_draw,
                             hold_code,
                             use_current,
@@ -313,7 +582,7 @@ impl CoverageProductEvaluator {
                                             projects_standard_bag_lookahead,
                                         );
                                 self.activate_transition(
-                                    edge.to as usize,
+                                    edge.to,
                                     extra_draw,
                                     current_piece,
                                     swap_bits,
@@ -346,7 +615,7 @@ impl CoverageProductEvaluator {
                                             projects_standard_bag_lookahead,
                                         );
                                 self.activate_transition(
-                                    edge.to as usize,
+                                    edge.to,
                                     1,
                                     current_piece,
                                     store_bits,
@@ -381,7 +650,7 @@ impl CoverageProductEvaluator {
     }
 
     pub fn retained_bytes(&self) -> usize {
-        self.product_masks.capacity() * core::mem::size_of::<u64>()
+        let bytes = self.product_masks.capacity() * core::mem::size_of::<u64>()
             + self.product_stamps.capacity() * core::mem::size_of::<u32>()
             + self
                 .depth_queues
@@ -390,7 +659,8 @@ impl CoverageProductEvaluator {
                 .sum::<usize>()
             + self.coverage_words.capacity() * core::mem::size_of::<u64>()
             + self.path_counts.capacity() * core::mem::size_of::<u128>()
-            + self.depth_queues.capacity() * core::mem::size_of::<Vec<usize>>()
+            + self.depth_queues.capacity() * core::mem::size_of::<Vec<usize>>();
+        bytes.saturating_add(self.language_slots.retained_bytes())
     }
 
     /// Allocation-time upper bound for extended request admission. In
@@ -528,12 +798,12 @@ impl CoverageProductEvaluator {
         }
     }
 
-    fn activate_root(
+    fn activate_root<G: CoverageLanguage>(
         &mut self,
         node_index: usize,
         hold_code: u8,
         bits: u64,
-        graph: &BuildOrderGraph,
+        graph: &G,
         count_paths: bool,
     ) -> Result<(), WasmExactSearchError> {
         let state_index = self.activate_state(node_index, 0, hold_code, bits, graph)?;
@@ -548,19 +818,22 @@ impl CoverageProductEvaluator {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn activate_transition(
+    fn activate_transition<G: CoverageLanguage>(
         &mut self,
         node_index: usize,
         extra_draw: usize,
         hold_code: u8,
         bits: u64,
         source_state_index: usize,
-        graph: &BuildOrderGraph,
+        graph: &G,
         count_paths: bool,
         count_complete: &mut bool,
     ) -> Result<(), WasmExactSearchError> {
         if bits == 0 {
             return Ok(());
+        }
+        if G::DYNAMIC_SLOTS {
+            self.ensure_node_capacity(node_index, graph.max_depth(), count_paths)?;
         }
         let state_index = state_index(node_index, extra_draw, hold_code);
         let new_state = self.product_stamps[state_index] != self.product_generation;
@@ -582,20 +855,19 @@ impl CoverageProductEvaluator {
         Ok(())
     }
 
-    fn activate_state(
+    fn activate_state<G: CoverageLanguage>(
         &mut self,
         node_index: usize,
         extra_draw: usize,
         hold_code: u8,
         bits: u64,
-        graph: &BuildOrderGraph,
+        graph: &G,
     ) -> Result<usize, WasmExactSearchError> {
         if bits == 0 {
             return Ok(state_index(node_index, extra_draw, hold_code));
         }
         let node = graph
-            .nodes
-            .get(node_index)
+            .node(node_index)
             .ok_or(WasmExactSearchError::InvalidProblem(
                 "wasm_coverage_product_node_out_of_range",
             ))?;
@@ -612,6 +884,29 @@ impl CoverageProductEvaluator {
         }
         self.product_masks[state_index] |= bits;
         Ok(state_index)
+    }
+
+    /// Rooted language slots appear lazily as the product visits edges. Grow
+    /// dense scratch geometrically, without allocating for unrelated arena
+    /// nodes or repeating a one-slot relocation for every new suffix.
+    fn ensure_node_capacity(
+        &mut self,
+        node: usize,
+        max_depth: usize,
+        count_paths: bool,
+    ) -> Result<(), WasmExactSearchError> {
+        let required = node
+            .checked_add(1)
+            .and_then(|nodes| nodes.checked_mul(EXTRA_DRAW_STATE_COUNT))
+            .and_then(|states| states.checked_mul(HOLD_STATE_COUNT))
+            .ok_or(WasmExactSearchError::InvalidProblem(
+                "wasm_coverage_product_state_overflow",
+            ))?;
+        if required > self.product_masks.len() || required > self.product_stamps.len() {
+            let capacity = required.max(self.product_masks.len().saturating_mul(2));
+            self.ensure_capacity(capacity, max_depth, count_paths)?;
+        }
+        Ok(())
     }
 
     fn poll_cancellation(
@@ -677,6 +972,10 @@ const fn piece_from_code(code: u8) -> Option<PieceKind> {
 #[cfg(test)]
 #[path = "coverage_product_semiring_contract_tests.rs"]
 mod semiring_contract_tests;
+
+#[cfg(test)]
+#[path = "coverage_product_language_tests.rs"]
+mod language_tests;
 
 #[cfg(test)]
 mod resource_tests {

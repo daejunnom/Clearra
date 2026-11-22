@@ -303,7 +303,7 @@ fn imported_eleven_lock_relation_preserves_repeated_pieces_and_clear_frames() {
         .any(|(old, &new)| old != new as usize));
     let mut destination = PhysicalActionLanguage::default();
     destination
-        .merge_factored(source, &rebound, &control)
+        .merge_factored(source, &rebound, &control, &destination_kinds)
         .unwrap();
     drop(source_kinds);
     let view = destination

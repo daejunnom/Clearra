@@ -346,11 +346,12 @@ impl SymbolicPrefixOrders {
                 work,
                 profile_scale,
                 options,
+                0,
             )
         })
     }
 
-    #[cfg(feature = "placement-dependency-pc")]
+    #[cfg(all(test, feature = "placement-dependency-pc"))]
     pub(super) fn compile_product_with_workspace(
         catalog: &GeometryCatalog,
         candidate: &GeometryCandidate,
@@ -359,6 +360,30 @@ impl SymbolicPrefixOrders {
         workspace: &mut ReachabilityWorkspace,
         work: &mut SymbolicPrefixWork,
         profile_scale: u64,
+    ) -> Result<Self, SymbolicPrefixRefusal> {
+        Self::compile_product_completion_with_workspace(
+            catalog,
+            candidate,
+            profile,
+            control,
+            workspace,
+            work,
+            profile_scale,
+            0,
+        )
+    }
+
+    #[cfg(feature = "placement-dependency-pc")]
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn compile_product_completion_with_workspace(
+        catalog: &GeometryCatalog,
+        candidate: &GeometryCandidate,
+        profile: KickTableProfileId,
+        control: &ExecutionControl,
+        workspace: &mut ReachabilityWorkspace,
+        work: &mut SymbolicPrefixWork,
+        profile_scale: u64,
+        expected_final_board: u64,
     ) -> Result<Self, SymbolicPrefixRefusal> {
         // Product does not consult the process environment, thread-local
         // experiment selection or optional shared-catalog prototype.
@@ -378,6 +403,7 @@ impl SymbolicPrefixOrders {
                 catalog_static_guards: None,
                 experiment_subsumption: false,
             },
+            expected_final_board,
         )
     }
 
@@ -391,6 +417,7 @@ impl SymbolicPrefixOrders {
         work: &mut SymbolicPrefixWork,
         profile_scale: u64,
         options: PrefixCompileOptions<'_>,
+        expected_final_board: u64,
     ) -> Result<Self, SymbolicPrefixRefusal> {
         use SymbolicPrefixRefusal::{Cancelled, InconsistentProjection, Unsupported};
 
@@ -404,8 +431,12 @@ impl SymbolicPrefixOrders {
         if !workspace.has_local_import() && builtin_kick_profile(profile).is_none() {
             return Err(Unsupported);
         }
-        let geometry =
-            CandidateGeometry::for_symbolic_prefix(catalog, candidate).ok_or(Unsupported)?;
+        let geometry = CandidateGeometry::for_symbolic_prefix_completion(
+            catalog,
+            candidate,
+            expected_final_board,
+        )
+        .ok_or(Unsupported)?;
         let mut pieces = [PieceKind::I; MAX_OPERATIONS];
         pieces[..operation_count].copy_from_slice(geometry.pieces());
         workspace.configure_kick_profile(profile, false);
@@ -756,12 +787,27 @@ impl SymbolicPrefixOrders {
     pub(super) fn into_observation_parts(
         self,
     ) -> Result<(ExactPrefixRelation, CandidateGeometry), WasmExactSearchError> {
+        self.observation_relation()?;
+        Ok((self.relation, self.geometry))
+    }
+
+    /// The relation is coordinate-free, but its operation labels and exact
+    /// completion must stay paired with this candidate's geometry.
+    #[cfg(feature = "placement-dependency-pc")]
+    pub(super) fn observation_relation(
+        &self,
+    ) -> Result<&ExactPrefixRelation, WasmExactSearchError> {
         if !self.physical_action_complete {
             return Err(WasmExactSearchError::InvalidProblem(
                 "wasm_observation_dependency_action_authority_missing",
             ));
         }
-        Ok((self.relation, self.geometry))
+        Ok(&self.relation)
+    }
+
+    #[cfg(feature = "placement-dependency-pc")]
+    pub(super) fn geometry(&self) -> &CandidateGeometry {
+        &self.geometry
     }
 
     /// Compile the already-proved complete action relation for a policy that
@@ -770,8 +816,7 @@ impl SymbolicPrefixOrders {
     /// or movement search. Line clears change each action's physical cells,
     /// so keys come from this proof's own original-row projection.
     /// Kept as the eager exact test reference for the factored product owner.
-    #[cfg(feature = "placement-dependency-pc")]
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(all(test, feature = "placement-dependency-pc"))]
     pub(super) fn compile_observation_language(
         &self,
         language: &mut super::queue_observation_policy::PhysicalActionLanguage,
@@ -1741,6 +1786,7 @@ mod tests {
                 catalog_static_guards: None,
                 experiment_subsumption: true,
             },
+            0,
         )
         .unwrap();
         // The conservative authority boundary is independent of whether

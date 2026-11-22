@@ -12,10 +12,12 @@
 //! The symbolic prefix compiler reuses the candidate frame projection below.
 //! The distinct poset and conditional-order prototypes remain local-only.
 //! Their optional catalog guard table replaces repeated same-frame geometric
-//! tests, not movement proofs or the conditions on which they depend. Callers
-//! must additionally keep CountAll, finesse and non-clear-to-empty completion
-//! on their existing paths. A certificate belongs to the supplied candidate;
-//! its operation indices are concrete row IDs, not interchangeable kind IDs.
+//! tests, not movement proofs or the conditions on which they depend. Those
+//! prototypes keep CountAll, finesse and non-clear-to-empty completion on
+//! their existing paths. The symbolic prefix projection can separately qualify
+//! an explicitly requested final board after line clears. A certificate belongs
+//! to the supplied candidate; its operation indices are concrete row IDs, not
+//! interchangeable kind IDs.
 
 use clearra_core_domain::piece::piece_kind::PieceKind;
 #[cfg(any(test, feature = "local-search-ab"))]
@@ -584,11 +586,35 @@ impl CandidateGeometry {
             not(target_family = "wasm")
         )
     ))]
+    #[cfg(any(test, feature = "local-search-ab"))]
     pub(super) fn for_symbolic_prefix(
         catalog: &GeometryCatalog,
         candidate: &GeometryCandidate,
     ) -> Option<Self> {
         Self::compile(catalog, candidate)
+    }
+
+    /// Qualify the same exact original-cell projection for a requested build
+    /// completion. The terminal value is the board after every operation and
+    /// every completed original row have been consumed, matching
+    /// `BuildCompletion::ExactBoardAfterLineClears` rather than the target-frame
+    /// occupancy. This does not certify any movement or relax the old poset
+    /// and conditional-order clear-to-empty contracts.
+    #[cfg(any(
+        test,
+        feature = "placement-dependency-pc",
+        all(
+            feature = "local-search-ab",
+            feature = "parallel",
+            not(target_family = "wasm")
+        )
+    ))]
+    pub(super) fn for_symbolic_prefix_completion(
+        catalog: &GeometryCatalog,
+        candidate: &GeometryCandidate,
+        expected_final_board: u64,
+    ) -> Option<Self> {
+        Self::compile_for_final_board(catalog, candidate, expected_final_board)
     }
 
     #[cfg(any(
@@ -783,7 +809,16 @@ impl CandidateGeometry {
             .expect("candidate geometry owns a validated compact row frame")
     }
 
+    #[cfg(any(test, feature = "local-search-ab"))]
     fn compile(catalog: &GeometryCatalog, candidate: &GeometryCandidate) -> Option<Self> {
+        Self::compile_for_final_board(catalog, candidate, 0)
+    }
+
+    fn compile_for_final_board(
+        catalog: &GeometryCatalog,
+        candidate: &GeometryCandidate,
+        expected_final_board: u64,
+    ) -> Option<Self> {
         let width = catalog.width();
         let height = catalog.height();
         let operation_count = candidate.row_ids().len();
@@ -840,7 +875,8 @@ impl CandidateGeometry {
                 completed_rows |= 1_u16 << original_row;
             }
         }
-        if compact_target_board(width, height, final_board, completed_rows) != 0 {
+        if compact_target_board(width, height, final_board, completed_rows) != expected_final_board
+        {
             return None;
         }
         Some(Self {
@@ -1051,6 +1087,92 @@ fn board_for_operations(
         board |= physical_cells[operation];
     }
     board
+}
+
+#[cfg(test)]
+mod symbolic_completion_tests {
+    use super::*;
+    use crate::backend::wasm_cpu::buildup::{
+        BuildCompletion, BuildUpWorkspace, CandidateProjection,
+    };
+
+    #[test]
+    fn symbolic_completion_matches_the_exact_post_clear_board() {
+        let o = 3 | (3 << 10);
+        let bottom_two_rows = (1_u64 << 20) - 1;
+        for (height, initial, expected, deleted) in [
+            (2, 0, o, 0),
+            (3, (bottom_two_rows & !o) | (1 << 20), 1, 0b11),
+            (2, bottom_two_rows & !o, 0, 0b11),
+        ] {
+            let catalog = GeometryCatalog::compile_build_stage(height, initial, o).unwrap();
+            let row = catalog.skeleton_id(PieceKind::O, o).unwrap();
+            let candidate = GeometryCandidate::from_rows(&catalog, 0, &[row]).unwrap();
+            let geometry =
+                CandidateGeometry::for_symbolic_prefix_completion(&catalog, &candidate, expected)
+                    .expect("exact final board");
+            let completion = BuildCompletion::ExactBoardAfterLineClears(expected);
+            let mut workspace = BuildUpWorkspace::default();
+            let mut reference =
+                CandidateProjection::compile(&catalog, &candidate, &mut workspace, completion)
+                    .unwrap();
+
+            for executed in 0..=1 {
+                let state = geometry.conditional_state(executed);
+                assert_eq!(
+                    (state.board, state.deleted),
+                    reference.state(usize::from(executed))
+                );
+            }
+            assert_eq!(reference.state(1), (expected, deleted));
+            assert!(completion.accepts(&mut reference, 1));
+            assert_eq!(
+                BuildCompletion::ClearToEmpty.accepts(&mut reference, 1),
+                expected == 0
+            );
+            assert_eq!(
+                CandidateGeometry::for_symbolic_prefix(&catalog, &candidate).is_some(),
+                expected == 0
+            );
+            assert_eq!(
+                CandidateGeometry::compile(&catalog, &candidate).is_some(),
+                expected == 0
+            );
+            assert!(CandidateGeometry::for_symbolic_prefix_completion(
+                &catalog,
+                &candidate,
+                expected ^ 1,
+            )
+            .is_none());
+        }
+    }
+
+    #[test]
+    fn symbolic_completion_rejects_empty_and_incomplete_candidates() {
+        let o = 3 | (3 << 10);
+        let catalog = GeometryCatalog::compile_build_stage(2, 0, o | (o << 4)).unwrap();
+        let empty = GeometryCandidate::from_rows(&catalog, 0, &[]).unwrap();
+        assert!(CandidateGeometry::for_symbolic_prefix_completion(&catalog, &empty, 0).is_none());
+
+        let row = catalog.skeleton_id(PieceKind::O, o).unwrap();
+        let incomplete = GeometryCandidate::from_rows(&catalog, 0, &[row]).unwrap();
+        // Its own post-clear board matches o, but it does not cover the
+        // catalog's required cells and therefore has no qualified projection.
+        assert!(
+            CandidateGeometry::for_symbolic_prefix_completion(&catalog, &incomplete, o).is_none()
+        );
+    }
+
+    #[test]
+    fn symbolic_completion_preserves_initial_full_row_rejection() {
+        let o = 3 | (3 << 10);
+        let catalog = GeometryCatalog::compile_build_stage(3, (1 << 10) - 1, o << 10).unwrap();
+        let row = catalog.skeleton_id(PieceKind::O, o << 10).unwrap();
+        let candidate = GeometryCandidate::from_rows(&catalog, 0, &[row]).unwrap();
+        assert!(
+            CandidateGeometry::for_symbolic_prefix_completion(&catalog, &candidate, o).is_none()
+        );
+    }
 }
 
 #[cfg(test)]

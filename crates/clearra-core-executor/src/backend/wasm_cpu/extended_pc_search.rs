@@ -143,7 +143,7 @@ pub(super) fn validate_pc_family_problem(
             "extended_pc_family_contract_not_connected",
         ));
     }
-    super::ensure_connected_kick_profile(problem)
+    super::ensure_canonical_kick_profile(problem)
 }
 
 pub(super) fn checked_pc_family_problem_nested_retained_bytes(

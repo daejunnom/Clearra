@@ -2167,7 +2167,6 @@ impl WasmExactSearchSession {
         let canonical_minimum_source_complete =
             self.validate_parallel_minimum_cover_source(&mut outcome)?;
         let catalog_payload_bytes = self.catalog.retained_bytes();
-        #[cfg(feature = "placement-dependency-pc")]
         for shard in core::mem::take(&mut outcome.observation_producer_shards) {
             self.buildup_workspace
                 .merge_observation_producer_shard(shard, &self.execution_control)?;
@@ -3611,9 +3610,6 @@ impl WasmExactSearchSession {
                 })?;
             self.ensure_session_memory_bound(reduction_future)?;
         }
-        if let Some(root) = result.observation_language_root {
-            self.buildup_workspace.merge_observation_language(root)?;
-        }
         let reduction_span = SearchStageSpan::begin_scaled(
             ExecutorSearchStage::WasmCandidateResultReduce,
             profile_scale,
@@ -4520,6 +4516,20 @@ impl WasmExactSearchSession {
                                 .saturating_add(self.solution_coverage_bytes)
                                 .saturating_add(metrics.retained_bytes),
                         );
+                        // Global physical-action union and policy scratch can
+                        // grow after the final candidate. That peak belongs
+                        // to the same configured budget as candidate work;
+                        // it must not be published as a complete result when
+                        // only the earlier candidate peaks fit the cap.
+                        if self.memory_budget_exceeded() {
+                            self.mark_truncated("memory_budget_exceeded");
+                        }
+                        if matches!(
+                            self.problem_retention,
+                            SearchProblemRetention::ParentAuthorizedSharedInput { .. }
+                        ) {
+                            self.ensure_session_memory_bound(metrics.retained_bytes as u128)?;
+                        }
                     }
                     Ok(None) => {
                         let pattern_count = self

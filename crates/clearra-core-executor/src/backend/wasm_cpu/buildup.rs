@@ -46,6 +46,7 @@ use clearra_supply::{
     hold_automaton::HoldAutomatonState,
     pattern_universe::PatternPiecePositionIndex,
     piece_source::{PieceSourceId, PieceSourceKind},
+    QueueObservationPolicy,
 };
 
 use crate::{
@@ -69,9 +70,7 @@ use super::{
     exact_collections::ExactHashSet,
     geometry::{GeometryCandidate, TargetGroup},
     piece_order_language::{CoverageCacheLookup, PieceOrderLanguageCache},
-    queue_observation_policy::{
-        QueueObservationCoverage, QueueObservationPolicyEvaluator, RootedPieceLanguageUnion,
-    },
+    queue_observation_policy::{QueueObservationCoverage, QueueObservationPolicyEvaluator},
     reachability::{checked_reachability_retained_upper_bound, ReachabilityWorkspace},
     realization_feasibility::{RealizationFeasibility, RealizationFeasibilityWorkspace},
     standard_bag_coverage::{
@@ -262,7 +261,6 @@ pub(super) struct BuildOrderGraph {
     reachability_states: usize,
     // Worker-local suffix-language identity, consumed before the owning
     // BuildUpWorkspace may recycle its language arena. Never exported as an ID.
-    #[cfg(any(test, feature = "local-search-ab"))]
     canonical_language_root: Option<u32>,
 }
 
@@ -516,7 +514,6 @@ pub(super) struct CandidateBuildResult {
     pub buildable: bool,
     pub covered_patterns: Option<PatternBitSet>,
     pub symbolic_coverage_root: Option<u32>,
-    pub observation_language_root: Option<u32>,
     pub symbolic_covered_pattern_count: usize,
     pub witness_pattern_id: Option<u32>,
     pub build_variant_count: u128,
@@ -865,6 +862,31 @@ impl BuildCompletion {
     }
 }
 
+/// The Build constructor and candidate verifier must agree on both the
+/// geometry bound and the evidence contract before admitting an ordered
+/// imported table or selecting the Boolean dependency product.
+pub(super) fn uses_build_placement_dependency(
+    problem: &SearchProblem,
+    catalog: &GeometryCatalog,
+    operation_count: usize,
+    finesse_requested: bool,
+    spin_coverage_requested: bool,
+) -> bool {
+    cfg!(feature = "placement-dependency-pc")
+        && catalog.width() == 10
+        && (1..=6).contains(&catalog.height())
+        && (1..=11).contains(&operation_count)
+        && !super::pc_placement_dependency_reference_requested()
+        && problem.count_policy() == PcCountPolicy::CountUnique
+        && !finesse_requested
+        && !spin_coverage_requested
+        && !problem.objective().score().requested()
+        && !problem.objective().execution_constraints().requested()
+        && problem.queue_observation_policy() == QueueObservationPolicy::FullQueueOracle
+        && problem.piece_source().materialized_universe().is_some()
+        && problem.backend_policy().max_memory_mib().is_none()
+}
+
 #[cfg(any(feature = "parallel", test))]
 #[derive(Clone, Copy, Debug, Default)]
 pub(super) struct BuildUpMemoryComponents {
@@ -878,18 +900,20 @@ pub(super) struct BuildUpMemoryComponents {
 /// A worker's exact physical proofs travel with the only kind-language arena
 /// in which their suffix IDs have meaning. The coordinator re-interns that
 /// arena once before combining any physical residuals or policy choices.
-#[cfg(all(feature = "parallel", feature = "placement-dependency-pc"))]
+#[cfg(feature = "parallel")]
 pub(super) struct ObservationProducerShard {
     physical: super::queue_observation_policy::PhysicalActionLanguage,
-    kinds: PieceOrderLanguageCache,
+    kinds: Option<PieceOrderLanguageCache>,
 }
 
-#[cfg(all(feature = "parallel", feature = "placement-dependency-pc"))]
+#[cfg(feature = "parallel")]
 impl ObservationProducerShard {
     pub(super) fn retained_bytes(&self) -> usize {
-        self.physical
-            .retained_bytes()
-            .saturating_add(self.kinds.retained_bytes())
+        self.physical.retained_bytes().saturating_add(
+            self.kinds
+                .as_ref()
+                .map_or(0, PieceOrderLanguageCache::retained_bytes),
+        )
     }
 }
 
@@ -900,8 +924,6 @@ pub(super) struct BuildUpWorkspace {
     standard_bag_coverage: Option<StandardBagCoverage>,
     standard_bag_coverage_initialized: bool,
     shared_standard_bag_request: Option<Arc<SharedStandardBagRequest>>,
-    observation_language_roots: Vec<u32>,
-    #[cfg(feature = "placement-dependency-pc")]
     dependency_observation: super::queue_observation_policy::PhysicalActionLanguage,
     reachability: ReachabilityWorkspace,
     graph_nodes: Vec<BuildNode>,
@@ -1112,13 +1134,8 @@ impl BuildUpWorkspace {
     fn other_retained_bytes(&self) -> usize {
         // Count private components directly, never subtract two snapshots of
         // a shared OnceLock which another worker may initialize in between.
-        #[cfg(feature = "placement-dependency-pc")]
-        let dependency_observation_bytes = self.dependency_observation.retained_bytes();
-        #[cfg(not(feature = "placement-dependency-pc"))]
-        let dependency_observation_bytes = 0;
         self.realization_feasibility.retained_bytes()
-            + self.observation_language_roots.capacity() * core::mem::size_of::<u32>()
-            + dependency_observation_bytes
+            + self.dependency_observation.retained_bytes()
             + self.legal_board_query_cache.retained_bytes()
     }
 
@@ -1274,29 +1291,20 @@ impl BuildUpWorkspace {
         }
     }
 
-    pub fn merge_observation_language(&mut self, root: u32) -> Result<(), WasmExactSearchError> {
-        self.observation_language_roots
-            .try_reserve(1)
-            .map_err(|_| {
-                WasmExactSearchError::InvalidProblem(
-                    "wasm_observation_language_root_storage_unavailable",
-                )
-            })?;
-        self.observation_language_roots.push(root);
-        Ok(())
-    }
-
-    #[cfg(all(feature = "parallel", feature = "placement-dependency-pc"))]
+    #[cfg(feature = "parallel")]
     pub(super) fn take_observation_producer_shard(&mut self) -> Option<ObservationProducerShard> {
         self.dependency_observation
             .has_roots()
             .then(|| ObservationProducerShard {
+                kinds: self
+                    .dependency_observation
+                    .has_factored_roots()
+                    .then(|| core::mem::take(&mut self.piece_order_languages)),
                 physical: core::mem::take(&mut self.dependency_observation),
-                kinds: core::mem::take(&mut self.piece_order_languages),
             })
     }
 
-    #[cfg(all(feature = "parallel", feature = "placement-dependency-pc"))]
+    #[cfg(feature = "parallel")]
     pub(super) fn merge_observation_producer_shard(
         &mut self,
         shard: ObservationProducerShard,
@@ -1305,9 +1313,24 @@ impl BuildUpWorkspace {
         if control.is_cancelled() {
             return Err(WasmExactSearchError::Cancelled);
         }
-        let rebound = self.piece_order_languages.import_node_map(&shard.kinds)?;
+        #[cfg(feature = "placement-dependency-pc")]
+        if shard.physical.has_factored_roots() {
+            let kinds = shard
+                .kinds
+                .as_ref()
+                .ok_or(WasmExactSearchError::InvalidProblem(
+                    "wasm_observation_kind_owner_missing",
+                ))?;
+            let rebound = self.piece_order_languages.import_node_map(kinds)?;
+            return self.dependency_observation.merge_factored(
+                shard.physical,
+                &rebound,
+                control,
+                &self.piece_order_languages,
+            );
+        }
         self.dependency_observation
-            .merge_factored(shard.physical, &rebound, control)
+            .merge_eager(shard.physical, control)
     }
 
     pub fn evaluate_observation_language(
@@ -1315,15 +1338,9 @@ impl BuildUpWorkspace {
         problem: &SearchProblem,
         control: &ExecutionControl,
     ) -> Result<Option<QueueObservationCoverage>, WasmExactSearchError> {
-        #[cfg(feature = "placement-dependency-pc")]
-        let physical_actions = self.dependency_observation.has_roots();
-        #[cfg(not(feature = "placement-dependency-pc"))]
-        let physical_actions = false;
-        if self.observation_language_roots.is_empty() && !physical_actions {
+        if !self.dependency_observation.has_roots() {
             return Ok(None);
         }
-        self.observation_language_roots.sort_unstable();
-        self.observation_language_roots.dedup();
         let universe = problem.piece_source().materialized_universe().ok_or(
             WasmExactSearchError::InvalidProblem("wasm_piece_source_not_materialized"),
         )?;
@@ -1342,12 +1359,7 @@ impl BuildUpWorkspace {
             None,
         )?;
         #[cfg(feature = "placement-dependency-pc")]
-        if physical_actions {
-            if !self.observation_language_roots.is_empty() {
-                return Err(WasmExactSearchError::InvalidProblem(
-                    "wasm_observation_physical_and_kind_owners_mixed",
-                ));
-            }
+        if self.dependency_observation.has_factored_roots() {
             let language = self
                 .dependency_observation
                 .factored_view(&self.piece_order_languages, control)?
@@ -1386,15 +1398,14 @@ impl BuildUpWorkspace {
             ];
             return Ok(Some(result));
         }
-        let language = RootedPieceLanguageUnion::new(
-            &self.piece_order_languages,
-            &self.observation_language_roots,
-        )?;
-        let mut result = evaluator.evaluate(&language, control)?;
-        result.metrics.retained_bytes = result
-            .metrics
-            .retained_bytes
-            .saturating_add(language.retained_bytes());
+        let result = {
+            let language = self.dependency_observation.view(control)?.ok_or(
+                WasmExactSearchError::InvalidProblem("wasm_observation_physical_root_missing"),
+            )?;
+            evaluator.evaluate(&language, control)?
+        };
+        // This view borrows the eager owner already charged by the workspace.
+        // Only the factored view above creates additional local memo storage.
         Ok(Some(result))
     }
 
@@ -1433,6 +1444,74 @@ impl BuildUpWorkspace {
             .map(Some)
     }
 
+    /// Compose an exact Boolean placement language with the existing supply
+    /// authority. Complete standard bags keep their symbolic representation;
+    /// all other materialized universes use the same original-ordinal bitset
+    /// product as the concrete verifier, without constructing another graph.
+    fn cover_piece_language(
+        &mut self,
+        problem: &SearchProblem,
+        target: &TargetGroup,
+        language_root: u32,
+        evaluator: &mut CoverageProductEvaluator,
+        control: &ExecutionControl,
+    ) -> Result<CandidateBuildResult, WasmExactSearchError> {
+        if let Some(coverage) = self.cover_standard_bag_language(problem, language_root, control)? {
+            return Ok(certified_language_result(Some(coverage)));
+        }
+        let pattern_index =
+            target
+                .pattern_index
+                .as_deref()
+                .ok_or(WasmExactSearchError::InvalidProblem(
+                    "wasm_concrete_pattern_index_not_compiled",
+                ))?;
+        let mut result = certified_language_result(None);
+        let coverage = match self
+            .piece_order_languages
+            .coverage(language_root, target.pattern_index_id)?
+        {
+            CoverageCacheLookup::Hit(local_words) => pattern_index
+                .expand_coverage_words(local_words.as_ref())
+                .map_err(|_| {
+                    WasmExactSearchError::InvalidProblem("wasm_cached_coverage_expansion_failed")
+                })?,
+            CoverageCacheLookup::Miss {
+                admit_after_compute,
+            } => {
+                let product = evaluator.evaluate_language(
+                    &self.piece_order_languages,
+                    language_root,
+                    pattern_index,
+                    problem.initial_hold(),
+                    problem.supply().hold_enabled(),
+                    problem.supply().projects_unplaced_lookahead(),
+                    problem.supply().projects_standard_bag_lookahead(),
+                    control,
+                )?;
+                result.coverage_product_words = product.processed_words;
+                result.coverage_product_states = product.active_states;
+                result.coverage_product_edge_checks = product.edge_checks;
+                if admit_after_compute {
+                    self.piece_order_languages.insert_coverage(
+                        language_root,
+                        target.pattern_index_id,
+                        evaluator.local_coverage_words(),
+                    )?;
+                }
+                product.coverage_bits
+            }
+        };
+        if !coverage.is_empty() {
+            result.buildable = true;
+            result.witness_pattern_id = coverage
+                .first_pattern()
+                .map(|pattern| pattern.index() as u32);
+            result.covered_patterns = Some(coverage);
+        }
+        Ok(result)
+    }
+
     fn recycle_symbolic_caches_if_needed(&mut self) -> Result<(), WasmExactSearchError> {
         let standard_live = self
             .standard_bag_coverage
@@ -1446,11 +1525,7 @@ impl BuildUpWorkspace {
         if let Some(coverage) = self.standard_bag_coverage.as_mut() {
             coverage.flush_and_recycle_local_cache()?;
         }
-        #[cfg(feature = "placement-dependency-pc")]
-        let physical_suffixes_pinned = self.dependency_observation.has_roots();
-        #[cfg(not(feature = "placement-dependency-pc"))]
-        let physical_suffixes_pinned = false;
-        if !self.observation_language_roots.is_empty() || physical_suffixes_pinned {
+        if self.dependency_observation.has_factored_roots() {
             self.piece_order_languages.clear_coverage_caches();
         } else {
             self.piece_order_languages.clear_retain_capacity();
@@ -2120,6 +2195,7 @@ pub(super) fn verify_candidate(
         retain_trace,
         profile_scale,
         BuildCompletion::ClearToEmpty,
+        false,
         control,
     )
 }
@@ -2136,6 +2212,7 @@ pub(super) fn verify_candidate_for_completion(
     retain_trace: bool,
     profile_scale: u64,
     completion: BuildCompletion,
+    spin_coverage_requested: bool,
     control: &ExecutionControl,
 ) -> Result<CandidateBuildResult, WasmExactSearchError> {
     verify_candidate_for_completion_mode(
@@ -2150,7 +2227,7 @@ pub(super) fn verify_candidate_for_completion(
         profile_scale,
         completion,
         false,
-        false,
+        spin_coverage_requested,
         control,
     )
 }
@@ -2241,13 +2318,29 @@ fn verify_candidate_for_completion_mode(
             problem,
             catalog,
             candidate,
+            target,
             workspace,
+            evaluator,
             control,
             profile_scale,
         );
     }
-    super::ensure_pc_placement_dependency_mode(problem)?;
-    let use_dependency = super::uses_pc_placement_dependency(problem);
+    let use_dependency = match completion {
+        BuildCompletion::ClearToEmpty => {
+            super::ensure_pc_placement_dependency_mode(problem)?;
+            super::uses_pc_placement_dependency(problem)
+        }
+        BuildCompletion::ExactBoardAfterLineClears(_) => {
+            super::ensure_no_pc_placement_dependency_mode(problem)?;
+            uses_build_placement_dependency(
+                problem,
+                catalog,
+                candidate.row_ids().len(),
+                finesse_requested,
+                finesse_spin_coverage_requested,
+            )
+        }
+    };
     #[cfg(any(test, all(feature = "local-search-ab", feature = "parallel")))]
     // Both arms explicitly compare the concrete graph/mask producer. The
     // zero arm is a requested reference, not an unscoped product default.
@@ -2256,22 +2349,30 @@ fn verify_candidate_for_completion_mode(
     if use_dependency {
         #[cfg(feature = "placement-dependency-pc")]
         {
-            if !matches!(completion, BuildCompletion::ClearToEmpty)
-                || finesse_requested
-                || finesse_spin_coverage_requested
-                || witness_mode.enabled()
-            {
+            if finesse_requested || finesse_spin_coverage_requested {
                 return Err(WasmExactSearchError::InvalidProblem(
                     super::PC_PLACEMENT_DEPENDENCY_UNSUPPORTED,
                 ));
             }
-            placement_dependency::validate_candidate_scope(catalog, candidate, target)?;
+            if !placement_dependency::supports_candidate(catalog, candidate) {
+                return Err(WasmExactSearchError::InvalidProblem(
+                    "wasm_placement_dependency_candidate_unsupported",
+                ));
+            }
+            let expected_final_board = match completion {
+                BuildCompletion::ClearToEmpty => 0,
+                BuildCompletion::ExactBoardAfterLineClears(board) => board,
+            };
             return placement_dependency::verify_product(
                 problem,
                 catalog,
                 candidate,
+                target,
                 workspace,
+                evaluator,
                 retain_trace,
+                witness_mode.enabled() && problem.piece_source().fixed_sequence().is_some(),
+                expected_final_board,
                 control,
                 profile_scale,
             );
@@ -3245,7 +3346,6 @@ fn verify_certified_poset(
     Ok(Some(certified_language_result(Some(coverage))))
 }
 
-#[cfg(any(test, feature = "local-search-ab", feature = "placement-dependency-pc"))]
 fn certified_language_result(coverage: Option<StandardBagCoverageResult>) -> CandidateBuildResult {
     let buildable = coverage
         .as_ref()
@@ -3257,7 +3357,6 @@ fn certified_language_result(coverage: Option<StandardBagCoverageResult>) -> Can
             .as_ref()
             .filter(|value| value.covers_any_pattern)
             .map(|value| value.root),
-        observation_language_root: None,
         symbolic_covered_pattern_count: coverage
             .as_ref()
             .map_or(0, |value| value.covered_pattern_count),
@@ -3413,7 +3512,6 @@ fn verify_candidate_with_projection(
             witness_pattern_id: covered.and_then(|value| value.witness_pattern_id),
             covered_patterns: None,
             symbolic_coverage_root: covered.map(|value| value.root),
-            observation_language_root: None,
             symbolic_covered_pattern_count: covered.map_or(0, |value| value.covered_pattern_count),
             build_variant_count: 0,
             count_complete: true,
@@ -3474,7 +3572,6 @@ fn verify_candidate_with_projection(
     };
     let mut covered_patterns = None;
     let mut symbolic_coverage_root = None;
-    let mut observation_language_root = None;
     let mut symbolic_covered_pattern_count = 0usize;
     let mut witness_pattern_id = None;
     let mut build_variant_count = 0_u128;
@@ -3531,27 +3628,19 @@ fn verify_candidate_with_projection(
             coverage_product_states = product.active_states;
             coverage_product_edge_checks = product.edge_checks;
         } else {
-            #[cfg(any(test, feature = "local-search-ab"))]
-            let mut canonical_language_id = graph.canonical_language_root;
-            #[cfg(not(any(test, feature = "local-search-ab")))]
-            let mut canonical_language_id = None;
+            let canonical_language_id = graph.canonical_language_root;
             if problem
                 .queue_observation_policy()
                 .requires_observation_policy()
             {
-                let language_id = if let Some(language_id) = canonical_language_id {
-                    language_id
-                } else {
-                    match workspace.piece_order_languages.canonicalize(&graph) {
-                        Ok(language_id) => language_id,
-                        Err(error) => {
-                            workspace.recycle_graph(graph);
-                            return Err(error);
-                        }
-                    }
-                };
-                canonical_language_id = Some(language_id);
-                observation_language_root = Some(language_id);
+                if let Err(error) = workspace.dependency_observation.register_graph(
+                    &graph,
+                    catalog.width(),
+                    control,
+                ) {
+                    workspace.recycle_graph(graph);
+                    return Err(error);
+                }
             }
             if count_paths {
                 let Some(pattern_index) = target.pattern_index.as_deref() else {
@@ -3618,113 +3707,41 @@ fn verify_candidate_with_projection(
                     feature = "parallel",
                     not(target_family = "wasm")
                 ))]
-                let bag_product_span = SearchStageSpan::begin_scaled(
-                    ExecutorSearchStage::StrictStandardBagProduct,
-                    profile_scale,
-                );
-                let symbolic =
-                    match workspace.cover_standard_bag_language(problem, language_id, control) {
-                        Ok(symbolic) => symbolic,
-                        Err(error) => {
-                            workspace.recycle_graph(graph);
-                            return Err(error);
-                        }
-                    };
+                let bag_product_span =
+                    StandardBagCoverage::supports(universe, problem.initial_hold()).then(|| {
+                        SearchStageSpan::begin_scaled(
+                            ExecutorSearchStage::StrictStandardBagProduct,
+                            profile_scale,
+                        )
+                    });
+                let product = match workspace.cover_piece_language(
+                    problem,
+                    target,
+                    language_id,
+                    evaluator,
+                    control,
+                ) {
+                    Ok(product) => product,
+                    Err(error) => {
+                        workspace.recycle_graph(graph);
+                        return Err(error);
+                    }
+                };
                 #[cfg(all(
                     feature = "local-search-ab",
                     feature = "parallel",
                     not(target_family = "wasm")
                 ))]
-                bag_product_span.finish(
-                    symbolic
-                        .as_ref()
-                        .map_or(0, |value| value.edge_checks as u64),
-                );
-                if let Some(symbolic) = symbolic {
-                    coverage_product_states = symbolic.product_states;
-                    coverage_product_edge_checks = symbolic.edge_checks;
-                    if symbolic.covers_any_pattern {
-                        symbolic_coverage_root = Some(symbolic.root);
-                        symbolic_covered_pattern_count = symbolic.covered_pattern_count;
-                        witness_pattern_id = symbolic.witness_pattern_id;
-                    }
-                } else {
-                    let Some(pattern_index) = target.pattern_index.as_deref() else {
-                        workspace.recycle_graph(graph);
-                        return Err(WasmExactSearchError::InvalidProblem(
-                            "wasm_concrete_pattern_index_not_compiled",
-                        ));
-                    };
-                    let cache_lookup = match workspace
-                        .piece_order_languages
-                        .coverage(language_id, target.pattern_index_id)
-                    {
-                        Ok(lookup) => lookup,
-                        Err(error) => {
-                            workspace.recycle_graph(graph);
-                            return Err(error);
-                        }
-                    };
-                    let coverage = match cache_lookup {
-                        CoverageCacheLookup::Hit(local_words) => {
-                            match target
-                                .pattern_index
-                                .as_deref()
-                                .expect("generic coverage requires its compiled pattern index")
-                                .expand_coverage_words(local_words.as_ref())
-                            {
-                                Ok(coverage) => coverage,
-                                Err(_) => {
-                                    workspace.recycle_graph(graph);
-                                    return Err(WasmExactSearchError::InvalidProblem(
-                                        "wasm_cached_coverage_expansion_failed",
-                                    ));
-                                }
-                            }
-                        }
-                        CoverageCacheLookup::Miss {
-                            admit_after_compute,
-                        } => {
-                            let product = match evaluator.evaluate(
-                                &graph,
-                                pattern_index,
-                                problem.initial_hold(),
-                                problem.supply().hold_enabled(),
-                                problem.supply().projects_unplaced_lookahead(),
-                                problem.supply().projects_standard_bag_lookahead(),
-                                false,
-                                false,
-                                control,
-                            ) {
-                                Ok(product) => product,
-                                Err(error) => {
-                                    workspace.recycle_graph(graph);
-                                    return Err(error);
-                                }
-                            };
-                            coverage_product_words = product.processed_words;
-                            coverage_product_states = product.active_states;
-                            coverage_product_edge_checks = product.edge_checks;
-                            if admit_after_compute {
-                                if let Err(error) = workspace.piece_order_languages.insert_coverage(
-                                    language_id,
-                                    target.pattern_index_id,
-                                    evaluator.local_coverage_words(),
-                                ) {
-                                    workspace.recycle_graph(graph);
-                                    return Err(error);
-                                }
-                            }
-                            product.coverage_bits
-                        }
-                    };
-                    if !coverage.is_empty() {
-                        witness_pattern_id = coverage
-                            .first_pattern()
-                            .map(|pattern| pattern.index() as u32);
-                        covered_patterns = Some(coverage);
-                    }
+                if let Some(span) = bag_product_span {
+                    span.finish(product.coverage_product_edge_checks as u64);
                 }
+                covered_patterns = product.covered_patterns;
+                symbolic_coverage_root = product.symbolic_coverage_root;
+                symbolic_covered_pattern_count = product.symbolic_covered_pattern_count;
+                witness_pattern_id = product.witness_pattern_id;
+                coverage_product_words = product.coverage_product_words;
+                coverage_product_states = product.coverage_product_states;
+                coverage_product_edge_checks = product.coverage_product_edge_checks;
             }
         }
         if retain_trace && representative_path.is_empty() {
@@ -3778,7 +3795,6 @@ fn verify_candidate_with_projection(
         }),
         covered_patterns,
         symbolic_coverage_root,
-        observation_language_root,
         symbolic_covered_pattern_count,
         build_variant_count,
         count_complete,
@@ -3800,7 +3816,6 @@ fn infeasible_candidate_result(feasibility_states: usize) -> CandidateBuildResul
         buildable: false,
         covered_patterns: None,
         symbolic_coverage_root: None,
-        observation_language_root: None,
         symbolic_covered_pattern_count: 0,
         witness_pattern_id: None,
         build_variant_count: 0,
@@ -3859,7 +3874,6 @@ fn verify_first_pattern_witness(
             buildable: false,
             covered_patterns: None,
             symbolic_coverage_root: None,
-            observation_language_root: None,
             symbolic_covered_pattern_count: 0,
             witness_pattern_id: None,
             build_variant_count: 0,
@@ -3901,7 +3915,6 @@ fn verify_first_pattern_witness(
         buildable: true,
         covered_patterns,
         symbolic_coverage_root: None,
-        observation_language_root: None,
         symbolic_covered_pattern_count: 0,
         witness_pattern_id: Some(witness.global_pattern_index as u32),
         build_variant_count: 0,
@@ -4853,7 +4866,6 @@ impl BuildOrderGraph {
             piece_edges_share_operation_edges: piece_transitions_are_unique,
             root,
             reachability_states,
-            #[cfg(any(test, feature = "local-search-ab"))]
             canonical_language_root: None,
         })
     }
@@ -5163,7 +5175,6 @@ impl BuildOrderGraph {
                 .realization_feasibility
                 .has_current_partial_dependency_graph(proof)
         });
-        #[cfg(any(test, feature = "local-search-ab"))]
         let mut accepting_reached = false;
         #[cfg(any(test, all(feature = "local-search-ab", feature = "parallel")))]
         let mut selected_mask_edges = 0usize;
@@ -5210,10 +5221,7 @@ impl BuildOrderGraph {
                     debug_assert_eq!(allowed_operations.len(), node_index);
                     allowed_operations.push(0);
                 }
-                #[cfg(any(test, feature = "local-search-ab"))]
-                {
-                    accepting_reached |= accepting;
-                }
+                accepting_reached |= accepting;
                 continue;
             }
             edge_scratch.clear();
@@ -5767,13 +5775,15 @@ impl BuildOrderGraph {
                     metrics.max_piece_edge_capacity.max(piece_edges.capacity());
             }
         });
-        #[cfg(any(test, feature = "local-search-ab"))]
-        let fuse_language = super::placement_dependency::enabled()
-            && piece_language_projection_only
+        let fuse_language = piece_language_projection_only
             && problem.count_policy() == PcCountPolicy::CountUnique
             && reachability_mode == BuildReachabilityMode::Existing;
-        #[cfg(not(any(test, feature = "local-search-ab")))]
-        let fuse_language = false;
+        // Product Boolean consumers need the canonical suffix immediately.
+        // Their completion marks and language share one backward pass. Keep
+        // the existing scoped/native diagnostic axis as an independent
+        // two-pass reference; it cannot alter CountAll or finesse producers.
+        #[cfg(any(test, feature = "local-search-ab"))]
+        let fuse_language = fuse_language && super::placement_dependency::enabled();
         if !fuse_language {
             for index in (0..nodes.len()).rev() {
                 if nodes[index].live {
@@ -5800,12 +5810,11 @@ impl BuildOrderGraph {
                 .reachability
                 .generated_state_count()
                 .saturating_sub(reachability_states_before),
-            #[cfg(any(test, feature = "local-search-ab"))]
             canonical_language_root: None,
         };
-        #[cfg(any(test, feature = "local-search-ab"))]
         let graph = if fuse_language && accepting_reached {
             let mut graph = graph;
+            #[cfg(any(test, feature = "local-search-ab"))]
             super::placement_dependency::record(|metrics| {
                 metrics.fused_language_graphs += 1;
                 metrics.fused_language_nodes += graph.nodes.len() as u64;
@@ -5827,11 +5836,10 @@ impl BuildOrderGraph {
             };
             graph
         } else {
+            // With no accepting terminal every node already denotes the
+            // empty language. Leave the root unset without a second scan.
+            #[cfg(any(test, feature = "local-search-ab"))]
             if fuse_language {
-                // Every node starts nonlive, and only accepting terminals can
-                // seed a live suffix. With no such terminal, the graph already
-                // denotes the empty language; leave its root ID unset without
-                // initializing classes or visiting edges again.
                 super::placement_dependency::record(|metrics| {
                     metrics.skipped_dead_language_graphs += 1;
                     metrics.skipped_dead_language_nodes += graph.nodes.len() as u64;
@@ -5911,11 +5919,8 @@ fn annotate_and_prune_finesse_graph_with_query_count(
     control: &ExecutionControl,
     query_count: Option<&mut usize>,
 ) -> Result<PreparedFinesseLanguage, WasmExactSearchError> {
-    #[cfg(any(test, feature = "local-search-ab"))]
-    {
-        // Finesse may replace the edge set, invalidating any earlier suffix ID.
-        graph.canonical_language_root = None;
-    }
+    // Finesse may replace the edge set, invalidating any earlier suffix ID.
+    graph.canonical_language_root = None;
     let target_grouping_span = SearchStageSpan::begin(ExecutorSearchStage::FinesseTargetGrouping);
     let mut subsets = vec![usize::MAX; graph.nodes.len()];
     subsets[graph.root as usize] = 0;

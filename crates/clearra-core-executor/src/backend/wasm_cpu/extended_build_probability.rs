@@ -416,7 +416,7 @@ impl ExtendedBuildProbabilitySession {
         coexisting_retained_bytes: u128,
         purpose: ExtendedFamilyPurpose,
     ) -> Result<Self, WasmExactSearchError> {
-        super::ensure_connected_kick_profile(problem)?;
+        super::ensure_canonical_kick_profile(problem)?;
         super::ensure_no_pc_placement_dependency_mode(problem)?;
         if aggregation.is_tiling_only() && problem.solution_probability_policy().requested() {
             return Err(WasmExactSearchError::InvalidProblem(

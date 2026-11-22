@@ -2376,7 +2376,6 @@ impl CompactBuildProbabilitySession {
         memory_bound: ExecutionMemoryBound,
         coexisting_retained_bytes: u128,
     ) -> Result<Self, WasmExactSearchError> {
-        super::ensure_connected_kick_profile(problem)?;
         super::ensure_no_pc_placement_dependency_mode(problem)?;
         if aggregation.is_tiling_only() && problem.solution_probability_policy().requested() {
             return Err(WasmExactSearchError::InvalidProblem(
@@ -2413,6 +2412,24 @@ impl CompactBuildProbabilitySession {
             return Err(WasmExactSearchError::InvalidProblem(
                 "wasm_build_probability_piece_count_mismatch",
             ));
+        }
+        let mut buildup = BuildUpWorkspace::default();
+        if super::buildup::uses_build_placement_dependency(
+            problem,
+            &catalog,
+            target_piece_count,
+            finesse_requested,
+            aggregation.requests_spin_coverage(),
+        ) {
+            if let Some(authority) =
+                super::ordered_kick_authority(problem, catalog.width(), catalog.height())?
+            {
+                buildup.bind_local_import(authority, &catalog)?;
+            } else {
+                super::ensure_canonical_kick_profile(problem)?;
+            }
+        } else {
+            super::ensure_canonical_kick_profile(problem)?;
         }
         let universe = problem.piece_source().materialized_universe().ok_or(
             WasmExactSearchError::InvalidProblem("wasm_piece_source_not_materialized"),
@@ -2499,7 +2516,7 @@ impl CompactBuildProbabilitySession {
             geometry,
             #[cfg(test)]
             analyze_inverse_dependencies: false,
-            buildup: BuildUpWorkspace::default(),
+            buildup,
             coverage_evaluator: CoverageProductEvaluator::default(),
             covered_patterns,
             buildable_tilings: ExactHashSet::default(),
@@ -2539,7 +2556,7 @@ impl CompactBuildProbabilitySession {
         Ok(session)
     }
 
-    fn advance(
+    pub(super) fn advance(
         &mut self,
         work_budget: usize,
         control: &ExecutionControl,
@@ -2673,6 +2690,7 @@ impl CompactBuildProbabilitySession {
                 self.representative_path.is_empty(),
                 0,
                 BuildCompletion::ExactBoardAfterLineClears(self.final_board),
+                self.aggregation.requests_spin_coverage(),
                 control,
             )?
         };
