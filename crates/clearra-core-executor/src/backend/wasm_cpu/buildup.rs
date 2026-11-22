@@ -2296,10 +2296,6 @@ impl BuildUpWorkspace {
                     language.ordered_class_metrics(),
                 );
                 eprintln!(
-                    "clearra_observation_full_multiset_failure_metrics={:?}",
-                    language.full_multiset_metrics(),
-                );
-                eprintln!(
                     "clearra_observation_word_bitmap_failure_metrics={:?}",
                     language.word_bitmap_metrics(),
                 );
@@ -2332,7 +2328,6 @@ impl BuildUpWorkspace {
             result.metrics.prefix_cone_exact = language.prefix_cone_exact_metrics();
             result.metrics.boundary_classes = language.boundary_class_metrics();
             result.metrics.ordered_classes = language.ordered_class_metrics();
-            result.metrics.full_multiset = language.full_multiset_metrics();
             result.metrics.word_bitmap = language.word_bitmap_metrics();
             result.metrics.word_bitmap_board = language.word_bitmap_board_metrics();
             result.metrics.suffix_import = self.observation_suffix_import;

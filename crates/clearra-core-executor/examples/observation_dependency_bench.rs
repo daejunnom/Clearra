@@ -317,19 +317,12 @@ mod run {
             Err(std::env::VarError::NotPresent) => "0".into(),
             Err(error) => return Err(error.to_string()),
         };
-        let full_multiset_mode = match std::env::var("CLEARRA_OBSERVATION_FULL_MULTISET") {
-            Ok(mode) if cfg!(feature = "local-search-ab") && matches!(mode.as_str(), "0" | "1") => {
-                mode
-            }
-            Ok(_) => {
-                return Err(
-                    "CLEARRA_OBSERVATION_FULL_MULTISET requires local-search-ab and mode 0|1"
-                        .into(),
-                )
-            }
-            Err(std::env::VarError::NotPresent) => "0".into(),
-            Err(error) => return Err(error.to_string()),
-        };
+        if std::env::var_os("CLEARRA_OBSERVATION_FULL_MULTISET").is_some() {
+            return Err(
+                "CLEARRA_OBSERVATION_FULL_MULTISET was retired after the q25 scope proof; remove this environment variable"
+                    .into(),
+            );
+        }
         let execution = PcExecutionPolicy::mvp_default()
             .with_requested_backend(RequestedSearchBackend::Cpu)
             .with_allow_backend_fallback(false)
@@ -393,7 +386,7 @@ mod run {
             WasmCpuSearchBackend::execute_with_control(&problem, &ExecutionControl::default());
         let execution_seconds = start.elapsed().as_secs_f64();
         let mut report = json!({
-            "schema": "clearra.observation-dependency-benchmark.v20",
+            "schema": "clearra.observation-dependency-benchmark.v21",
             "fixture": fixture, "policy": observation.keyword(),
             "binary_sha256": binary_sha,
             "compiled_source_commit": option_env!("CLEARRA_SOURCE_COMMIT"),
@@ -417,7 +410,6 @@ mod run {
             "word_bitmap_mode": word_bitmap_mode,
             "shared_producer_mode": shared_producer_mode,
             "ordered_classes_mode": ordered_classes_mode,
-            "full_multiset_mode": full_multiset_mode,
             "source_sequence_length": problem.supply().source_sequence_length(),
             "projects_unplaced_lookahead": problem.supply().projects_unplaced_lookahead(),
             "projects_standard_bag_lookahead": problem.supply().projects_standard_bag_lookahead(),

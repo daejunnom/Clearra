@@ -2396,19 +2396,7 @@ impl BoardActionFamily {
             },
         )?;
         let supply_multiset_enabled = supply_multiset_enabled()? && union_enabled;
-        let groups_enabled = multiset_groups_enabled()? && supply_multiset_enabled;
-        union.set_multiset_grouping_enabled(groups_enabled);
-        let full_multiset_enabled = full_multiset_enabled()?;
-        if full_multiset_enabled
-            && (!groups_enabled
-                || !self.plan.fresh_bag_observation
-                || !self.plan.source_filter
-                || !self.plan.boundary_suffixes_only
-                || !(1..=6).contains(&(self.plan.total_depth - self.plan.hidden_horizon)))
-        {
-            return Err(invalid("wasm_observation_full_multiset_scope_invalid"));
-        }
-        union.set_full_multiset_enabled(full_multiset_enabled);
+        union.set_multiset_grouping_enabled(multiset_groups_enabled()? && supply_multiset_enabled);
         let mut revealed = Vec::new();
         if union_enabled {
             revealed
@@ -2425,7 +2413,6 @@ impl BoardActionFamily {
             // representation. Supply filtering specializes only lazy unions.
             supply_multiset_enabled,
             word_bitmap_enabled: word_bitmap_enabled()?,
-            full_multiset_enabled,
             union: RefCell::new(RevealedKindUnion {
                 arena: union,
                 revealed,
@@ -2754,19 +2741,6 @@ fn word_bitmap_enabled() -> Result<bool, WasmExactSearchError> {
     Ok(false)
 }
 
-fn full_multiset_enabled() -> Result<bool, WasmExactSearchError> {
-    #[cfg(feature = "local-search-ab")]
-    {
-        match std::env::var("CLEARRA_OBSERVATION_FULL_MULTISET") {
-            Ok(value) if value == "0" => return Ok(false),
-            Ok(value) if value == "1" => return Ok(true),
-            Err(std::env::VarError::NotPresent) => {}
-            _ => return Err(invalid("wasm_observation_full_multiset_mode_invalid")),
-        }
-    }
-    Ok(false)
-}
-
 fn is_kind_union(node: u32) -> bool {
     node & (KIND_TAG | REVEALED_BOARD_TAG | KIND_UNION_TAG) == KIND_UNION_TAG
 }
@@ -2793,7 +2767,6 @@ pub(in crate::backend::wasm_cpu) struct BoardActionLanguageView<'a> {
     union_enabled: bool,
     supply_multiset_enabled: bool,
     word_bitmap_enabled: bool,
-    full_multiset_enabled: bool,
     union: RefCell<RevealedKindUnion>,
 }
 
@@ -2820,10 +2793,6 @@ impl BoardActionLanguageView<'_> {
 
     pub(in crate::backend::wasm_cpu) fn word_bitmap_board_metrics(&self) -> [usize; 6] {
         self.union.borrow().arena.word_bitmap_board_metrics()
-    }
-
-    pub(in crate::backend::wasm_cpu) fn full_multiset_metrics(&self) -> [usize; 6] {
-        self.union.borrow().arena.full_multiset_metrics()
     }
 
     pub(in crate::backend::wasm_cpu) fn edge_closure_metrics(&self) -> [usize; 5] {
@@ -3081,7 +3050,7 @@ impl ObservationPieceLanguage for BoardActionLanguageView<'_> {
     }
 
     fn supports_revealed_word_membership(&self, node: u32) -> bool {
-        (self.word_bitmap_enabled || self.full_multiset_enabled)
+        self.word_bitmap_enabled
             && self.union_enabled
             && self.owner.plan.fresh_bag_observation
             && self.owner.plan.source_filter
@@ -3115,34 +3084,17 @@ impl ObservationPieceLanguage for BoardActionLanguageView<'_> {
         // This frozen view pins both the board/class ID and its exact unique
         // root set for the arena lifetime. Root order is not part of that
         // identity; the evaluator alone grants actual-observed supply access.
-        let mut union = self.union.borrow_mut();
-        if self.full_multiset_enabled {
-            match union.arena.full_multiset_membership(
+        self.union
+            .borrow_mut()
+            .arena
+            .word_bitmap_membership_for_board(
                 node & !REVEALED_BOARD_TAG,
                 board.remaining(),
                 roots,
                 query,
                 self.kinds,
                 control,
-            )? {
-                Some(true) => return Ok(Some(true)),
-                Some(false) => {
-                    return Err(invalid("wasm_observation_full_multiset_negative_invalid"));
-                }
-                None => {}
-            }
-        }
-        if !self.word_bitmap_enabled {
-            return Ok(None);
-        }
-        union.arena.word_bitmap_membership_for_board(
-            node & !REVEALED_BOARD_TAG,
-            board.remaining(),
-            roots,
-            query,
-            self.kinds,
-            control,
-        )
+            )
     }
 
     fn fully_revealed_node_with_supply(

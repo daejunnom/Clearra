@@ -132,6 +132,16 @@ impl BoardActionFamily {
                 Ok(())
             }
             Err(error) => {
+                #[cfg(feature = "local-search-ab")]
+                if !self.failed {
+                    eprintln!(
+                        "clearra_observation_ordered_class_failed stage=prepare error={error:?} ordered_classes={:?} board={:?} retained_bytes={} peak_bytes={}",
+                        self.ordered_class_metrics,
+                        self.metrics,
+                        self.retained_bytes(),
+                        self.peak_bytes(),
+                    );
+                }
                 self.failed = true;
                 Err(error)
             }
@@ -453,4 +463,483 @@ fn signature_word(hash: u64, word: u64) -> u64 {
     (hash ^ word)
         .rotate_left(23)
         .wrapping_mul(0x9ddf_ea08_eb38_2d69)
+}
+
+#[cfg(test)]
+mod tests {
+    use clearra_core_domain::probability::probability_value::ProbabilityValue;
+    use clearra_coverage::universe::{
+        pattern_universe_id::PatternUniverseId, pattern_weight_model_id::PatternWeightModelId,
+    };
+    use clearra_rules::kicks::KickTableProfileId;
+    use clearra_supply::{pattern_universe::MaterializedPatternUniverse, QueueObservationPolicy};
+
+    use crate::backend::wasm_cpu::{
+        queue_observation_policy::{QueueObservationCoverage, QueueObservationPolicyEvaluator},
+        symbolic_prefix_orders::SymbolicPrefixWork,
+    };
+
+    use super::super::super::PhysicalActionLanguage;
+    use super::super::tests::{fresh_bag_orders_for_tail, source_filter_plan};
+    use super::*;
+
+    const ROOT: u32 = 0;
+    const X: u32 = 1;
+    const LEFT: u32 = 2;
+    const Y: u32 = 3;
+    const RIGHT: u32 = 4;
+
+    fn word(kinds: &mut PieceOrderLanguageCache, pieces: &[PieceKind]) -> u32 {
+        let predecessors: Vec<_> = (0..pieces.len()).map(|index| (1 << index) - 1).collect();
+        kinds
+            .compile_poset_language(pieces, &predecessors, 64)
+            .unwrap()
+            .unwrap()
+            .root
+    }
+
+    fn edge(piece: PieceKind, cells: u64, child: u32) -> BoardEdge {
+        BoardEdge {
+            piece: piece_code(piece),
+            cells,
+            child,
+        }
+    }
+
+    /// A small frozen policy-game fixture. It isolates ordering from movement
+    /// proof construction; the separate ten-lock test below obtains the same
+    /// freeze authority through real catalog/reachability/complete-family code.
+    /// Raw IDs deliberately mix depths. Both pre-H boards have X,Y,X choices,
+    /// with different physical cells; reversing the right list changes its tie.
+    fn fixture(enabled: bool, reverse_right: bool) -> (BoardActionFamily, PieceOrderLanguageCache) {
+        use PieceKind::{I, J, L, O, S, T, Z};
+        let mut plan = BoardObservationPlan::new(10, 4, 0, 8, 2, 1, None).unwrap();
+        let scope = Arc::get_mut(&mut plan).unwrap();
+        scope.boundary_suffixes_only = true;
+        scope.fresh_bag_observation = true;
+        scope.source_filter = true;
+        scope.boundary_classes_enabled = true;
+        scope.edge_closure = EdgeClosureMode::BeforeLastPhysicalLayer;
+        scope.ordered_classes_enabled = enabled;
+        let mut kinds = PieceOrderLanguageCache::default();
+        let x = word(&mut kinds, &[S, Z, L, J, T, I]);
+        let y = word(&mut kinds, &[S, Z, L, J, T, O]);
+        let o = 3 | (3 << 10);
+        let right_children = if reverse_right { [Y, X, Y] } else { [X, Y, X] };
+        let mut family = BoardActionFamily::new(plan);
+        family.nodes = vec![
+            BoardNode {
+                state: BoardState::Physical(BoardKey {
+                    board: 0,
+                    remaining: 8,
+                }),
+                edges: vec![edge(I, 0xf, LEFT), edge(I, 0xf0, RIGHT)],
+                suffixes: SuffixRoots::default(),
+            },
+            BoardNode {
+                state: BoardState::Boundary { remaining: 6 },
+                edges: Vec::new(),
+                suffixes: SuffixRoots::FrozenUniqueUnordered(vec![x]),
+            },
+            BoardNode {
+                state: BoardState::Physical(BoardKey {
+                    board: 0xf,
+                    remaining: 7,
+                }),
+                edges: vec![edge(O, o << 4, X), edge(O, o << 6, Y), edge(O, o << 8, X)],
+                suffixes: SuffixRoots::default(),
+            },
+            BoardNode {
+                state: BoardState::Boundary { remaining: 6 },
+                edges: Vec::new(),
+                suffixes: SuffixRoots::FrozenUniqueUnordered(vec![y]),
+            },
+            BoardNode {
+                state: BoardState::Physical(BoardKey {
+                    board: 0xf0,
+                    remaining: 7,
+                }),
+                edges: [o, o << 2, o << 14]
+                    .into_iter()
+                    .zip(right_children)
+                    .map(|(cells, child)| edge(O, cells, child))
+                    .collect(),
+                suffixes: SuffixRoots::default(),
+            },
+        ];
+        family.root = Some(ROOT);
+        family.metrics.nodes = family.nodes.len();
+        family.metrics.edges = family.nodes.iter().map(|node| node.edges.len()).sum();
+        family.metrics.suffix_roots = 2;
+        family.edge_capacity_bytes = family
+            .nodes
+            .iter()
+            .map(|node| node.edges.capacity() * core::mem::size_of::<BoardEdge>())
+            .sum();
+        family.suffix_capacity_bytes = family
+            .nodes
+            .iter()
+            .map(|node| node.suffixes.retained_bytes())
+            .sum();
+        family.producer_closed = true;
+        family.frozen = true;
+        family.edge_closure_complete = true;
+        family.kind_arena = Some(Arc::clone(kinds.arena_identity()));
+        (family, kinds)
+    }
+
+    struct RootAt<'a, 'b> {
+        view: &'a BoardActionLanguageView<'b>,
+        root: u32,
+    }
+
+    impl ObservationPieceLanguage for RootAt<'_, '_> {
+        fn root(&self) -> u32 {
+            self.root
+        }
+        fn node(&self, node: u32) -> Option<ObservationLanguageNode> {
+            self.view.node(node)
+        }
+        fn edge_count(&self, node: u32) -> Option<usize> {
+            self.view.edge_count(node)
+        }
+        fn edge(&self, node: u32, index: usize) -> Option<(u8, u32)> {
+            self.view.edge(node, index)
+        }
+        fn has_physical_actions(&self, node: u32) -> bool {
+            self.view.has_physical_actions(node)
+        }
+        fn physical_action_cells(&self, node: u32, index: usize) -> Option<u64> {
+            self.view.physical_action_cells(node, index)
+        }
+        fn prepare_edges(
+            &self,
+            node: u32,
+            pieces: u8,
+            control: &ExecutionControl,
+        ) -> Result<(), WasmExactSearchError> {
+            self.view.prepare_edges(node, pieces, control)
+        }
+        fn fixed_horizon(&self) -> Option<u8> {
+            self.view.fixed_horizon()
+        }
+        fn fully_revealed_node(
+            &self,
+            node: u32,
+            control: &ExecutionControl,
+        ) -> Result<u32, WasmExactSearchError> {
+            self.view.fully_revealed_node(node, control)
+        }
+        fn revealed_alternatives(
+            &self,
+            node: u32,
+            control: &ExecutionControl,
+        ) -> Result<Option<Vec<u32>>, WasmExactSearchError> {
+            self.view.revealed_alternatives(node, control)
+        }
+        fn memo_class(&self, node: u32) -> Option<u32> {
+            self.view.memo_class(node)
+        }
+    }
+
+    fn source_universe(tails: &[PieceKind]) -> MaterializedPatternUniverse {
+        use PieceKind::{I, J, L, O, S, T, Z};
+        let sequences = tails
+            .iter()
+            .map(|&tail| vec![I, O, T, S, Z, L, J, T, tail])
+            .collect();
+        MaterializedPatternUniverse::from_sequences(
+            PatternUniverseId::new(2401),
+            PatternWeightModelId::new(2402),
+            sequences,
+            vec![ProbabilityValue::new(1.0 / tails.len() as f64).unwrap(); tails.len()],
+            tails.len() as u128,
+            true,
+            None,
+        )
+        .unwrap()
+    }
+
+    fn evaluate(
+        view: &BoardActionLanguageView<'_>,
+        universe: &MaterializedPatternUniverse,
+        root: u32,
+        cursor: u16,
+        collect: bool,
+    ) -> QueueObservationCoverage {
+        let mut evaluator = QueueObservationPolicyEvaluator::for_original_universe(
+            universe,
+            QueueObservationPolicy::VisibleSeven,
+            cursor,
+            None,
+            true,
+            false,
+            false,
+            None,
+        )
+        .unwrap();
+        evaluator.set_collect_full_for_test(collect);
+        evaluator
+            .evaluate(&RootAt { view, root }, &ExecutionControl::default())
+            .unwrap()
+    }
+
+    fn same_coverage(left: &QueueObservationCoverage, right: &QueueObservationCoverage) {
+        assert_eq!(
+            left.covered_patterns.words(),
+            right.covered_patterns.words()
+        );
+        assert_eq!(left.covered_pattern_count, right.covered_pattern_count);
+        assert_eq!(
+            left.covered_weight.to_bits(),
+            right.covered_weight.to_bits()
+        );
+        assert_eq!(left.min_accepted_depth, right.min_accepted_depth);
+        assert_eq!(left.max_accepted_depth, right.max_accepted_depth);
+    }
+
+    fn witness(family: &BoardActionFamily) -> Vec<(Option<BoardKey>, Vec<BoardEdge>)> {
+        family
+            .nodes
+            .iter()
+            .map(|node| (node.physical_key(), node.edges.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn ordered_classes_keep_first_real_edges_and_early_reveal_namespaces() {
+        let control = ExecutionControl::default();
+        let (mut family, kinds) = fixture(true, false);
+        let before = witness(&family);
+        let original_bytes = family.retained_bytes();
+        let view = family.view_with_kind_union(&kinds, &control, true).unwrap();
+        assert_ne!(before[LEFT as usize].0, before[RIGHT as usize].0);
+        assert_eq!(view.memo_class(LEFT), view.memo_class(RIGHT));
+        assert_eq!(view.edge_count(ROOT), Some(1));
+        assert_eq!(view.edge(ROOT, 0), Some((piece_code(PieceKind::I), LEFT)));
+        assert_eq!(view.physical_action_cells(ROOT, 0), Some(0xf));
+        for node in [LEFT, RIGHT] {
+            assert_eq!(view.edge_count(node), Some(2));
+            assert_eq!(view.edge(node, 0).unwrap().1, X);
+            assert_eq!(view.edge(node, 1).unwrap().1, Y);
+            assert_eq!(
+                view.physical_action_cells(node, 0),
+                Some(before[node as usize].1[0].cells)
+            );
+            assert_eq!(
+                view.physical_action_cells(node, 1),
+                Some(before[node as usize].1[1].cells)
+            );
+            let revealed = view.fully_revealed_node(node, &control).unwrap();
+            assert_eq!(revealed, node);
+            assert!(view.has_physical_actions(revealed));
+            assert_eq!(view.memo_class(revealed), view.memo_class(node));
+        }
+        let revealed = view.fully_revealed_node(X, &control).unwrap();
+        assert_ne!(revealed, X);
+        assert_eq!(view.memo_class(revealed), Some(revealed));
+        assert!(view.prepare_edges(X, 0x7f, &control).is_err());
+        let metrics = view.ordered_class_metrics();
+        assert_eq!(&metrics[..6], &[3, 2, 1, 8, 5, 3]);
+        assert!(metrics[6] > 0 && metrics[7] > 0);
+        drop(view);
+        assert_eq!(witness(&family), before);
+        let quotient = family.ordered_quotient.as_ref().unwrap();
+        assert_eq!(quotient.member_count(), 5);
+        assert_eq!(
+            family.retained_bytes(),
+            original_bytes + quotient.retained_bytes()
+        );
+        assert_eq!(family.metrics.work, metrics[6]);
+        let again = family
+            .view_with_kind_union(&kinds, &control, false)
+            .unwrap();
+        assert_eq!(again.ordered_class_metrics(), metrics);
+    }
+
+    #[test]
+    fn ordered_classes_preserve_original_ids_and_distinguish_reordered_ties() {
+        use PieceKind::{I, O, Z};
+        let universe = source_universe(&[I, O, I, O]);
+        let control = ExecutionControl::default();
+        for reverse in [false, true] {
+            let mut expected = None;
+            for enabled in [false, true] {
+                let (mut family, kinds) = fixture(enabled, reverse);
+                for union in [false, true] {
+                    let view = family
+                        .view_with_kind_union(&kinds, &control, union)
+                        .unwrap();
+                    if enabled {
+                        assert_eq!(view.memo_class(LEFT) == view.memo_class(RIGHT), !reverse);
+                    }
+                    for collect in [false, true] {
+                        let root = evaluate(&view, &universe, ROOT, 0, collect);
+                        assert_eq!(root.covered_patterns.words(), &[0b0101]);
+                        assert_eq!(root.covered_pattern_count, 2);
+                        assert_eq!(root.covered_weight, 0.5);
+                        if let Some(expected) = &expected {
+                            same_coverage(&root, expected);
+                        } else {
+                            expected = Some(root);
+                        }
+                        let left = evaluate(&view, &universe, LEFT, 1, collect);
+                        let right = evaluate(&view, &universe, RIGHT, 1, collect);
+                        assert_eq!(left.covered_patterns.words(), &[0b0101]);
+                        assert_eq!(
+                            right.covered_patterns.words(),
+                            &[if reverse { 0b1010 } else { 0b0101 }]
+                        );
+                    }
+                    // Inferred complete supply is already known at depth 0;
+                    // the boundary-only provider still keeps physical choices.
+                    let known = source_universe(&[I, I]);
+                    assert_eq!(
+                        evaluate(&view, &known, ROOT, 0, false).covered_pattern_count,
+                        2
+                    );
+                    // All legal actions fail this source. Dedup keeps the
+                    // original first edge rather than deleting a zero class.
+                    let rejected = source_universe(&[Z, Z]);
+                    assert_eq!(
+                        evaluate(&view, &rejected, ROOT, 0, false).covered_pattern_count,
+                        0
+                    );
+                    assert_eq!(view.physical_action_cells(ROOT, 0), Some(0xf));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn ordered_classes_match_actual_ten_lock_completed_family() {
+        use PieceKind::{I, J, L, O, S, T, Z};
+        let first = vec![J, I, O, T, Z, S, L, Z, T, I, O];
+        let universe = MaterializedPatternUniverse::from_sequences(
+            PatternUniverseId::new(2411),
+            PatternWeightModelId::new(2412),
+            vec![first.clone(), vec![J, I, O, T, Z, S, L, Z, T, I, S], first],
+            vec![ProbabilityValue::new(1.0 / 3.0).unwrap(); 3],
+            3,
+            true,
+            None,
+        )
+        .unwrap();
+        let control = ExecutionControl::default();
+        let mut expected = None;
+        for enabled in [false, true] {
+            let mut plan = source_filter_plan(true);
+            let scope = Arc::get_mut(&mut plan).unwrap();
+            scope.boundary_classes_enabled = true;
+            scope.edge_closure = EdgeClosureMode::BeforeLastPhysicalLayer;
+            scope.ordered_classes_enabled = enabled;
+            let mut physical = PhysicalActionLanguage::default();
+            physical.set_board_plan(Arc::clone(&plan)).unwrap();
+            let mut kinds = PieceOrderLanguageCache::default();
+            for alternate in [false, true] {
+                physical
+                    .produce_board_relation(
+                        fresh_bag_orders_for_tail(alternate),
+                        &mut kinds,
+                        &mut SymbolicPrefixWork::default(),
+                        &control,
+                        0,
+                    )
+                    .unwrap();
+            }
+            let source = physical.board.take().unwrap();
+            let identity: Vec<_> = (0..kinds.node_count() as u32).collect();
+            let mut family = BoardActionFamily::new(plan);
+            family
+                .merge_completed_boundaries(vec![source], &[&identity], 0, &kinds, &control)
+                .unwrap();
+            let catalog = GeometryCatalog::compile_for_required_cells_on_dimensions(
+                10,
+                4,
+                0,
+                (1_u64 << 40) - 1,
+            )
+            .unwrap();
+            let mut reachability = ReachabilityWorkspace::default();
+            reachability.configure_kick_profile(KickTableProfileId::Jstris180, false);
+            family
+                .complete_physical_edges(&catalog, &mut reachability, &control)
+                .unwrap();
+            let before = witness(&family);
+            for union in [false, true] {
+                let view = family
+                    .view_with_kind_union(&kinds, &control, union)
+                    .unwrap();
+                for collect in [false, true] {
+                    let coverage = evaluate(&view, &universe, view.root(), 0, collect);
+                    assert_eq!(coverage.covered_pattern_count, 3);
+                    if let Some(expected) = &expected {
+                        same_coverage(&coverage, expected);
+                    } else {
+                        expected = Some(coverage);
+                    }
+                }
+            }
+            assert_eq!(witness(&family), before);
+            assert_eq!(family.ordered_class_metrics()[0] > 0, enabled);
+        }
+    }
+
+    #[test]
+    fn ordered_classes_fail_closed_without_publishing_partial_tables() {
+        let control = ExecutionControl::default();
+        let (mut scope, _) = fixture(true, false);
+        Arc::get_mut(&mut scope.plan).unwrap().source_filter = false;
+        assert!(matches!(
+            scope.prepare_ordered_policy_quotient(&control),
+            Err(WasmExactSearchError::InvalidProblem(
+                "wasm_observation_ordered_class_scope_invalid"
+            ))
+        ));
+        assert!(scope.failed && scope.ordered_quotient.is_none());
+
+        let (mut cancelled, _) = fixture(true, false);
+        let stop = ExecutionControl::default();
+        stop.cancellation.handle().cancel();
+        assert!(matches!(
+            cancelled.prepare_ordered_policy_quotient(&stop),
+            Err(WasmExactSearchError::Cancelled)
+        ));
+        assert!(cancelled.failed && cancelled.ordered_quotient.is_none());
+        assert!(cancelled.prepare_ordered_policy_quotient(&control).is_err());
+
+        let (mut limited, _) = fixture(true, false);
+        limited.metrics.work = MAX_WORK - 1;
+        assert!(matches!(
+            limited.prepare_ordered_policy_quotient(&control),
+            Err(WasmExactSearchError::InvalidProblem(
+                "wasm_observation_physical_work_limit"
+            ))
+        ));
+        assert_eq!(limited.metrics.work, MAX_WORK - 1);
+        assert!(limited.failed && limited.ordered_quotient.is_none());
+        assert!(limited.ordered_class_metrics()[7] > 0);
+
+        let (mut members, _) = fixture(true, false);
+        members.metrics.suffix_roots = MAX_UNION_MEMBERS;
+        assert!(matches!(
+            members.prepare_ordered_policy_quotient(&control),
+            Err(WasmExactSearchError::InvalidProblem(
+                "wasm_observation_physical_union_limit"
+            ))
+        ));
+        assert!(members.failed && members.ordered_quotient.is_none());
+        assert!(members.metrics.work > 0);
+
+        let (mut malformed, _) = fixture(true, false);
+        malformed.nodes[RIGHT as usize].edges[2].cells =
+            malformed.nodes[RIGHT as usize].edges[1].cells;
+        assert!(matches!(
+            malformed.prepare_ordered_policy_quotient(&control),
+            Err(WasmExactSearchError::InvalidProblem(
+                "wasm_observation_physical_action_order_invalid"
+            ))
+        ));
+        assert!(malformed.failed && malformed.ordered_quotient.is_none());
+    }
 }

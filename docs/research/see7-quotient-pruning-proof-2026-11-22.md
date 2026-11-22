@@ -1,8 +1,9 @@
 # see-7의 추가 몫과 Geometry 가지치기: 적용 조건과 전 경로 증명
 
-작성일: 2026-11-22. 기준 commit은
+작성일: 2026-11-22. 초기 기준 commit은
 `c89b330bca8fb6c10e9c6d4752d375999c62b11a`, 작업 branch는
-`codex/see7-quotient-pruning-20261122`다. 이 문서는 각 축약의 적용 조건과 모든
+`codex/see7-quotient-pruning-20261122`다. 최종 구현 상태는 q26 정리 commit
+`3507e7d4f3506969fd3d5d656ecf96b0667c19bf`를 기준으로 한다. 이 문서는 각 축약의 적용 조건과 모든
 허용 경로에 대한 보존 증명을 담는다. 실제 실행·commit·receipt·실패 원인은
 [측정 보고서](see7-pruning-measurements-2026-11-22.md)에 구분해 기록한다.
 
@@ -31,8 +32,13 @@ class와 freeze를 만들었으나 정책 work 한도로 미완료다. 11-lock�
 등록 뒤 **8,000,000 suffix 참조** 한도에서 생성 중 거절됐다. 이 시점의 실제 pre-H
 physical node는 962,289개, pending H group은 1,311,519개, physical work는
 47,272,836이다. 전체 생성이 완료되지 않았으므로 이 값은 최종 비용이 아니다.
-후속 q24/q25는 정책 의미 class와 Full 충분조건을 구현 중이며, 생성 단계의 이 한도를
-해결했다는 주장은 하지 않는다. §B23/B24와 측정 보고서 §3.50을 함께 따른다.
+q24의 ordered policy class는 구현·실측했으나 10-lock을 완주하지 못했다.
+q25의 개별 H root에 대한 plain Full 양성 shortcut은 일반적으로 sound하지만,
+현재 source-qualified H 범위에서는 양성이 불가능함을 증명했다. 실제 8-lock에서도
+7,325,943회 조회의 양성 hit가 0이고 추가 work가 14,798,470이었다. q26에서는
+이 실행 경로와 전용 회귀 6개를 제거했다. 여러 root의 정확한 OR를 인증하는 q22의
+board Full은 별도 정리이며 유지한다. §B23/B24와 측정 보고서의 q24–q26 기록을 따른다.
+어느 결과도 11-lock 생성 단계의 8M 참조 한도를 해결했다는 근거가 아니다.
 
 유한 회귀는 구현 실수를 찾는 근거이고 이 문서의 전칭 증명을 대신하지 않는다.
 조합론적 상태 수, 완료 시간, 실패까지의 시간, 관측 RSS 및 제품 기본값을 서로
@@ -48,8 +54,8 @@ membership을 새로운 최적화로 다시 세지 않는다.
 | 후보 | 보존하는 것 | 추가로 필요한 조건 | 예상 이득과 비용 | 적용 판단 |
 | --- | --- | --- | --- | --- |
 | A. Dormant Frontier, live relation 공유와 reveal 하계 | 경계 전 물리 commitment, 경계 후 정확한 종류 잔여 언어, Boolean 정책 값 | 정확한 hidden horizon, 원래 공급의 reveal 권한, 같은 종류 arena. 하계는 인증된 전체 fresh bag에 한정한다. | 경계 배열·재스캔과 불필요한 suffix binding 보유·merge를 줄인다. 더 이른 행동 signature는 계산 비용을 제한한다. | A1/A3/A4와 q4의 board-only root0 binding 생략 및 A5 original-source index 생략을 구현했다. A2의 추가 signature는 미적용이다. |
-| B. 완전한 생산 뒤 freeze한 board DAG 또는 공급 상대 정책 memo | 전체 물리 family에서는 raw 언어, 공급 상대 family에서는 원래 Ω와 product한 root의 정확한 정책 값 | 아래의 family 완전성 certificate와 실제 board 전이의 soundness. 단순히 같은 board라는 사실만으로는 부족하다. | candidate/prefix 장기 보유와 반복 scan을 제거할 수 있다. 모든 필요한 prefix/edge의 등록·merge 비용은 남는다. | B5–B20을 구현하고 실제 8-lock 비교를 진행했다. q17의 exact incumbent 가지치기는 해당 fixture에서 큰 비용 감소를 보여 guard를 유지해 기본 활성화했다. Prefix mask·공개 전 memo·multiset group index 등 비용 개선을 확인하지 못한 선택 기능은 기본 off다. q21의 cone/class 실험도 10-lock을 완주하지 못했으며 전체 생산·병합 비용을 함께 측정한다. |
-| C. residual 언어 포함관계와 제한된 multiset bitmap | 같은 residual union의 정확한 종류 언어 | 포함관계 증거 또는 제한된 r·uniform multiset certificate | 중복 root를 줄일 수 있으나 pair 비교나 bitmap materialization 비용이 더 클 수도 있다. | 일반 언어 포함관계·producer 전체 bitmap 교체는 미적용이다. q20/q21의 실제 공개 r≤6 membership bitmap은 8-lock에서 work-limit 실패했다. q22는 target M의 공급 재명명, frozen board OR와 Full/Empty certificate로 같은 교집합의 계산을 공유한다. 기본 off 및 실제 계측에 따른 채택 원칙을 유지한다. |
+| B. 완전한 생산 뒤 freeze한 board DAG 또는 공급 상대 정책 memo | 전체 물리 family에서는 raw 언어, 공급 상대 family에서는 원래 Ω와 product한 root의 정확한 정책 값 | 아래의 family 완전성 certificate와 실제 board 전이의 soundness. 단순히 같은 board라는 사실만으로는 부족하다. | candidate/prefix 장기 보유와 반복 scan을 제거할 수 있다. 모든 필요한 prefix/edge의 등록·merge 비용은 남는다. | B5–B23을 구현하고 각 실험의 완료·실패를 별도로 기록했다. q17은 guard를 유지해 제품 기본값으로 활성화했으며 다른 실험을 일괄 채택하지 않는다. q23 공유 생산 이후에도 10-lock은 정책 work, 11-lock은 생산 중 8M 참조에서 미완료다. q24 ordered class도 10-lock을 완주하지 못했다. |
+| C. residual 언어 포함관계와 제한된 multiset bitmap | 같은 residual union의 정확한 종류 언어 | 포함관계 증거 또는 제한된 r·uniform multiset certificate | 중복 root를 줄일 수 있으나 pair 비교나 bitmap materialization 비용이 더 클 수도 있다. | 일반 언어 포함관계·producer 전체 bitmap 교체는 미적용이다. q20/q21의 실제 공개 r≤6 membership bitmap은 8-lock에서 work-limit 실패했다. q22의 target M 재명명·frozen board OR·Full/Empty는 유지한다. q25 per-root plain Full은 현재 H 범위의 불가능 증명과 양성 0 실측 뒤 q26에서 제거했다. 생산 중 포함관계의 후속 최소 조건은 §10.5의 미구현 후보다. |
 | D. 공급 미래를 먼저 factor하는 observation source | 관측별 원래 ID·질량·공급 전이·EOF | 정확한 source 구조와 ordinal 대응. 처음에는 완전 canonical standard bag으로 한정 가능 | 거대한 raw trie의 생성·보유를 줄인다. 성공 bitset의 원래 ID 복원은 남는다. | trie 비용이 실제로 지배할 때 후속 구조 개선으로 적용한다. |
 
 Geometry의 `off/current/improved`는 이 네 정책 축약과 별도 축이다. 현재 전역 E2는
@@ -2173,7 +2179,7 @@ abort, poisoned lock, 잘못된 owner와 부분 family는 실패를 유지하고
 
 ### B23. q24: 실제 행동 순서를 보존하는 정책 의미 class
 
-현재 구현 중인 추가 실험은 **완료된 H-only family의 CoverageSummary**에 한정한다.
+q24로 구현한 추가 실험은 **완료된 H-only family의 CoverageSummary**에 한정한다.
 실제 board, four-cell mask, child와 physical/revealed 권한은 그대로 보관한다. 새 class는
 값 memo와 중복 선택지에만 쓰며 물리 검증기에 다른 board나 가짜 cells를 전달하지 않는다.
 
@@ -2215,12 +2221,33 @@ signature를 그대로 적용하지 않는다. replay, finesse, CountAll과 후�
 초기화를 기존 누적 work에 청구한다. 이미 수행된 생산 work를 환불하지 않는다. 이 후처리
 축약은 생산 단계 자체가 상한을 넘는 경우를 해결한 것으로 보고할 수 없다.
 
-### B24. q25 설계: multiset의 모든 단어를 포함한다는 충분조건
+구현 경계는
+[`OrderedPolicyQuotient`와 `BoardActionFamily::prepare_ordered_policy_quotient`](../../crates/clearra-core-executor/src/backend/wasm_cpu/queue_observation_ordered_policy_quotient.rs),
+[`BoardActionLanguageView::memo_class`](../../crates/clearra-core-executor/src/backend/wasm_cpu/queue_observation_board_actions.rs)다.
+실제 graph의 간선 index를 따로 보유하고, 모든 깊이의 class 생성과 자원 검사가
+성공한 뒤에만 전체 표를 게시한다. 실패한 부분 표로 memo를 바꾸지 않는다.
 
-전체 bitmap을 만들기 전에 얻을 수 있는 더 싼 **양성 증거**를 검토한다. B11의 uniform
+q24 실측에서는 다음의 구조 변화를 확인했다. 이것은 원래 graph를 바꾼 값이 아니라
+추가 정책 class와 선택지 view의 계측이다.
+
+| 입력 | pre-H node | class | class 재사용 | 원래 선택지 → 보유 선택지 | 추가 work | 결과 해석 |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| 8-lock | 상세 실행 기록 참조 | 상세 실행 기록 참조 | 0 | 5개 제외 | 상세 실행 기록 참조 | class 공유 효과는 관측되지 않았으며 선택지 5개만 제외했다. |
+| 10-lock | 125,312 | 116,473 | 8,839 | 1,683,722 → 1,666,553 | 5,765,530 | 추가 축약을 만들었으나 전체 정책은 완주하지 못했다. |
+
+class 재사용과 선택지 감소 자체는 완료 시간 개선의 증거가 아니다. q24는 구현·실측된
+선택 기능으로 남기되, 실제 10/11-lock 완주와 최종 source SHA의 실행 gate를 별도로
+확인한다. 이 절의 귀납 증명과 특정 회귀 실행 수를 같은 증거로 취급하지 않는다.
+
+### B24. q25 plain Full: 일반 충분조건과 현재 H 범위에서의 제외
+
+#### B24a. 일반적으로 sound한 양성 충분조건
+
+전체 bitmap을 만들기 전에 얻을 수 있는 **양성 증거**다. B11의 uniform
 multiset certificate를 가진 root v의 multiset을 M이라 하고, `Perm(M)`을 M의 모든 서로
-다른 종류 순열이라고 하자. terminal의 빈 언어 단어는 Full이다. 비종료 v에서 M에 남은
-각 종류 p마다 `M−e_p`에 대해 Full인 p-child가 하나 이상 있으면 v를 Full로 인증한다.
+다른 종류 순열이라고 하자. 수용 terminal의 언어 `{ε}`는 Full이며 empty reject와
+구분한다. 비종료 v에서 M에 남은 각 종류 p마다 `M−e_p`에 대해 Full인 p-child가
+하나 이상 있으면 v를 Full로 인증한다.
 
 \[
 \forall p\;(M_p>0\Rightarrow
@@ -2240,11 +2267,84 @@ uniform certificate가 반대 포함을 준다. uniform 검증은 여전히 **�
 또는 다른 projection 계약에는 이 증거를 쓰지 않는다. 단순 `M≤A`만으로 기존 공급
 자동자를 대신하지 않는다.
 
-이 증거는 기존 uniform certificate 계산의 child 순회에 합칠 수 있다. 다만 추가
-child-Full 검사, 종류 mask와 cache 조회는 실제 비용이므로 기존 work에 포함해야 한다.
-개별 query에서 전체 root를 다시 훑는 비용도 피해야 한다. 기존 multiset group 구축에서
-같은 M의 Full witness를 저장하고 실제 공급의 가능한 M key만 조회하는 구현을 우선
-검토한다. **구현·계측 전의 설계이며 성능 개선이나 10·11-lock 완주를 뜻하지 않는다.**
+q25는 이 충분조건을 uniform certificate의 기존 child 순회에 합치고, multiset group을
+만들 때 각 M의 개별 Full root 존재 여부를 보관하도록 구현했다. 실제 query에서는
+가능한 M key만 조회했으며 전체 root를 매번 재순회하지 않았다. 추가 child-Full 검사,
+종류 mask와 조회 비용은 기존 누적 kind work에 청구했다. Full 추가 work와 group work는
+일부 겹치는 진단 부분집합이므로 두 수를 다시 더해 전체 비용으로 삼지 않는다.
+이 구현 방식의 soundness와 현재 입력에서 양성 증거가 존재하는지는 별개 문제다.
+
+#### B24b. source-qualified 개별 H root는 현재 r=6 범위에서 Full일 수 없다
+
+B15/B16의 전체 fresh-bag 범위와 H-only 생산을 전제로 한다. 전체 operation의
+종류별 개수는 2 이하이고, 모든 수용 경로의 첫 여섯 종류는 서로 다르다.
+고정된 원래 operation prefix P의 깊이를 H라 하고, 그 prefix의 종류 집합도 P로
+쓰자. 이 범위에서 P는 H개의 서로 다른 종류다. 개별 H suffix root는 그 **고정 P**
+뒤의 경로 언어이며, 남은 multiset M의 크기는 r=6이다.
+
+이 제약은 H에서 suffix를 생성한다고 없어지지 않는다. 현재 소스의 연결은 다음과 같다.
+
+- [`symbolic_prefix_source_filter.rs::project_source_mask`](../../crates/clearra-core-executor/src/backend/wasm_cpu/symbolic_prefix_source_filter.rs)는
+  전체 종류별 2개 상한을 검사하고, 깊이 6의 중복 종류 subset을 막는다.
+  parent와 child 양쪽을 allowed mask로 제한한 뒤 `PrefixDomain::live_from_start`로
+  시작점 도달성과 terminal 생산성을 다시 계산한다. 따라서 앞서 중복된 prefix나
+  그 경계를 통과해야만 완성되는 후손도 수용 경로에 남지 않는다.
+- [`SourceQualifiedPrefixOrders::compile_product_suffixes_with_residuals`](../../crates/clearra-core-executor/src/backend/wasm_cpu/symbolic_prefix_orders.rs)는
+  원래 pieces·permitted parents와 함께 **source-qualified active mask**를 전달한다.
+  raw physical relation과 같은 객체로 위장하지 않으며, 동일 geometry owner를 빌린다.
+- [`PieceOrderLanguageCache::compile_prefix_suffix_classes`](../../crates/clearra-core-executor/src/backend/wasm_cpu/piece_order_language.rs)는
+  active prefix만 읽고 child class가 `EMPTY_REFERENCE`인 간선을 제외한다.
+  `min_prefix_depth=H`는 H보다 얕은 class 생성을 생략할 뿐 H 이후의 source mask를
+  해제하지 않는다. 같은 종류의 모든 유효 NFA child를 유지하고 정확한 suffix class를
+  intern하므로 서로 다른 P의 언어를 임의로 넓히지 않는다.
+- [`PhysicalActionLanguage::produce_source_qualified_board_relation`](../../crates/clearra-core-executor/src/backend/wasm_cpu/queue_observation_physical_actions.rs)는
+  fresh-bag 권한과 H≤5를 확인하고 위 qualified compiler의 suffix만
+  local 또는 shared board 등록에 전달한다. 종류 arena의 정확한 import도 이 언어를 보존한다.
+
+이제 개별 root의 언어가 `Perm(M)`이라고 가정하자. M에 있는 임의 종류 p는 그
+언어의 첫 종류로 올 수 있다. H<6이므로 p가 이미 P에 있으면 첫 여섯 종류가 중복된다.
+따라서 다음 필요조건을 얻는다.
+
+\[
+\operatorname{supp}(M)\cap P=\varnothing.
+\]
+
+H≤4에서는 첫 여섯 자리에 아직 두 자리 이상 남는다. M에 어떤 종류가 두 번 있으면
+`pp`로 시작하는 순열도 `Perm(M)`에 포함되므로 첫 여섯 종류 제약을 위반한다.
+따라서 H=2,3,4에서 Full은 M의 여섯 종류가 모두 달라야 하는데, P 밖에는 각각
+5,4,3종류만 있다. H=5에서는 이 중복 논증을 그대로 쓸 수 없지만, P 밖의 두 종류를
+전체 종류별 2개 상한으로 채워도 남은 여섯 미노를 만들 수 없다.
+
+| H | n=H+6 | 깊이 6까지 남은 자리 | P 밖 종류 수 | Full 가정의 모순 |
+| ---: | ---: | ---: | ---: | --- |
+| 2 | 8 | 4 | 5 | M은 6 distinct여야 하나 가능한 종류가 5개다. |
+| 3 | 9 | 3 | 4 | M은 6 distinct여야 하나 가능한 종류가 4개다. |
+| 4 | 10 | 2 | 3 | M은 6 distinct여야 하나 가능한 종류가 3개다. |
+| 5 | 11 | 1 | 2 | 종류별 2개로도 남은 개수는 4 이하라 6개를 채울 수 없다. |
+
+따라서 이 네 범위에서 개별 H root의 plain Full 양성 증거는 존재하지 않는다.
+H=3 행은 같은 정리의 중간 경우이며 별도의 실제 9-lock 측정을 뜻하지 않는다.
+깊이 6 이후 child가 Full이 될 가능성은 남으므로 전체 certificate 생성 수까지
+0이라고 주장하지 않는다. n=7/H=1 등 다른 범위의 일반 Full 정리도 부정하지 않는다.
+
+이 결론은 **개별 root**에 관한 것이다. 같은 보드와 M에 속한 여러 prefix의 언어가
+서로 보완하면 그 OR는 `Perm(M)`이 될 수 있다. 따라서 B21b와
+[`ensure_board_word_bitmap_inner`의 `BoardWordPayload::Full`](../../crates/clearra-core-executor/src/backend/wasm_cpu/queue_observation_kind_union.rs)는
+유효하다. 이 q22 경로는 실제 OR bitmap을 확인하며, q25의 “개별 Full root 하나가
+있다”는 충분조건과 같지 않다.
+
+#### B24c. 실제 관측과 q26의 실행 경로 제거
+
+q25의 frozen source `2a8ee70`에서 실제 8-lock 한 실행은 Full 조회
+**7,325,943회**, 양성 hit **0회**, Full 추가 work **14,798,470**을 기록했다.
+관측된 양성 0만으로 불가능성을 추론한 것이 아니라 B24b가 그 원인을 전칭으로
+설명한다. 이 범위에서 동일 실험의 ABBA와 10-lock 반복을 더 수행하지 않았다.
+
+q26 정리 상태 `3507e7d4f3506969fd3d5d656ecf96b0667c19bf`에서는 q25의
+실행 kernel, hook·옵션·전용 계측과 전용 회귀 6개를 제거했다. sound한 일반 정리와
+범위 제외 근거는 이 절에 남기며, q22의 board OR Full과 관련 회귀는 유지한다.
+제거 뒤 최종 source SHA의 실행 gate와 회귀 수는 별도 검증 기록으로 확인한다.
+이 결정을 10/11-lock 완주 또는 생산 단계 참조 한도의 해결로 표시하지 않는다.
 
 ## 6. 후보 D: 관측 trie를 만들기 전에 공급 미래를 factor
 
@@ -2382,6 +2482,10 @@ steady-state search에서 pruning 강도가 더 세졌다고 표현하지 않는
 | B19의 q18/q21 predecessor cone | 같은 요청·원래 kind/cells의 전체 선행 cone, 새 outgoing edge와 매 후보 H suffix 보존 | H hit/miss, 중간 T 조회·재사용, cache 초기화·성장·재배치·실제 누적 work 및 retained/peak |
 | B20의 q19 완료 boundary class | 모든 shard를 읽은 뒤 같은 remaining과 전체 root 집합; 원래 child clear 검증 뒤 remap | raw H와 고유 보드/class 수, retained roots, staging peak, 추가 work; 161개 관측 통합 검증에 첫 5개 회귀 포함 |
 | B21의 q20 실제 공개 membership | 실제 알려진 Hold/큐 word와 uniform multiset DAG 언어의 정확한 교집합, 원래 ID 전부/없음 | query 생성/cache hit, bitmap nodes/words, intersection·fallback 및 기존 kind work에 포함된 추가 work |
+| B21a/B21b의 q22 target M·board OR | actual M의 순서를 보존하는 공급 재명명, immutable board/M의 모든 root OR, Full/Empty와 unknown fallback | target query·raw profile cache, 실제 OR word와 모든 보유 payload/peak. q25 제거 뒤에도 board OR Full은 유지 |
+| B22의 q23 요청 단위 공유 생산 | 같은 Plan/arena의 정확한 증분 import, 모든 후보 등록과 완료 barrier 뒤 H class, 원래 물리 전이 | 공유 소유량은 한 번, worker private source/map은 각각 계상. 11-lock은 1,285,619 후보 뒤 참조 8M에서 미완료이며 work 47,272,836은 중간 값 |
+| B23의 q24 ordered policy class | 실제 cells 순서의 첫 child class만 남기며 값·동률 원래 ID·실제 edge replay 보존 | 8-lock은 class 재사용 0·선택지 5개 제외. 10-lock은 8,839 class 재사용·17,169 선택지 제외에 추가 work 5,765,530이며 완주 실패 |
+| B24의 q25 plain Full / q26 제거 | 일반 Full 충분조건은 sound하지만 source-qualified H=2/3/4/5, r=6 개별 root에서는 성립 불가 | 실제 8-lock 7,325,943회 조회·양성 0·추가 work 14,798,470. q26에서 실행 경로와 전용 회귀 6개 제거; 최종 실행 gate는 별도 |
 | C의 antichain | bounded proof가 승인한 union의 언어 equality | inclusion query/edge 수, proof budget exhaustion, 제거 root 수, saved membership 비용 |
 | C의 r≤7 multiset bitmap 후보 | uniform multiset의 exact word 언어와 OR/derivative equality | `(board,multiset)`별 root 중복, 실제 bitmap payload·밀도·word 연산 수, arena rebind 제거 가능 범위. 현재 미구현 |
 | D의 source factor | raw trie와 동일 reveal block·ID·질량·EOF 및 선택 bitset | source construction 시간, retained source nodes, ordinal 복원 시간, policy state 수 |
@@ -2634,6 +2738,12 @@ OOM-kill delta도 null이므로 이 기록만으로 OOM, manager kill 또는 마
 - [x] 수정 파일: `crates/clearra-core-executor/src/backend/wasm_cpu/queue_observation_board_actions.rs`, `crates/clearra-core-executor/src/backend/wasm_cpu/queue_observation_physical_actions.rs`, 구현 내용: typed source 경로에서만 q5/q11 중복 cap을 생략하고 filtered child를 suffix와 물리 등록에 같이 적용했다. raw route, worker merge, 실패·취소와 원래 ID 경계를 포함한 관측 124개 검증을 통과했다.
 - [x] 수정 파일: `docs/research/see7-pruning-measurements-2026-11-22.md`, 구현 내용: q15 같은 바이너리 source-filter 8-lock ABBA의 완료·coverage 일치와 평균 비율 0.9344308135557023을 기록했다. 실제 10/11-lock은 각각 정책 work/중앙 node 한도로 미완료이며 실패시간을 완료 speedup으로 비교하지 않았다. source-filter 기본 0을 유지한다.
 
+### q24 구현·실측과 q25/q26 제외 결정
+
+- [x] 수정 파일: `crates/clearra-core-executor/src/backend/wasm_cpu/queue_observation_ordered_policy_quotient.rs`, `crates/clearra-core-executor/src/backend/wasm_cpu/queue_observation_board_actions.rs`, 구현 내용: B23의 완료 H-only family에서 실제 간선 index와 cells 순서를 보존하는 정책 class를 구현했다. 8-lock은 class 재사용 0·선택지 5개 제외, 10-lock은 125,312 node를 116,473 class로 공유하고 선택지를 1,683,722에서 1,666,553으로 줄였으나 완주하지 못했다.
+- [x] 수정 파일: `docs/research/see7-quotient-pruning-proof-2026-11-22.md`, 구현 내용: B24의 일반 Full 충분조건과 source-qualified 개별 H root의 불가능 증명을 분리했다. q25 실제 8-lock의 조회 7,325,943·양성 0·추가 work 14,798,470을 전칭 증명과 별개 실행 근거로 기록했다.
+- [x] 수정 파일: `crates/clearra-core-executor/src/backend/wasm_cpu/queue_observation_kind_union.rs`, `crates/clearra-core-executor/src/backend/wasm_cpu/queue_observation_board_actions.rs`, `crates/clearra-core-executor/src/backend/wasm_cpu/queue_observation_policy.rs`, `crates/clearra-core-executor/src/backend/wasm_cpu/buildup.rs`, `crates/clearra-core-executor/src/backend/wasm_cpu/result.rs`, `crates/clearra-core-executor/examples/observation_dependency_bench.rs`, 구현 내용: q26 정리 상태 3507e7d에서 현재 H 범위에 양성이 없는 q25 실행 경로·전용 옵션과 계측·전용 회귀 6개를 제거했다. q22의 여러 root OR Full은 유지했다. 이 체크는 정리 완료이며 최종 source SHA의 실행 gate 통과를 대신하지 않는다.
+
 ### 완주 확인과 미적용 후속 후보
 
 - [x] 수정 파일: `docs/research/see7-pruning-measurements-2026-11-22.md`, 구현 내용: 같은 q9 binary에서 `(EDGE,COLLECT_FULL)=(0,0),(1,0),(2,0),(2,1)`의 실제 8-lock을 완료하고 Rust comparator로 원래 coverage와 완료 계약을 확인했다. 순차 단일 표본과 별도 freeze/policy 비용을 유지하며 q7의 실패시간을 완료 대조로 사용하지 않는다.
@@ -2641,13 +2751,19 @@ OOM-kill delta도 null이므로 이 기록만으로 OOM, manager kill 또는 마
 - [ ] 수정 파일: `crates/clearra-core-executor/src/backend/wasm_cpu/queue_observation_factored_actions.rs`, 구현 내용: A2가 여전히 필요한 경우에만 제한 깊이의 exact action signature를 추가한다. A1/A3/A4 및 B5의 구현 완료와 구분한다.
 - [ ] 수정 파일: `crates/clearra-core-executor/src/backend/wasm_cpu/queue_observation_factored_actions.rs`, 구현 내용: B3 별도 score memo를 적용한다면 완료 권한 아래 board/depth value class만 공유하고 raw residual·frame 및 행동 재평가를 유지한다. 현재 채택한 B5 board closure의 필수 미완료 단계는 아니다.
 - [ ] 수정 파일: `crates/clearra-core-executor/src/backend/wasm_cpu/piece_order_language.rs`, 구현 내용: C를 적용한다면 같은 arena/깊이의 bounded directed simulation을 제공하고 비교 예산 초과에서 원래 root를 유지한다. 현재는 미적용 설계다.
+- [ ] 수정 파일: `crates/clearra-core-executor/src/backend/wasm_cpu/queue_observation_shared_producer.rs`, `crates/clearra-core-executor/src/backend/wasm_cpu/queue_observation_board_actions.rs`, `crates/clearra-core-executor/src/backend/wasm_cpu/piece_order_language.rs`, 구현 내용: §10.5의 같은 보드·M에서 증명된 언어 포함관계, first-kind F⊆C 또는 prefix-relative Full이 실제 생산 중 중복 참조를 줄이는지 설계·계측한다. 미구현 후보이며 q25 plain Full을 다시 활성화하는 항목이 아니다.
 - [x] 수정 파일: `crates/clearra-core-executor/src/backend/wasm_cpu/queue_observation_word_bitmap.rs`, `crates/clearra-core-executor/src/backend/wasm_cpu/queue_observation_kind_union.rs`, `crates/clearra-core-executor/src/backend/wasm_cpu/queue_observation_policy.rs`, 구현 내용: 실제 관련 draw가 공개된 r≤6 공급의 exact membership을 q20으로 구현하고 161개 관측 통합 검증을 통과했다. 일반 r≤7 producer bitmap 교체와 구분하며, 64M/8M 상한 내 10/11 완주를 이 항목만으로 주장하지 않는다.
 - [ ] 수정 파일: `crates/clearra-core-executor/src/backend/wasm_cpu/piece_order_language.rs`, `crates/clearra-core-executor/src/backend/wasm_cpu/queue_observation_board_actions.rs`, `crates/clearra-core-executor/src/backend/wasm_cpu/queue_observation_physical_actions.rs`, 구현 내용: q12와 별개로 worker 원본 arena를 실제 축소할 필요가 있으면 retained-root closure·모든 ID 소비자·product cache 정리·원자적 owner 교체·실제 재바인딩 work와 공존 peak를 검토한다. pinned base가 recycle threshold를 계속 넘는 현상을 진단하며, threshold 변경이나 주기적 GC를 무검증 채택하지 않는다.
 - [ ] 수정 파일: `crates/clearra-core-executor/src/backend/wasm_cpu/queue_observation_policy.rs`, 구현 내용: trie 비용이 실제 병목이면 D source DAG를 기존 standard-bag 전이·suffix count와 연결하며 sparse/가중 일반 공급은 기존 표현을 유지한다. 현재는 미적용 설계다.
 
 ## 10. 실제 11-lock이 요구하는 추가 구조 변경
 
-q15의 아홉 worker는 geometry 후보 414,005,053개를 처리하고 source-positive
+현재 진단은 q23 공유 생산의 **완료 전 suffix 참조 8M 도달**이다(§10.4).
+§10.1의 q15/q18 work 하한은 당시의 worker별 생산 표현에 대한 실행 근거이며,
+공유 소유와 등록을 바꾼 q23에 그대로 적용하지 않는다. 현재 입력을 모든 정확한
+알고리즘으로도 해결할 수 없다는 하한은 어느 실행에서도 증명하지 않았다.
+
+이전 q15의 아홉 worker는 geometry 후보 414,005,053개를 처리하고 source-positive
 2,008,622개를 생산했다. coordinator는 두 번째 suffix import 이후
 `wasm_observation_physical_node_limit`으로 종료했다. freeze와 최종 정책은 실행하지
 못했다. 따라서 q14의 worker 내부 실패보다 뒤 단계까지 진행했지만 full see-7 완료는
@@ -2674,11 +2790,11 @@ $$
 BoardActionFamily의 counter를 초기화하지 않는다. `register_inner`의 candidate 수와
 work는 단조 증가하고 해당 milestone을 worker당 한 번만 출력한다. coordinator의
 `merge_inner`는 첫 shard부터 `source.metrics.work+1`을 누적한다. 따라서 위 합은
-남은 후보·실제 merge·freeze·policy를 모두 제외한 **현재 생산 표현의 하한**이다.
+남은 후보·실제 merge·freeze·policy를 모두 제외한 **q15 생산 표현의 하한**이다.
 
 독립 Rust 도구 `worker_work_bound.rs`가 worker 수·완료 counter의 partition과 합을
 검증하고 `quotient15-eleven-work-lower-bound.json`을 생성했다. 이것은 다른 알고리즘의
-불가능성 정리가 아니다. 그러나 현재 worker 생산을 그대로 둔 채 policy만 바꾸거나
+불가능성 정리가 아니다. 그러나 그 worker 생산을 그대로 둔 채 policy만 바꾸거나
 merge 뒤 H 노드만 합치는 변경은 기존 64M 안의 full 11을 완성할 수 없다.
 
 ### 10.2 H 경계의 mutable 병합이 부정확한 이유
@@ -2689,13 +2805,15 @@ merge 뒤 H 노드만 합치는 변경은 기존 64M 안의 full 11을 완성할
 immutable set payload를 공유하는 것은 안전하지만 보드별 construction identity는
 남으며, 별도 증명 없이 이 alias를 node 한도에서 제외할 수는 없다.
 
-q15는 worker 생산을 끝냈으므로 completion barrier 뒤 **batch H-frontier quotient**는
-검토할 수 있다. 같은 H 보드에 대한 모든 shard의 rebound root를 먼저 완전히 합치고,
+q15는 worker 생산을 끝냈으므로 completion barrier 뒤 **batch H-frontier quotient**를
+후속 후보로 삼았다. 같은 H 보드에 대한 모든 shard의 rebound root를 먼저 완전히 합치고,
 완성된 exact root-set이 같은 경계를 immutable class로 공유한다. 마지막 physical
 edge는 원래 child board의 place/clear 증거를 유지한다. 다만 기존 shard별 즉시 merge
 API를 바꾸고, 모든 owner·rebind map·staging·destination 공존 peak와 추가 work를
-계상해야 한다. 실제 보드 사이의 완성 root-set 중복률은 아직 측정하지 않았다.
-그리고 이 변경만으로 §10.1의 worker 생산 하한이 사라지지는 않는다.
+계상해야 한다. 이 경계는 q19의 완료 batch class와 q23의 공유 pending H group 후
+완료 class로 구현했고, 구조 개수와 비용은 각 실행 기록에 남겼다. 이 구현 사실이
+생산 중 서로 다른 mutable 보드를 합칠 권한을 주지는 않는다. 또한 완료 후 병합만으로
+§10.1의 이전 worker 생산 하한이 사라지는 것은 아니다.
 
 ### 10.3 원래 symbolic compile 이전의 source mask는 시간 개선 후보
 
@@ -2712,7 +2830,123 @@ mask는 공유할 수 있다. n11/count≤2에서 layout은 최대 77개이며, 
 감소율이나 cap 해결을 뜻하지 않는다. 결과에는 source-qualified owning 권한을 붙이고
 무제한 raw `ExactPrefixRelation`로 재발급하지 않아야 한다.
 
-이 선행 mask는 아직 구현하지 않았다. q15와 최종 board graph 및 등록 방문이 같으므로,
-full 11의 우선 과제는 **후보별 생산 반복을 실제로 제거하는 family 단위 공유**와
-완성된 H 언어의 추가 압축을 함께 설계하는 것이다. 기존 상한을 바꾸거나 이미 수행한
-worker work를 합산에서 빼는 것은 이 과제의 해결로 간주하지 않는다.
+이 선행 mask는 아직 구현하지 않았다. q15와 최종 board graph 및 등록 방문이 같으므로
+이 변경만으로 등록 참조 상한을 해결하지는 않는다. **후보별 생산 반복을 실제로
+제거하는 family 단위 공유**는 q23에서 구현했으며, 그 뒤에도 남은 문제는 §10.4의
+생산 중 참조량이다. 기존 상한을 바꾸거나 이미 수행한 worker work를 합산에서 빼는
+것은 이 과제의 해결로 간주하지 않는다.
+
+### 10.4 q23 공유 생산 이후의 현재 11-lock 병목
+
+`quotient23-eleven-shared1-groups1`은 전체 family가 완성되기 전에
+`wasm_observation_physical_union_limit`으로 거절됐다. 상세 receipt와 계측은
+[측정 보고서의 q23 11-lock 기록](see7-pruning-measurements-2026-11-22.md)에 둔다.
+
+| 중단 시점 지표 | 값 | 해석 |
+| --- | ---: | --- |
+| 등록 candidate | 1,285,619 | 전체 입력 후보의 생산 완료가 아니다. |
+| 실제 pre-H physical node | 962,289 | 이 시점에는 1M node 상한에 도달하지 않았다. |
+| 실제 physical edge | 4,737,867 | pending H 보드를 실행 가능한 fake node로 센 값이 아니다. |
+| 보유 H suffix root 참조 | 8,000,000 | 이번 중단의 직접 한도다. |
+| pending H BoardKey group | 1,311,519 | 아직 완료 class로 바꿀 수 없는 보드별 construction identity다. |
+| 누적 physical work | 47,272,836 | 64M 미만이지만 남은 생산·freeze·정책 비용을 포함하지 않는다. |
+| 실패까지 시간 | 355.943417559초 | 완료 시간이나 완료된 확률 계산이 아니다. |
+
+따라서 이 실행에서 먼저 해결할 대상은 원래 family를 유지하면서 **생산 중 실제
+보유 root 참조를 줄이는 것**이다. q24는 freeze 뒤 정책 class를 만들고, q25는 정책
+query의 양성 증거를 찾았으므로 이 단계에 도달하지 못한 실행을 해결할 수 없다.
+q23의 work 47,272,836을 완성 비용으로 사용하거나, 앞선 q18의 71,396,217을
+새 공유 알고리즘의 하한으로 사용하는 것도 잘못이다.
+
+### 10.5 미구현 후보: 같은 보드의 증명된 suffix 포함관계
+
+아래는 **미구현 설계 조건**이다. q25의 plain Full 실행 경로를 재활성화하거나
+동일 multiset만으로 root를 지우겠다는 계획이 아니다. 실제 이득은 아직 측정하지
+않았으며 현재 8M/64M 상한을 그대로 둔다.
+
+#### 공통 최소 계약
+
+동일 Plan·catalog·ordered-kick 권한과 동일 kind arena epoch 안에서, 같은 실제
+H BoardKey 및 remaining을 가진 두 보유 root u,v를 생각하자. 다음을 증명하면
+u의 참조를 제거하고 v를 유지해도 그 보드의 suffix union은 정확히 같다.
+
+\[
+K(u)\subseteq K(v).
+\]
+
+이때 같은 M끼리 비교하는 것은 증명 비용을 줄이는 범위 제한이며, 같은 M이라는
+사실 자체는 포함관계 증거가 아니다. 실제 v를 보유한 상태에서만 u를 버리고,
+동일 언어의 root를 서로의 증거로 동시에 모두 제거하지 않는다. 새 후보의 참조가
+추가될 때마다 이 국소 union equality를 유지하면 생산 순서와 무관하게 최종 union도
+같다. 다른 BoardKey의 현재 root 집합이 우연히 같다는 이유로 mutable identity를
+합치는 §10.2의 오류와 구분한다.
+
+제거하지 않은 모든 원래 성공 suffix와 실제 physical edge를 유지하므로 B5/B16의
+원래 Ω product 동치도 유지된다. H의 kinds는 기존 reveal 권한 뒤에서만 소비하고,
+CountAll·witness·입력 경로·finesse·별도 scoring에는 이 권한을 확대하지 않는다.
+검사한 owner/remaining/multiset과 실제 immutable 언어를 묶어야 하며 hash나 profile
+tag 일치만으로 증거를 재사용하지 않는다.
+
+#### 11-lock의 first-kind F⊆C 충분조건
+
+같은 uniform multiset M을 가진 root u,v에 대해 다음을 정의한다.
+
+\[
+F(u)=\{p:\exists(p,a)\in E(u),\ K(a)\ne\varnothing\},
+\qquad
+C(v)=\{p:\exists(p,b)\in E(v),\ K(b)=\operatorname{Perm}(M-e_p)\}.
+\]
+
+그러면 **F(u)⊆C(v)**는 K(u)⊆K(v)의 충분조건이다. u의 임의 단어는 어떤
+p∈F(u)로 시작하고, uniform certificate에 의해 꼬리는 `Perm(M−e_p)`에 속한다.
+같은 p에 대해 v가 그 모든 꼬리를 허용하는 child를 하나 이상 가지므로 그 단어를
+v에서도 읽을 수 있다. 모든 종류 간선과 모든 NFA child에 대한 uniform 검증은
+유지한다. 첫 child만 보거나 미증명 child를 Full로 간주해서는 안 된다.
+
+n=11,H=5에서는 첫 suffix lock 뒤에 이미 여섯 종류가 놓였으므로, 깊이 6의
+5-lock child가 ordinary Full일 가능성이 있다. **C(v)가 M의 모든 종류일 필요는
+없다**는 점이 B24b의 plain Full 불가능성과 양립한다. 서로 다른 prefix P의 root라도
+같은 보드·M에서 실제 단어 포함관계가 증명되면 이 충분조건을 사용할 수 있다.
+이는 단일 root v를 증거로 남기는 최소안이며 synthetic union node를 요구하지 않는다.
+
+10-lock/H=4에서 첫 두 종류 block과 이후 Full tail을 사용하는 유사한 충분조건도
+가능하다. 다만 block 수·certificate 빈도·실제 work와 제거 참조량을 새로 측정해야 하며,
+현재 문서의 구현 또는 검증 완료 항목에 포함하지 않는다.
+
+#### prefix-relative Full의 별도 권한
+
+고정 prefix의 종류 집합 P, 남은 M, 첫 여섯 자리까지 남은 t=6−H에 대해
+다음의 source-relative 상위 언어를 정의할 수 있다.
+
+\[
+W(P,M,t)=\{w\in\operatorname{Perm}(M):
+  w_1,\ldots,w_t\text{가 서로 다르고 모두 }P\text{ 밖에 있음}\}.
+\]
+
+전체 종류별 2개 상한과 B15의 fresh-bag·초기 empty Hold·두 projection false 등
+원래 공급 권한을 그대로 적용한다. Source-qualified root의 언어는 W의 부분집합이다.
+어떤 root v가 이 **동일 P,M,t의 비어 있지 않은 W 전체**를 포함한다는 증거를 가지면
+그 범위의 다른 root를 지배한다. t=0에서는 ordinary Full을 쓰고, t>0에서는 가능한
+모든 첫 종류 p마다 `W(P∪{p},M−e_p,t−1)`를 포함하는 p-child가 있다는 조건으로
+충분 증거를 만들 수 있다. 각 접두 block의 실제 잔여 언어가 같은지 확인하는 귀납이다.
+
+이 증거는 source 권한에 상대적이다. 보드가 같아도 P가 다르면 W가 다르므로
+`(BoardKey,P,M)` 또는 동등한 전체 권한을 key에 포함해야 한다. root ID만으로
+prefix-relative 증거를 재사용하거나 모든 M 순열에 대한 plain Full로 승격하지 않는다.
+정확한 단어 포함관계를 따로 증명한 first-kind F⊆C와 이 source-relative certificate를
+서로 혼동하지 않는다.
+
+#### 비용·실패와 채택 조건
+
+실제 감소는 보유 참조를 삭제하거나 새 중복 참조의 삽입을 생략한 경우에만 기록한다.
+기존 payload를 다른 cache로 옮기고 한도 계상에서 빼는 변경은 감소가 아니다.
+추가 certificate 산술·child 방문·조회·정확 비교는 기존 누적 64M work에 청구하며
+이미 수행한 work는 환불하지 않는다. 필요한 재바인딩의 기존 compiler/import 계측도
+유지하고, 새 검사를 다른 domain으로 옮겨 한도를 우회하지 않는다. 증거 cache의 root 참조,
+staging 및 bitmap을 사용한다면 그 word credit도 기존 8M 계약에 포함하고,
+metadata·성장 중 old/new 공존량과 실패 peak를 계상한다.
+
+증거 미확인이나 optional cache 한도에서는 원래 참조를 유지한다. 잘못된 owner,
+malformed language, 취소와 hard work/storage 거절은 기존 오류를 유지하며 성공이나
+확률 0으로 바꾸지 않는다. 이 최소 조건 아래 실제 제거 참조 수와 추가 비용을 함께
+측정한 뒤에만 적용을 판단한다. 현재 source 3507e7d에는 이 생산 중 포함관계 경로가 없다.
