@@ -1,20 +1,31 @@
 # Architecture
 
-Clearra has one Rust product boundary and two existing CPU implementation paths.
-The native C path requires `native-c-core` and uses the statically linked C
-geometry and BuildUp implementation through `clearra-core-ffi`. The Rust CPU
-path is compiled into native and WASM hosts and already implements geometry and
-verification; supported request contracts are not identical. The historical
-module milestones below describe the C path unless stated otherwise.
+Clearra has one Rust product boundary. Native CLI, Discord compute and Desktop
+execute the Rust runtime; Web uses the Rust solver compiled to WebAssembly.
+Geometry, candidate verification, supply coverage and requested execution
+evidence are produced by the existing Rust kernels. Supported request contracts
+and host qualification remain explicit.
+
+The preserved C geometry and BuildUp implementation is an independent reference,
+not a product fallback. Explicit reference builds use `native-c-core` and the
+statically linked implementation through `clearra-core-ffi`. Retaining this
+reference does not keep a second shipping CPU solver route.
+
+The module milestones and their C request flow below retain historical
+implementation and ABI contracts unless a section states a later update.
+Historical references to C product execution do not override this current
+product boundary. The active compact Boolean dependency consumer scope is
+documented in [BuildUp](buildup.md) and its
+[consumer cleanup record](research/dependency-consumers-cleanup-2026-11-22.md).
 
 The [Rust core and relation roadmap](research/rust-core-and-relation-roadmap-2026-11-20.md)
-targets convergence onto the existing Rust CPU service, not a second Rust
-solver. The [host contract](research/v090-rust-host-contract-2026-11-20.md)
-records the request-specific routes and capability gaps. Service parity and
-confirmed ABI compatibility must precede retirement of native C. Retaining C
-as a qualification reference is separate from keeping production C links.
+records the migration onto the existing Rust CPU service. Its historical
+checklists and the [host contract](research/v090-rust-host-contract-2026-11-20.md)
+retain their source-specific parity and capability evidence. The
+[execution ledger](v0.9.0-placement-dependency-rust-release-plan.md) separates
+current implementation from earlier qualification and release measurements.
 
-The native C request flow is:
+The historical native C reference request flow is:
 
 user input
 -> Rust CLI
@@ -32,7 +43,7 @@ user input
 -> Rust Coverage / Objectives
 -> Rust Replay / Output
 
-The [dependency boundary](dependency-boundary.md) applies to both paths:
+The current typed [dependency boundary](dependency-boundary.md) is:
 `CLI / GUI / WASM / Discord adapter -> AppRequest -> clearra-app ->
 validated SearchProblem -> clearra-core-executor -> requested backend's
 candidate and execution evidence -> shared reducers -> replay / postprocess /
