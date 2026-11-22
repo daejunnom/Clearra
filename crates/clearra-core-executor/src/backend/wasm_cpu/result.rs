@@ -905,6 +905,71 @@ enum SearchProblemRetention {
     },
 }
 
+/// First product scope for the prefix impossibility proof. Pure tiling,
+/// ordinal-row evidence, retained replay families and external producers keep
+/// their established unfiltered geometry domain. The proof itself never
+/// grants queue membership or physical success to a retained candidate.
+fn full6l_physical_prefix_pruning_eligible(
+    problem: &SearchProblem,
+    catalog: &GeometryCatalog,
+) -> bool {
+    use clearra_core_domain::piece::piece_kind::PieceKind;
+    use clearra_objectives::policy::objective_policy::ObjectivePolicy;
+    use clearra_pc_graph::request::PcCountPolicy;
+    use clearra_problem::{goal::SearchGoal, SearchProblemKind, SearchProblemPreset};
+    use clearra_supply::QueueObservationPolicy;
+
+    let backend = problem.backend_request();
+    if cfg!(target_family = "wasm")
+        || usize::BITS < 64
+        || problem.preset() != SearchProblemPreset::ScenarioPc
+        || problem.problem_kind() != SearchProblemKind::ScenarioPc
+        || !matches!(problem.search_goal(), SearchGoal::ClearToEmpty)
+        || catalog.width() != 10
+        || catalog.height() != 6
+        || catalog.initial_board() != 0
+        || catalog.required_cells() != (1_u64 << 60) - 1
+        || problem.exact_pieces() != Some(15)
+        || problem.objective() != ObjectivePolicy::unique()
+        || problem.count_policy() != PcCountPolicy::CountUnique
+        || problem.queue_observation_policy() != QueueObservationPolicy::FullQueueOracle
+        || problem.pc_chance_evidence_policy() != PcChanceEvidencePolicy::Disabled
+        || problem.output_policy() != SearchOutputPolicy::Trace
+        || problem.solution_probability_policy().requested()
+        || problem.build_replay_evidence_requested()
+        || problem.replay_trace_policy().retained_trace_limit() > 1
+        || problem.allowed_colored_solution_identities().is_some()
+        || backend.tablebase_requested()
+        || backend.precompute_build_dependencies()
+        || backend.exact_legal_board_enabled()
+        || backend.conditioned_reachability_enabled()
+        || problem.budget().max_nodes() != 0
+        || backend.max_candidates() != 0
+        || backend.max_frontier_states() != 0
+        || backend.max_memory_mib().is_some()
+        || !problem.initial_hold().hold_empty()
+        || !super::uses_order_independent_pc_candidate_digest(problem)
+    {
+        return false;
+    }
+    problem
+        .piece_source()
+        .materialized_universe()
+        .and_then(|universe| universe.complete_factorized_layout())
+        .is_some_and(|layout| {
+            layout.full_sequence_len() == 15
+                && layout.visible_sequence_len() == 15
+                && layout.segment_count() == 3
+                && layout
+                    .segments()
+                    .map(|segment| segment.draw_count())
+                    .eq([1, 7, 7])
+                && layout
+                    .segments()
+                    .all(|segment| segment.choices() == PieceKind::STANDARD_TETROMINOES)
+        })
+}
+
 pub(crate) struct WasmExactSearchSession {
     problem: Arc<SearchProblem>,
     problem_retention: SearchProblemRetention,
@@ -932,6 +997,10 @@ pub(crate) struct WasmExactSearchSession {
     packing_candidate_digest: u64,
     compact_failed_queue_worker_commitment: u64,
     order_independent_candidate_digest: bool,
+    // The geometric DAG still counts the complete raw family. This mode only
+    // emits candidates whose selected prefixes have not been proved physically
+    // impossible; it does not certify a raw tiling digest or absolute ordinal.
+    physical_prefix_pruning_active: bool,
     coverage_row_count: usize,
     pattern_verified_execution_count: usize,
     build_variant_count: u128,
@@ -1761,7 +1830,7 @@ impl WasmExactSearchSession {
                 .ensure_memory_bound(retained_before_geometry, target_peak)
                 .map_err(WasmExactSearchError::resource_admission)?;
         }
-        let geometry = if external_geometry {
+        let mut geometry = if external_geometry {
             GeometrySearch::external_deferred(
                 universe,
                 &multiset_family,
@@ -1790,6 +1859,12 @@ impl WasmExactSearchSession {
                 )?
             }
         };
+        let physical_prefix_pruning_active = !external_geometry
+            && !parent_authorized
+            && full6l_physical_prefix_pruning_eligible(problem.as_ref(), &catalog);
+        if physical_prefix_pruning_active {
+            geometry.enable_physical_prefix_pruning();
+        }
         geometry_span.finish(geometry.targets().map_or(0, |targets| targets.len()) as u64);
         let peak_cpu_bytes = catalog
             .retained_bytes()
@@ -1872,6 +1947,7 @@ impl WasmExactSearchSession {
             packing_candidate_digest: 0,
             compact_failed_queue_worker_commitment: 0,
             order_independent_candidate_digest,
+            physical_prefix_pruning_active,
             coverage_row_count: 0,
             pattern_verified_execution_count: 0,
             build_variant_count: 0,
@@ -3638,11 +3714,16 @@ impl WasmExactSearchSession {
     ) -> Result<Option<ExactSearchAdvance>, WasmExactSearchError> {
         let candidate_ordinal = external_ordinal.unwrap_or(self.packing_candidate_count as u64);
         self.packing_candidate_count += 1;
-        self.packing_candidate_digest = if self.order_independent_candidate_digest {
-            mix_order_independent_candidate_digest(self.packing_candidate_digest, candidate_hash)
-        } else {
-            mix_digest(self.packing_candidate_digest, candidate_hash)
-        };
+        if !self.physical_prefix_pruning_active {
+            self.packing_candidate_digest = if self.order_independent_candidate_digest {
+                mix_order_independent_candidate_digest(
+                    self.packing_candidate_digest,
+                    candidate_hash,
+                )
+            } else {
+                mix_digest(self.packing_candidate_digest, candidate_hash)
+            };
+        }
         if self.problem.objective().kind() == ObjectiveKind::Tiling {
             return self.observe_tiling_candidate(candidate, candidate_ordinal);
         }
@@ -5293,6 +5374,36 @@ impl WasmExactSearchSession {
         self.peak_cpu_bytes as u64 > limit
     }
 
+    /// This is the number of raw family paths skipped by the prefix proof,
+    /// not the number rejected by subsequent physical/source verification.
+    /// Only natural exhaustion of this session's entire internal producer
+    /// partitions the raw family into emitted and prefix-pruned candidates.
+    fn complete_prefix_pruned_candidate_count(
+        &self,
+        final_result: bool,
+        count_complete: bool,
+    ) -> Option<u128> {
+        if !self.physical_prefix_pruning_active
+            || !final_result
+            || !self.observation_family_production.authorizes_board_closure(
+                ExactCompletionRole::Final,
+                count_complete,
+                self.truncated_reason.is_some(),
+                self.execution_control.partition().count() == 1,
+                self.execution_control.is_cancelled() || self.candidate_verification_cancelled,
+            )
+        {
+            return None;
+        }
+        let raw = self.geometry.candidate_family_count()?;
+        // The emitted counter is usize. Refuse to infer a complement if that
+        // counter could have saturated, or if the two domains do not agree.
+        if raw > usize::MAX as u128 {
+            return None;
+        }
+        raw.checked_sub(self.packing_candidate_count as u128)
+    }
+
     fn build_result(
         &mut self,
         include_normalized_keys: bool,
@@ -5363,6 +5474,8 @@ impl WasmExactSearchSession {
         let count_complete = self.truncated_reason.is_none()
             && self.count_complete
             && (!tiling_only || self.tiling_supply_projection_complete);
+        let prefix_pruned_candidate_count =
+            self.complete_prefix_pruned_candidate_count(include_normalized_keys, count_complete);
         let source_solution_count = tiling_solution_store
             .as_ref()
             .map_or(identities.len(), |store| store.len());
@@ -5855,6 +5968,18 @@ impl WasmExactSearchSession {
             field("packing_candidate_is_solution", tiling_only),
             field("packing_candidate_count", self.packing_candidate_count),
             field(
+                "packing_candidate_domain",
+                if self.physical_prefix_pruning_active {
+                    "physical-prefix-filtered"
+                } else {
+                    "unfiltered-geometric-family"
+                },
+            ),
+            field(
+                "physical_prefix_pruning_active",
+                self.physical_prefix_pruning_active,
+            ),
+            field(
                 "geometry_candidate_family_count",
                 self.geometry
                     .candidate_family_count()
@@ -5862,8 +5987,20 @@ impl WasmExactSearchSession {
                     .unwrap_or_else(|| "overflow-or-incomplete".to_owned()),
             ),
             field(
+                "geometry_prefix_pruned_candidate_count",
+                prefix_pruned_candidate_count
+                    .map(|count| count.to_string())
+                    .unwrap_or_else(|| "not-calculated".to_owned()),
+            ),
+            field(
+                "geometry_prefix_pruned_candidate_count_calculated",
+                prefix_pruned_candidate_count.is_some(),
+            ),
+            field(
                 "packing_candidate_set_digest",
-                if self.problem.output_policy().retains_candidate_digest() {
+                if self.physical_prefix_pruning_active {
+                    "not-calculated: proven-infeasible-subtrees-skipped".to_owned()
+                } else if self.problem.output_policy().retains_candidate_digest() {
                     format!("{:016x}", self.packing_candidate_digest)
                 } else {
                     "not-calculated".to_owned()
@@ -5871,7 +6008,8 @@ impl WasmExactSearchSession {
             ),
             field(
                 "packing_candidate_set_digest_calculated",
-                self.problem.output_policy().retains_candidate_digest(),
+                self.problem.output_policy().retains_candidate_digest()
+                    && !self.physical_prefix_pruning_active,
             ),
             field("packing_count_complete", count_complete),
             field(

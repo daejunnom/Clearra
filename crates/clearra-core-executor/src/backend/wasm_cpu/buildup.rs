@@ -108,7 +108,7 @@ mod geometric_edge_reuse {
 
     #[cfg(test)]
     thread_local! {
-        static MODE: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+        static MODE: std::cell::Cell<Option<TestMode>> = const { std::cell::Cell::new(None) };
         static METRICS: std::cell::Cell<GeometricEdgeReuseMetrics> =
             std::cell::Cell::new(GeometricEdgeReuseMetrics::default());
     }
@@ -122,13 +122,25 @@ mod geometric_edge_reuse {
     #[cfg(feature = "local-search-ab")]
     static PROJECTIONS: AtomicU64 = AtomicU64::new(0);
 
-    pub(super) fn enabled() -> bool {
+    #[cfg(test)]
+    #[derive(Clone, Copy)]
+    enum TestMode {
+        Forced(bool),
+        ProductDefault,
+    }
+
+    pub(super) fn enabled(product_default: bool) -> bool {
         #[cfg(test)]
-        if let Some(enabled) = MODE.with(std::cell::Cell::get) {
-            return enabled;
+        if let Some(mode) = MODE.with(std::cell::Cell::get) {
+            return match mode {
+                TestMode::Forced(enabled) => enabled,
+                TestMode::ProductDefault => product_default,
+            };
         }
         #[cfg(feature = "local-search-ab")]
         {
+            // Keep the existing experiment independent of product defaults.
+            let _ = product_default;
             static MODE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
             *MODE.get_or_init(|| {
                 std::env::var("CLEARRA_GEOMETRIC_EDGE_REUSE").is_ok_and(|value| value == "1")
@@ -136,7 +148,7 @@ mod geometric_edge_reuse {
         }
         #[cfg(not(feature = "local-search-ab"))]
         {
-            false
+            product_default
         }
     }
 
@@ -177,7 +189,22 @@ mod geometric_edge_reuse {
         enabled: bool,
         action: impl FnOnce() -> T,
     ) -> (T, GeometricEdgeReuseMetrics) {
-        struct Restore(Option<bool>, GeometricEdgeReuseMetrics);
+        with_selected_mode(TestMode::Forced(enabled), action)
+    }
+
+    #[cfg(test)]
+    pub(super) fn with_product_default<T>(
+        action: impl FnOnce() -> T,
+    ) -> (T, GeometricEdgeReuseMetrics) {
+        with_selected_mode(TestMode::ProductDefault, action)
+    }
+
+    #[cfg(test)]
+    fn with_selected_mode<T>(
+        mode: TestMode,
+        action: impl FnOnce() -> T,
+    ) -> (T, GeometricEdgeReuseMetrics) {
+        struct Restore(Option<TestMode>, GeometricEdgeReuseMetrics);
         impl Drop for Restore {
             fn drop(&mut self) {
                 MODE.with(|slot| slot.set(self.0));
@@ -185,7 +212,7 @@ mod geometric_edge_reuse {
             }
         }
         let _restore = Restore(
-            MODE.with(|slot| slot.replace(Some(enabled))),
+            MODE.with(|slot| slot.replace(Some(mode))),
             METRICS.with(|slot| slot.replace(GeometricEdgeReuseMetrics::default())),
         );
         let output = action();
@@ -2798,7 +2825,9 @@ impl CandidateProjection {
         for (operation_index, row_id) in candidate.row_ids().iter().copied().enumerate() {
             let cells = catalog.skeleton(row_id).cells;
             operation_cells[operation_index] = cells;
-            let mut occupied = occupied_rows(catalog.width(), cells);
+            // The catalog owns this row's immutable target-frame footprint.
+            // Contributor bits still belong to this candidate's operation order.
+            let mut occupied = catalog.skeleton_occupied_rows(row_id);
             while occupied != 0 {
                 let row = occupied.trailing_zeros() as usize;
                 occupied &= occupied - 1;
@@ -6314,8 +6343,14 @@ impl BuildOrderGraph {
         let mut proof_conflict = None;
         #[cfg(any(test, feature = "local-search-ab"))]
         let mut kick_guard_metrics = super::structural_order::KickGuardReuseMetrics::default();
+        let reuse_geometric_edges = product_geometric_edge_reuse_enabled(
+            problem,
+            piece_language_projection_only,
+            completion,
+            reachability_mode,
+        );
         #[cfg(any(test, feature = "local-search-ab"))]
-        let reuse_geometric_edges = geometric_edge_reuse::enabled();
+        let reuse_geometric_edges = geometric_edge_reuse::enabled(reuse_geometric_edges);
         #[cfg(any(test, feature = "local-search-ab"))]
         let mut geometric_reuse_metrics = GeometricEdgeReuseMetrics::default();
         let mut subset_cursor = 0usize;
@@ -6383,14 +6418,12 @@ impl BuildOrderGraph {
                 // This memo owns only this candidate, subset, operation and
                 // original deleted-row frame. It never stores an edge pose or
                 // substitutes one realization for another.
-                #[cfg(any(test, feature = "local-search-ab"))]
                 let mut prepared_footprint = None;
                 #[allow(unused_mut)]
                 let mut prepare_edge =
                     |projection: &mut CandidateProjection,
                      realization: super::catalog::InstantiatedRealization,
                      needs_grounding: bool| {
-                        #[cfg(any(test, feature = "local-search-ab"))]
                         if reuse_geometric_edges {
                             return geometric_build_edge_with_reuse(
                                 catalog,
@@ -6403,6 +6436,7 @@ impl BuildOrderGraph {
                                 realization,
                                 needs_grounding,
                                 &mut prepared_footprint,
+                                #[cfg(any(test, feature = "local-search-ab"))]
                                 &mut geometric_reuse_metrics,
                             );
                         }
@@ -7695,7 +7729,23 @@ fn geometric_build_edge(
     ))
 }
 
-#[cfg(any(test, feature = "local-search-ab"))]
+// This is a scalar geometric quotient only. Oracle Boolean PC consumers can
+// use it without changing pose enumeration, movement proofs or graph order.
+fn product_geometric_edge_reuse_enabled(
+    problem: &SearchProblem,
+    piece_language_projection_only: bool,
+    completion: BuildCompletion,
+    reachability_mode: BuildReachabilityMode,
+) -> bool {
+    piece_language_projection_only
+        && problem.count_policy() == PcCountPolicy::CountUnique
+        && reachability_mode == BuildReachabilityMode::Existing
+        && completion == BuildCompletion::ClearToEmpty
+        && problem.queue_observation_policy() == QueueObservationPolicy::FullQueueOracle
+        && !problem.objective().score().requested()
+        && !problem.objective().execution_constraints().requested()
+}
+
 #[derive(Clone, Copy)]
 struct PreparedGeometricFootprint {
     lock_mask: u64,
@@ -7704,7 +7754,6 @@ struct PreparedGeometricFootprint {
     cleared_lines: Option<u8>,
 }
 
-#[cfg(any(test, feature = "local-search-ab"))]
 #[allow(clippy::too_many_arguments)]
 fn geometric_build_edge_with_reuse(
     catalog: &GeometryCatalog,
@@ -7717,31 +7766,43 @@ fn geometric_build_edge_with_reuse(
     realization: super::catalog::InstantiatedRealization,
     needs_grounding: bool,
     prepared: &mut Option<PreparedGeometricFootprint>,
-    metrics: &mut GeometricEdgeReuseMetrics,
+    #[cfg(any(test, feature = "local-search-ab"))] metrics: &mut GeometricEdgeReuseMetrics,
 ) -> Option<BuildEdge> {
     let lock_mask = realization.lock_mask;
     let cleared_lines = match prepared {
         Some(previous)
             if previous.lock_mask == lock_mask && previous.needs_grounding == needs_grounding =>
         {
-            metrics.reused_validations += 1;
+            #[cfg(any(test, feature = "local-search-ab"))]
+            {
+                metrics.reused_validations += 1;
+            }
             previous.cleared_lines
         }
         _ => {
-            metrics.footprint_validations += 1;
+            #[cfg(any(test, feature = "local-search-ab"))]
+            {
+                metrics.footprint_validations += 1;
+            }
             let cleared_lines = if (!needs_grounding
                 || placement_is_grounded(catalog.width(), board, lock_mask))
                 && board & lock_mask == 0
             {
-                metrics.line_clear_computations += 1;
-                let (lines, projection_checked) = projected_line_clear(
+                #[cfg(any(test, feature = "local-search-ab"))]
+                {
+                    metrics.line_clear_computations += 1;
+                }
+                let (lines, _projection_checked) = projected_line_clear(
                     catalog,
                     projection,
                     child,
                     board | lock_mask,
                     deleted_rows,
                 );
-                metrics.projection_validations += u64::from(projection_checked);
+                #[cfg(any(test, feature = "local-search-ab"))]
+                {
+                    metrics.projection_validations += u64::from(_projection_checked);
+                }
                 lines
             } else {
                 None
@@ -8216,16 +8277,6 @@ pub(super) fn compact_target_board(width: u8, height: u8, board: u64, deleted_ro
         output_row += 1;
     }
     compacted
-}
-
-fn occupied_rows(width: u8, mut cells: u64) -> u16 {
-    let mut rows = 0_u16;
-    while cells != 0 {
-        let cell = cells.trailing_zeros() as usize;
-        cells &= cells - 1;
-        rows |= 1_u16 << (cell / width as usize);
-    }
-    rows
 }
 
 #[cfg(test)]
@@ -8898,6 +8949,281 @@ mod v081_legal_child_admission_tests {
             assert_eq!(metrics.footprint_validations, 2);
             assert_eq!(metrics.reused_validations, 1);
         }
+    }
+
+    #[test]
+    fn geometric_edge_reuse_product_default_matches_full6l_mixed_finite_graph() {
+        use clearra_pc_graph::request::{
+            PcExecutionPolicy, PcScenarioBoard, PcScenarioQuery, PieceWindow, SupplyWindowSize,
+        };
+        use clearra_rules::profile::builtin_rules::srs_plus;
+        use clearra_supply::queue::queue_pattern_expression::QueuePatternExpression;
+        use PieceKind::{I, J, L, O, S, T, Z};
+
+        let query = PcScenarioQuery::new(
+            PcScenarioBoard::standard_10(6, 0),
+            PcQueueInput::pattern_expression(QueuePatternExpression::parse("P1P7P7", 0).unwrap()),
+            PieceWindow::new(15),
+        )
+        .with_rule(srs_plus())
+        .with_allow_hold(true)
+        .with_hold_piece(None)
+        .with_exact_pieces(Some(15))
+        .with_supply_window_size(SupplyWindowSize::new(15))
+        .with_count_policy(PcCountPolicy::CountUnique)
+        .with_queue_observation_policy(QueueObservationPolicy::FullQueueOracle)
+        .with_execution_policy(PcExecutionPolicy::mvp_default().with_max_patterns(0));
+        let problem = ProblemCompiler::compile_scenario_pc(&query).unwrap();
+        let catalog = GeometryCatalog::compile(&problem).unwrap();
+        assert_eq!(
+            (catalog.width(), catalog.height(), catalog.initial_board()),
+            (10, 6, 0)
+        );
+        let universe = problem.piece_source().materialized_universe().unwrap();
+        assert_eq!(universe.pattern_count(), 177_811_200);
+        assert_eq!(
+            universe
+                .complete_factorized_layout()
+                .unwrap()
+                .full_sequence_len(),
+            15
+        );
+        assert!(problem.supply().projects_unplaced_lookahead());
+        assert!(!problem.supply().projects_standard_bag_lookahead());
+
+        // A concrete 15-operation tiling with the actual source inventory:
+        // two of every kind plus I. Its physical witness clears the lower
+        // four original rows together, then the upper pair. The source/Hold
+        // intersection is checked separately below; inventory and a live
+        // graph alone are not treated as a queue-success certificate.
+        let ordered_cells = [
+            (I, 0x4010_0401_u64),
+            (T, 0x100e),
+            (T, 0x8070),
+            (Z, 0x0003_0180),
+            (S, 0x0300_6000),
+            (S, 0x0006_00c0_0000),
+            (J, 0x0001_8020_0800),
+            (Z, 0x0018_0c00_0000),
+            (L, 0x0060_1004_0000),
+            (I, 0x0080_2008_0200),
+            (I, 0x001e << 40),
+            (O, 0x0003_00c0 << 40),
+            (O, 0x000c_0300 << 40),
+            (L, 0x1c01 << 40),
+            (J, 0xe020 << 40),
+        ];
+        let rows = ordered_cells
+            .iter()
+            .map(|&(piece, cells)| catalog.skeleton_id(piece, cells).unwrap())
+            .collect::<Vec<_>>();
+        let candidate = GeometryCandidate::from_rows(&catalog, 0, &rows).unwrap();
+        assert_eq!(candidate.row_ids().len(), 15);
+        for piece in PieceKind::STANDARD_TETROMINOES {
+            assert_eq!(
+                ordered_cells
+                    .iter()
+                    .filter(|(kind, _)| *kind == piece)
+                    .count(),
+                2 + usize::from(piece == I),
+            );
+        }
+        assert_eq!(
+            ordered_cells
+                .iter()
+                .fold(0, |mask, (_, cells)| mask | cells),
+            (1_u64 << 60) - 1
+        );
+
+        let mut projection_workspace = BuildUpWorkspace::default();
+        let mut projection = CandidateProjection::compile(
+            &catalog,
+            &candidate,
+            &mut projection_workspace,
+            BuildCompletion::ClearToEmpty,
+        )
+        .unwrap();
+        let selected = candidate
+            .row_ids()
+            .iter()
+            .map(|&row| catalog.skeleton(row).cells)
+            .collect::<Vec<_>>();
+        // An independent scalar row scan protects both catalog metadata reuse
+        // and the candidate-order contributor bits at the full u15 boundary.
+        for subset in 0..(1 << 15) {
+            let logical = selected.iter().enumerate().fold(0, |board, (i, &cells)| {
+                board | if subset & (1 << i) == 0 { 0 } else { cells }
+            });
+            let mut deleted = 0;
+            let mut physical = 0;
+            let mut destination = 0;
+            for row in 0..6 {
+                let cells = (logical >> (row * 10)) & 0x3ff;
+                if cells == 0x3ff {
+                    deleted |= 1 << row;
+                } else {
+                    physical |= cells << (destination * 10);
+                    destination += 1;
+                }
+            }
+            assert_eq!(
+                projection.state(subset),
+                (physical, deleted),
+                "subset={subset}"
+            );
+        }
+        let mut subset = 0;
+        for (depth, &row_id) in rows.iter().enumerate() {
+            let operation = candidate
+                .row_ids()
+                .iter()
+                .position(|&row| row == row_id)
+                .unwrap();
+            let (board, deleted_rows) = projection.state(subset);
+            let pose = catalog
+                .instantiations(row_id, deleted_rows)
+                .find(|pose| primitive_harddrop(10, 6, board, pose.lock_mask))
+                .unwrap();
+            let child = subset | (1 << operation);
+            assert!(geometric_build_edge(
+                &catalog,
+                &mut projection,
+                child,
+                operation,
+                catalog.skeleton(row_id).piece,
+                board,
+                deleted_rows,
+                pose,
+            )
+            .is_some());
+            subset = child;
+            if depth == 9 {
+                assert_eq!(projection.state(subset), (0, 0b00_1111));
+            }
+        }
+        assert_eq!(projection.state(subset), (0, 0b11_1111));
+
+        assert!(product_geometric_edge_reuse_enabled(
+            &problem,
+            true,
+            BuildCompletion::ClearToEmpty,
+            BuildReachabilityMode::Existing,
+        ));
+        for (unique, completion, mode) in [
+            (
+                false,
+                BuildCompletion::ClearToEmpty,
+                BuildReachabilityMode::Existing,
+            ),
+            (
+                true,
+                BuildCompletion::ExactBoardAfterLineClears(0),
+                BuildReachabilityMode::Existing,
+            ),
+            (
+                true,
+                BuildCompletion::ClearToEmpty,
+                BuildReachabilityMode::GeometryOnly,
+            ),
+            (
+                true,
+                BuildCompletion::ClearToEmpty,
+                BuildReachabilityMode::GroundedGeometryOnly,
+            ),
+        ] {
+            assert!(!product_geometric_edge_reuse_enabled(
+                &problem, unique, completion, mode
+            ));
+        }
+        for alternative in [
+            query.clone().with_count_policy(PcCountPolicy::CountAll),
+            query
+                .clone()
+                .with_queue_observation_policy(QueueObservationPolicy::VisibleSeven),
+        ] {
+            let alternate_problem = ProblemCompiler::compile_scenario_pc(&alternative).unwrap();
+            assert!(!product_geometric_edge_reuse_enabled(
+                &alternate_problem,
+                true,
+                BuildCompletion::ClearToEmpty,
+                BuildReachabilityMode::Existing,
+            ));
+        }
+        let run = || {
+            let mut workspace = BuildUpWorkspace::default();
+            workspace
+                .reachability
+                .configure_kick_profile(KickTableProfileId::SrsPlus, false);
+            let mut projection = CandidateProjection::compile(
+                &catalog,
+                &candidate,
+                &mut workspace,
+                BuildCompletion::ClearToEmpty,
+            )
+            .unwrap();
+            let graph = BuildOrderGraph::build_with_legal_board_admission(
+                &problem,
+                &catalog,
+                &candidate,
+                &mut projection,
+                &mut workspace,
+                true,
+                BuildCompletion::ClearToEmpty,
+                None,
+                BuildReachabilityMode::Existing,
+                false,
+                &CandidateMovementProofs::default(),
+            )
+            .unwrap();
+            assert!(graph.is_live());
+            let mut language = PieceOrderLanguageCache::default();
+            let root = language.canonicalize(&graph).unwrap();
+            let mut coverage = StandardBagCoverage::for_universe(
+                universe,
+                problem.initial_hold(),
+                problem.supply().hold_enabled(),
+                problem.supply().projects_unplaced_lookahead(),
+            )
+            .unwrap()
+            .unwrap();
+            let covered = coverage
+                .cover_language(&language, root, &ExecutionControl::default())
+                .unwrap();
+            let nodes = graph
+                .nodes
+                .iter()
+                .map(|node| {
+                    (
+                        node.edge_start,
+                        node.edge_count,
+                        node.piece_edge_start,
+                        node.piece_edge_count,
+                        node.depth,
+                        node.live,
+                        node.accepting,
+                    )
+                })
+                .collect::<Vec<_>>();
+            (
+                nodes,
+                graph.edges,
+                graph.piece_edges,
+                graph.piece_edges_share_operation_edges,
+                graph.root,
+                graph.reachability_states,
+                (
+                    covered.covers_any_pattern,
+                    covered.covered_pattern_count,
+                    covered.witness_pattern_id,
+                ),
+            )
+        };
+        let (reference, off) = geometric_edge_reuse::with_mode(false, run);
+        let (actual, on) = geometric_edge_reuse::with_product_default(run);
+        assert_eq!(actual, reference);
+        assert_eq!(off, GeometricEdgeReuseMetrics::default());
+        assert!(on.footprint_validations > 0);
+        assert!(on.reused_validations > 0);
     }
 
     #[test]

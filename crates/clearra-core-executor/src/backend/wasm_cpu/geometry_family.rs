@@ -78,6 +78,12 @@ impl GeometrySolutionFamily {
         self.refused_retained_bytes
     }
 
+    /// Inventory aliases preserve interned node IDs and traversal order only
+    /// while this unbounded owner retains its original active interner.
+    pub(super) const fn unbounded_interning_active(&self) -> bool {
+        !self.interning_disabled && self.retained_limit_bytes.is_none()
+    }
+
     pub fn append(&mut self, row_id: u32, suffix: u32) -> Option<u32> {
         if suffix == FAMILY_INVALID {
             return Some(FAMILY_INVALID);

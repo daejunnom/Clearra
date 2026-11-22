@@ -1047,8 +1047,10 @@ fn run_branch(
     )>,
 ) -> Result<(BranchSearchOutcome, usize), WasmExactSearchError> {
     let mut search = task.search;
+    let retain_candidate_digest = problem.output_policy().retains_candidate_digest()
+        && !search.physical_prefix_pruning_enabled();
     let mut candidate_digest = CandidateDigestEvidence::new(
-        problem.output_policy().retains_candidate_digest(),
+        retain_candidate_digest,
         super::uses_order_independent_pc_candidate_digest(problem),
     );
     let mut local_ordinal = 0usize;
@@ -1096,7 +1098,7 @@ fn run_branch(
                 if !problem.allows_solution_identity(&candidate.identity) {
                     continue;
                 }
-                if problem.output_policy().retains_candidate_digest() {
+                if retain_candidate_digest {
                     candidate_digest.observe(candidate.identity.bucket_hash())?;
                 }
                 if problem.objective().kind() == ObjectiveKind::Tiling {

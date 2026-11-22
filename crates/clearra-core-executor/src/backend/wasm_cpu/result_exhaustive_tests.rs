@@ -2,16 +2,17 @@ use clearra_core_domain::{execution_cancellation::ExecutionControl, piece::piece
 use clearra_objectives::policy::objective_policy::ObjectivePolicy;
 use clearra_pc_graph::request::{
     PcCountPolicy, PcExecutionPolicy, PcQueueInput, PcScenarioBoard, PcScenarioQuery,
-    PcSolutionProbabilityPolicy, PieceWindow, SupplyWindowSize,
+    PcSolutionProbabilityPolicy, PieceWindow, RequestedSearchBackend, SupplyWindowSize,
+    WorkerPolicy,
 };
-use clearra_problem::ProblemCompiler;
+use clearra_problem::{ProblemCompiler, SearchOutputPolicy, SearchProblem};
 use clearra_rules::profile::builtin_rules::srs_plus;
 use clearra_supply::{
     queue::{fixed_sequence::FixedSequence, queue_pattern_expression::QueuePatternExpression},
     QueueObservationPolicy,
 };
 
-use crate::WasmCpuSearchBackend;
+use crate::{CoreExecutionResult, WasmCpuSearchBackend};
 
 use super::{ExactSearchAdvance, GeometryAdvance, WasmExactSearchSession};
 
@@ -57,10 +58,10 @@ fn factorized_partial_coverage_preserves_exhaustive_serial_and_parallel_results(
             reference.initial_hold(),
         )
     );
-    // Full6L uses Unique + CountUnique. The default All objective instead
-    // retains a traversal-order digest, and ordinary parallel product seeds
-    // need not follow the serial emission order. Require the actual Unique
-    // multiset-digest contract before comparing it across worker counts.
+    // with_count_policy(CountUnique) also selects the Unique objective.
+    // Commutative candidate evidence additionally requires a supported
+    // factorized source; P4's explicit storage does not satisfy that gate.
+    // Require the complete contract before comparing across worker counts.
     assert!(super::super::uses_order_independent_pc_candidate_digest(
         &reference
     ));
@@ -99,6 +100,259 @@ fn factorized_partial_coverage_preserves_exhaustive_serial_and_parallel_results(
         ] {
             let reference = expected.field(field).expect("complete reference field");
             assert_eq!(result.field(field), Some(reference), "{field}");
+        }
+    }
+}
+
+#[cfg(all(not(target_family = "wasm"), target_pointer_width = "64"))]
+#[test]
+fn full6l_physical_prefix_pruning_matches_harness_and_rejects_other_contracts() {
+    let full6l_query = |queue| {
+        PcScenarioQuery::new(
+            PcScenarioBoard::standard_10(6, 0),
+            queue,
+            PieceWindow::new(15),
+        )
+        .with_rule(srs_plus())
+        .with_exact_pieces(Some(15))
+        .with_supply_window_size(SupplyWindowSize::new(15))
+        .with_min_remaining_queue(0)
+        .with_hold_piece(None)
+        .with_allow_hold(true)
+        .with_count_policy(PcCountPolicy::CountUnique)
+        .with_solution_probability_policy(PcSolutionProbabilityPolicy::Omit)
+        .with_queue_observation_policy(QueueObservationPolicy::FullQueueOracle)
+        .with_retained_trace_limit(1)
+        .with_execution_policy(
+            PcExecutionPolicy::mvp_default()
+                .with_requested_backend(RequestedSearchBackend::Cpu)
+                .with_allow_backend_fallback(false)
+                .with_worker_policy(WorkerPolicy::Auto)
+                .with_worker_hardware_limit(2)
+                .with_use_all_logical_processors(true)
+                .with_cpu_warmup(false)
+                .with_exact_legal_board_enabled(false)
+                .with_conditioned_reachability_enabled(false)
+                .with_tablebase_requested(false)
+                .with_max_patterns(0),
+        )
+    };
+    let query = full6l_query(PcQueueInput::pattern_expression(
+        QueuePatternExpression::parse("P1P7P7", 0).unwrap(),
+    ));
+    let problem = ProblemCompiler::compile_scenario_pc(&query).unwrap();
+    let universe = problem.piece_source().materialized_universe().unwrap();
+    assert_eq!(universe.pattern_count(), 177_811_200);
+    assert!(universe.complete_factorized_layout().is_some());
+    assert_eq!(problem.objective(), ObjectivePolicy::unique());
+    assert_eq!(problem.replay_trace_policy().retained_trace_limit(), 1);
+
+    // Construction checks the actual product gate without compiling or
+    // traversing the enormous Full6L candidate family.
+    let session = WasmExactSearchSession::new(&problem).unwrap();
+    assert!(session.physical_prefix_pruning_active);
+    assert!(session.geometry.physical_prefix_pruning_enabled());
+    assert_eq!(session.geometry.expanded_nodes(), 0);
+
+    let explicit_query = full6l_query(PcQueueInput::fixed_sequence(FixedSequence::new(vec![
+        PieceKind::I,
+        PieceKind::I,
+        PieceKind::I,
+        PieceKind::O,
+        PieceKind::O,
+        PieceKind::T,
+        PieceKind::T,
+        PieceKind::S,
+        PieceKind::S,
+        PieceKind::Z,
+        PieceKind::Z,
+        PieceKind::J,
+        PieceKind::J,
+        PieceKind::L,
+        PieceKind::L,
+    ])));
+    for (contract, other) in [
+        (
+            "explicit source",
+            ProblemCompiler::compile_scenario_pc(&explicit_query).unwrap(),
+        ),
+        (
+            "candidate coverage evidence",
+            problem.clone().with_pc_chance_probability_v2_evidence(),
+        ),
+        (
+            "All objective",
+            ProblemCompiler::compile_scenario_pc(
+                &query.clone().with_objective(ObjectivePolicy::all()),
+            )
+            .unwrap(),
+        ),
+        (
+            "multiple retained traces",
+            ProblemCompiler::compile_scenario_pc(&query.clone().with_retained_trace_limit(2))
+                .unwrap(),
+        ),
+        (
+            "coverage-only output",
+            problem
+                .clone()
+                .with_output_policy(SearchOutputPolicy::CoverageSummary),
+        ),
+    ] {
+        assert!(
+            !super::full6l_physical_prefix_pruning_eligible(&other, &session.catalog),
+            "{contract}",
+        );
+    }
+    let external = WasmExactSearchSession::new_external_geometry(&problem).unwrap();
+    assert!(!external.physical_prefix_pruning_active);
+    assert!(!external.geometry.physical_prefix_pruning_enabled());
+}
+
+#[test]
+fn physical_prefix_pruning_preserves_exhaustive_serial_and_parallel_results() {
+    fn execute(problem: &SearchProblem, workers: usize, filtered: bool) -> CoreExecutionResult {
+        let mut session = WasmExactSearchSession::new(problem).unwrap();
+        assert!(!session.physical_prefix_pruning_active);
+        if filtered {
+            // This tiny fixture deliberately lies outside the Full6L product
+            // gate, but exercises the same enumerator and result integration.
+            session.geometry.enable_physical_prefix_pruning();
+            session.physical_prefix_pruning_active = true;
+        }
+        let control = ExecutionControl::default();
+        if workers > 1 {
+            return session
+                .execute_parallel_with_identity_storage(workers, &control, true)
+                .unwrap()
+                .expect("the four-O family has multiple parallel branches");
+        }
+        loop {
+            match session.advance(64, &control).unwrap() {
+                ExactSearchAdvance::Pending => {}
+                ExactSearchAdvance::Completed(result) => return result,
+                ExactSearchAdvance::Cancelled => panic!("the control is not cancelled"),
+            }
+        }
+    }
+
+    // The initial six rightmost cells in each row embed an empty 4x4 field
+    // in the standard ten-column product board. O skeletons with interleaved
+    // original rows include dependency cycles, alongside physical solutions.
+    let problem = ProblemCompiler::compile_scenario_pc(
+        &PcScenarioQuery::new(
+            PcScenarioBoard::standard_10(4, 0xfc3f_0fc3_f0),
+            PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::O; 4])),
+            PieceWindow::new(4),
+        )
+        .with_rule(srs_plus())
+        .with_allow_hold(false)
+        .with_exact_pieces(Some(4))
+        .with_supply_window_size(SupplyWindowSize::new(4))
+        .with_count_policy(PcCountPolicy::CountUnique)
+        .with_solution_probability_policy(PcSolutionProbabilityPolicy::Omit)
+        .with_queue_observation_policy(QueueObservationPolicy::FullQueueOracle)
+        .with_retained_trace_limit(1)
+        .with_execution_policy(
+            PcExecutionPolicy::default()
+                .with_workers(2)
+                .with_tablebase_requested(false)
+                .with_exact_legal_board_enabled(false)
+                .with_conditioned_reachability_enabled(false),
+        ),
+    )
+    .unwrap();
+    let reference = execute(&problem, 1, false);
+    assert!(!reference.normalized_solution_identities().is_empty());
+    assert_eq!(reference.coverage_pattern_words(), &[1]);
+    assert_eq!(reference.path_steps().len(), 4);
+    let raw_family: u128 = reference
+        .field("geometry_candidate_family_count")
+        .unwrap()
+        .parse()
+        .unwrap();
+    let raw_emitted = reference.usize_field("packing_candidate_count").unwrap();
+    assert_eq!(raw_family, raw_emitted as u128);
+    let mut filtered_emitted = None;
+
+    for (workers, filtered) in [(1, false), (2, false), (1, true), (2, true)] {
+        let result = execute(&problem, workers, filtered);
+        assert_eq!(result.usize_field("workers_used"), Some(workers));
+        assert_eq!(result.bool_field("probability_complete"), Some(true));
+        assert_eq!(result.bool_field("count_complete"), Some(true));
+        assert_eq!(result.bool_field("packing_count_complete"), Some(true));
+        assert_eq!(result.bool_field("resource_truncated"), Some(false));
+        assert_eq!(
+            result.normalized_solution_identities(),
+            reference.normalized_solution_identities(),
+        );
+        assert_eq!(
+            result.normalized_solution_keys(),
+            reference.normalized_solution_keys(),
+        );
+        assert_eq!(
+            result.coverage_pattern_words(),
+            reference.coverage_pattern_words()
+        );
+        assert_eq!(result.path_steps(), reference.path_steps());
+        for field in [
+            "normalized_unique_solution_count",
+            "normalized_solution_set_hash",
+            "geometry_candidate_family_count",
+        ] {
+            assert_eq!(result.field(field), reference.field(field), "{field}");
+        }
+        assert_eq!(
+            result.bool_field("physical_prefix_pruning_active"),
+            Some(filtered),
+        );
+        assert_eq!(
+            result.bool_field("packing_candidate_set_digest_calculated"),
+            Some(!filtered),
+        );
+        let emitted = result.usize_field("packing_candidate_count").unwrap();
+        if filtered {
+            assert!(
+                emitted < raw_emitted,
+                "the fixture must exercise a real prune"
+            );
+            assert_eq!(
+                result.field("packing_candidate_domain"),
+                Some("physical-prefix-filtered"),
+            );
+            assert!(result
+                .field("packing_candidate_set_digest")
+                .unwrap()
+                .starts_with("not-calculated"));
+            assert_eq!(
+                result.bool_field("geometry_prefix_pruned_candidate_count_calculated"),
+                Some(true),
+            );
+            let pruned: u128 = result
+                .field("geometry_prefix_pruned_candidate_count")
+                .unwrap()
+                .parse()
+                .unwrap();
+            assert_eq!(pruned, raw_family - emitted as u128);
+            if let Some(expected) = filtered_emitted {
+                assert_eq!(emitted, expected);
+            } else {
+                filtered_emitted = Some(emitted);
+            }
+        } else {
+            assert_eq!(emitted, raw_emitted);
+            assert_eq!(
+                result.field("packing_candidate_domain"),
+                Some("unfiltered-geometric-family"),
+            );
+            assert_eq!(
+                result.bool_field("geometry_prefix_pruned_candidate_count_calculated"),
+                Some(false),
+            );
+            assert_eq!(
+                result.field("geometry_prefix_pruned_candidate_count"),
+                Some("not-calculated"),
+            );
         }
     }
 }
