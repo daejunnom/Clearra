@@ -48,7 +48,9 @@ extra_draw=1인 상태의 Current 위치와 같다. 따라서 두 위치의 7종
 공유하면 충분하다. 새로운 source 전체 순회나 후보별 heap allocation은 없다.
 
 **재사용이 켜진 `(depth, 원본 bitmap word)` 쌍**에서 Current·Swap·Store에 필요한
-서로 다른 position-word 조회는 최대 14개다. Hold가 꺼져 있고
+서로 다른 공급 인수 helper 계산은 최대 14개다. Standard6 projected complement는
+helper 안에서 앞선 위치를 읽을 수 있으므로 실제 배열 읽기까지 14회 이하라는
+뜻은 아니다. Hold가 꺼져 있고
 해당 층의 product state가 하나뿐이면 이미 존재하는 depth queue 길이만 보고 직접
 조회한다. 이 경로에서도 구체 pose edge와 CountAll의 labeled history는 전부 유지한다.
 직접 조회 층이나 기존 terminal held-release helper까지 포함해 전역 조회 수가
@@ -206,7 +208,8 @@ cache 변경의 인과 효과로 기록하지 않는다.
 - Hold가 꺼진 단일 상태 층은 전략 분기 후 기존 source 조회로 바로 간다. Cache
   유효 bit 검사와 저장은 생략하지만 초기화·분기 비용이 정확히 0인 것은 아니다.
 
-큰 입력에서 한 `(depth, word)`의 공급 조회 요청을 Q회, 실제로 요청된 서로 다른
+큰 입력에서 캐시가 켜진 한 `(depth, word)`의 공급 인수 helper 요청을 Q회,
+실제로 요청된 서로 다른
 `(position, kind)`를 U개라 하면 기존 원본 조회 Q회가 U회로 줄고, `U ≤ min(Q, 14)`다.
 대신 Q회의 작은 cache 검사와 U회의 저장이 남는다. 원본 조회 비용을 C라고 하면
 그 구간의 비용은 `O(Q × C)`에서 `O(U × C + Q)`가 된다. 실제 graph 전이, active
@@ -419,3 +422,46 @@ rust-exact가 위 이유로 실패했다. Focused job 4개의 skipped는 full ga
 통과는 실제 지연 감소율이나 브라우저 peak memory 측정 결과를 의미하지 않는다.
 원본 CI 응답·실패 로그와 로컬 회귀 근거는
 `_local/artifacts/candidate-preflight-45068762194/`에 보존했다.
+
+### 8.3. 후속 후보에서 확인한 feature·lockfile 해석
+
+통합 수정 `01022f7dd96939c8c1b714ba3108255c40815f88`의
+[Candidate Preflight #58](https://github.com/daejunnom/Clearra/actions/runs/45071469548)는
+앞선 unsafe 경계 검사를 통과한 뒤 추가 누락 두 가지를 드러냈다.
+
+`native_unavailable_explicit_error` 증거는 `parallel`이 없는 기본 feature의
+core libtest를 컴파일한다. 이때 unconditional host-yield 회귀가 parallel에서만
+정의한 `GeometrySearch::placeholder()`를 호출하여 E0599로 실패했다. 생성자의
+cfg 한 줄을 `any(feature = "parallel", test)`로 넓혀 같은 초기 상태를 테스트에서도
+사용하게 했다. 직렬 host-yield 회귀나 native-unavailable error assertion을
+제외하지 않으며, 비parallel 제품 빌드의 API는 늘리지 않는다.
+
+실패한 조합 그대로 `cargo check --locked --offline -p clearra-core-executor --tests`
+가 통과했다. Cargo fingerprint는 `default, placement-dependency-pc`이며 parallel과
+native-c-core는 없다. Receipt는 `1795382777952436637-5-runtime`, 로그는
+`core-serial-placeholder-check.log`다. 추가 대형 libtest 링크·실행이나 성능 측정은
+하지 않았다.
+
+DesktopHost에서는 `--locked`가 실제 Tauri check의 lockfile 불일치를 명시적으로
+거부했다. 앞선 `libc` 연결 보강만으로는 현재 manifest의 dependency closure와
+일치하지 않았다. Cargo의 `update --workspace --dry-run`과 이후 offline workspace
+해석으로 기존 버전을 보존하며 정리했다. 새 패키지나 버전 업데이트는 없고,
+선택되지 않는 `bytemuck_derive 1.12.0`, `libm 0.2.16`, `objc2-metal 0.3.2`와
+관련 feature dependency를 제거하며 유일한 버전의 dependency 표기를 정규화했다.
+Manifest, `--locked`와 build-input seal 검사는 그대로 유지한다.
+
+이어 Windows 대상의 다음 full-resolve가 exit 0으로 완료됐다.
+
+```sh
+cargo metadata --locked \
+  --manifest-path apps/clearra-desktop/src-tauri/Cargo.toml \
+  --filter-platform x86_64-pc-windows-msvc --format-version 1
+```
+
+`--no-deps`를 쓰지 않았고 CI와 같은 기본 feature로 의존성을 해석했다. Lock package는
+476개에서 473개가 되었으며 신규·버전 변경은 0개다. 이는 lock consistency 검증이고
+Windows Tauri 빌드 자체의 통과는 후속 CI가 확인한다.
+
+이 후속 후보의 원본 CI 응답·실패 로그와 로컬 확인 자료는
+`_local/artifacts/candidate-preflight-45071469548/`에 보존한다. 성능 측정 source는
+계속 1절의 tree이며, cfg·lockfile 후속 수정의 성능 결과로 바꾸지 않는다.

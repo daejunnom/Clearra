@@ -4568,7 +4568,7 @@ impl GeometrySearch {
         Ok(())
     }
 
-    #[cfg(feature = "parallel")]
+    #[cfg(any(feature = "parallel", test))]
     pub fn placeholder() -> Self {
         Self {
             group_pattern_index_bytes: 0,
