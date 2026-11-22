@@ -104,7 +104,7 @@ Invoke-DesktopHostCommand `
         -Label "WASM CPU GUI host async AppRequest E2E" `
         -FileName $CargoPath `
         -Arguments @(
-            "test", "-p", "clearra-gui-host",
+            "test", "--locked", "-p", "clearra-gui-host",
             "--features", "wasm-cpu-runtime",
             "--lib",
             "--", "--test-threads=1"
@@ -116,7 +116,7 @@ Invoke-DesktopHostCommand `
         -Label "cargo check Tauri desktop" `
         -FileName $CargoPath `
         -Arguments @(
-            "check",
+            "check", "--locked",
             "--manifest-path", "apps/clearra-desktop/src-tauri/Cargo.toml"
         )
 

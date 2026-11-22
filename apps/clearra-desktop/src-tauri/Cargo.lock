@@ -491,6 +491,7 @@ dependencies = [
  "clearra-problem",
  "clearra-rules",
  "clearra-supply",
+ "libc",
 ]
 
 [[package]]

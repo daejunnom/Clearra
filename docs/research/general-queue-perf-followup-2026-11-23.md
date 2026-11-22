@@ -17,7 +17,7 @@ GitHub `codex/full6l-p1p7p7-20261122`의 `92dc86b0`와 이전 로컬 작업공�
 `a39988f2901b8d842da5e2665fc4923391e1d032`다. 검증 때의 로컬 commit
 `662a02e0`를 동일 tree인 원격 기준 위에 재배치했고, 원격 기록에서도 그 tree를
 다시 확인했다. 소스 내용과 검증 실행파일은 바뀌지 않았다. 후속 문서 기록 이후의
-FFI 파일 경계 정리는 아래 8절에서 별도로 구분한다.
+FFI 파일 경계와 데스크톱 잠금 파일 정리는 아래 8절에서 별도로 구분한다.
 
 옛 작업공간의 미커밋 자료도 읽기 전용으로 확인했다. 큰 WebGPU 제거·생성 한도
 정리는 현재 구현에 계승되어 있었고, 미연결 `extended_build_symbolic.rs` 초안은
@@ -315,7 +315,7 @@ borrowing, 명시적인 소유 범위, 단순한 자료구조와 설명형 실�
 Chromium 코드베이스 전용 thread 지침을 이 Cargo 프로젝트의 표준 thread 금지로
 확대하지 않는다.
 
-## 8. 후보 CI에서 확인한 FFI 파일 경계 정리
+## 8. 후보 CI에서 확인한 통합 누락 정리
 
 보고서를 포함한 `a03a4b9bc6d9c4f1da0c5020355aa72aa3f2e14e`에 대해
 [Candidate Preflight #57](https://github.com/daejunnom/Clearra/actions/runs/45068762194)를
@@ -338,3 +338,21 @@ OS ABI 구현을 다음 기존 raw 디렉터리로 옮기고 안전한 facade의
 없어 실제 architecture task의 실행 확인은 후속 정확한 커밋의 Candidate Preflight에
 맡긴다. 6절의 성능 수치는 FFI 파일 이동 이전의 명시된 실행파일에 대한 값이며,
 파일 이동 후 새로운 소입력 성능 측정은 추가하지 않았다.
+
+같은 후보의 DesktopHost 제품 검사는 `status=passed`였지만 build transaction의
+마지막 입력 서명 검사에서 `source_changed=True`, `input_count_changed=False`,
+`context_changed=False`로 실패했다. 이 서명은 입력 파일의 상대경로·길이·내용
+SHA-256을 사용하므로 단순 mtime이나 원격 브랜치 갱신이 원인은 아니다.
+
+확인된 구체적 불일치는 `dd36cad4`의 Linux `libc` 의존성 추가가 루트 Cargo.lock에만
+반영되고 독립 `apps/clearra-desktop/src-tauri/Cargo.lock`의 `clearra-core-ffi` dependency
+목록에는 빠진 점이다. 데스크톱 lockfile에는 동일한 `libc 0.2.186` 패키지가 이미
+있으므로 누락된 연결 한 행만 추가했다. `desktop-host-check.ps1`의 Cargo test/check에
+`--locked`를 추가하여 향후 불일치를 컴파일 전에 직접 거부하게 했다. 빌드 입력
+서명과 transaction seal 계약은 그대로 유지한다.
+
+이는 관측된 서명 변화와 일치하는 원인 후보지만, 최초 CI는 바뀐 파일별 manifest를
+남기지 않아 그 실행의 변경 파일을 사후 확정하지 못한다. 로컬의 `--locked --offline`
+metadata 시도도 Tauri 독립 의존성의 registry `serde_json`이 없어 해석 전에 막혔으므로
+stale lock 오류를 직접 재현했다고 기록하지 않는다. 수정된 잠금 파일과 실행 명령은
+후속 정확한 커밋의 Windows DesktopHost 및 transaction seal 결과로 확인한다.
