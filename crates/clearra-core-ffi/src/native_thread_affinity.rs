@@ -3,10 +3,10 @@
 //! placement may only narrow the calling thread's currently permitted CPUs.
 
 #[cfg(target_os = "linux")]
-#[path = "native_thread_affinity_linux.rs"]
+#[path = "raw/native_thread_affinity_linux.rs"]
 mod platform;
 #[cfg(all(target_os = "windows", target_pointer_width = "64"))]
-#[path = "native_thread_affinity_windows.rs"]
+#[path = "raw/native_thread_affinity_windows.rs"]
 mod platform;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

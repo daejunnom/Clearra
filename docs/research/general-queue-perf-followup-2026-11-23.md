@@ -12,12 +12,12 @@ GitHub `codex/full6l-p1p7p7-20261122`의 `92dc86b0`와 이전 로컬 작업공�
 [일반 큐·병렬 실행 기록](general-queue-parallel-numa-2026-11-23.md)에 있었다.
 첨부 프로젝트 핸드오프는 초기 장기 설계이므로 현재 구현 완료표로 해석하지 않았다.
 
-이번 원격 제품 commit은 `ea3dc26faf05293cd625e1463de21133c91ae567`이며,
+이번 성능 측정의 원격 제품 commit은 `ea3dc26faf05293cd625e1463de21133c91ae567`이며,
 검증된 로컬 commit `44c9dad7135fe055912eaa87baa003525e59ec55`와 같은 tree
 `a39988f2901b8d842da5e2665fc4923391e1d032`다. 검증 때의 로컬 commit
 `662a02e0`를 동일 tree인 원격 기준 위에 재배치했고, 원격 기록에서도 그 tree를
-다시 확인했다. 소스 내용과 검증 실행파일은 바뀌지 않았다. 이후 commit은 이 검토
-문서를 기록한다.
+다시 확인했다. 소스 내용과 검증 실행파일은 바뀌지 않았다. 후속 문서 기록 이후의
+FFI 파일 경계 정리는 아래 8절에서 별도로 구분한다.
 
 옛 작업공간의 미커밋 자료도 읽기 전용으로 확인했다. 큰 WebGPU 제거·생성 한도
 정리는 현재 구현에 계승되어 있었고, 미연결 `extended_build_symbolic.rs` 초안은
@@ -314,3 +314,27 @@ hash·전체 결과 조회 계약을 보존해야 하며, 부분 count나 단순
 borrowing, 명시적인 소유 범위, 단순한 자료구조와 설명형 실패 문맥, rustfmt를 따른다.
 Chromium 코드베이스 전용 thread 지침을 이 Cargo 프로젝트의 표준 thread 금지로
 확대하지 않는다.
+
+## 8. 후보 CI에서 확인한 FFI 파일 경계 정리
+
+보고서를 포함한 `a03a4b9bc6d9c4f1da0c5020355aa72aa3f2e14e`에 대해
+[Candidate Preflight #57](https://github.com/daejunnom/Clearra/actions/runs/45068762194)를
+한 번 실행했다. `no-product-debt`의 unsafe architecture 검사가 앞선 `dd36cad4`에서
+추가된 두 OS affinity 파일의 위치를 거절했다. 두 파일은 `clearra-core-ffi` 안에
+있었으나 지정된 raw 경계 밖에 있었다.
+
+OS ABI 구현을 다음 기존 raw 디렉터리로 옮기고 안전한 facade의 `#[path]` 두 곳을
+수정했다.
+
+- `crates/clearra-core-ffi/src/raw/native_thread_affinity_linux.rs`
+- `crates/clearra-core-ffi/src/raw/native_thread_affinity_windows.rs`
+
+두 플랫폼 파일의 내용은 byte 단위로 동일하다. 논리 모듈은 계속
+`native_thread_affinity::platform`이며 `pub(super)`, `super` 참조, 플랫폼 cfg,
+안전한 공개 API와 OS 호출 계약도 같다. `raw/mod.rs`의 중복 등록은 필요 없다.
+기존 validator와 unsafe 허용 목록은 변경하지 않았다.
+
+기존 affinity 단위 테스트 3개와 rustfmt를 통과했다. 이 로컬 환경에는 PowerShell이
+없어 실제 architecture task의 실행 확인은 후속 정확한 커밋의 Candidate Preflight에
+맡긴다. 6절의 성능 수치는 FFI 파일 이동 이전의 명시된 실행파일에 대한 값이며,
+파일 이동 후 새로운 소입력 성능 측정은 추가하지 않았다.
