@@ -28,6 +28,7 @@ use super::{CoverageProductEvaluator, CoverageProductResult};
 #[derive(Clone, Copy)]
 enum SupplyReuse {
     Enabled,
+    TransitionsOnly,
     Reference,
 }
 
@@ -50,6 +51,10 @@ thread_local! {
 }
 
 pub(super) fn reuse_supply_steps() -> bool {
+    SUPPLY_REUSE.with(|mode| !matches!(mode.get(), SupplyReuse::Reference))
+}
+
+pub(super) fn reuse_layer_source_words() -> bool {
     SUPPLY_REUSE.with(|mode| matches!(mode.get(), SupplyReuse::Enabled))
 }
 
@@ -455,4 +460,115 @@ fn supply_step_reuse_keeps_standard_bag_projected_complement() {
         true,
         false,
     );
+}
+
+#[test]
+fn layer_source_words_share_supply_without_merging_dependency_paths() {
+    use PieceKind::{I, J, O, T};
+
+    // Two dependency orders converge before T. The first I placement also
+    // has two concrete realizations: Boolean coverage may share their supply
+    // factor, but CountAll still owns both physical execution histories.
+    let edges = vec![
+        BuildOrderGraph::edge(1, 0, I, RotationState::Zero, 0, 0, 0),
+        BuildOrderGraph::edge(1, 0, I, RotationState::Right, 0, 0, 0),
+        BuildOrderGraph::edge(2, 1, O, RotationState::Zero, 0, 0, 0),
+        BuildOrderGraph::edge(3, 1, O, RotationState::Zero, 0, 0, 0),
+        BuildOrderGraph::edge(3, 0, I, RotationState::Zero, 0, 0, 0),
+        BuildOrderGraph::edge(4, 2, T, RotationState::Zero, 0, 0, 0),
+    ];
+    let nodes = [(0, 3, 0), (3, 1, 1), (4, 1, 1), (5, 1, 2), (6, 0, 3)]
+        .into_iter()
+        .map(|(edge_start, edge_count, depth)| BuildOrderNodeSpec {
+            edge_start,
+            edge_count,
+            depth,
+            accepting: depth == 3,
+        })
+        .collect();
+    let graph = BuildOrderGraph::from_topological_parts(nodes, edges, 0, 0, false).unwrap();
+    let queues = [[I, O, T, J], [O, I, T, I], [T, I, O, J], [J, T, O, I]];
+    let sources = [
+        explicit_source(
+            (0..130)
+                .map(|index| queues[index % queues.len()].to_vec())
+                .collect(),
+        ),
+        PatternUniverseMaterializer::queue_pattern_expression(
+            &QueuePatternExpression::parse("[IOT]3[IJ]1", 0).unwrap(),
+            99,
+        )
+        .unwrap(),
+    ];
+    let mut evaluator = CoverageProductEvaluator::default();
+    let mut reference_reads = 0;
+    let mut reused_reads = 0;
+    for source in sources {
+        let index = PatternPiecePositionIndex::compile(&source).unwrap();
+        for cursor in [0, 1] {
+            for held in [None, Some(O), Some(T)] {
+                for enabled in [false, true] {
+                    if !enabled && held.is_some() {
+                        // The public supply contract forbids a populated
+                        // Hold slot when the Hold policy is disabled.
+                        continue;
+                    }
+                    let initial = initial(cursor, held, enabled);
+                    let mut expected = PatternBitSet::new(source.pattern_count());
+                    let mut expected_histories = 0;
+                    for ordinal in 0..source.pattern_count() {
+                        let queue = source.sequence_at(ordinal);
+                        let histories = 2 * finite_histories(&queue, &[I, O, T], initial, true)
+                            + finite_histories(&queue, &[O, I, T], initial, true);
+                        if histories != 0 {
+                            expected.insert(PatternId::new(ordinal)).unwrap();
+                        }
+                        expected_histories += histories;
+                    }
+                    for count_paths in [false, true] {
+                        let mut execute = |strategy| {
+                            let (result, work) = measure(strategy, || {
+                                evaluator
+                                    .evaluate(
+                                        &graph,
+                                        &index,
+                                        initial,
+                                        enabled,
+                                        true,
+                                        false,
+                                        count_paths,
+                                        false,
+                                        &ExecutionControl::default(),
+                                    )
+                                    .unwrap()
+                            });
+                            (result, work, evaluator.retained_bytes())
+                        };
+                        let (reference, old_work, old_bytes) =
+                            execute(SupplyReuse::TransitionsOnly);
+                        let (reused, new_work, new_bytes) = execute(SupplyReuse::Enabled);
+                        assert_same_result(&reference, &reused);
+                        assert_eq!(old_bytes, new_bytes);
+                        assert_eq!(reused.coverage_bits, expected);
+                        assert_eq!(
+                            reused.path_count,
+                            if count_paths { expected_histories } else { 0 }
+                        );
+                        assert!(reused.count_complete);
+                        assert_eq!(new_work.transition_calls, old_work.transition_calls);
+                        assert_eq!(new_work.nonempty_transitions, old_work.nonempty_transitions);
+                        assert!(new_work.position_word_reads <= old_work.position_word_reads);
+                        assert!(
+                            new_work.position_word_reads <= 14 * 3 * index.word_count(),
+                            "each requested kind is loaded at most once per source position/layer"
+                        );
+                        reference_reads += old_work.position_word_reads;
+                        reused_reads += new_work.position_word_reads;
+                    }
+                }
+            }
+        }
+    }
+    assert!(reused_reads < reference_reads);
+    eprintln!("layer_source_words position reads {reference_reads} -> {reused_reads}");
 }

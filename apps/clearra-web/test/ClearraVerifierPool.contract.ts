@@ -10,7 +10,8 @@ import { ClearraVerifierPool } from '../src/workers/ClearraVerifierPool.ts';
 import { VerifierTransportProfile } from '../src/workers/VerifierTransportProfile.ts';
 import {
   DurableDelegationAuthority,
-  MemoryDelegationJournal
+  MemoryDelegationJournal,
+  sha256Hex
 } from '../src/workers/DurableDelegationJournal.ts';
 
 async function bounded<T>(label: string, operation: Promise<T>): Promise<T> {
@@ -270,6 +271,146 @@ conditionedWorkers.forEach(worker => worker.query());
 await Promise.resolve();
 assert.equal(conditionedQueryCount, 2, 'stale replies/queries after opt-out cannot use the old owner');
 conditionedPool.cancel();
+
+{
+  class PairedAssetWorker extends FakeVerifierWorker {
+    readonly controls: WorkerMessage[] = [];
+    readonly pairPosted = signal();
+    initializationPosts = 0;
+    holdControls = true;
+    constructor() { super(false); }
+    override postMessage(message: WorkerMessage) {
+      if (message.type === 'accelerator-pack' || message.type === 'accelerator-synopsis') {
+        this.controls.push(message);
+        if (this.controls.length === 2) this.pairPosted.resolve();
+        if (this.holdControls) return;
+      }
+      if (message.type === 'initialize') this.initializationPosts += 1;
+      super.postMessage(message);
+    }
+    acknowledge(index: number) { super.postMessage(this.controls[index]); }
+  }
+  const worker = new PairedAssetWorker();
+  const pool = new ClearraVerifierPool(() => worker as unknown as Worker);
+  const initialization = pool.initialize('paired assets', 1, undefined, 'paired-assets',
+    'atomic-task', undefined, 'geometry-verifier',
+    { profile: 3, wire: Uint8Array.of(1).buffer, maximumPeers: 1 },
+    { profile: 1, seed: Uint8Array.of(2).buffer, identity: 'qualified-generation',
+      reservedBytes: 1024 * 1024, maximumPeers: 1, answerQueries: wire => wire.slice(0) });
+  void initialization.catch(() => undefined);
+  try {
+    await bounded('both independent asset controls are posted before either ACK', worker.pairPosted.promise);
+    assert.deepEqual(worker.controls.map(control => control.type),
+      ['accelerator-pack', 'accelerator-synopsis']);
+    assert.equal(worker.initializationPosts, 0, 'asset requests grant no execution authority');
+    worker.acknowledge(1);
+    await Promise.resolve();
+    assert.equal(worker.initializationPosts, 0, 'a synopsis ACK cannot skip the outstanding pack ACK');
+    worker.acknowledge(0);
+    await bounded('both asset ACKs admit initialization', initialization);
+    await bounded('paired asset job drains', pool.finish(() => undefined));
+    worker.holdControls = false;
+    await bounded('both stale accelerator slots clear before the next request',
+      pool.initialize('plain exact request', 1, undefined, 'paired-assets'));
+    assert.deepEqual(worker.controls.slice(2).map(control => [control.type, control.profile]),
+      [['accelerator-pack', null], ['accelerator-synopsis', null]]);
+  } finally { pool.cancel(); }
+}
+
+{
+  const authority = await DurableDelegationAuthority.recover(new MemoryDelegationJournal());
+  const releaseAuthority = signal();
+  const hashStarted = signal();
+  const payload = 'payload before authority recovery';
+  const digest = globalThis.crypto.subtle.digest.bind(globalThis.crypto.subtle);
+  const hash = mock.method(globalThis.crypto.subtle, 'digest', (algorithm: AlgorithmIdentifier, bytes: BufferSource) => {
+    if (new TextDecoder().decode(bytes) === payload) hashStarted.resolve();
+    return digest(algorithm, bytes);
+  });
+  let prepared = 0;
+  const prepare = authority.prepare.bind(authority);
+  authority.prepare = (...args) => { prepared += 1; return prepare(...args); };
+  const pool = new ClearraVerifierPool(() => new FakeVerifierWorker(false) as unknown as Worker,
+    { delegationAuthority: releaseAuthority.promise.then(() => authority) });
+  const initialization = pool.initialize(payload, 1, undefined, 'parallel-authority-hash');
+  void initialization.catch(() => undefined);
+  try {
+    await bounded('payload hashing starts while journal authority is still pending', hashStarted.promise);
+    assert.equal(prepared, 0, 'a digest alone cannot prepare or publish execution');
+    releaseAuthority.resolve();
+    await bounded('authority and payload jointly admit execution', initialization);
+    assert.equal(prepared, 1);
+  } finally {
+    releaseAuthority.resolve();
+    pool.cancel();
+    hash.mock.restore();
+  }
+}
+
+{
+  const journal = new MemoryDelegationJournal();
+  const authority = await DurableDelegationAuthority.recover(journal);
+  let workersCreated = 0;
+  const pool = new ClearraVerifierPool(() => {
+    workersCreated += 1;
+    return new FakeVerifierWorker(false) as unknown as Worker;
+  }, { delegationAuthority: authority });
+  try {
+    for (const request of ['first exact query', 'different exact query']) {
+      const priorCount = (await journal.load()).length;
+      const expectedRoot = await sha256Hex(request);
+      await bounded('warm worker initializes the current request', pool.initialize(request, 1,
+        undefined, 'reused-query-owner'));
+      await bounded('current request consumes', pool.enqueue(Uint8Array.of(3).buffer, () => undefined));
+      await bounded('current request finishes', pool.finish(() => undefined));
+      const events = (await journal.load()).slice(priorCount);
+      assert.ok(events.length > 0);
+      assert.ok(events.every(event => event.requestSha256 === expectedRoot),
+        'initialization, consume and finish must all refer to this request, never the prior warm query');
+      const initializer = events.find(event => event.phase === 'prepared' && event.taskId.endsWith(':initialize'));
+      assert.equal(initializer?.payloadSha256, expectedRoot);
+    }
+    assert.equal(workersCreated, 1, 'the identity regression must reuse the same warm worker');
+  } finally { pool.cancel(); }
+}
+
+{
+  const authority = await DurableDelegationAuthority.recover(new MemoryDelegationJournal());
+  const releaseResultHash = signal();
+  const replyHashStarted = signal();
+  const digest = globalThis.crypto.subtle.digest.bind(globalThis.crypto.subtle);
+  let heldResultHash = false;
+  const hash = mock.method(globalThis.crypto.subtle, 'digest', (algorithm: AlgorithmIdentifier, bytes: BufferSource) => {
+    const material = new TextDecoder().decode(bytes);
+    if (material.startsWith('{"schema":"clearra.verifier-merger-ready-result.v1"')) {
+      heldResultHash = true;
+      return releaseResultHash.promise.then(() => digest(algorithm, bytes));
+    }
+    if (material.startsWith('{"schema":"clearra.verifier-worker-reply.v1"')) replyHashStarted.resolve();
+    return digest(algorithm, bytes);
+  });
+  let seals = 0;
+  const seal = authority.resultSealed.bind(authority);
+  authority.resultSealed = (...args) => { seals += 1; return seal(...args); };
+  const pool = new ClearraVerifierPool(() => new FakeVerifierWorker(false) as unknown as Worker,
+    { delegationAuthority: authority });
+  const initialization = pool.initialize('paired result hashes', 1, undefined, 'paired-result-hashes');
+  void initialization.catch(() => undefined);
+  try {
+    await bounded('reply hashing does not wait for the independent result digest', replyHashStarted.promise);
+    assert.equal(heldResultHash, true);
+    assert.equal(seals, 0, 'the journal cannot seal before both exact digests finish');
+    assert.equal(pool.progressSnapshot().readyWorkers, 0);
+    releaseResultHash.resolve();
+    await bounded('both hashes preserve the durable ready boundary', initialization);
+    assert.equal(seals, 1);
+    assert.equal(pool.progressSnapshot().readyWorkers, 1);
+  } finally {
+    releaseResultHash.resolve();
+    pool.cancel();
+    hash.mock.restore();
+  }
+}
 
 const oversizedRelationWorkers: ConditionedVerifierWorker[] = [];
 const oversizedRelationPool = new ClearraVerifierPool(() => {

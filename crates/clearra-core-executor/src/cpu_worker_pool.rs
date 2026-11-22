@@ -89,6 +89,7 @@ mod native {
         queue: Arc<JobQueue>,
         threads: Mutex<Vec<JoinHandle<()>>>,
         spawned_workers: AtomicUsize,
+        growth: Mutex<PoolGrowth>,
         // One immutable, tiny topology owner shared across worker startup.
         // Search catalogs and workspaces are never cloned into this metadata.
         locality: Option<Arc<CpuWorkerTopology>>,
@@ -96,6 +97,14 @@ mod native {
         growth_hook: Option<Arc<dyn Fn(usize) -> Result<(), CpuWorkerPoolError> + Send + Sync>>,
         #[cfg(test)]
         affinity_attempts: Arc<AtomicUsize>,
+        #[cfg(test)]
+        growth_coordinators: AtomicUsize,
+    }
+
+    #[derive(Default)]
+    struct PoolGrowth {
+        requested_background_workers: usize,
+        coordinator_running: bool,
     }
 
     impl CpuWorkerPool {
@@ -108,11 +117,14 @@ mod native {
                 queue: Arc::new(JobQueue::new()),
                 threads: Mutex::new(Vec::new()),
                 spawned_workers: AtomicUsize::new(0),
+                growth: Mutex::new(PoolGrowth::default()),
                 locality: topology.ok().map(Arc::new),
                 #[cfg(test)]
                 growth_hook: None,
                 #[cfg(test)]
                 affinity_attempts: Arc::new(AtomicUsize::new(0)),
+                #[cfg(test)]
+                growth_coordinators: AtomicUsize::new(0),
             }
         }
 
@@ -180,23 +192,67 @@ mod native {
                 return Ok(());
             }
 
-            // The short-lived coordinator shares pool ownership. Worker jobs
-            // and their large request-owned data do not acquire another owner.
+            // Concurrent callers raise one target instead of spawning a stack
+            // and coordinator for every request while later workers are slow.
+            // This mutex is never held across worker creation or useful work.
+            {
+                let mut growth = self
+                    .growth
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if self.spawned_workers.load(Ordering::Acquire) >= background_workers {
+                    return Ok(());
+                }
+                growth.requested_background_workers =
+                    growth.requested_background_workers.max(background_workers);
+                if growth.coordinator_running {
+                    return Ok(());
+                }
+                growth.coordinator_running = true;
+            }
+            #[cfg(test)]
+            self.growth_coordinators.fetch_add(1, Ordering::Relaxed);
+
+            // The short-lived coordinator shares only pool ownership; private
+            // request workspaces remain with their original logical jobs.
             let pool = Arc::clone(self);
             if std::thread::Builder::new()
                 .name("clearra-cpu-worker-growth".to_owned())
                 .spawn(move || {
                     // A failed late spawn only reduces parallelism. Logical jobs
                     // remain queued and are still completed by ready workers.
-                    let _ = pool.ensure_background_workers(background_workers);
+                    let _ = pool.complete_background_growth();
                 })
                 .is_err()
             {
                 // If even the lightweight growth coordinator cannot start, keep
                 // the previous exact behavior as the fail-operational fallback.
-                self.ensure_background_workers(background_workers)?;
+                self.complete_background_growth()?;
             }
             Ok(())
+        }
+
+        fn complete_background_growth(&self) -> Result<(), CpuWorkerPoolError> {
+            loop {
+                let requested = self
+                    .growth
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .requested_background_workers;
+                let result = self.ensure_background_workers(requested);
+                let mut growth = self
+                    .growth
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let spawned = self.spawned_workers.load(Ordering::Acquire);
+                if result.is_err() || spawned >= growth.requested_background_workers {
+                    // The same lock admits subsequent requests and retires this
+                    // coordinator, so a target raised at handoff cannot be lost.
+                    growth.coordinator_running = false;
+                    growth.requested_background_workers = spawned;
+                    return result;
+                }
+            }
         }
 
         fn submit(&self, job: WorkerJob) {
@@ -261,6 +317,9 @@ mod native {
         total_workers: usize,
     ) -> Result<CpuWarmupReport, CpuWorkerPoolError> {
         let total_workers = total_workers.max(1);
+        if total_workers == 1 {
+            return Ok(CpuWarmupReport { total_workers });
+        }
         let background_workers = total_workers.saturating_sub(1);
         let pool = pool();
         pool.ensure_background_workers(background_workers)?;
@@ -282,6 +341,9 @@ mod native {
     pub(crate) fn ensure_cpu_workers(
         total_workers: usize,
     ) -> Result<CpuWarmupReport, CpuWorkerPoolError> {
+        if total_workers <= 1 {
+            return Ok(CpuWarmupReport { total_workers: 1 });
+        }
         pool().ensure_workers(total_workers)
     }
 
@@ -360,6 +422,70 @@ mod native {
                     .total_workers(),
                 4
             );
+            assert_eq!(pool.affinity_attempts.load(Ordering::Relaxed), 0);
+        }
+
+        #[test]
+        fn overlapping_growth_requests_share_one_coordinator_and_keep_the_largest_target() {
+            let (growth_started, growth_receiver) = mpsc::channel();
+            let (largest_started, largest_receiver) = mpsc::channel();
+            let (release_growth, release_receiver) = mpsc::channel();
+            let release_receiver = Mutex::new(release_receiver);
+            let mut pool = CpuWorkerPool::with_topology(Err(TopologyFallback::SingleNode));
+            pool.growth_hook = Some(Arc::new(move |worker| {
+                if worker == 1 {
+                    let _ = growth_started.send(());
+                    release_receiver
+                        .lock()
+                        .expect("growth release gate")
+                        .recv()
+                        .map_err(|_| CpuWorkerPoolError::ThreadSpawnFailed)?;
+                }
+                if worker == 6 {
+                    let _ = largest_started.send(());
+                }
+                Ok(())
+            }));
+            let pool = Arc::new(pool);
+            pool.ensure_workers(4).expect("first ready worker");
+            growth_receiver
+                .recv_timeout(Duration::from_secs(2))
+                .expect("later worker creation is blocked");
+
+            let request_pool = Arc::clone(&pool);
+            let (reports_sender, reports_receiver) = mpsc::channel();
+            let requests = std::thread::spawn(move || {
+                let reports =
+                    [3, 8, 5, 7, 4, 8].map(|workers| request_pool.ensure_workers(workers));
+                let _ = reports_sender.send(reports);
+            });
+            let reports = reports_receiver.recv_timeout(Duration::from_secs(2));
+            let coordinators_before_release = pool.growth_coordinators.load(Ordering::Relaxed);
+            let (job_sender, job_receiver) = mpsc::channel();
+            pool.submit(Box::new(move || {
+                let _ = job_sender.send(19);
+            }));
+            let ready_job = job_receiver.recv_timeout(Duration::from_secs(2));
+            let _ = release_growth.send(());
+            requests.join().expect("overlapping callers joined");
+            let largest_target = largest_receiver.recv_timeout(Duration::from_secs(2));
+            pool.ensure_background_workers(7)
+                .expect("largest requested pool is available");
+
+            for (report, requested) in reports
+                .expect("no caller waited for the remaining workers")
+                .into_iter()
+                .zip([3, 8, 5, 7, 4, 8])
+            {
+                assert_eq!(
+                    report.expect("progressive admission").total_workers(),
+                    requested
+                );
+            }
+            assert_eq!(ready_job.expect("ready worker ran during growth"), 19);
+            largest_target.expect("the existing coordinator observed the raised target");
+            assert_eq!(coordinators_before_release, 1);
+            assert_eq!(pool.spawned_workers.load(Ordering::Acquire), 7);
             assert_eq!(pool.affinity_attempts.load(Ordering::Relaxed), 0);
         }
 

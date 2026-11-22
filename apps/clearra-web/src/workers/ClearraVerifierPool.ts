@@ -332,9 +332,13 @@ class VerifierClient {
       const worker = this.requireWorker();
       await warming;
       this.requireWorker(worker);
-      await this.installWorkerPack(executionKind === 'geometry-verifier' ? conditionedPack : null);
-      this.requireWorker(worker);
-      await this.installWorkerSynopsis(executionKind === 'geometry-verifier' ? legalBoardSynopsis : null);
+      // These controls own separate accelerator slots. Post both before
+      // waiting for their ACKs; initialize still needs both installations (or
+      // removals) to finish before it can publish an executable.
+      await Promise.all([
+        this.installWorkerPack(executionKind === 'geometry-verifier' ? conditionedPack : null),
+        this.installWorkerSynopsis(executionKind === 'geometry-verifier' ? legalBoardSynopsis : null)
+      ]);
       this.requireWorker(worker);
       this.candidatesVerified = 0;
       this.candidatesVerifiedAvailable = true;
@@ -850,10 +854,17 @@ class VerifierClient {
     payload: string | ArrayBuffer,
     memoryBytes: number
   ): Promise<ActiveDelegation> {
-    const authority = await this.delegationAuthority();
-    const payloadSha256 = await this.transportProfile.measure('payload_hash', operation, () => sha256Hex(payload));
+    // Hashing does not need the recovered journal. Both must succeed before
+    // prepare creates a permit; rejection of either also observes the other.
+    const [authority, payloadSha256] = await Promise.all([
+      this.delegationAuthority(),
+      this.transportProfile.measure('payload_hash', operation, () => sha256Hex(payload))
+    ]);
     this.requireWorker(worker);
-    const requestSha256 = this.rootRequestSha256 ?? payloadSha256;
+    // A warm worker may belong to a previous request. Its new initializer is
+    // its own root; subsequent consume/finish operations use that new root.
+    const requestSha256 = operation === 'initialize'
+      ? payloadSha256 : this.rootRequestSha256 ?? payloadSha256;
     const taskId = `${this.jobId}:${this.clientId}:${this.nextDelegationTask++}:${operation}`;
     const token = await this.transportProfile.measure('prepare', operation, () => authority.prepare(
       {
@@ -1878,21 +1889,21 @@ async function sealVerifierResponse(
       sha256: await sha256Hex(partial)
     }))
   );
-  const resultSha256 = await sha256Hex(
-    JSON.stringify({
+  // Both digests read the same immutable descriptors, with no dependency on
+  // each other. The journal seal remains after both digests are complete.
+  const [resultSha256, workerReplySha256] = await Promise.all([
+    sha256Hex(JSON.stringify({
       schema: 'clearra.verifier-merger-ready-result.v1',
       operation,
       partials: partialDescriptors
-    })
-  );
-  const workerReplySha256 = await sha256Hex(
-    JSON.stringify({
+    })),
+    sha256Hex(JSON.stringify({
       schema: 'clearra.verifier-worker-reply.v1',
       operation,
       reply: canonicalVerifierReply(response),
       partials: partialDescriptors
-    })
-  );
+    }))
+  ]);
   hashing();
   await delegation.profile.measure('result_sealed', operation, () => delegation.authority.resultSealed(
     delegation.token,

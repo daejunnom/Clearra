@@ -18,6 +18,78 @@ pub(super) const EXTRA_DRAW_STATE_COUNT: usize = 2;
 const PATTERNS_PER_WORD: usize = u64::BITS as usize;
 const CANCELLATION_POLL_MASK: u32 = 0xff;
 
+/// At one ranked graph depth the source cursor has only two possibilities:
+/// `initial_cursor + depth` and the extra draw from an initially empty Hold.
+/// StoreCurrent is available only before that extra draw, so its lookahead
+/// uses the same second position. These source factors are independent of the
+/// graph node, held kind, physical edge and counting semiring.
+///
+/// Keep the fourteen words on the stack and load only requested kinds. A layer
+/// reset invalidates the words without clearing their contents or scanning the
+/// source. The original active ordinal bits are intersected by each caller.
+struct LayerSourceWords<'a> {
+    source: &'a PatternPiecePositionIndex,
+    words: [[u64; 7]; EXTRA_DRAW_STATE_COUNT],
+    loaded: [u8; EXTRA_DRAW_STATE_COUNT],
+    first_position: usize,
+    word_index: usize,
+    projects_standard_bag_lookahead: bool,
+    reuse: bool,
+    reuse_enabled: bool,
+}
+
+impl<'a> LayerSourceWords<'a> {
+    fn new(source: &'a PatternPiecePositionIndex, projects_standard_bag_lookahead: bool) -> Self {
+        Self {
+            source,
+            words: [[0; 7]; EXTRA_DRAW_STATE_COUNT],
+            loaded: [0; EXTRA_DRAW_STATE_COUNT],
+            first_position: 0,
+            word_index: 0,
+            projects_standard_bag_lookahead,
+            reuse: false,
+            reuse_enabled: reuse_layer_source_words(),
+        }
+    }
+
+    fn begin_layer(&mut self, first_position: usize, word_index: usize, repeated_states: bool) {
+        self.loaded.fill(0);
+        self.first_position = first_position;
+        self.word_index = word_index;
+        self.reuse = self.reuse_enabled && repeated_states;
+    }
+
+    #[inline]
+    fn piece_word(&mut self, extra_draw: usize, piece_code: u8) -> u64 {
+        if !self.reuse {
+            return source_piece_word(
+                self.source,
+                self.first_position.saturating_add(extra_draw),
+                piece_code,
+                self.word_index,
+                self.projects_standard_bag_lookahead,
+            );
+        }
+        let Some(piece_index) = piece_code.checked_sub(1).filter(|&piece| piece < 7) else {
+            return 0;
+        };
+        let piece_bit = 1 << piece_index;
+        if self.loaded[extra_draw] & piece_bit != 0 {
+            return self.words[extra_draw][usize::from(piece_index)];
+        }
+        let word = source_piece_word(
+            self.source,
+            self.first_position.saturating_add(extra_draw),
+            piece_code,
+            self.word_index,
+            self.projects_standard_bag_lookahead,
+        );
+        self.words[extra_draw][usize::from(piece_index)] = word;
+        self.loaded[extra_draw] |= piece_bit;
+        word
+    }
+}
+
 #[derive(Clone, Copy)]
 struct CoverageNode {
     depth: u8,
@@ -438,6 +510,8 @@ impl CoverageProductEvaluator {
         let mut active_states = 0usize;
         let mut edge_checks = 0usize;
         let reuse_supply_steps = reuse_supply_steps();
+        let mut source_words =
+            LayerSourceWords::new(pattern_index, projects_standard_bag_lookahead);
 
         for word_index in 0..pattern_index.word_count() {
             self.poll_cancellation(control)?;
@@ -460,6 +534,14 @@ impl CoverageProductEvaluator {
 
             let mut covered_word = 0_u64;
             for depth in 0..self.depth_queues.len() {
+                // A no-Hold linear layer has no repeated state supply to
+                // amortize a cache lookup. CountAll physical edges and all
+                // child states still run unchanged in either strategy.
+                source_words.begin_layer(
+                    usize::from(initial_hold.cursor()) + depth,
+                    word_index,
+                    hold_enabled || self.depth_queues[depth].len() > 1,
+                );
                 let mut cursor = 0;
                 while cursor < self.depth_queues[depth].len() {
                     self.poll_cancellation(control)?;
@@ -474,6 +556,7 @@ impl CoverageProductEvaluator {
                             .ok_or(WasmExactSearchError::InvalidProblem(
                                 "wasm_coverage_product_node_out_of_range",
                             ))?;
+                    debug_assert_eq!(usize::from(node.depth), depth);
                     if node.accepting {
                         covered_word |= active;
                         if count_paths {
@@ -546,14 +629,8 @@ impl CoverageProductEvaluator {
                                 &mut count_complete,
                             )?;
                         }
-                        let use_current = active
-                            & source_piece_word(
-                                pattern_index,
-                                queue_position,
-                                desired_piece,
-                                word_index,
-                                projects_standard_bag_lookahead,
-                            );
+                        let use_current =
+                            active & source_words.piece_word(extra_draw, desired_piece);
                         self.activate_transition(
                             edge.to,
                             extra_draw,
@@ -584,14 +661,8 @@ impl CoverageProductEvaluator {
                                 }) {
                                     continue;
                                 }
-                                let swap_bits = active
-                                    & source_piece_word(
-                                        pattern_index,
-                                        queue_position,
-                                        current_piece,
-                                        word_index,
-                                        projects_standard_bag_lookahead,
-                                    );
+                                let swap_bits =
+                                    active & source_words.piece_word(extra_draw, current_piece);
                                 self.activate_transition(
                                     edge.to,
                                     extra_draw,
@@ -609,14 +680,7 @@ impl CoverageProductEvaluator {
                             // intersection before selecting the held current
                             // kind; source order and physical edges stay put.
                             let stored_source_bits = if reuse_supply_steps {
-                                active
-                                    & source_piece_word(
-                                        pattern_index,
-                                        queue_position.saturating_add(1),
-                                        desired_piece,
-                                        word_index,
-                                        projects_standard_bag_lookahead,
-                                    )
+                                active & source_words.piece_word(1, desired_piece)
                             } else {
                                 active
                             };
@@ -632,23 +696,10 @@ impl CoverageProductEvaluator {
                                 let desired_bits = if reuse_supply_steps {
                                     stored_source_bits
                                 } else {
-                                    active
-                                        & source_piece_word(
-                                            pattern_index,
-                                            queue_position.saturating_add(1),
-                                            desired_piece,
-                                            word_index,
-                                            projects_standard_bag_lookahead,
-                                        )
+                                    active & source_words.piece_word(1, desired_piece)
                                 };
-                                let store_bits = desired_bits
-                                    & source_piece_word(
-                                        pattern_index,
-                                        queue_position,
-                                        current_piece,
-                                        word_index,
-                                        projects_standard_bag_lookahead,
-                                    );
+                                let store_bits =
+                                    desired_bits & source_words.piece_word(0, current_piece);
                                 self.activate_transition(
                                     edge.to,
                                     1,
@@ -1011,6 +1062,18 @@ fn reuse_supply_steps() -> bool {
     #[cfg(test)]
     {
         supply_reuse_tests::reuse_supply_steps()
+    }
+    #[cfg(not(test))]
+    {
+        true
+    }
+}
+
+#[inline]
+fn reuse_layer_source_words() -> bool {
+    #[cfg(test)]
+    {
+        supply_reuse_tests::reuse_layer_source_words()
     }
     #[cfg(not(test))]
     {

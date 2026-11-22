@@ -236,36 +236,20 @@ impl StandardBagProductMemo {
             self.failed_admissions_remaining -= 1;
             return Err(ProductMemoAdmissionError::Capacity);
         }
-        if let ProductMemoStorage::StateMajor(memo) = &self.storage {
-            if memo.row_index(key).is_none() {
-                return Err(ProductMemoAdmissionError::OutOfScope);
-            }
-        }
-        let future = self
-            .checked_insert_future_bytes(key)
-            .ok_or(ProductMemoAdmissionError::Capacity)?;
-        if !admit(self.retained_bytes(), future) {
-            return Err(ProductMemoAdmissionError::Capacity);
-        }
         let previous = match &mut self.storage {
             ProductMemoStorage::Flat(memo) => {
+                let future = memo
+                    .checked_reserve_future_bytes(1)
+                    .ok_or(ProductMemoAdmissionError::Capacity)?;
+                if !admit(memo.retained_payload_bytes(), future) {
+                    return Err(ProductMemoAdmissionError::Capacity);
+                }
                 memo.try_reserve(1)
                     .map_err(|_| ProductMemoAdmissionError::Capacity)?;
                 memo.insert(key.packed(), value)
             }
             ProductMemoStorage::StateMajor(memo) => {
-                let row_index = memo.prepare_row(key)?;
-                let previous = memo
-                    .mutate_row(row_index, |row| {
-                        row.try_reserve(1)
-                            .map_err(|_| ProductMemoAdmissionError::Capacity)?;
-                        Ok(row.insert(key.language_node, value))
-                    })
-                    .ok_or(ProductMemoAdmissionError::Capacity)??;
-                if previous.is_none() {
-                    memo.entry_count += 1;
-                }
-                previous
+                memo.try_insert_guarded(key, value, &mut admit)?
             }
         };
         if previous.is_none() {
@@ -274,32 +258,10 @@ impl StandardBagProductMemo {
         Ok(previous)
     }
 
+    #[cfg(test)]
     fn retained_bytes(&self) -> usize {
         self.retained_payload_bytes()
             .saturating_add(self.directory_retained_bytes())
-    }
-
-    fn checked_insert_future_bytes(&self, key: StandardBagProductMemoKey) -> Option<u128> {
-        match &self.storage {
-            ProductMemoStorage::Flat(memo) => memo.checked_reserve_future_bytes(1),
-            ProductMemoStorage::StateMajor(memo) => {
-                let index = memo.row_index(key)?;
-                let directory = if memo.rows.is_empty() {
-                    (memo.row_count() as u128)
-                        .checked_mul(core::mem::size_of::<Option<StateMajorRow>>() as u128)?
-                } else {
-                    0
-                };
-                let row = memo.rows.get(index).and_then(Option::as_ref);
-                let row_future = checked_hash_reserve_future_bytes(
-                    row.map_or(0, StateMajorRow::capacity),
-                    row.map_or(0, StateMajorRow::len),
-                    1,
-                    core::mem::size_of::<(u32, u32)>(),
-                )?;
-                directory.checked_add(row_future)
-            }
-        }
     }
 
     /// Deterministic admission-failure fixture, absent from every product and
@@ -320,7 +282,10 @@ impl StandardBagProductMemo {
                 .try_reserve(additional)
                 .map_err(|_| ProductMemoAdmissionError::Capacity),
             ProductMemoStorage::StateMajor(memo) => {
-                let row_index = memo.prepare_row(key)?;
+                let row_index = memo
+                    .row_index(key)
+                    .ok_or(ProductMemoAdmissionError::OutOfScope)?;
+                memo.prepare_row(row_index, key)?;
                 memo.mutate_row(row_index, |row| row.try_reserve(additional))
                     .ok_or(ProductMemoAdmissionError::Capacity)?
                     .map_err(|_| ProductMemoAdmissionError::Capacity)
@@ -332,13 +297,13 @@ impl StandardBagProductMemo {
         match &mut self.storage {
             ProductMemoStorage::Flat(memo) => memo.clear(),
             ProductMemoStorage::StateMajor(memo) => {
-                let mut row_capacity = 0;
-                for row in memo.rows.iter_mut().flatten() {
-                    row.clear();
-                    row_capacity += row.capacity();
+                if memo.entry_count != 0 {
+                    for row in memo.rows.iter_mut().flatten() {
+                        row.clear();
+                    }
+                    memo.entry_count = 0;
                 }
-                memo.row_capacity = row_capacity;
-                memo.entry_count = 0;
+                // HashMap::clear retains capacity; the cached sum stays exact.
             }
         }
     }
@@ -523,11 +488,9 @@ impl StateMajorProductMemo {
 
     fn prepare_row(
         &mut self,
+        index: usize,
         key: StandardBagProductMemoKey,
-    ) -> Result<usize, ProductMemoAdmissionError> {
-        let index = self
-            .row_index(key)
-            .ok_or(ProductMemoAdmissionError::OutOfScope)?;
+    ) -> Result<(), ProductMemoAdmissionError> {
         if self.rows.is_empty() {
             let row_count = self.row_count();
             self.rows
@@ -540,9 +503,65 @@ impl StateMajorProductMemo {
                 source_prefix: key.packed() & !u64::from(u32::MAX),
             })
         });
-        Ok(index)
+        Ok(())
     }
 
+    fn try_insert_guarded(
+        &mut self,
+        key: StandardBagProductMemoKey,
+        value: u32,
+        admit: &mut impl FnMut(usize, u128) -> bool,
+    ) -> Result<Option<u32>, ProductMemoAdmissionError> {
+        let index = self
+            .row_index(key)
+            .ok_or(ProductMemoAdmissionError::OutOfScope)?;
+        let directory_future = if self.rows.is_empty() {
+            (self.row_count() as u128)
+                .checked_mul(core::mem::size_of::<Option<StateMajorRow>>() as u128)
+                .ok_or(ProductMemoAdmissionError::Capacity)?
+        } else {
+            0
+        };
+        let row = self.rows.get(index).and_then(Option::as_ref);
+        let needs_row = row.is_none();
+        let row_future = checked_hash_reserve_future_bytes(
+            row.map_or(0, StateMajorRow::capacity),
+            row.map_or(0, StateMajorRow::len),
+            1,
+            core::mem::size_of::<(u32, u32)>(),
+        )
+        .ok_or(ProductMemoAdmissionError::Capacity)?;
+        let future = directory_future
+            .checked_add(row_future)
+            .ok_or(ProductMemoAdmissionError::Capacity)?;
+        let retained = self
+            .retained_payload_bytes()
+            .saturating_add(self.directory_retained_bytes());
+        if !admit(retained, future) {
+            return Err(ProductMemoAdmissionError::Capacity);
+        }
+        if needs_row {
+            self.prepare_row(index, key)?;
+        }
+        let row = self.rows[index]
+            .as_mut()
+            .ok_or(ProductMemoAdmissionError::Capacity)?;
+        if row_future != 0 {
+            let previous_capacity = row.capacity();
+            let reserved = row.try_reserve(1);
+            // Only growth can change capacity. Preserve exact accounting even
+            // if reserve fails; ordinary inserts reuse the admitted allocation.
+            self.row_capacity = self.row_capacity - previous_capacity + row.capacity();
+            reserved.map_err(|_| ProductMemoAdmissionError::Capacity)?;
+        }
+        let previous = row.insert(key.language_node, value);
+        if previous.is_none() {
+            self.entry_count += 1;
+        }
+        Ok(previous)
+    }
+
+    #[cfg(test)]
     #[inline]
     fn mutate_row<T>(
         &mut self,
@@ -615,9 +634,13 @@ impl StateMajorProductMemo {
             let index = target
                 .row_index(key)
                 .ok_or(ProductMemoAdmissionError::OutOfScope)?;
-            target
-                .mutate_row(index, |row| row.insert(key.language_node, value))
+            let row = target.rows[index]
+                .as_mut()
                 .ok_or(ProductMemoAdmissionError::Capacity)?;
+            // The exact row population was reserved above. Copying an entry
+            // cannot grow the row or change its already accumulated capacity.
+            debug_assert!(row.len() < row.capacity());
+            row.insert(key.language_node, value);
             Ok(())
         })?;
         target.entry_count = source.len();
@@ -964,6 +987,69 @@ mod tests {
             assert_eq!(memo.get(&first), Some(&19));
             assert_eq!(memo.get(&second), Some(&23));
             assert_eq!(memo.retained_bytes(), before);
+        }
+    }
+
+    #[test]
+    fn state_major_reuses_capacity_but_keeps_admission_at_growth_and_recycle_boundaries() {
+        let mut memo = candidate(1);
+        let key_for = |language| StandardBagProductMemoKey::new(language, 1, 7, 3);
+        memo.try_insert(key_for(0), 11)
+            .expect("allocate the first row entry");
+        let initial_capacity = memo.capacity();
+        let retained = memo.retained_bytes();
+        for language in 1..initial_capacity as u32 {
+            memo.try_insert_guarded(key_for(language), language + 11, |bytes, future| {
+                assert_eq!(bytes, retained);
+                assert_eq!(future, 0);
+                true
+            })
+            .expect("reuse the row's already admitted capacity");
+        }
+        assert_exact_row_capacity(&memo);
+        let next = key_for(initial_capacity as u32);
+        assert_eq!(
+            memo.try_insert_guarded(next, 27, |bytes, future| {
+                assert_eq!(bytes, retained);
+                assert!(future > 0);
+                false
+            }),
+            Err(ProductMemoAdmissionError::Capacity)
+        );
+        assert_eq!(memo.get(&next), None);
+        assert_eq!(memo.len(), initial_capacity);
+        assert_eq!(memo.retained_bytes(), retained);
+        memo.try_insert(next, 27)
+            .expect("grow the row after admitting its new allocation");
+        assert!(memo.capacity() > initial_capacity);
+        assert_exact_row_capacity(&memo);
+        for language in 0..initial_capacity as u32 {
+            assert_eq!(memo.get(&key_for(language)), Some(&(language + 11)));
+        }
+        let capacity = memo.capacity();
+        let retained = memo.retained_bytes();
+        for _ in 0..3 {
+            memo.clear();
+            memo.clear();
+            assert_eq!(memo.len(), 0);
+            assert_eq!(memo.get(&next), None);
+            assert_eq!(memo.capacity(), capacity);
+            assert_eq!(memo.retained_bytes(), retained);
+            assert_exact_row_capacity(&memo);
+            // Zero allocation does not bypass the caller's cache admission.
+            assert_eq!(
+                memo.try_insert_guarded(next, 31, |bytes, future| {
+                    assert_eq!(bytes, retained);
+                    assert_eq!(future, 0);
+                    false
+                }),
+                Err(ProductMemoAdmissionError::Capacity)
+            );
+            assert_eq!(memo.get(&next), None);
+            memo.try_insert(next, 31)
+                .expect("reuse the cleared row in the new cache epoch");
+            assert_eq!(memo.get(&next), Some(&31));
+            assert_exact_row_capacity(&memo);
         }
     }
 
