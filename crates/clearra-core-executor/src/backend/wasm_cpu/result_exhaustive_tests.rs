@@ -170,7 +170,7 @@ fn full6l_physical_prefix_pruning_matches_harness_and_rejects_other_contracts() 
         );
         single_target.enable_physical_prefix_pruning();
         single_target.enable_full_draw_source_prefix_pruning(&problem);
-        assert!(!single_target.source_prefix_pruning_enabled());
+        assert!(single_target.source_prefix_pruning_enabled());
         Arc::clone(&session.catalog)
     };
 
@@ -261,11 +261,96 @@ fn full6l_physical_prefix_pruning_matches_harness_and_rejects_other_contracts() 
         PieceKind::L,
         PieceKind::L,
     ])));
-    for (contract, other) in [
+    for (source_name, source, source_cut) in [
         (
-            "explicit source",
-            ProblemCompiler::compile_scenario_pc(&explicit_query).unwrap(),
+            "fixed IIIOOTTSSZZJJLL, Hold allowed",
+            explicit_query.clone(),
+            true,
         ),
+        (
+            "fixed IIIOOTTSSZZJJLL, Hold forbidden",
+            explicit_query.clone().with_allow_hold(false),
+            true,
+        ),
+        (
+            "OP7P7",
+            full6l_query(PcQueueInput::pattern_expression(
+                QueuePatternExpression::parse("OP7P7", 0).unwrap(),
+            )),
+            true,
+        ),
+        (
+            "P7P7I",
+            full6l_query(PcQueueInput::pattern_expression(
+                QueuePatternExpression::parse("P7P7I", 0).unwrap(),
+            )),
+            true,
+        ),
+        (
+            "IIIOOTTSSZZJJLL;OIIIOOTTSZZJJLL",
+            full6l_query(PcQueueInput::pattern_expression(
+                QueuePatternExpression::parse("IIIOOTTSSZZJJLL;OIIIOOTTSZZJJLL", 0).unwrap(),
+            )),
+            false,
+        ),
+    ] {
+        let ordinary = ProblemCompiler::compile_scenario_pc(&source).unwrap();
+        let mut session = WasmExactSearchSession::new(&ordinary).unwrap();
+        assert!(
+            session.physical_prefix_pruning_active,
+            "source={source_name}"
+        );
+        assert!(
+            session.geometry.physical_prefix_pruning_enabled(),
+            "source={source_name}"
+        );
+        assert_eq!(
+            session.geometry.source_prefix_pruning_enabled(),
+            source_cut,
+            "source={source_name}"
+        );
+        assert_eq!(session.geometry.expanded_nodes(), 0, "source={source_name}");
+
+        // Exercise the actual result contract without enumerating Full6L.
+        // Partial diagnostics neither calculate the skipped candidate digest
+        // nor claim an exhausted or complete solution domain.
+        session.mark_truncated("test_before_family_enumeration");
+        let result = session.build_result(true, None, None).unwrap();
+        assert_eq!(
+            result.bool_field("count_complete"),
+            Some(false),
+            "source={source_name}"
+        );
+        assert_eq!(
+            result.bool_field("resource_truncated"),
+            Some(true),
+            "source={source_name}"
+        );
+        assert_eq!(
+            result.bool_field("packing_candidate_set_digest_calculated"),
+            Some(false),
+            "source={source_name}",
+        );
+        assert_eq!(
+            result.field("packing_candidate_set_digest"),
+            Some("not-calculated: proven-infeasible-subtrees-skipped"),
+            "source={source_name}",
+        );
+        assert_eq!(
+            result.field("packing_candidate_domain"),
+            Some(if source_cut {
+                "physical-source-prefix-filtered"
+            } else {
+                "physical-prefix-filtered"
+            }),
+            "source={source_name}",
+        );
+    }
+    let explicit = ProblemCompiler::compile_scenario_pc(&explicit_query).unwrap();
+    assert!(!super::super::uses_order_independent_pc_candidate_digest(
+        &explicit
+    ));
+    for (contract, other) in [
         (
             "candidate coverage evidence",
             problem.clone().with_pc_chance_probability_v2_evidence(),

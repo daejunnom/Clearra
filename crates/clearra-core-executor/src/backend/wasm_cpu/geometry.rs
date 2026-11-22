@@ -2561,7 +2561,7 @@ struct TraversalTask {
     continuation_count: u8,
     prefix_verified: bool,
     source_prefix_verified: bool,
-    prefix_row_order_mask: u32,
+    prefix_row_order_state: u32,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -2609,7 +2609,7 @@ impl FamilyEnumerator {
     }
 
     fn enable_full_draw_source_prefix_pruning(&mut self, request: FullDrawPrefixRequest) {
-        if request.supports_targets(&self.targets) {
+        if let Some(request) = request.for_targets(&self.targets) {
             self.source_prefix_request = Some(request);
             self.invalidate_prefix_verification();
         }
@@ -2619,12 +2619,12 @@ impl FamilyEnumerator {
         for task in &mut self.tasks {
             task.prefix_verified = task.depth == 0;
             task.source_prefix_verified = task.depth == 0;
-            task.prefix_row_order_mask = ROW_ORDER_ALL;
+            task.prefix_row_order_state = ROW_ORDER_ALL;
         }
         if let Some(task) = self.active_task.as_mut() {
             task.prefix_verified = task.depth == 0;
             task.source_prefix_verified = task.depth == 0;
-            task.prefix_row_order_mask = ROW_ORDER_ALL;
+            task.prefix_row_order_state = ROW_ORDER_ALL;
         }
     }
 
@@ -2744,7 +2744,7 @@ impl FamilyEnumerator {
                 continuation_count: 0,
                 prefix_verified: true,
                 source_prefix_verified: true,
-                prefix_row_order_mask: ROW_ORDER_ALL,
+                prefix_row_order_state: ROW_ORDER_ALL,
             });
         }
         Self {
@@ -2794,7 +2794,7 @@ impl FamilyEnumerator {
                 continuation_count: 0,
                 prefix_verified: true,
                 source_prefix_verified: true,
-                prefix_row_order_mask: ROW_ORDER_ALL,
+                prefix_row_order_state: ROW_ORDER_ALL,
             });
         }
         let enumerator = Self {
@@ -3022,10 +3022,10 @@ impl FamilyEnumerator {
                 }
                 if use_row_order {
                     if !task.prefix_verified {
-                        if let Some(mask) = self.row_order_table.as_ref().and_then(|table| {
-                            table.selected_mask(&self.rows[..usize::from(task.depth)])
+                        if let Some(state) = self.row_order_table.as_ref().and_then(|table| {
+                            table.prefix_state(&self.rows[..usize::from(task.depth)])
                         }) {
-                            task.prefix_row_order_mask = mask;
+                            task.prefix_row_order_state = state;
                             task.prefix_verified = true;
                         } else {
                             self.row_order_table = None;
@@ -3035,7 +3035,7 @@ impl FamilyEnumerator {
                     }
                     let possible = self.row_order_table.as_ref().and_then(|table| {
                         table.task_mask(
-                            task.prefix_row_order_mask,
+                            task.prefix_row_order_state,
                             task.family,
                             &task.continuations[..usize::from(task.continuation_count)],
                         )
@@ -3073,9 +3073,14 @@ impl FamilyEnumerator {
                     // A failure discards this task AND its continuations, while
                     // pending Union siblings keep their own saved prefixes.
                     if task.depth >= 8
-                        && self
-                            .source_prefix_profile
-                            .stalls(catalog, &self.rows[..usize::from(task.depth)])
+                        && self.source_prefix_request.is_some_and(|request| {
+                            self.source_prefix_profile.stalls(
+                                request,
+                                &self.targets,
+                                catalog,
+                                &self.rows[..usize::from(task.depth)],
+                            )
+                        })
                     {
                         break;
                     }
@@ -3110,12 +3115,10 @@ impl FamilyEnumerator {
                             task.source_prefix_verified = false;
                         }
                         if use_row_order {
-                            if let Some(mask) = self
-                                .row_order_table
-                                .as_ref()
-                                .and_then(|table| table.row_mask(node.row_id))
-                            {
-                                task.prefix_row_order_mask &= mask;
+                            if let Some(state) = self.row_order_table.as_ref().and_then(|table| {
+                                table.extend_prefix(task.prefix_row_order_state, node.row_id)
+                            }) {
+                                task.prefix_row_order_state = state;
                             } else {
                                 self.row_order_table = None;
                                 use_row_order = false;
@@ -4459,20 +4462,26 @@ impl GeometrySearch {
         let Some(request) = FullDrawPrefixRequest::compile(problem) else {
             return;
         };
-        let supported_targets = self
+        let request = self
             .compiler
             .as_ref()
-            .map(|compiler| request.supports_targets(&compiler.targets))
+            .and_then(|compiler| request.for_targets(&compiler.targets))
+            .or_else(|| {
+                // Inventory keys are already fixed from the actual family;
+                // deferred preparation fills only their pattern indexes.
+                self.target_preparation
+                    .as_ref()
+                    .and_then(|preparation| request.for_targets(&preparation.targets))
+            })
             .or_else(|| {
                 self.targets()
-                    .map(|targets| request.supports_targets(targets))
-            })
-            .unwrap_or(false);
-        if !supported_targets {
+                    .and_then(|targets| request.for_targets(targets))
+            });
+        let Some(request) = request else {
             // Unknown/deferred target domains retain the original traversal.
             // Report application only after the actual owned targets match.
             return;
-        }
+        };
         self.source_prefix_request = Some(request);
         if let Some(enumerator) = self.enumerator.as_mut() {
             enumerator.enable_full_draw_source_prefix_pruning(request);

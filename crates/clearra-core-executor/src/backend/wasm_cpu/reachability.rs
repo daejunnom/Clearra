@@ -107,6 +107,9 @@ use super::{
     mix_digest, piece_index,
 };
 
+#[path = "reachability_anchor_planes.rs"]
+mod anchor_planes;
+
 #[derive(Clone, Copy, Debug, Default)]
 pub(super) struct ReachableLocks {
     anchors: [u64; 4],
@@ -1848,7 +1851,16 @@ impl ReachabilityWorkspace {
             .expect("harddrop query initialized the reachability template");
         let (reachable, locks, unreachable_locks, all_locks_exhaustive, visited_state_count) =
             if exhaustive {
-                let result = search_reachable_locks(template, board, &mut self.scratch, None);
+                let result = try_anchor_plane_lock_family(
+                    template,
+                    piece,
+                    board,
+                    self.kick_profile_id,
+                    self.local_import.as_ref(),
+                )
+                .unwrap_or_else(|| {
+                    search_reachable_locks(template, board, &mut self.scratch, None)
+                });
                 #[cfg(any(test, feature = "local-search-ab"))]
                 if reuse_builtin_proofs {
                     self.placement_dependencies.observe_full(
@@ -1873,8 +1885,19 @@ impl ReachabilityWorkspace {
                     result.visited_state_count,
                 )
             } else {
-                let result =
-                    reverse_lock_reachable(template, board, rotation, x, y, &mut self.scratch);
+                let result = reverse_lock_reachable_in_request(
+                    template,
+                    board,
+                    rotation,
+                    x,
+                    y,
+                    &mut self.scratch,
+                    AnchorMovementRequest {
+                        piece,
+                        profile: self.kick_profile_id,
+                        authority: self.local_import.as_ref(),
+                    },
+                );
                 #[cfg(any(test, feature = "local-search-ab"))]
                 if reuse_builtin_proofs {
                     self.placement_dependencies.observe_reverse(
@@ -2634,6 +2657,71 @@ struct State {
     y: i16,
 }
 
+/// The workspace selected this template from this exact piece and authority.
+/// This adapter is used only where the existing policy already requests the
+/// complete forward lock family; short target-reverse queries stay unchanged.
+fn try_anchor_plane_lock_family(
+    template: &ReachabilityTemplate,
+    piece: PieceKind,
+    board: u64,
+    profile: KickTableProfileId,
+    authority: Option<&super::compact_kick_authority::CompactKickAuthority>,
+) -> Option<ReachabilitySearchResult> {
+    if !anchor_planes::full_forward_enabled() || !anchor_plane_trace_compatible() {
+        return None;
+    }
+    let ordered = AnchorMovementRequest {
+        piece,
+        profile,
+        authority,
+    }
+    .ordered(template)?;
+    anchor_planes::search_reachable_locks(template, piece, board, &ordered)
+        .map(|result| result.search)
+}
+
+fn anchor_plane_trace_compatible() -> bool {
+    #[cfg(any(test, feature = "local-search-ab"))]
+    if super::placement_dependency::enabled() {
+        // These observers recover a certificate from the scalar scratch
+        // trace. A bitmap answer must never expose a stale preceding trace.
+        return false;
+    }
+    true
+}
+
+#[derive(Clone, Copy)]
+struct AnchorMovementRequest<'a> {
+    piece: PieceKind,
+    profile: KickTableProfileId,
+    authority: Option<&'a super::compact_kick_authority::CompactKickAuthority>,
+}
+
+impl<'a> AnchorMovementRequest<'a> {
+    fn ordered(self, template: &ReachabilityTemplate) -> Option<anchor_planes::OrderedKicks<'a>> {
+        if let Some(authority) = self.authority {
+            let input = authority.piece(self.piece);
+            if (input.width, input.height, input.ceiling, input.allow_180)
+                != (
+                    template.width,
+                    template.height,
+                    template.ceiling,
+                    template.allow_180,
+                )
+            {
+                return None;
+            }
+            Some(anchor_planes::OrderedKicks::Normalized(input.ordered))
+        } else {
+            Some(anchor_planes::OrderedKicks::from_profile(
+                self.piece,
+                builtin_kick_profile(self.profile)?,
+                template.allow_180,
+            ))
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 enum DesiredLocks {
     All(ReachableLocks),
@@ -2906,6 +2994,40 @@ fn reverse_lock_reachable(
     y: i8,
     scratch: &mut ReachabilityScratch,
 ) -> ReverseReachabilityResult {
+    reverse_lock_reachable_with_request::<false>(template, board, rotation, x, y, scratch, None)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn reverse_lock_reachable_in_request(
+    template: &ReachabilityTemplate,
+    board: u64,
+    rotation: RotationState,
+    x: i8,
+    y: i8,
+    scratch: &mut ReachabilityScratch,
+    request: AnchorMovementRequest<'_>,
+) -> ReverseReachabilityResult {
+    reverse_lock_reachable_with_request::<true>(
+        template,
+        board,
+        rotation,
+        x,
+        y,
+        scratch,
+        Some(request),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn reverse_lock_reachable_with_request<const ALLOW_ANCHOR: bool>(
+    template: &ReachabilityTemplate,
+    board: u64,
+    rotation: RotationState,
+    x: i8,
+    y: i8,
+    scratch: &mut ReachabilityScratch,
+    request: Option<AnchorMovementRequest<'_>>,
+) -> ReverseReachabilityResult {
     let target = State {
         rotation,
         x,
@@ -2921,7 +3043,14 @@ fn reverse_lock_reachable(
         return ReverseReachabilityResult::default();
     }
 
-    reverse_lock_reachable_large(template, board, target_index, scratch)
+    reverse_lock_reachable_large_with_proven_exit_words::<false, ALLOW_ANCHOR>(
+        template,
+        board,
+        target_index,
+        scratch,
+        &[],
+        request,
+    )
 }
 
 fn reverse_lock_reachable_large(
@@ -2930,12 +3059,13 @@ fn reverse_lock_reachable_large(
     target_index: usize,
     scratch: &mut ReachabilityScratch,
 ) -> ReverseReachabilityResult {
-    reverse_lock_reachable_large_with_proven_exit_words::<false>(
+    reverse_lock_reachable_large_with_proven_exit_words::<false, false>(
         template,
         board,
         target_index,
         scratch,
         &[],
+        None,
     )
 }
 
@@ -2995,21 +3125,29 @@ fn reverse_lock_reachable_via_proven_exits(
     {
         return Some(ReverseReachabilityResult::default());
     }
-    Some(reverse_lock_reachable_large_with_proven_exit_words::<true>(
+    Some(reverse_lock_reachable_large_with_proven_exit_words::<
+        true,
+        false,
+    >(
         template,
         board,
         target,
         scratch,
         &words[..word_count],
+        None,
     ))
 }
 
-fn reverse_lock_reachable_large_with_proven_exit_words<const USE_PROVEN_EXITS: bool>(
+fn reverse_lock_reachable_large_with_proven_exit_words<
+    const USE_PROVEN_EXITS: bool,
+    const ALLOW_ANCHOR: bool,
+>(
     template: &ReachabilityTemplate,
     board: u64,
     target_index: usize,
     scratch: &mut ReachabilityScratch,
     proven_exit_words: &[u64],
+    request: Option<AnchorMovementRequest<'_>>,
 ) -> ReverseReachabilityResult {
     let state_count = template.state_masks.len();
     let generation = scratch.begin_search(state_count);
@@ -3021,6 +3159,29 @@ fn reverse_lock_reachable_large_with_proven_exit_words<const USE_PROVEN_EXITS: b
 
     let mut queue_cursor = 0usize;
     while queue_cursor < scratch.queue.len() {
+        // Preserve the complete scalar path for short queries. The
+        // larger representation is prepared only once useful work remains
+        // after this many processed poses; it never restarts from the target.
+        if ALLOW_ANCHOR
+            && queue_cursor == 32
+            && anchor_planes::hybrid_reverse_enabled()
+            && anchor_plane_trace_compatible()
+        {
+            if let Some(request) = request {
+                if let Some(ordered) = request.ordered(template) {
+                    if let Some(result) = anchor_planes::finish_reverse_search(
+                        template,
+                        request.piece,
+                        board,
+                        &ordered,
+                        &scratch.queue,
+                        queue_cursor,
+                    ) {
+                        return result.search;
+                    }
+                }
+            }
+        }
         let current = usize::from(scratch.queue[queue_cursor]);
         queue_cursor += 1;
         if template.is_sky_seed(current)

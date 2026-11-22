@@ -5,12 +5,18 @@
 //! The same order is used by both operands of a Product. A nonzero mask is
 //! only optimistic feasibility; movement and the exact queue verifier retain
 //! all positive authority.
+//!
+//! One unused bit also records whether any represented operation can be the
+//! first grounded lock on an empty board. Append and Product require a common
+//! row order, but either operand may supply that first lock. Its absence is a
+//! negative certificate only for an empty initial board.
 
 use std::sync::{Arc, Weak};
 
 use super::{FamilyNodeKind, GeometryCatalog, GeometrySolutionFamily};
 
 pub(super) const ROW_ORDER_ALL: u32 = (1 << 24) - 1;
+const FIRST_LOCK_POSSIBLE: u32 = 1 << 24;
 const INTERNAL_ROWS: u16 = 0b01_1110;
 
 // Bits are the lexicographic permutations of [1, 2, 3, 4].
@@ -65,7 +71,7 @@ impl CatalogBinding {
 #[derive(Debug)]
 pub(super) struct RowOrderCapability {
     binding: CatalogBinding,
-    row_masks: Vec<u32>,
+    row_states: Vec<u32>,
 }
 
 impl RowOrderCapability {
@@ -82,8 +88,10 @@ impl RowOrderCapability {
             return None;
         }
 
-        let mut row_masks = Vec::new();
-        row_masks.try_reserve_exact(catalog.skeleton_count()).ok()?;
+        let mut row_states = Vec::new();
+        row_states
+            .try_reserve_exact(catalog.skeleton_count())
+            .ok()?;
         for row in 0..catalog.skeleton_count() {
             let row = u32::try_from(row).ok()?;
             // This authenticates every concrete alternative. No selected
@@ -102,26 +110,57 @@ impl RowOrderCapability {
                 // realization requirements, without instantiating a pose.
                 catalog.realization_requirement_is_satisfied(row, deleted)
             })?;
-            row_masks.push(mask);
+            // On an empty board a valid pose at the floor has an unobstructed
+            // vertical drop. Check the exact frame-zero projection without
+            // warming the catalog's optional lazy instantiation cache. For a
+            // nonempty board this certificate stays unknown; a failed drop
+            // must not rule out a lock reached through a rotation or slide.
+            let first_lock = if catalog.initial_board() != 0 || occupied & 1 == 0 {
+                false
+            } else if let Some(poses) = catalog.instantiated_realizations(row, 0) {
+                poses.iter().any(|pose| pose.lock_y == 0)
+            } else {
+                catalog.realizations(row).iter().any(|&realization| {
+                    catalog
+                        .instantiate_realization(catalog.skeleton(row).cells, realization, 0)
+                        .is_some_and(|pose| pose.lock_y == 0)
+                })
+            };
+            row_states.push(mask | if first_lock { FIRST_LOCK_POSSIBLE } else { 0 });
         }
         Some(Self {
             binding: CatalogBinding::of(catalog),
-            row_masks,
+            row_states,
         })
     }
 
-    pub(super) fn row_mask(&self, row: u32) -> Option<u32> {
-        self.row_masks.get(row as usize).copied()
+    fn row_state(&self, row: u32) -> Option<u32> {
+        self.row_states.get(row as usize).copied()
     }
 
+    fn selected_state(&self, rows: &[u32]) -> Option<u32> {
+        rows.iter().try_fold(ROW_ORDER_ALL, |state, &row| {
+            Some(combine_selected(state, self.row_state(row)?))
+        })
+    }
+
+    #[cfg(test)]
+    pub(super) fn row_mask(&self, row: u32) -> Option<u32> {
+        Some(self.row_state(row)? & ROW_ORDER_ALL)
+    }
+
+    #[cfg(test)]
     pub(super) fn selected_mask(&self, rows: &[u32]) -> Option<u32> {
-        rows.iter()
-            .try_fold(ROW_ORDER_ALL, |mask, &row| Some(mask & self.row_mask(row)?))
+        Some(self.selected_state(rows)? & ROW_ORDER_ALL)
     }
 
     fn retained_bytes(&self) -> usize {
-        self.row_masks.capacity() * core::mem::size_of::<u32>()
+        self.row_states.capacity() * core::mem::size_of::<u32>()
     }
+}
+
+fn combine_selected(left: u32, right: u32) -> u32 {
+    (left & right & ROW_ORDER_ALL) | ((left | right) & FIRST_LOCK_POSSIBLE)
 }
 
 fn mask_for_domain(
@@ -235,10 +274,10 @@ impl FamilyRowOrderBuilder {
             };
             let value = match node.kind {
                 FamilyNodeKind::Append => {
-                    let Some(row) = self.capability.row_mask(node.row_id) else {
+                    let Some(row) = self.capability.row_state(node.row_id) else {
                         return RowOrderBuildAdvance::Unavailable;
                     };
-                    left & row
+                    combine_selected(left, row)
                 }
                 FamilyNodeKind::Union | FamilyNodeKind::Product => {
                     let Some(right) = self.values.get(node.right as usize).copied() else {
@@ -247,7 +286,7 @@ impl FamilyRowOrderBuilder {
                     if node.kind == FamilyNodeKind::Union {
                         left | right
                     } else {
-                        left & right
+                        combine_selected(left, right)
                     }
                 }
             };
@@ -313,31 +352,49 @@ impl FamilyRowOrderTable {
         self.family.as_ptr() == Arc::as_ptr(family)
             && self.capability.binding == CatalogBinding::of(catalog)
             && self.values.len() == family.node_count() as usize + 2
-            && self.capability.row_masks.len() == catalog.skeleton_count()
+            && self.capability.row_states.len() == catalog.skeleton_count()
     }
 
+    #[cfg(test)]
     pub(super) fn mask(&self, reference: u32) -> Option<u32> {
-        self.values.get(reference as usize).copied()
+        Some(*self.values.get(reference as usize)? & ROW_ORDER_ALL)
     }
 
+    #[cfg(test)]
     pub(super) fn row_mask(&self, row: u32) -> Option<u32> {
         self.capability.row_mask(row)
     }
 
+    #[cfg(test)]
     pub(super) fn selected_mask(&self, rows: &[u32]) -> Option<u32> {
         self.capability.selected_mask(rows)
     }
 
+    pub(super) fn prefix_state(&self, rows: &[u32]) -> Option<u32> {
+        self.capability.selected_state(rows)
+    }
+
+    pub(super) fn extend_prefix(&self, prefix_state: u32, row: u32) -> Option<u32> {
+        Some(combine_selected(
+            prefix_state,
+            self.capability.row_state(row)?,
+        ))
+    }
+
     pub(super) fn task_mask(
         &self,
-        prefix_mask: u32,
+        prefix_state: u32,
         family: u32,
         continuations: &[u32],
     ) -> Option<u32> {
-        let mut mask = prefix_mask & self.mask(family)?;
+        let mut state = combine_selected(prefix_state, *self.values.get(family as usize)?);
         for &continuation in continuations {
-            mask &= self.mask(continuation)?;
+            state = combine_selected(state, *self.values.get(continuation as usize)?);
         }
-        Some(mask)
+        if self.capability.binding.initial == 0 && state & FIRST_LOCK_POSSIBLE == 0 {
+            return Some(0);
+        }
+        // The first-lock bit never grants row-order or positive authority.
+        Some(state & ROW_ORDER_ALL)
     }
 }

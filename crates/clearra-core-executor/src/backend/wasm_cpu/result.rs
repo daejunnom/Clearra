@@ -918,7 +918,6 @@ fn full6l_physical_prefix_pruning_eligible(
     problem: &SearchProblem,
     catalog: &GeometryCatalog,
 ) -> bool {
-    use clearra_core_domain::piece::piece_kind::PieceKind;
     use clearra_objectives::policy::objective_policy::ObjectivePolicy;
     use clearra_pc_graph::request::PcCountPolicy;
     use clearra_problem::{goal::SearchGoal, SearchProblemKind, SearchProblemPreset};
@@ -941,6 +940,8 @@ fn full6l_physical_prefix_pruning_eligible(
         || catalog.initial_board() != 0
         || catalog.required_cells() != (1_u64 << 60) - 1
         || problem.exact_pieces() != Some(15)
+        || problem.supply().source_sequence_length() != 15
+        || problem.supply().projects_standard_bag_lookahead()
         || problem.objective() != ObjectivePolicy::unique()
         || problem.count_policy() != PcCountPolicy::CountUnique
         || problem.queue_observation_policy() != QueueObservationPolicy::FullQueueOracle
@@ -956,25 +957,21 @@ fn full6l_physical_prefix_pruning_eligible(
         || backend.max_frontier_states() != 0
         || backend.max_memory_mib().is_some()
         || !problem.initial_hold().hold_empty()
-        || !super::uses_order_independent_pc_candidate_digest(problem)
     {
         return false;
     }
+    // Positive-requirement infeasibility is independent of queue structure.
+    // Both serial and parallel filtered producers disable candidate digests
+    // and report that evidence as not calculated, so digest support must not
+    // restrict this negative-only physical proof to symbolic bag sources.
     problem
         .piece_source()
         .materialized_universe()
-        .and_then(|universe| universe.complete_factorized_layout())
-        .is_some_and(|layout| {
-            layout.full_sequence_len() == 15
-                && layout.visible_sequence_len() == 15
-                && layout.segment_count() == 3
-                && layout
-                    .segments()
-                    .map(|segment| segment.draw_count())
-                    .eq([1, 7, 7])
-                && layout
-                    .segments()
-                    .all(|segment| segment.choices() == PieceKind::STANDARD_TETROMINOES)
+        .is_some_and(|universe| {
+            universe.complete()
+                && universe.truncation_reason().is_none()
+                && universe.pattern_count() != 0
+                && universe.total_possible_pattern_count() == universe.pattern_count() as u128
         })
 }
 

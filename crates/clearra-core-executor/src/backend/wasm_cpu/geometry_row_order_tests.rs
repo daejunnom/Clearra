@@ -419,7 +419,7 @@ fn row_order_family_masks_match_every_explicit_path_and_shared_product_choice() 
     assert_eq!(table.mask(reference_count), None);
     // A task's later Product continuation must share the same order too:
     // adding the incompatible continuation changes this nonzero task to zero.
-    let prefix = table.row_mask(row_a).unwrap();
+    let prefix = table.prefix_state(&[row_a]).unwrap();
     assert_ne!(prefix & table.mask(c).unwrap() & table.mask(d).unwrap(), 0);
     assert_eq!(
         prefix & table.mask(c).unwrap() & table.mask(d).unwrap() & table.mask(b).unwrap(),
@@ -428,4 +428,86 @@ fn row_order_family_masks_match_every_explicit_path_and_shared_product_choice() 
     assert_ne!(table.task_mask(prefix, c, &[d]).unwrap(), 0);
     assert_eq!(table.task_mask(prefix, c, &[d, b]), Some(0));
     assert_eq!(table.task_mask(prefix, c, &[reference_count]), None);
+}
+
+#[test]
+fn row_order_first_lock_combines_union_product_prefix_and_continuations() {
+    let catalog = full6_catalog();
+    let floating = o_row(&catalog, 4, 5, 0);
+    let floor = o_row(&catalog, 0, 1, 6);
+    let gap_a = o_row(&catalog, 0, 2, 0);
+    let gap_b = o_row(&catalog, 1, 3, 2);
+    let mut family = GeometrySolutionFamily::new();
+    let tail = family
+        .append(floating, FAMILY_EMPTY)
+        .expect("floating leaf");
+    let grounded = family.append(floor, FAMILY_EMPTY).expect("grounded leaf");
+    let deferred = family.append(gap_a, tail).expect("gapped prefix");
+    let choice = family
+        .union(deferred, grounded)
+        .expect("union alternatives");
+    let product = family.product(tail, grounded).expect("product components");
+    let appended = family.append(floor, tail).expect("grounded prefix");
+    let cycle_a = family.append(gap_a, FAMILY_EMPTY).expect("first cycle row");
+    let cycle = family.append(gap_b, cycle_a).expect("second cycle row");
+    let grounded_cycle = family.product(cycle, grounded).expect("grounded cycle");
+    let family = Arc::new(family);
+    let table = build_table(&catalog, &family);
+    let empty = table.prefix_state(&[]).expect("empty prefix state");
+    let prefix = table.prefix_state(&[floor]).expect("grounded prefix state");
+    assert_eq!(table.extend_prefix(empty, floor), Some(prefix));
+    assert_ne!(table.mask(tail), Some(0));
+    assert_ne!(table.mask(deferred), Some(0));
+    assert_eq!(table.task_mask(empty, tail, &[]), Some(0));
+    assert_eq!(table.task_mask(empty, deferred, &[]), Some(0));
+    assert_eq!(table.task_mask(empty, FAMILY_EMPTY, &[]), Some(0));
+    for reference in [choice, product, appended] {
+        assert_ne!(table.task_mask(empty, reference, &[]), Some(0));
+    }
+    // The first lock may be in a later Product continuation or in the fixed
+    // selected prefix. Requiring each operand to contain one would lose paths.
+    assert_ne!(table.task_mask(empty, tail, &[grounded]), Some(0));
+    assert_ne!(table.task_mask(prefix, tail, &[]), Some(0));
+    assert_ne!(table.task_mask(prefix, FAMILY_EMPTY, &[]), Some(0));
+    // A possible first lock cannot rescue an incompatible common row order.
+    assert_eq!(table.task_mask(empty, grounded_cycle, &[]), Some(0));
+    assert_eq!(table.task_mask(prefix, cycle, &[]), Some(0));
+    assert_eq!(family.path_count(choice), Some(2));
+    assert_eq!(family.path_count(product), Some(1));
+}
+
+#[test]
+fn row_order_first_lock_nonempty_board_keeps_unknown_feasibility() {
+    let initial = 3_u64 | (3_u64 << 10);
+    let catalog = GeometryCatalog::compile_for_required_cells_on_dimensions(
+        10,
+        6,
+        initial,
+        ((1_u64 << 60) - 1) & !initial,
+    )
+    .expect("complete nonempty six-row catalog");
+    let supported = o_row(&catalog, 2, 3, 0);
+    let floating = o_row(&catalog, 4, 5, 4);
+    assert!(catalog
+        .instantiations(supported, 0)
+        .any(|pose| { pose.lock_y == 2 && initial & (pose.lock_mask >> 10) != 0 }));
+    let mut family = GeometrySolutionFamily::new();
+    let supported = family
+        .append(supported, FAMILY_EMPTY)
+        .expect("supported leaf");
+    let floating = family
+        .append(floating, FAMILY_EMPTY)
+        .expect("floating leaf");
+    let family = Arc::new(family);
+    let table = build_table(&catalog, &family);
+    let empty = table.prefix_state(&[]).expect("empty prefix state");
+    for reference in [supported, floating] {
+        // No floor-only negative inference is made on a nonempty board,
+        // even when this particular leaf has no obvious supporting cell.
+        assert_eq!(
+            table.task_mask(empty, reference, &[]),
+            table.mask(reference)
+        );
+        assert_ne!(table.task_mask(empty, reference, &[]), Some(0));
+    }
 }

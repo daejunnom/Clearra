@@ -97,6 +97,134 @@ fn physical_row_order_future_pruning_preserves_order_and_raw_specialization() {
     }
 }
 
+#[test]
+fn physical_row_order_first_lock_prunes_full6_family_and_preserves_drop_witness() {
+    let catalog = full_catalog();
+    let rows_for_pairs = |pairs: [(u32, u32); 3]| {
+        let catalog = &catalog;
+        pairs
+            .into_iter()
+            .flat_map(|(lower, upper)| {
+                (0..5).map(move |column| {
+                    let cells =
+                        (3_u64 << (lower * 10 + column * 2)) | (3_u64 << (upper * 10 + column * 2));
+                    catalog
+                        .skeleton_id(PieceKind::O, cells)
+                        .expect("paired O skeleton belongs to the full catalog")
+                })
+            })
+            .collect::<Vec<_>>()
+    };
+    let grounded_rows = rows_for_pairs([(0, 1), (2, 3), (4, 5)]);
+    let blocked_rows = rows_for_pairs([(0, 5), (1, 2), (3, 4)]);
+    for rows in [&grounded_rows, &blocked_rows] {
+        let mut occupied = 0_u64;
+        for &row in rows {
+            let cells = catalog.skeleton(row).cells;
+            assert_eq!(occupied & cells, 0);
+            occupied |= cells;
+        }
+        assert_eq!(occupied, (1_u64 << 60) - 1);
+        assert!(!prefix_pruning::selected_prefix_stalls(&catalog, rows));
+    }
+    assert!(blocked_rows
+        .iter()
+        .all(|&row| catalog.instantiations(row, 0).all(|pose| pose.lock_y != 0)));
+
+    // Independent concrete witness: five disjoint floor drops fill two rows,
+    // then both rows clear. Check every pose against its original-row frame.
+    let mut board = 0_u64;
+    for (index, &row) in grounded_rows.iter().enumerate() {
+        let deleted = (1_u16 << (2 * (index / 5))) - 1;
+        let lock = (3_u64 | (3_u64 << 10)) << (2 * (index % 5));
+        let pose = catalog
+            .instantiations(row, deleted)
+            .find(|pose| pose.lock_mask == lock)
+            .expect("each original-row O projects to its recorded floor drop");
+        assert_eq!(pose.lock_y, 0);
+        assert_eq!(board & lock, 0);
+        board |= lock;
+        if index % 5 == 4 {
+            assert_eq!(board, (1_u64 << 20) - 1);
+            board = 0;
+        }
+    }
+    assert_eq!(board, 0);
+
+    let mut family = GeometrySolutionFamily::new();
+    let mut grounded = FAMILY_EMPTY;
+    let mut blocked = FAMILY_EMPTY;
+    for &row in grounded_rows.iter().rev() {
+        grounded = family.append(row, grounded).expect("grounded family path");
+    }
+    for &row in blocked_rows.iter().rev() {
+        blocked = family.append(row, blocked).expect("blocked family path");
+    }
+    let root = family
+        .union(grounded, blocked)
+        .expect("two complete tilings");
+    let family = Arc::new(family);
+    let raw_count = family.path_count(root);
+    assert_eq!(raw_count, Some(2));
+    let mut counts = [0; 7];
+    counts[piece_index(PieceKind::O)] = 15;
+    let targets: Arc<[TargetGroup]> = Arc::from([TargetGroup {
+        key: PieceMultisetKey::from_counts(counts),
+        pattern_index_id: 0,
+        possible_patterns: Arc::new(PatternBitSet::all(1)),
+        pattern_index: None,
+    }]);
+    let mut raw = FamilyEnumerator::from_shared_completed_family(
+        Arc::clone(&targets),
+        Arc::clone(&family),
+        root,
+        15,
+        raw_count,
+    );
+    let mut filtered = FamilyEnumerator::from_shared_completed_family(
+        Arc::clone(&targets),
+        Arc::clone(&family),
+        root,
+        15,
+        raw_count,
+    );
+    filtered.enable_physical_prefix_pruning();
+    prepare(&mut filtered, &catalog, None, 1);
+    let raw_candidates = collect_steps(&mut raw, &catalog, 1, true).0;
+    let survivors = collect_steps(&mut filtered, &catalog, 1, true).0;
+    assert_eq!(raw_candidates.len(), 2);
+    assert_eq!(survivors.len(), 1);
+    for (rows, should_survive) in [(&grounded_rows, true), (&blocked_rows, false)] {
+        // A frozen seed may already have selected its entire candidate. Its
+        // prefix must be revalidated even when no family nodes remain.
+        let (mut leaf, _) = FamilyEnumerator::from_completed_family(
+            Arc::clone(&targets),
+            GeometrySolutionFamily::new(),
+            FAMILY_EMPTY,
+            15,
+            None,
+        );
+        leaf.rows[..15].copy_from_slice(rows);
+        leaf.tasks[0].depth = 15;
+        leaf.enable_physical_prefix_pruning();
+        prepare(&mut leaf, &catalog, None, 1);
+        let outcome = leaf
+            .next_candidate_step(&catalog, true, usize::MAX)
+            .expect("complete frozen prefix has a valid traversal");
+        assert_eq!(
+            matches!(outcome, FamilyEnumerationAdvance::Candidate(_)),
+            should_survive,
+        );
+    }
+    let mut expected = grounded_rows;
+    expected.sort_unstable();
+    assert_eq!(survivors[0].2, expected);
+    assert!(raw_candidates.contains(&survivors[0]));
+    assert_eq!(filtered.prefix_profile.row_order_pruned_subtrees, 1);
+    assert_eq!(filtered.prefix_profile.emitted_candidates, 1);
+    assert_eq!(family.path_count(root), raw_count);
+}
+
 #[cfg(feature = "parallel")]
 #[test]
 fn physical_row_order_canonical_seeds_share_table_once_and_validate_leaf_prefix() {

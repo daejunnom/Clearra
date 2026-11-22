@@ -465,14 +465,38 @@ fn source_prefix_cache_diagnostic_keys_preserve_actual_decisions_and_owner() {
     };
     let prefixes = test_prefixes(&catalog, 0);
     let translated = test_prefixes(&catalog, 1);
+    let targets: Vec<_> = (0..7)
+        .map(|extra| {
+            let mut counts = [2; 7];
+            counts[extra] += 1;
+            super::TargetGroup {
+                key: clearra_supply::pattern_universe::PieceMultisetKey::from_counts(counts),
+                pattern_index_id: extra as u32,
+                possible_patterns: Arc::new(
+                    clearra_coverage::pattern::pattern_bitset::PatternBitSet::new(1),
+                ),
+                pattern_index: None,
+            }
+        })
+        .collect();
+    let request = super::FullDrawPrefixRequest {
+        prefix_max: [2; 7],
+        suffix_min: [1; 7],
+        two_bag_plus_one: false,
+    }
+    .for_targets(&targets)
+    .unwrap();
     for (index, (rows, other)) in prefixes.iter().zip(translated).enumerate() {
         let original = super::selected_source_prefix_decision(&catalog, rows);
         assert_eq!(original.proved_infeasible, index == 2);
         assert_eq!(original.root_fast_pass, index == 0);
-        assert_eq!(profile.stalls(&catalog, rows), original.proved_infeasible);
+        assert_eq!(
+            profile.stalls(request, &targets, &catalog, rows),
+            original.proved_infeasible
+        );
         let reversed: Vec<_> = other.into_iter().rev().collect();
         assert_eq!(
-            profile.stalls(&catalog, &reversed),
+            profile.stalls(request, &targets, &catalog, &reversed),
             original.proved_infeasible
         );
     }

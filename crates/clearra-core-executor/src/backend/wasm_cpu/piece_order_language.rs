@@ -1772,7 +1772,7 @@ impl PieceOrderLanguageCache {
                 "wasm_piece_language_root_out_of_range",
             ));
         }
-        self.prepare_graph_classes(graph.nodes.len())?;
+        self.ensure_graph_class_storage(graph.nodes.len())?;
         for node_index in (0..graph.nodes.len()).rev() {
             let accepting = graph.nodes[node_index].accepting();
             self.edge_scratch.clear();
@@ -1808,6 +1808,10 @@ impl PieceOrderLanguageCache {
                 self.edge_scratch.dedup();
                 let remaining_depth = self.remaining_depth(accepting)?;
                 self.graph_classes[node_index] = self.intern_node(accepting, remaining_depth)?;
+            } else {
+                // Every child is written earlier in this reverse traversal.
+                // Overwrite dead nodes too, without clearing the whole buffer.
+                self.graph_classes[node_index] = EMPTY_REFERENCE;
             }
         }
         Ok(self
@@ -1818,6 +1822,12 @@ impl PieceOrderLanguageCache {
     }
 
     fn prepare_graph_classes(&mut self, node_count: usize) -> Result<(), WasmExactSearchError> {
+        self.ensure_graph_class_storage(node_count)?;
+        self.graph_classes[..node_count].fill(EMPTY_REFERENCE);
+        Ok(())
+    }
+
+    fn ensure_graph_class_storage(&mut self, node_count: usize) -> Result<(), WasmExactSearchError> {
         self.ensure_buckets();
         if self.graph_classes.len() < node_count {
             self.graph_classes
@@ -1829,7 +1839,6 @@ impl PieceOrderLanguageCache {
                 })?;
             self.graph_classes.resize(node_count, EMPTY_REFERENCE);
         }
-        self.graph_classes[..node_count].fill(EMPTY_REFERENCE);
         Ok(())
     }
 
@@ -3888,6 +3897,41 @@ mod tests {
         assert!(PieceOrderLanguageCache::default()
             .canonicalize_and_mark_live(&mut graph)
             .is_err());
+    }
+
+    #[test]
+    fn fused_language_reused_classes_reject_invalid_topology_and_recover() {
+        let mut cache = PieceOrderLanguageCache::default();
+        let mut valid = branching_operation_graph(true);
+        let expected_root = cache
+            .canonicalize_and_mark_live(&mut valid)
+            .expect("the original graph is topological")
+            .expect("the original graph has an accepting path");
+        let expected_words = words(&cache, expected_root);
+
+        let mut backward_edge = branching_operation_graph(true);
+        backward_edge.nodes.swap(0, 1);
+        let mut missing_child = branching_operation_graph(true);
+        missing_child
+            .nodes
+            .pop()
+            .expect("the fixture has a final node referenced by an edge");
+
+        for mut invalid in [backward_edge, missing_child] {
+            let error = cache
+                .canonicalize_and_mark_live(&mut invalid)
+                .expect_err("an invalid edge cannot reuse a previous graph's class");
+            assert_eq!(
+                error,
+                super::WasmExactSearchError::InvalidProblem("wasm_piece_language_not_topological")
+            );
+            let root = cache
+                .canonicalize_and_mark_live(&mut valid)
+                .expect("the next graph must not depend on the rejected traversal")
+                .expect("the valid graph still has an accepting path");
+            assert_eq!(root, expected_root);
+            assert_eq!(words(&cache, root), expected_words);
+        }
     }
 
     #[test]
