@@ -735,7 +735,7 @@ impl ExecutorSearchProfileSession {
     /// Return the submitting thread and pooled worker aggregates separately.
     /// The submitting thread may also run a native worker. Neither list is
     /// exclusive wall time: different spans can overlap or be nested.
-    #[cfg(all(feature = "local-search-ab", not(target_family = "wasm")))]
+    #[cfg(not(target_family = "wasm"))]
     pub fn finish_partitioned(
         mut self,
     ) -> (
@@ -865,7 +865,6 @@ mod tests {
         assert_eq!(stage(&stages).work_item_count, 27);
     }
 
-    #[cfg(feature = "local-search-ab")]
     #[test]
     fn diagnostic_profile_distinguishes_caller_from_pool_worker_work() {
         let session = ExecutorSearchProfileSession::start().expect("caller profile");

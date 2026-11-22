@@ -352,6 +352,7 @@ pub use pc_candidate_page_boundary::{
 };
 pub use pc_chance_probability_result::{
     PcChanceIngressOrigin, PcChanceProblemPreset, PcChanceQuerySnapshot,
+    PcGlobalProbabilityV1Result, PcGlobalProbabilityValidationError,
     PcProbabilityCompletenessEvidence, PcProbabilityV2Result,
 };
 pub use pc_failed_queue_result::{

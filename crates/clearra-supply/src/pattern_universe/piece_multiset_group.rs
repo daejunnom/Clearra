@@ -17,6 +17,7 @@ use super::hold_multiset_reachability::ReachableMultisetWorkspace;
 use super::materialized_pattern_universe::{
     MaterializedPatternUniverse, MaterializedPatternUniverseStructure,
 };
+use super::FactorizedPatternLayout;
 
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct PieceMultisetKey {
@@ -99,6 +100,10 @@ pub struct PackingMultisetFamily {
 pub enum PackingPatternMembershipKind {
     ExactMaterialized,
     ExactSymbolicStandardBag,
+    /// Exact reachable full-draw multiset keys with shared original-universe
+    /// extent. The group bitmap is an upper bound, not per-queue membership;
+    /// an ordinal-preserving factorized supply product must decide coverage.
+    ExactSymbolicFactorizedFullDraw,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -135,6 +140,7 @@ impl PackingPatternMembershipKind {
         match self {
             Self::ExactMaterialized => "exact-materialized",
             Self::ExactSymbolicStandardBag => "exact-symbolic-standard-bag",
+            Self::ExactSymbolicFactorizedFullDraw => "exact-symbolic-factorized-full-draw",
         }
     }
 }
@@ -220,6 +226,219 @@ impl PackingMultisetGroup {
 }
 
 impl MaterializedPatternUniverse {
+    /// Checked construction peak for the explicitly selected symbolic
+    /// factorized full-draw family. No concrete queue or pattern-ID record is
+    /// enumerated. Unsupported source/hold scopes return `None`.
+    pub fn checked_symbolic_factorized_full_draw_family_build_projection(
+        &self,
+        placed_piece_count: usize,
+        initial_hold: HoldAutomatonState,
+        hold_enabled: bool,
+        hold_projection: PackingHoldProjection,
+    ) -> Result<Option<PackingMultisetFamilyBuildProjection>, PackingMultisetBuildError> {
+        let Some((layout, _)) = self.factorized_full_draw_scope(
+            placed_piece_count,
+            initial_hold,
+            hold_enabled,
+            hold_projection,
+        ) else {
+            return Ok(None);
+        };
+        Ok(Some(factorized_full_draw_build_plan(layout)?.projection))
+    }
+
+    /// Explicit symbolic consumer entry point. The returned keys are exact,
+    /// while every group's shared bitmap denotes the original source extent.
+    /// Callers must use an exact factorized ordinal product before accepting a
+    /// Build result. Generic materialized-family APIs deliberately do not call
+    /// this method, and it grants no coverage, replay, or enumeration authority.
+    pub fn symbolic_factorized_full_draw_family_for_execution(
+        &self,
+        placed_piece_count: usize,
+        initial_hold: HoldAutomatonState,
+        hold_enabled: bool,
+        hold_projection: PackingHoldProjection,
+    ) -> Result<Option<PackingMultisetFamily>, PackingMultisetBuildError> {
+        self.symbolic_factorized_full_draw_family_bounded(
+            placed_piece_count,
+            initial_hold,
+            hold_enabled,
+            hold_projection,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn symbolic_factorized_full_draw_family_for_execution_with_memory_limit(
+        &self,
+        placed_piece_count: usize,
+        initial_hold: HoldAutomatonState,
+        hold_enabled: bool,
+        hold_projection: PackingHoldProjection,
+        already_retained_bytes: u128,
+        max_memory_bytes: u128,
+    ) -> Result<Option<PackingMultisetFamily>, PackingMultisetBuildError> {
+        self.symbolic_factorized_full_draw_family_bounded(
+            placed_piece_count,
+            initial_hold,
+            hold_enabled,
+            hold_projection,
+            Some(FamilyMemoryLimit {
+                already_retained_bytes,
+                max_memory_bytes,
+            }),
+        )
+    }
+
+    fn factorized_full_draw_scope(
+        &self,
+        placed_piece_count: usize,
+        initial_hold: HoldAutomatonState,
+        hold_enabled: bool,
+        hold_projection: PackingHoldProjection,
+    ) -> Option<(FactorizedPatternLayout<'_>, Option<PieceKind>)> {
+        let layout = self.complete_factorized_layout()?;
+        if layout.full_sequence_len() != layout.visible_sequence_len()
+            || initial_hold.cursor() != 0
+            || initial_hold.hold_empty() != initial_hold.hold_piece().is_none()
+            || initial_hold.bag_epoch() != 0
+            || initial_hold.bag_remainder_key() != 0
+            || initial_hold.source_kind()
+                != crate::piece_source::PieceSourceKind::MaterializedPatternUniverse
+            || placed_piece_count > usize::from(u8::MAX)
+        {
+            return None;
+        }
+        let initial_piece = match hold_projection {
+            PackingHoldProjection::PreserveFinalHoldLanguage
+                if initial_hold.hold_piece().is_none()
+                    && placed_piece_count == layout.full_sequence_len() =>
+            {
+                None
+            }
+            PackingHoldProjection::ReleaseHeldAtTerminal
+                if hold_enabled
+                    && layout
+                        .full_sequence_len()
+                        .checked_add(usize::from(initial_hold.hold_piece().is_some()))
+                        == Some(placed_piece_count) =>
+            {
+                initial_hold.hold_piece()
+            }
+            _ => return None,
+        };
+        Some((layout, initial_piece))
+    }
+
+    fn symbolic_factorized_full_draw_family_bounded(
+        &self,
+        placed_piece_count: usize,
+        initial_hold: HoldAutomatonState,
+        hold_enabled: bool,
+        hold_projection: PackingHoldProjection,
+        memory_limit: Option<FamilyMemoryLimit>,
+    ) -> Result<Option<PackingMultisetFamily>, PackingMultisetBuildError> {
+        let Some((layout, initial_piece)) = self.factorized_full_draw_scope(
+            placed_piece_count,
+            initial_hold,
+            hold_enabled,
+            hold_projection,
+        ) else {
+            return Ok(None);
+        };
+        let plan = factorized_full_draw_build_plan(layout)?;
+        ensure_family_limit(memory_limit, 0, plan.projection.required_peak_bytes)?;
+
+        // Both vectors have a fixed admitted capacity. A segment emits each
+        // unordered choice subset once, then exact sorting/deduplication merges
+        // equal cumulative inventories. Queue permutations never enter the DP.
+        let mut keys =
+            factorized_family_vec::<PieceMultisetKey>(plan.key_capacity, 0, memory_limit)?;
+        let mut next = factorized_family_vec::<PieceMultisetKey>(
+            plan.key_capacity,
+            factorized_vec_bytes(&keys)?,
+            memory_limit,
+        )?;
+        keys.push(PieceMultisetKey::default());
+        for segment in layout.segments() {
+            next.clear();
+            for subset in 1_u8..=0x7f {
+                if subset & !segment.choice_mask() != 0
+                    || subset.count_ones() as usize != segment.draw_count()
+                {
+                    continue;
+                }
+                for &prefix in &keys {
+                    let mut key = prefix;
+                    for (index, piece) in PieceKind::STANDARD_TETROMINOES.into_iter().enumerate() {
+                        if subset & (1 << index) != 0 {
+                            key.push(piece);
+                        }
+                    }
+                    if next.len() == next.capacity() {
+                        return Err(PackingMultisetBuildError::ProjectionOverflow);
+                    }
+                    next.push(key);
+                }
+            }
+            next.sort_unstable();
+            next.dedup();
+            core::mem::swap(&mut keys, &mut next);
+        }
+        drop(next);
+        if let Some(piece) = initial_piece {
+            for key in &mut keys {
+                key.push(piece);
+            }
+        }
+        let key_bytes = factorized_vec_bytes(&keys)?;
+        let mut groups =
+            factorized_family_vec::<PackingMultisetGroup>(keys.len(), key_bytes, memory_limit)?;
+        let construction_base = key_bytes
+            .checked_add(factorized_vec_bytes(&groups)?)
+            .ok_or(PackingMultisetBuildError::ProjectionOverflow)?;
+        let bitset_projection = PatternBitSet::checked_all_projection(self.pattern_count())
+            .ok_or(PackingMultisetBuildError::ProjectionOverflow)?;
+        ensure_family_limit(
+            memory_limit,
+            construction_base,
+            bitset_projection.constructor_peak_bytes,
+        )?;
+        let all_patterns = Arc::new(match memory_limit {
+            Some(limit) => PatternBitSet::all_with_memory_limit(
+                self.pattern_count(),
+                limit
+                    .already_retained_bytes
+                    .checked_add(construction_base)
+                    .ok_or(PackingMultisetBuildError::ProjectionOverflow)?,
+                limit.max_memory_bytes,
+            )
+            .map_err(PackingMultisetBuildError::PatternBitSet)?,
+            None => PatternBitSet::all(self.pattern_count()),
+        });
+        let mut envelope = PieceMultisetKey::default();
+        for key in keys {
+            envelope = envelope.componentwise_max(key);
+            groups.push(PackingMultisetGroup {
+                key,
+                pattern_bits: Arc::clone(&all_patterns),
+            });
+        }
+        let family = PackingMultisetFamily {
+            envelope,
+            groups,
+            membership_kind: PackingPatternMembershipKind::ExactSymbolicFactorizedFullDraw,
+        };
+        ensure_family_limit(
+            memory_limit,
+            family
+                .checked_retained_bytes()
+                .ok_or(PackingMultisetBuildError::ProjectionOverflow)?,
+            0,
+        )?;
+        Ok(Some(family))
+    }
+
     /// Derives an allocation-free upper bound from the actual record, group,
     /// worker-stack, and private PatternBitSet layouts used by family
     /// construction. The projection is intentionally about construction peak;
@@ -874,6 +1093,101 @@ fn checked_multiset_key_count(total_piece_count: usize) -> Option<u128> {
     })
 }
 
+struct FactorizedFullDrawBuildPlan {
+    key_capacity: usize,
+    projection: PackingMultisetFamilyBuildProjection,
+}
+
+fn factorized_full_draw_build_plan(
+    layout: FactorizedPatternLayout<'_>,
+) -> Result<FactorizedFullDrawBuildPlan, PackingMultisetBuildError> {
+    let mut max_unique_keys = 1_u128;
+    let mut max_stage_keys = 1_u128;
+    let mut drawn = 0_usize;
+    for segment in layout.segments() {
+        let choices = segment.choices().len();
+        let selected = segment.draw_count().min(choices - segment.draw_count());
+        let subsets = (1..=selected)
+            .try_fold(1_u128, |count, divisor| {
+                count
+                    .checked_mul((choices - selected + divisor) as u128)?
+                    .checked_div(divisor as u128)
+            })
+            .ok_or(PackingMultisetBuildError::ProjectionOverflow)?;
+        let stage_keys = max_unique_keys
+            .checked_mul(subsets)
+            .ok_or(PackingMultisetBuildError::ProjectionOverflow)?;
+        max_stage_keys = max_stage_keys.max(stage_keys);
+        drawn = drawn
+            .checked_add(segment.draw_count())
+            .ok_or(PackingMultisetBuildError::ProjectionOverflow)?;
+        max_unique_keys = stage_keys.min(
+            checked_multiset_key_count(drawn)
+                .ok_or(PackingMultisetBuildError::ProjectionOverflow)?,
+        );
+    }
+    let key_capacity = usize::try_from(max_stage_keys)
+        .map_err(|_| PackingMultisetBuildError::ProjectionOverflow)?;
+    let key_bytes = max_stage_keys
+        .checked_mul(core::mem::size_of::<PieceMultisetKey>() as u128)
+        .ok_or(PackingMultisetBuildError::ProjectionOverflow)?;
+    let symbolic_frontier_bytes = key_bytes
+        .checked_mul(2)
+        .ok_or(PackingMultisetBuildError::ProjectionOverflow)?;
+    let group_storage_bytes = max_unique_keys
+        .checked_mul(core::mem::size_of::<PackingMultisetGroup>() as u128)
+        .ok_or(PackingMultisetBuildError::ProjectionOverflow)?;
+    let bitset = PatternBitSet::checked_all_projection(layout.pattern_count())
+        .ok_or(PackingMultisetBuildError::ProjectionOverflow)?;
+    // The second DP vector is dropped before the groups and all-pattern bitmap
+    // are allocated. The surviving key capacity, group slots, temporary bitmap
+    // Vec, and final bitmap Arc can coexist and are all charged here.
+    let finalization_peak = key_bytes
+        .checked_add(group_storage_bytes)
+        .and_then(|bytes| bytes.checked_add(bitset.constructor_peak_bytes))
+        .ok_or(PackingMultisetBuildError::ProjectionOverflow)?;
+    Ok(FactorizedFullDrawBuildPlan {
+        key_capacity,
+        projection: PackingMultisetFamilyBuildProjection {
+            worker_count: 0,
+            max_group_count: max_unique_keys,
+            max_record_count: 0,
+            record_storage_bytes: 0,
+            group_storage_bytes,
+            pattern_bitset_storage_bytes: bitset.shared_retained_bytes,
+            symbolic_frontier_bytes,
+            worker_stack_bytes: 0,
+            worker_coordination_bytes: 0,
+            required_peak_bytes: symbolic_frontier_bytes.max(finalization_peak),
+        },
+    })
+}
+
+fn factorized_vec_bytes<T>(values: &Vec<T>) -> Result<u128, PackingMultisetBuildError> {
+    (values.capacity() as u128)
+        .checked_mul(core::mem::size_of::<T>() as u128)
+        .ok_or(PackingMultisetBuildError::ProjectionOverflow)
+}
+
+fn factorized_family_vec<T>(
+    capacity: usize,
+    live_bytes: u128,
+    memory_limit: Option<FamilyMemoryLimit>,
+) -> Result<Vec<T>, PackingMultisetBuildError> {
+    let requested_bytes = (capacity as u128)
+        .checked_mul(core::mem::size_of::<T>() as u128)
+        .ok_or(PackingMultisetBuildError::ProjectionOverflow)?;
+    ensure_family_limit(memory_limit, live_bytes, requested_bytes)?;
+    let mut values = Vec::new();
+    values.try_reserve_exact(capacity).map_err(|_| {
+        PackingMultisetBuildError::AllocationFailed {
+            required_memory_bytes: live_bytes.saturating_add(requested_bytes),
+        }
+    })?;
+    ensure_family_limit(memory_limit, live_bytes, factorized_vec_bytes(&values)?)?;
+    Ok(values)
+}
+
 fn collect_pattern_multiset_records(
     universe: &MaterializedPatternUniverse,
     begin: usize,
@@ -1223,6 +1537,355 @@ const fn piece_index(piece: PieceKind) -> usize {
         PieceKind::Z => 4,
         PieceKind::J => 5,
         PieceKind::L => 6,
+    }
+}
+
+#[cfg(test)]
+mod factorized_full_draw_tests {
+    use std::collections::BTreeSet;
+
+    use clearra_core_domain::probability::probability_value::ProbabilityValue;
+    use clearra_coverage::universe::{
+        pattern_universe_id::PatternUniverseId, pattern_weight_model_id::PatternWeightModelId,
+    };
+
+    use crate::{
+        hold_automaton::SupplyProvenanceId, piece_source::PieceSourceId,
+        queue::queue_pattern_expression::QueuePatternExpression,
+    };
+
+    use super::*;
+
+    fn source(expression: &str, visible: usize) -> MaterializedPatternUniverse {
+        let expression = QueuePatternExpression::parse(expression, 0)
+            .unwrap()
+            .prefix(visible);
+        let count = expression.pattern_count();
+        assert!(expression.is_factorized());
+        MaterializedPatternUniverse::from_factorized_queue_expression(
+            PatternUniverseId::new(71),
+            PatternWeightModelId::new(72),
+            expression,
+            ProbabilityValue::new(1.0 / count as f64).unwrap(),
+            count as u128,
+        )
+        .unwrap()
+    }
+
+    fn initial(held: Option<PieceKind>) -> HoldAutomatonState {
+        HoldAutomatonState::new(
+            PieceSourceId::new(73),
+            0,
+            held,
+            0,
+            0,
+            SupplyProvenanceId(74),
+        )
+    }
+
+    fn concrete_keys(
+        universe: &MaterializedPatternUniverse,
+        held: Option<PieceKind>,
+    ) -> BTreeSet<PieceMultisetKey> {
+        (0..universe.pattern_count())
+            .map(|ordinal| {
+                PieceMultisetKey::from_pieces(
+                    universe.sequence_at(ordinal).iter().copied().chain(held),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn factorized_full_draw_dp_matches_every_small_original_queue_inventory() {
+        for expression in ["P1P4", "P2P3", "[LOI]2P7"] {
+            let universe = source(expression, usize::MAX);
+            let draws = universe
+                .complete_factorized_layout()
+                .unwrap()
+                .full_sequence_len();
+            for held in [None, Some(PieceKind::T)] {
+                let family = universe
+                    .symbolic_factorized_full_draw_family_for_execution(
+                        draws + usize::from(held.is_some()),
+                        initial(held),
+                        true,
+                        PackingHoldProjection::ReleaseHeldAtTerminal,
+                    )
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(
+                    family.membership_kind(),
+                    PackingPatternMembershipKind::ExactSymbolicFactorizedFullDraw
+                );
+                assert_eq!(
+                    family
+                        .groups()
+                        .iter()
+                        .map(PackingMultisetGroup::key)
+                        .collect::<BTreeSet<_>>(),
+                    concrete_keys(&universe, held),
+                    "{expression}, held={held:?}"
+                );
+                assert!(family
+                    .groups()
+                    .windows(2)
+                    .all(|groups| groups[0].key() < groups[1].key()));
+                assert!(family.groups().iter().all(|group| {
+                    group.pattern_bits().count_ones() as usize == universe.pattern_count()
+                        && Arc::ptr_eq(&family.groups()[0].pattern_bits, &group.pattern_bits)
+                }));
+            }
+            // Opt-in is essential: generic consumers retain concrete membership
+            // and cannot acquire symbolic authority just from this new API.
+            let generic = universe.packing_multiset_family_for_execution(
+                draws,
+                initial(None),
+                false,
+                PackingHoldProjection::PreserveFinalHoldLanguage,
+            );
+            assert_eq!(
+                generic.membership_kind(),
+                PackingPatternMembershipKind::ExactMaterialized
+            );
+            assert_eq!(
+                generic
+                    .groups()
+                    .iter()
+                    .map(PackingMultisetGroup::key)
+                    .collect::<BTreeSet<_>>(),
+                concrete_keys(&universe, None)
+            );
+        }
+    }
+
+    #[test]
+    fn p1p7p7_full_draw_family_has_seven_keys_and_accounts_for_its_real_bitmap() {
+        let universe = source("P1P7P7", 15);
+        let hold = initial(None);
+        let projection = universe
+            .checked_symbolic_factorized_full_draw_family_build_projection(
+                15,
+                hold,
+                true,
+                PackingHoldProjection::ReleaseHeldAtTerminal,
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(projection.max_group_count, 7);
+        assert_eq!(projection.max_record_count, 0);
+        assert_eq!(projection.record_storage_bytes, 0);
+        assert_eq!(projection.worker_count, 0);
+        assert_eq!(projection.symbolic_frontier_bytes, 2 * 7 * 8);
+        let bitmap = PatternBitSet::checked_all_projection(177_811_200).unwrap();
+        assert_eq!(bitmap.storage_retained_bytes, 22_226_400);
+        assert_eq!(bitmap.constructor_peak_bytes, 44_452_800);
+        assert_eq!(
+            projection.pattern_bitset_storage_bytes,
+            bitmap.shared_retained_bytes
+        );
+        assert_eq!(
+            projection.required_peak_bytes,
+            7 * 8
+                + 7 * core::mem::size_of::<PackingMultisetGroup>() as u128
+                + bitmap.constructor_peak_bytes
+        );
+        let base = 137;
+        let cap = base + projection.required_peak_bytes;
+        assert_eq!(
+            universe.symbolic_factorized_full_draw_family_for_execution_with_memory_limit(
+                15,
+                hold,
+                true,
+                PackingHoldProjection::ReleaseHeldAtTerminal,
+                base,
+                cap - 1,
+            ),
+            Err(PackingMultisetBuildError::MemoryCapacityExceeded {
+                required_memory_bytes: cap,
+                max_memory_bytes: cap - 1,
+            })
+        );
+        let family = universe
+            .symbolic_factorized_full_draw_family_for_execution_with_memory_limit(
+                15,
+                hold,
+                true,
+                PackingHoldProjection::ReleaseHeldAtTerminal,
+                base,
+                cap,
+            )
+            .unwrap()
+            .unwrap();
+        let expected = (0..7)
+            .map(|extra| {
+                let mut counts = [2; 7];
+                counts[extra] = 3;
+                PieceMultisetKey::from_counts(counts)
+            })
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            family
+                .groups()
+                .iter()
+                .map(PackingMultisetGroup::key)
+                .collect::<BTreeSet<_>>(),
+            expected
+        );
+        assert!(family.groups().iter().all(|group| {
+            group.key().total_count() == 15
+                && group.pattern_bits().pattern_count() == 177_811_200
+                && Arc::ptr_eq(&family.groups()[0].pattern_bits, &group.pattern_bits)
+        }));
+        assert_eq!(
+            family.checked_retained_bytes().unwrap(),
+            7 * core::mem::size_of::<PackingMultisetGroup>() as u128 + bitmap.shared_retained_bytes
+        );
+    }
+
+    #[test]
+    fn factorized_full_draw_exact_cap_matches_unbounded_with_terminal_hold() {
+        let universe = source("P1P4", 5);
+        for (hold, enabled, projection_kind, locks) in [
+            (
+                initial(None),
+                false,
+                PackingHoldProjection::PreserveFinalHoldLanguage,
+                5,
+            ),
+            (
+                initial(None),
+                true,
+                PackingHoldProjection::ReleaseHeldAtTerminal,
+                5,
+            ),
+            (
+                initial(Some(PieceKind::O)),
+                true,
+                PackingHoldProjection::ReleaseHeldAtTerminal,
+                6,
+            ),
+        ] {
+            let projection = universe
+                .checked_symbolic_factorized_full_draw_family_build_projection(
+                    locks,
+                    hold,
+                    enabled,
+                    projection_kind,
+                )
+                .unwrap()
+                .unwrap();
+            let base = 29;
+            let cap = base + projection.required_peak_bytes;
+            assert!(matches!(
+                universe.symbolic_factorized_full_draw_family_for_execution_with_memory_limit(
+                    locks,
+                    hold,
+                    enabled,
+                    projection_kind,
+                    base,
+                    cap - 1,
+                ),
+                Err(PackingMultisetBuildError::MemoryCapacityExceeded { .. })
+            ));
+            let bounded = universe
+                .symbolic_factorized_full_draw_family_for_execution_with_memory_limit(
+                    locks,
+                    hold,
+                    enabled,
+                    projection_kind,
+                    base,
+                    cap,
+                )
+                .unwrap();
+            let reference = universe
+                .symbolic_factorized_full_draw_family_for_execution(
+                    locks,
+                    hold,
+                    enabled,
+                    projection_kind,
+                )
+                .unwrap();
+            assert_eq!(bounded, reference);
+            assert!(
+                bounded.unwrap().checked_retained_bytes().unwrap()
+                    <= projection.required_peak_bytes
+            );
+        }
+    }
+
+    #[test]
+    fn factorized_full_draw_does_not_infer_hidden_draws_or_partial_hold_inventory() {
+        let full = source("P1P4", 5);
+        let prefix = source("P1P4", 4);
+        let mut shifted = initial(None);
+        shifted.cursor = 1;
+        let mut bag_state = initial(None);
+        bag_state.bag_remainder_key = 1;
+        for (universe, locks, hold, enabled, projection) in [
+            (
+                &prefix,
+                4,
+                initial(None),
+                true,
+                PackingHoldProjection::ReleaseHeldAtTerminal,
+            ),
+            (
+                &full,
+                4,
+                initial(None),
+                true,
+                PackingHoldProjection::ReleaseHeldAtTerminal,
+            ),
+            (
+                &full,
+                6,
+                initial(None),
+                true,
+                PackingHoldProjection::ReleaseHeldAtTerminal,
+            ),
+            (
+                &full,
+                5,
+                initial(None),
+                false,
+                PackingHoldProjection::ReleaseHeldAtTerminal,
+            ),
+            (
+                &full,
+                5,
+                initial(Some(PieceKind::I)),
+                true,
+                PackingHoldProjection::PreserveFinalHoldLanguage,
+            ),
+            (
+                &full,
+                5,
+                shifted,
+                true,
+                PackingHoldProjection::ReleaseHeldAtTerminal,
+            ),
+            (
+                &full,
+                5,
+                bag_state,
+                true,
+                PackingHoldProjection::ReleaseHeldAtTerminal,
+            ),
+        ] {
+            assert!(universe
+                .checked_symbolic_factorized_full_draw_family_build_projection(
+                    locks, hold, enabled, projection
+                )
+                .unwrap()
+                .is_none());
+            assert!(universe
+                .symbolic_factorized_full_draw_family_for_execution_with_memory_limit(
+                    locks, hold, enabled, projection, 0, 0,
+                )
+                .unwrap()
+                .is_none());
+        }
     }
 }
 

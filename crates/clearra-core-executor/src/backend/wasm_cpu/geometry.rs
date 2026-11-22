@@ -23,6 +23,10 @@ use super::{
     mix_digest, piece_index, WasmExactSearchError, MAX_BOARD64_PIECES,
 };
 
+#[path = "geometry_streaming.rs"]
+mod streaming;
+use streaming::StreamingGeometry;
+
 const NO_ROW: u32 = u32::MAX;
 const RESIDUAL_ENTRY_CHUNK_CAPACITY: usize = 4096;
 const UNION_LEVEL_COUNT: usize = 32;
@@ -2967,6 +2971,8 @@ pub(super) struct GeometrySearch {
     target_preparation_mode: Option<TargetGroupPreparationMode>,
     compiler: Option<FamilyCompiler>,
     enumerator: Option<FamilyEnumerator>,
+    streaming: Option<StreamingGeometry>,
+    streaming_probability_requested: bool,
     expanded_nodes: usize,
     peak_frontier: usize,
     candidate_family_count: Option<u128>,
@@ -3710,6 +3716,46 @@ fn checked_target_nested_retained_bytes(targets: &[TargetGroup]) -> Option<u128>
 }
 
 impl GeometrySearch {
+    /// Select incremental exact cover only for an explicit probability-only
+    /// caller. Existing count/unique callers retain the full-family compiler.
+    /// A started compiler cannot be reinterpreted as a fresh search.
+    pub fn enable_streaming_probability(&mut self) -> Result<(), WasmExactSearchError> {
+        if self.streaming_probability_requested {
+            return Ok(());
+        }
+        if self.target_preparation.is_some()
+            && matches!(
+                self.target_preparation_mode.as_ref(),
+                Some(TargetGroupPreparationMode::Internal { .. })
+            )
+        {
+            self.streaming_probability_requested = true;
+            return Ok(());
+        }
+        self.activate_streaming_probability()?;
+        self.streaming_probability_requested = true;
+        Ok(())
+    }
+
+    fn activate_streaming_probability(&mut self) -> Result<(), WasmExactSearchError> {
+        if !self
+            .compiler
+            .as_ref()
+            .is_some_and(StreamingGeometry::can_start)
+            || self.enumerator.is_some()
+            || self.external_targets.is_some()
+        {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "wasm_geometry_streaming_fresh_root_required",
+            ));
+        }
+        let compiler = self.compiler.take().expect("fresh compiler was checked");
+        self.streaming = Some(StreamingGeometry::from_compiler(compiler)?);
+        self.peak_frontier = 1;
+        self.candidate_family_count = None;
+        Ok(())
+    }
+
     pub(super) fn new_for_verifier_target(required_cells: u64, target: &TargetGroup) -> Self {
         // The verifier already owns the possible-pattern backing. Geometry
         // needs the same key and keeps only a reference to that backing.
@@ -3804,6 +3850,8 @@ impl GeometrySearch {
             target_preparation_mode: None,
             compiler: None,
             enumerator: None,
+            streaming: None,
+            streaming_probability_requested: false,
             expanded_nodes: 0,
             peak_frontier: 0,
             candidate_family_count: Some(0),
@@ -3922,6 +3970,8 @@ impl GeometrySearch {
             target_preparation_mode: Some(TargetGroupPreparationMode::Internal { required_cells }),
             compiler: None,
             enumerator: None,
+            streaming: None,
+            streaming_probability_requested: false,
             expanded_nodes: 0,
             peak_frontier: 0,
             candidate_family_count: None,
@@ -3946,6 +3996,8 @@ impl GeometrySearch {
                 Arc::clone(&shared.targets),
             )),
             enumerator: None,
+            streaming: None,
+            streaming_probability_requested: false,
             expanded_nodes: 0,
             peak_frontier: 0,
             candidate_family_count: None,
@@ -3973,6 +4025,8 @@ impl GeometrySearch {
                 Arc::clone(&shared.targets),
             )?),
             enumerator: None,
+            streaming: None,
+            streaming_probability_requested: false,
             expanded_nodes: 0,
             peak_frontier: 0,
             candidate_family_count: None,
@@ -4056,6 +4110,8 @@ impl GeometrySearch {
             target_preparation_mode: Some(TargetGroupPreparationMode::External),
             compiler: None,
             enumerator: None,
+            streaming: None,
+            streaming_probability_requested: false,
             expanded_nodes: 0,
             peak_frontier: 0,
             candidate_family_count: None,
@@ -4077,6 +4133,8 @@ impl GeometrySearch {
             target_preparation_mode: None,
             compiler: None,
             enumerator: None,
+            streaming: None,
+            streaming_probability_requested: false,
             expanded_nodes: 0,
             peak_frontier: 0,
             candidate_family_count: None,
@@ -4153,6 +4211,11 @@ impl GeometrySearch {
                                     Arc::clone(&shared.targets),
                                 ))
                             };
+                            if self.streaming_probability_requested {
+                                if let Err(error) = self.activate_streaming_probability() {
+                                    return GeometryAdvance::ResourceIncomplete(error.reason());
+                                }
+                            }
                         }
                         TargetGroupPreparationMode::External => {
                             self.external_targets = Some(shared);
@@ -4163,6 +4226,22 @@ impl GeometrySearch {
                     return GeometryAdvance::Pending;
                 }
             }
+        }
+        if self.streaming.is_some() {
+            // Both the shared inputs and the complete bounded DFS stack are
+            // already live. No transition allocates or grows traversal state.
+            if retained_limit_bytes.is_some_and(|limit| self.retained_bytes() as u128 > limit) {
+                return GeometryAdvance::ResourceIncomplete("geometry_memory_capacity_exceeded");
+            }
+            let streaming = self.streaming.as_mut().expect("streaming owner exists");
+            let advance = streaming.advance(catalog);
+            self.expanded_nodes = streaming.expanded_nodes;
+            self.peak_frontier = streaming.peak_frontier;
+            self.domain_pruned_states = streaming.domain_pruned_states;
+            if matches!(advance, GeometryAdvance::Complete) {
+                self.candidate_family_count = streaming.completed_count();
+            }
+            return advance;
         }
         let internal_limit = match retained_limit_bytes {
             Some(total_limit) => {
@@ -4278,6 +4357,28 @@ impl GeometrySearch {
         // distinct from the later per-worker Geometry traversal samples.
         let _stage =
             SearchStageSpan::begin(ExecutorSearchStage::WasmParallelGeometryCompileAndSplit);
+        if self.streaming_probability_requested {
+            while self.target_preparation.is_some() {
+                if control.is_cancelled() {
+                    return Err(WasmExactSearchError::Cancelled);
+                }
+                match self.advance_internal(catalog, None, None) {
+                    GeometryAdvance::Pending => {}
+                    GeometryAdvance::ResourceIncomplete(reason) => {
+                        return Err(WasmExactSearchError::InvalidProblem(reason));
+                    }
+                    GeometryAdvance::Candidate(_) | GeometryAdvance::Complete => {
+                        return Err(WasmExactSearchError::InvalidProblem(
+                            "wasm_parallel_geometry_compile_state_invalid",
+                        ));
+                    }
+                }
+            }
+            if control.is_cancelled() {
+                return Err(WasmExactSearchError::Cancelled);
+            }
+            return self.prepare_streaming_parallel(catalog, control, requested_workers);
+        }
         let needed_compile = self.target_preparation.is_some() || self.compiler.is_some();
         let mut path_counts = None;
         #[cfg(all(feature = "local-search-ab", target_os = "linux"))]
@@ -4550,6 +4651,8 @@ impl GeometrySearch {
                 compiler: None,
                 candidate_family_count: enumerator.candidate_count,
                 enumerator: Some(enumerator),
+                streaming: None,
+                streaming_probability_requested: false,
                 expanded_nodes: usize::from(index == 0) * self.expanded_nodes,
                 peak_frontier: usize::from(index == 0) * self.peak_frontier,
                 domain_pruned_states: usize::from(index == 0) * self.domain_pruned_states,
@@ -4662,21 +4765,18 @@ impl GeometrySearch {
     }
 
     pub fn target(&self, target_index: u32) -> Option<&TargetGroup> {
-        self.enumerator
-            .as_ref()
-            .map(|enumerator| enumerator.targets.as_ref())
-            .or_else(|| {
-                self.external_targets
-                    .as_ref()
-                    .map(SharedTargetGroups::targets)
-            })?
-            .get(target_index as usize)
+        self.targets()?.get(target_index as usize)
     }
 
     pub fn targets(&self) -> Option<&[TargetGroup]> {
-        self.enumerator
+        self.streaming
             .as_ref()
-            .map(|enumerator| enumerator.targets.as_ref())
+            .map(StreamingGeometry::targets)
+            .or_else(|| {
+                self.enumerator
+                    .as_ref()
+                    .map(|enumerator| enumerator.targets.as_ref())
+            })
             .or_else(|| {
                 self.external_targets
                     .as_ref()
@@ -4714,6 +4814,9 @@ impl GeometrySearch {
     }
 
     fn checked_active_target_nested_retained_bytes(&self) -> Option<u128> {
+        if let Some(streaming) = self.streaming.as_ref() {
+            return streaming.checked_target_nested_retained_bytes();
+        }
         let internal = self
             .compiler
             .as_ref()
@@ -4750,6 +4853,11 @@ impl GeometrySearch {
             .unwrap_or(usize::MAX);
         current_target_nested_bytes
             .saturating_add(self.shared_family_bytes)
+            .saturating_add(
+                self.streaming
+                    .as_ref()
+                    .map_or(0, StreamingGeometry::retained_bytes),
+            )
             .saturating_add(
                 self.compiler
                     .as_ref()

@@ -122,6 +122,7 @@ pub(super) struct BranchSearchOutcome {
     pub candidate_count: usize,
     pub candidate_digest: CandidateDigestEvidence,
     pub chance_rows: Vec<(usize, PatternBitSet)>,
+    pub candidate_domain_exhausted: bool,
     pub truncated_reason: Option<&'static str>,
 }
 
@@ -1052,6 +1053,11 @@ fn run_branch(
     );
     let mut local_ordinal = 0usize;
     let mut truncated_reason = None;
+    let mut candidate_domain_exhausted = false;
+    let global_probability = problem
+        .pc_chance_evidence_policy()
+        .retains_pc_global_probability_evidence();
+    let mut unpublished_symbolic_candidates = 0_usize;
     let retain_chance_rows = retains_ordinal_chance_rows(problem);
     let mut chance_rows = Vec::new();
     let solution_coverage_required = retains_solution_coverage_evidence(problem);
@@ -1066,6 +1072,11 @@ fn run_branch(
             return Err(WasmExactSearchError::InvalidProblem(
                 "wasm_parallel_branch_queue_aborted",
             ));
+        }
+        // Retain and drain every canonical task even after this certificate.
+        // No external cancellation or queue abort is used for normal success.
+        if global_probability && shared_coverage.all_original_patterns_covered() {
+            break;
         }
         #[cfg(any(feature = "search-stage-profiling", feature = "wasm-stage-profiling"))]
         let geometry_profile_scale = {
@@ -1082,7 +1093,10 @@ fn run_branch(
         geometry_span.finish(1);
         match advancement {
             GeometryAdvance::Pending => {}
-            GeometryAdvance::Complete => break,
+            GeometryAdvance::Complete => {
+                candidate_domain_exhausted = true;
+                break;
+            }
             GeometryAdvance::ResourceIncomplete(reason) => {
                 truncated_reason = Some(reason);
                 break;
@@ -1199,6 +1213,24 @@ fn run_branch(
                             }
                         }
                         workspace.merge_standard_bag_coverage(root)?;
+                        if global_probability {
+                            unpublished_symbolic_candidates =
+                                unpublished_symbolic_candidates.saturating_add(1);
+                            // Publication cadence bounds duplicate peer work;
+                            // it never limits candidate generation or coverage.
+                            if unpublished_symbolic_candidates >= 64
+                                || workspace.standard_bag_coverage_complete()
+                            {
+                                workspace.publish_worker_standard_bag_coverage(shared_coverage)?;
+                                let (covered, total) = shared_coverage.progress();
+                                control.report_progress(
+                                    "wasm-global-original-queue-coverage",
+                                    covered as u64,
+                                    Some(total as u64),
+                                );
+                                unpublished_symbolic_candidates = 0;
+                            }
+                        }
                     }
                     if retain_chance_rows {
                         if let Some(coverage) = result.covered_patterns.take() {
@@ -1225,7 +1257,8 @@ fn run_branch(
                         result,
                         solution_coverage,
                         retain_identity,
-                        problem.output_policy().retains_representative_trace(),
+                        !global_probability
+                            && problem.output_policy().retains_representative_trace(),
                     )?;
                 }
                 local_ordinal = local_ordinal.saturating_add(1);
@@ -1247,6 +1280,9 @@ fn run_branch(
             }
         }
     }
+    if global_probability && unpublished_symbolic_candidates != 0 {
+        workspace.publish_worker_standard_bag_coverage(shared_coverage)?;
+    }
     Ok((
         BranchSearchOutcome {
             canonical_index: task.canonical_index,
@@ -1254,6 +1290,7 @@ fn run_branch(
             candidate_count: local_ordinal,
             candidate_digest,
             chance_rows,
+            candidate_domain_exhausted,
             truncated_reason,
         },
         local_ordinal,

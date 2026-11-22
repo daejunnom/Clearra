@@ -62,6 +62,7 @@ pub(super) struct ParallelSearchOutcome {
     pub pattern_verified_execution_count: usize,
     pub build_variant_count: u128,
     pub count_complete: bool,
+    pub candidate_domain_exhausted: bool,
     pub representative_path: Vec<CorePathStep>,
     pub representative_candidate_id: Option<u64>,
     pub representative_pattern_id: Option<u32>,
@@ -867,6 +868,9 @@ fn merge_results(
     let truncated_reason = branch_outcomes
         .iter()
         .find_map(|branch| branch.truncated_reason);
+    let candidate_domain_exhausted = branch_outcomes
+        .iter()
+        .all(|branch| branch.candidate_domain_exhausted);
     if problem.objective().kind()
         == clearra_core_domain::objective::objective_kind::ObjectiveKind::Tiling
     {
@@ -918,7 +922,10 @@ fn merge_results(
         coverage_row_count: merged.coverage_row_count,
         pattern_verified_execution_count: merged.pattern_verified_execution_count,
         build_variant_count: merged.build_variant_count,
-        count_complete: merged.count_complete && truncated_reason.is_none(),
+        count_complete: merged.count_complete
+            && truncated_reason.is_none()
+            && candidate_domain_exhausted,
+        candidate_domain_exhausted,
         representative_path,
         representative_candidate_id: representative
             .map(|entry| entry.candidate.identity.bucket_hash()),

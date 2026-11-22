@@ -1,5 +1,6 @@
 pub mod bag_multiset_reachability;
 mod compact_pattern_union;
+mod factorized_pattern_layout;
 mod flat_pattern_sequences;
 mod hold_multiset_reachability;
 pub mod materialized_pattern_universe;
@@ -18,6 +19,7 @@ pub use compact_pattern_union::{
     CompactPatternUnionError, CompactPatternUnionFrontier, CompactPatternUnionLanguage,
     CompactPatternUnionLimits,
 };
+pub use factorized_pattern_layout::{FactorizedPatternLayout, FactorizedPatternSegment};
 pub use materialized_pattern_universe::{
     MaterializedPatternUniverse, MaterializedPatternUniverseError,
     MaterializedPatternUniverseStructure,

@@ -19,6 +19,7 @@ use crate::{
         DistributedPcChanceCoverageRows, PcChanceCoverageEvidence, PcScoreProblemEvidence,
     },
     pc_full_height_replay_evidence::PcFullHeightReplayEvidence,
+    pc_global_probability_evidence::PcGlobalProbabilityEvidence,
     result_views::{SearchExecutionReport, SearchExecutionReportBuildError},
     setup_finder_report::SetupFinderReport,
     solution_probability::{
@@ -141,6 +142,7 @@ pub struct CoreExecutionResult {
     representative_solution_identity: Option<StandardBoard64TilingIdentity>,
     coverage_pattern_words: Vec<u64>,
     pc_chance_coverage_evidence: Option<PcChanceCoverageEvidence>,
+    pc_global_probability_evidence: Option<PcGlobalProbabilityEvidence>,
     distributed_pc_chance_coverage_rows: Option<DistributedPcChanceCoverageRows>,
     pc_score_problem_evidence: Option<PcScoreProblemEvidence>,
     pc_full_height_replay_evidence: Option<PcFullHeightReplayEvidence>,
@@ -238,6 +240,7 @@ impl CoreExecutionResult {
             representative_solution_identity: None,
             coverage_pattern_words: Vec::new(),
             pc_chance_coverage_evidence: None,
+            pc_global_probability_evidence: None,
             distributed_pc_chance_coverage_rows: None,
             pc_score_problem_evidence: None,
             pc_full_height_replay_evidence: None,
@@ -377,7 +380,18 @@ impl CoreExecutionResult {
     /// Reattaches an already constructed Core-owned transient batch without
     /// exposing any public evidence constructor.
     pub fn with_pc_chance_transient_evidence(mut self, evidence: PcChanceCoverageEvidence) -> Self {
+        self.pc_global_probability_evidence = None;
         self.pc_chance_coverage_evidence = Some(evidence);
+        self
+    }
+
+    pub(crate) fn with_pc_global_probability_evidence(
+        mut self,
+        evidence: PcGlobalProbabilityEvidence,
+    ) -> Self {
+        self.pc_chance_coverage_evidence = None;
+        self.distributed_pc_chance_coverage_rows = None;
+        self.pc_global_probability_evidence = Some(evidence);
         self
     }
 
@@ -388,6 +402,7 @@ impl CoreExecutionResult {
         mut self,
         rows: DistributedPcChanceCoverageRows,
     ) -> Self {
+        self.pc_global_probability_evidence = None;
         self.distributed_pc_chance_coverage_rows = Some(rows);
         self
     }
@@ -662,6 +677,7 @@ impl CoreExecutionResult {
         self.normalized_solution_identities = Vec::new();
         self.representative_solution_identity = None;
         self.pc_chance_coverage_evidence = None;
+        self.pc_global_probability_evidence = None;
         self.distributed_pc_chance_coverage_rows = None;
         self.pc_score_problem_evidence = None;
         self.pc_full_height_replay_evidence = None;
@@ -877,12 +893,14 @@ impl CoreExecutionResult {
     /// validate or drop the separately returned owner before public projection.
     pub fn into_pc_chance_transient_parts(mut self) -> (Self, Option<PcChanceCoverageEvidence>) {
         let evidence = self.pc_chance_coverage_evidence.take();
+        self.pc_global_probability_evidence = None;
         self.distributed_pc_chance_coverage_rows = None;
         (self, evidence)
     }
 
     pub fn without_pc_chance_transient_evidence(mut self) -> Self {
         self.pc_chance_coverage_evidence = None;
+        self.pc_global_probability_evidence = None;
         self.distributed_pc_chance_coverage_rows = None;
         self
     }
@@ -1282,6 +1300,9 @@ impl CoreExecutionResult {
         if let Some(evidence) = &self.pc_chance_coverage_evidence {
             bytes = bytes.checked_add(evidence.checked_non_pattern_storage_retained_bytes()?)?;
         }
+        if let Some(evidence) = &self.pc_global_probability_evidence {
+            bytes = bytes.checked_add(evidence.checked_non_pattern_storage_retained_bytes()?)?;
+        }
         if let Some(rows) = &self.distributed_pc_chance_coverage_rows {
             bytes = bytes.checked_add(rows.checked_non_pattern_storage_retained_bytes()?)?;
         }
@@ -1402,6 +1423,11 @@ impl CoreExecutionResult {
                     .iter()
                     .flat_map(|evidence| evidence.rows().iter())
                     .map(|row| row.coverage_bits()),
+            )
+            .chain(
+                self.pc_global_probability_evidence
+                    .iter()
+                    .map(PcGlobalProbabilityEvidence::coverage),
             )
             .chain(
                 self.distributed_pc_chance_coverage_rows
@@ -1668,6 +1694,10 @@ impl CoreExecutionResult {
 
     pub fn pc_chance_coverage_evidence(&self) -> Option<&PcChanceCoverageEvidence> {
         self.pc_chance_coverage_evidence.as_ref()
+    }
+
+    pub fn pc_global_probability_evidence(&self) -> Option<&PcGlobalProbabilityEvidence> {
+        self.pc_global_probability_evidence.as_ref()
     }
 
     pub fn distributed_pc_chance_coverage_rows(&self) -> Option<&DistributedPcChanceCoverageRows> {
@@ -2484,6 +2514,7 @@ mod tests {
             representative_solution_identity,
             coverage_pattern_words,
             pc_chance_coverage_evidence,
+            pc_global_probability_evidence,
             distributed_pc_chance_coverage_rows,
             pc_score_problem_evidence,
             pc_full_height_replay_evidence,
@@ -2526,6 +2557,7 @@ mod tests {
             representative_solution_identity,
             coverage_pattern_words,
             pc_chance_coverage_evidence,
+            pc_global_probability_evidence,
             distributed_pc_chance_coverage_rows,
             pc_score_problem_evidence,
             pc_full_height_replay_evidence,

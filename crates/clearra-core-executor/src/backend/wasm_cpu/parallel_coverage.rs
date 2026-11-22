@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use clearra_coverage::pattern::pattern_bitset::PatternBitSet;
 
@@ -8,6 +8,7 @@ pub(super) struct SharedCoverage {
     pattern_count: usize,
     words: Vec<AtomicU64>,
     complete: AtomicBool,
+    covered_count: AtomicUsize,
 }
 
 impl SharedCoverage {
@@ -18,6 +19,7 @@ impl SharedCoverage {
                 .map(|_| AtomicU64::new(0))
                 .collect(),
             complete: AtomicBool::new(pattern_count == 0),
+            covered_count: AtomicUsize::new(0),
         }
     }
 
@@ -60,12 +62,18 @@ impl SharedCoverage {
         else {
             return;
         };
+        let mut newly_covered = 0_usize;
         for (shared, word) in destinations.iter().zip(coverage.iter().copied()) {
-            shared.fetch_or(word, Ordering::AcqRel);
+            let previous = shared.fetch_or(word, Ordering::AcqRel);
+            newly_covered += (word & !previous).count_ones() as usize;
         }
         // Match PatternBitSet::from_words when the borrowed source spans only
         // part of its last storage word.
-        last_destination.fetch_or(last_word & self.tail_mask(), Ordering::AcqRel);
+        let last_word = last_word & self.tail_mask();
+        let previous = last_destination.fetch_or(last_word, Ordering::AcqRel);
+        newly_covered += (last_word & !previous).count_ones() as usize;
+        self.covered_count
+            .fetch_add(newly_covered, Ordering::AcqRel);
         if self.is_complete() {
             self.complete.store(true, Ordering::Release);
         }
@@ -78,6 +86,21 @@ impl SharedCoverage {
                 .iter()
                 .zip(required.words().iter().copied())
                 .all(|(shared, required)| shared.load(Ordering::Acquire) & required == required)
+    }
+
+    /// A cheap monotone publication flag. Only an exact union whose every
+    /// original ordinal is set may publish this flag; a rounded probability
+    /// and an individual candidate's success cannot set it.
+    pub(super) fn all_original_patterns_covered(&self) -> bool {
+        self.complete.load(Ordering::Acquire)
+    }
+
+    /// Monotone progress only; completion still checks every original word.
+    pub(super) fn progress(&self) -> (usize, usize) {
+        (
+            self.covered_count.load(Ordering::Acquire),
+            self.pattern_count,
+        )
     }
 
     pub fn to_bitset(&self) -> Result<PatternBitSet, WasmExactSearchError> {
@@ -136,6 +159,7 @@ mod tests {
             );
         }
         assert!(direct.is_complete());
+        assert_eq!(direct.progress(), (129, 129));
         assert_eq!(direct.words[2].load(Ordering::Acquire), 1);
 
         let unchanged = SharedCoverage::new(129);

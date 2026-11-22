@@ -483,6 +483,19 @@ mod execution_accessors {
             self
         }
 
+        /// Selects the global probability contract explicitly. CoverageSummary
+        /// alone never permits stopping a CountUnique enumeration early.
+        pub fn with_pc_global_probability_v1_evidence(mut self) -> Self {
+            if self.pc_chance_evidence_policy != PcChanceEvidencePolicy::PcGlobalProbabilityV1 {
+                self.pc_chance_evidence_policy = PcChanceEvidencePolicy::PcGlobalProbabilityV1;
+                self.problem_id = SearchProblemId::new(format!(
+                    "{}:pc-global-probability-v1",
+                    self.problem_id.as_str()
+                ));
+            }
+            self
+        }
+
         /// Purpose-separated complete coverage for the typed failed-queue
         /// producer. A chance or minimum request cannot borrow this authority.
         pub fn with_pc_failed_queue_v2_evidence(mut self, example_limit: usize) -> Self {
@@ -936,9 +949,11 @@ mod retained_capacity {
                 && self.objective.kind() == ObjectiveKind::All
                 && self.count_policy == CountPolicy::CountAll
                 && self.output_policy == SearchOutputPolicy::Trace;
-            let chance_source = self.pc_chance_evidence_policy
-                == PcChanceEvidencePolicy::PcProbabilityV2
-                && self.objective.kind() == ObjectiveKind::Unique
+            let chance_source = matches!(
+                self.pc_chance_evidence_policy,
+                PcChanceEvidencePolicy::PcProbabilityV2
+                    | PcChanceEvidencePolicy::PcGlobalProbabilityV1
+            ) && self.objective.kind() == ObjectiveKind::Unique
                 && self.count_policy == CountPolicy::CountUnique
                 && self.output_policy == SearchOutputPolicy::CoverageSummary
                 && !self.solution_probability_policy().requested();

@@ -2,6 +2,11 @@
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 
+mod factorized_source;
+use factorized_source::FactorizedSourceLayout;
+#[cfg(test)]
+mod factorized_tests;
+
 use crate::resource::ExecutionMemoryBound;
 
 use super::{
@@ -277,6 +282,7 @@ struct CompactSupplyStep {
 struct StandardBagCursorTransitions {
     max_source_depth: u8,
     next_remainders: Box<[u8]>,
+    factorized_valid_remainders: Option<Box<[u128]>>,
 }
 
 impl StandardBagCursorTransitions {
@@ -356,12 +362,23 @@ impl StandardBagCursorTransitions {
         Ok(Self {
             max_source_depth,
             next_remainders: next_remainders.into_boxed_slice(),
+            factorized_valid_remainders: None,
         })
+    }
+
+    fn source_is_reachable(&self, source: SourceState) -> bool {
+        match &self.factorized_valid_remainders {
+            Some(rows) => rows.get(usize::from(source.depth)).is_some_and(|row| {
+                source.bag_remainder <= FULL_STANDARD_BAG
+                    && row & (1_u128 << source.normalized().bag_remainder) != 0
+            }),
+            None => standard_bag_source_is_reachable(source),
+        }
     }
 
     fn validate_source(&self, source: SourceState) -> Result<SourceState, WasmExactSearchError> {
         let source = source.normalized();
-        if !standard_bag_source_is_reachable(source) {
+        if !self.source_is_reachable(source) {
             return Err(WasmExactSearchError::InvalidProblem(
                 "wasm_standard_bag_cursor_source_unreachable",
             ));
@@ -408,7 +425,7 @@ impl StandardBagCursorTransitions {
                 ))?,
             bag_remainder: next_remainder,
         };
-        if !standard_bag_source_is_reachable(next_source) {
+        if !self.source_is_reachable(next_source) {
             return Err(WasmExactSearchError::InvalidProblem(
                 "wasm_standard_bag_cursor_result_unreachable",
             ));
@@ -418,6 +435,10 @@ impl StandardBagCursorTransitions {
 
     fn retained_bytes(&self) -> usize {
         self.next_remainders.len() * core::mem::size_of::<u8>()
+            + self
+                .factorized_valid_remainders
+                .as_deref()
+                .map_or(0, core::mem::size_of_val)
     }
 }
 
@@ -544,6 +565,7 @@ struct StandardBagRequestIdentity {
     initial_hold: HoldAutomatonState,
     hold_enabled: bool,
     projects_unplaced_lookahead: bool,
+    factorized: bool,
 }
 
 struct StandardBagRequestSnapshot {
@@ -556,6 +578,7 @@ struct StandardBagRequestTables {
     initial_hold_code: u8,
     cursor_transitions: StandardBagCursorTransitions,
     suffix_counts: Box<[u128]>,
+    factorized_layout: Option<FactorizedSourceLayout>,
     #[cfg(test)]
     supply_identity: SupplyExecutionState,
 }
@@ -565,6 +588,11 @@ impl StandardBagRequestTables {
         core::mem::size_of::<Self>()
             .saturating_add(self.cursor_transitions.retained_bytes())
             .saturating_add(self.suffix_counts.len() * core::mem::size_of::<u128>())
+            .saturating_add(
+                self.factorized_layout
+                    .as_ref()
+                    .map_or(0, FactorizedSourceLayout::retained_bytes),
+            )
     }
 
     fn compile(
@@ -572,17 +600,22 @@ impl StandardBagRequestTables {
         initial_hold: HoldAutomatonState,
         hold_enabled: bool,
     ) -> Result<Option<Self>, WasmExactSearchError> {
-        let MaterializedPatternUniverseStructure::Standard7BagLexicographic { sequence_len } =
-            universe.structure()
-        else {
-            return Ok(None);
-        };
-        let sequence_len = u8::try_from(sequence_len).map_err(|_| {
-            WasmExactSearchError::InvalidProblem("wasm_standard_bag_sequence_too_long")
-        })?;
         if !StandardBagCoverage::supports(universe, initial_hold) {
             return Ok(None);
         }
+        let factorized_layout = FactorizedSourceLayout::compile(universe)?;
+        let sequence_len = if let Some(layout) = &factorized_layout {
+            layout.sequence_len()
+        } else if let MaterializedPatternUniverseStructure::Standard7BagLexicographic {
+            sequence_len,
+        } = universe.structure()
+        {
+            u8::try_from(sequence_len).map_err(|_| {
+                WasmExactSearchError::InvalidProblem("wasm_standard_bag_sequence_too_long")
+            })?
+        } else {
+            return Ok(None);
+        };
         let initial_hold_code = match (initial_hold.hold_empty(), initial_hold.hold_piece()) {
             (true, None) => 0,
             (false, Some(piece)) => piece_code(piece),
@@ -592,29 +625,39 @@ impl StandardBagRequestTables {
                 ));
             }
         };
-        let suffix_counts = compile_suffix_counts(sequence_len)?.into_boxed_slice();
-        let supply_automaton = SupplyExecutionAutomaton::for_bag(&PieceKind::STANDARD_TETROMINOES)
-            .map_err(|_| {
-                WasmExactSearchError::InvalidProblem("wasm_standard_bag_supply_automaton_invalid")
-            })?;
         let mut supply_identity = initial_hold;
-        supply_identity.source_kind = PieceSourceKind::BagUniverse;
         supply_identity.hold_policy = if hold_enabled {
             HoldPolicy::Allowed
         } else {
             HoldPolicy::Forbidden
         };
-        let cursor_transitions = StandardBagCursorTransitions::compile(
-            sequence_len,
-            &supply_automaton,
-            supply_identity,
-            hold_enabled,
-        )?;
+        let (cursor_transitions, suffix_counts) = if let Some(layout) = &factorized_layout {
+            let cursor = layout.compile_cursor()?;
+            let suffix = layout.compile_suffix_counts(&cursor)?;
+            (cursor, suffix)
+        } else {
+            let suffix = compile_suffix_counts(sequence_len)?.into_boxed_slice();
+            let supply_automaton = SupplyExecutionAutomaton::for_bag(
+                &PieceKind::STANDARD_TETROMINOES,
+            )
+            .map_err(|_| {
+                WasmExactSearchError::InvalidProblem("wasm_standard_bag_supply_automaton_invalid")
+            })?;
+            supply_identity.source_kind = PieceSourceKind::BagUniverse;
+            let cursor = StandardBagCursorTransitions::compile(
+                sequence_len,
+                &supply_automaton,
+                supply_identity,
+                hold_enabled,
+            )?;
+            (cursor, suffix)
+        };
         Ok(Some(Self {
             sequence_len,
             initial_hold_code,
             cursor_transitions,
             suffix_counts,
+            factorized_layout,
             #[cfg(test)]
             supply_identity,
         }))
@@ -635,6 +678,7 @@ impl SharedStandardBagRequest {
             initial_hold,
             hold_enabled,
             projects_unplaced_lookahead,
+            factorized: FactorizedSourceLayout::supported_layout(universe).is_some(),
         };
         let snapshot = self.snapshot.get_or_init(|| StandardBagRequestSnapshot {
             identity,
@@ -643,7 +687,18 @@ impl SharedStandardBagRequest {
         });
         // A request owner must never cross the supply/hold/projected-lookahead
         // boundary, including after an unsupported result was cached.
-        if snapshot.identity != identity {
+        let layout_matches = snapshot
+            .tables
+            .as_ref()
+            .ok()
+            .and_then(Option::as_ref)
+            .is_none_or(|tables| {
+                tables
+                    .factorized_layout
+                    .as_ref()
+                    .is_none_or(|layout| layout.matches_universe(universe))
+            });
+        if snapshot.identity != identity || !layout_matches {
             return Err(WasmExactSearchError::InvalidProblem(
                 "wasm_standard_bag_shared_request_identity_mismatch",
             ));
@@ -812,15 +867,18 @@ impl StandardBagCoverage {
     /// buffers coexist, plus the immutable Arc allocation. A caller using an
     /// already initialized shared request may conservatively use this bound.
     pub fn checked_creation_future_bytes(universe: &MaterializedPatternUniverse) -> Option<u128> {
-        let MaterializedPatternUniverseStructure::Standard7BagLexicographic { sequence_len } =
-            universe.structure()
-        else {
-            return Some(0);
+        let sequence_len = match universe.structure() {
+            MaterializedPatternUniverseStructure::Standard7BagLexicographic { sequence_len } => {
+                u8::try_from(sequence_len).ok()?
+            }
+            _ => {
+                let Some(layout) = FactorizedSourceLayout::supported_layout(universe) else {
+                    return Some(0);
+                };
+                u8::try_from(layout.visible_sequence_len()).ok()?
+            }
         };
-        let sequence_len = u8::try_from(sequence_len).ok()?;
-        let max_source_depth = sequence_len.checked_add(1)?;
-        let cursor_bytes =
-            StandardBagCursorTransitions::checked_storage_len(max_source_depth)? as u128;
+        let cursor_bytes = Self::checked_cursor_transition_retained_bytes(universe)?;
         let suffix_bytes = (usize::from(sequence_len) as u128)
             .checked_add(1)?
             .checked_mul(STANDARD_BAG_MASK_COUNT as u128)?
@@ -843,7 +901,10 @@ impl StandardBagCoverage {
         });
     }
 
-    #[cfg_attr(all(feature = "local-search-ab", not(target_family = "wasm")), track_caller)]
+    #[cfg_attr(
+        all(feature = "local-search-ab", not(target_family = "wasm")),
+        track_caller
+    )]
     fn ensure_growth(&self, future: Option<u128>) -> Result<(), WasmExactSearchError> {
         let Some(boundary) = self.resource_boundary else {
             return Ok(());
@@ -870,13 +931,23 @@ impl StandardBagCoverage {
         universe: &MaterializedPatternUniverse,
         initial_hold: HoldAutomatonState,
     ) -> bool {
-        matches!(
-            universe.structure(),
-            MaterializedPatternUniverseStructure::Standard7BagLexicographic { .. }
-        ) && initial_hold.cursor() == 0
+        let source_supported = match universe.structure() {
+            MaterializedPatternUniverseStructure::Standard7BagLexicographic { .. } => {
+                initial_hold.bag_remainder_key()
+                    == BagState::fresh_standard_7_bag().packed_remainder_key()
+            }
+            _ => {
+                FactorizedSourceLayout::supported_layout(universe).is_some()
+                    && initial_hold.source_kind() == PieceSourceKind::MaterializedPatternUniverse
+                    && initial_hold.bag_remainder_key() == 0
+                    && initial_hold.hold_policy() != HoldPolicy::Required
+                    && (initial_hold.hold_policy() != HoldPolicy::Forbidden
+                        || initial_hold.hold_piece().is_none())
+            }
+        };
+        source_supported
+            && initial_hold.cursor() == 0
             && initial_hold.bag_epoch() == 0
-            && initial_hold.bag_remainder_key()
-                == BagState::fresh_standard_7_bag().packed_remainder_key()
             && matches!(
                 (initial_hold.hold_empty(), initial_hold.hold_piece()),
                 (true, None) | (false, Some(_))
@@ -998,18 +1069,8 @@ impl StandardBagCoverage {
         language_root: u32,
         control: &ExecutionControl,
     ) -> Result<StandardBagCoverageResult, WasmExactSearchError> {
-        let state = SourceState {
-            depth: 0,
-            bag_remainder: FULL_STANDARD_BAG,
-        };
-        let key = product_key(
-            language_root,
-            SourceState {
-                depth: 0,
-                bag_remainder: FULL_STANDARD_BAG,
-            },
-            self.initial_hold_code,
-        );
+        let state = self.root_source();
+        let key = product_key(language_root, state, self.initial_hold_code);
         let cache_hit = self.product_memo.contains_key(&key);
         if cache_hit {
             self.root_cache_hits = self.root_cache_hits.saturating_add(1);
@@ -1025,10 +1086,7 @@ impl StandardBagCoverage {
             self.initial_hold_code,
             control,
         )?;
-        let root_source = SourceState {
-            depth: 0,
-            bag_remainder: FULL_STANDARD_BAG,
-        };
+        let root_source = state;
         let summary = self.summary(root, root_source)?;
         let witness_pattern_id = (summary.first_pattern_offset
             < self.materialized_pattern_count as u64)
@@ -1127,10 +1185,7 @@ impl StandardBagCoverage {
         words.resize(word_count, 0);
         self.accumulate_into(
             root,
-            SourceState {
-                depth: 0,
-                bag_remainder: FULL_STANDARD_BAG,
-            },
+            self.root_source(),
             0,
             self.materialized_pattern_count as u128,
             &mut words,
@@ -1148,7 +1203,8 @@ impl StandardBagCoverage {
         &mut self,
         root: u32,
     ) -> Result<Option<Arc<P7P4CoverageBlocks>>, WasmExactSearchError> {
-        if self.sequence_len != 11
+        if self.tables.factorized_layout.is_some()
+            || self.sequence_len != 11
             || self.materialized_pattern_count != P7P4_PREFIXES * P7P4_TAIL_BITS
             || !self.hold_enabled
             || self.initial_hold_code != 0
@@ -1391,14 +1447,48 @@ impl StandardBagCoverage {
     pub(super) fn checked_cursor_transition_retained_bytes(
         universe: &MaterializedPatternUniverse,
     ) -> Option<u128> {
-        let MaterializedPatternUniverseStructure::Standard7BagLexicographic { sequence_len } =
-            universe.structure()
-        else {
-            return Some(0);
-        };
-        let sequence_len = u8::try_from(sequence_len).ok()?;
-        let max_source_depth = sequence_len.checked_add(1)?;
-        Some(StandardBagCursorTransitions::checked_storage_len(max_source_depth)? as u128)
+        match universe.structure() {
+            MaterializedPatternUniverseStructure::Standard7BagLexicographic { sequence_len } => {
+                let sequence_len = u8::try_from(sequence_len).ok()?;
+                let max_source_depth = sequence_len.checked_add(1)?;
+                Some(StandardBagCursorTransitions::checked_storage_len(max_source_depth)? as u128)
+            }
+            _ => {
+                let Some(layout) = FactorizedSourceLayout::supported_layout(universe) else {
+                    return Some(0);
+                };
+                let depth = u8::try_from(layout.visible_sequence_len()).ok()?;
+                (StandardBagCursorTransitions::checked_storage_len(depth)? as u128)
+                    .checked_add(
+                        (usize::from(depth) as u128 + 1)
+                            .checked_mul(core::mem::size_of::<u128>() as u128)?,
+                    )?
+                    .checked_add(FactorizedSourceLayout::checked_retained_bytes(universe)?)
+            }
+        }
+    }
+
+    fn root_source(&self) -> SourceState {
+        SourceState {
+            depth: 0,
+            bag_remainder: self
+                .tables
+                .factorized_layout
+                .as_ref()
+                .map_or(FULL_STANDARD_BAG, FactorizedSourceLayout::initial_remainder),
+        }
+    }
+
+    fn source_piece_order(&self, depth: u8) -> impl Iterator<Item = usize> {
+        self.tables
+            .factorized_layout
+            .as_ref()
+            .map_or([0, 1, 2, 3, 4, 5, 6], |layout| {
+                layout.source_piece_order(depth)
+            })
+            .into_iter()
+            .filter(|index| *index < STANDARD_PIECE_COUNT as u8)
+            .map(usize::from)
     }
 
     #[cfg(test)]
@@ -1524,7 +1614,7 @@ impl StandardBagCoverage {
             )?;
             let mut result = REJECT;
 
-            if source.bag_remainder.count_ones() == 1 {
+            if self.tables.factorized_layout.is_none() && source.bag_remainder.count_ones() == 1 {
                 let lookahead_index = source.bag_remainder.trailing_zeros() as usize;
                 let lookahead_code = lookahead_index as u8 + 1;
                 let lookahead_piece = PieceKind::STANDARD_TETROMINOES[lookahead_index];
@@ -1589,10 +1679,10 @@ impl StandardBagCoverage {
                     }
                 }
             } else {
-                // A fresh next bag has no concrete projected identity. It may
-                // only trigger the final swap that releases the held source
-                // piece; the unknown incoming piece can never be placed or
-                // become part of another search state.
+                // Finite EOF, or a fresh next bag with no concrete projected
+                // identity, can only release the held source piece once. No
+                // unseen incoming piece may be placed or retained as another
+                // search state.
                 for edge in held_edges.iter().copied() {
                     self.edge_check_count = self.edge_check_count.saturating_add(1);
                     if language
@@ -1756,6 +1846,7 @@ impl StandardBagCoverage {
             if self.hold_enabled
                 && hold_code == 0
                 && self.projects_unplaced_lookahead
+                && self.tables.factorized_layout.is_none()
                 && next_source.depth == self.sequence_len
                 && next_source.bag_remainder.count_ones() == 1
             {
@@ -2013,7 +2104,8 @@ impl StandardBagCoverage {
         let mut covered_pattern_count = 0_u64;
         let mut first_pattern_offset = NO_PATTERN_OFFSET;
         let mut child_base = 0_u64;
-        for (piece_index, child) in children.into_iter().enumerate() {
+        for piece_index in self.source_piece_order(source.depth) {
+            let child = children[piece_index];
             if source.bag_remainder & (1_u8 << piece_index) == 0 {
                 continue;
             }
@@ -2066,7 +2158,8 @@ impl StandardBagCoverage {
         let children = self.nodes[index].children;
         let mut child_base = base;
         let mut newly_covered = 0usize;
-        for (piece_index, child) in children.into_iter().enumerate() {
+        for piece_index in self.source_piece_order(source.depth) {
+            let child = children[piece_index];
             if source.bag_remainder & (1_u8 << piece_index) == 0 {
                 continue;
             }
@@ -2109,7 +2202,8 @@ impl StandardBagCoverage {
         }
         let children = self.nodes[index].children;
         let mut child_base = base;
-        for (piece_index, child) in children.into_iter().enumerate() {
+        for piece_index in self.source_piece_order(source.depth) {
+            let child = children[piece_index];
             if source.bag_remainder & (1_u8 << piece_index) == 0 {
                 continue;
             }
@@ -2147,10 +2241,7 @@ impl StandardBagCoverage {
         }
         let newly_covered = self.accumulate_global(
             root,
-            SourceState {
-                depth: 0,
-                bag_remainder: FULL_STANDARD_BAG,
-            },
+            self.root_source(),
             0,
             self.materialized_pattern_count as u128,
         )?;
@@ -2188,7 +2279,8 @@ impl StandardBagCoverage {
         let children = self.nodes[index].children;
         let mut child_base = base;
         let mut count = 0_u128;
-        for (piece_index, child) in children.into_iter().enumerate() {
+        for piece_index in self.source_piece_order(source.depth) {
+            let child = children[piece_index];
             if source.bag_remainder & (1_u8 << piece_index) == 0 {
                 continue;
             }
