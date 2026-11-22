@@ -1107,7 +1107,9 @@ impl StandardBagCoverage {
         };
         Ok(StandardBagCoverageResult {
             root,
-            covers_any_pattern: root != REJECT,
+            // The symbolic root spans the full bag language. An explicitly
+            // materialized prefix may contain none of its accepted queues.
+            covers_any_pattern: covered_pattern_count != 0,
             witness_pattern_id,
             covered_pattern_count,
             product_states: self.product_state_count.saturating_sub(states_before),

@@ -102,6 +102,19 @@ pub(crate) enum ExecutorSearchStage {
     WasmSetupCoverageGraphCompile,
     #[cfg_attr(not(feature = "parallel"), allow(dead_code))]
     WasmParallelGeometryCompileAndSplit,
+    WasmGeometryTargetPreparation,
+    WasmGeometryFamilyCompile,
+    WasmGeometryPathCount,
+    WasmGeometryTaskSplit,
+    WasmGeometryResidualLookup,
+    WasmGeometryFeasiblePieces,
+    WasmGeometryCheapProjection,
+    WasmGeometryMinimumDomain,
+    WasmGeometryAdvancedDomain,
+    WasmGeometryAdvancedPrune,
+    WasmGeometryComponentPlan,
+    WasmGeometryFamilyCommit,
+    WasmGeometrySupportRows,
     WasmGeometryAdvance,
     WasmCandidateProjection,
     WasmCandidateFeasibility,
@@ -219,6 +232,19 @@ impl ExecutorSearchStage {
         Self::WasmSetupPartialBuild,
         Self::WasmSetupCoverageGraphCompile,
         Self::WasmParallelGeometryCompileAndSplit,
+        Self::WasmGeometryTargetPreparation,
+        Self::WasmGeometryFamilyCompile,
+        Self::WasmGeometryPathCount,
+        Self::WasmGeometryTaskSplit,
+        Self::WasmGeometryResidualLookup,
+        Self::WasmGeometryFeasiblePieces,
+        Self::WasmGeometryCheapProjection,
+        Self::WasmGeometryMinimumDomain,
+        Self::WasmGeometryAdvancedDomain,
+        Self::WasmGeometryAdvancedPrune,
+        Self::WasmGeometryComponentPlan,
+        Self::WasmGeometryFamilyCommit,
+        Self::WasmGeometrySupportRows,
         Self::WasmGeometryAdvance,
         Self::WasmCandidateProjection,
         Self::WasmCandidateFeasibility,
@@ -329,6 +355,19 @@ impl ExecutorSearchStage {
             Self::WasmSetupPartialBuild => "wasm.setup.partial_build",
             Self::WasmSetupCoverageGraphCompile => "wasm.setup.coverage_graph_compile",
             Self::WasmParallelGeometryCompileAndSplit => "wasm.geometry.parallel_compile_and_split",
+            Self::WasmGeometryTargetPreparation => "wasm.geometry.target_preparation",
+            Self::WasmGeometryFamilyCompile => "wasm.geometry.family_compile",
+            Self::WasmGeometryPathCount => "wasm.geometry.path_count",
+            Self::WasmGeometryTaskSplit => "wasm.geometry.task_split",
+            Self::WasmGeometryResidualLookup => "wasm.geometry.residual_lookup",
+            Self::WasmGeometryFeasiblePieces => "wasm.geometry.feasible_pieces",
+            Self::WasmGeometryCheapProjection => "wasm.geometry.cheap_projection",
+            Self::WasmGeometryMinimumDomain => "wasm.geometry.minimum_domain",
+            Self::WasmGeometryAdvancedDomain => "wasm.geometry.advanced_domain",
+            Self::WasmGeometryAdvancedPrune => "wasm.geometry.advanced_prune",
+            Self::WasmGeometryComponentPlan => "wasm.geometry.component_plan",
+            Self::WasmGeometryFamilyCommit => "wasm.geometry.family_commit",
+            Self::WasmGeometrySupportRows => "wasm.geometry.support_rows",
             Self::WasmGeometryAdvance => "wasm.geometry.advance",
             Self::WasmCandidateProjection => "wasm.candidate.projection",
             Self::WasmCandidateFeasibility => "wasm.candidate.feasibility",
@@ -633,6 +672,26 @@ impl SearchStageSpan {
         let _ = work_items;
     }
 
+    /// Publish an already accumulated, exact work count without sampling it
+    /// or inventing duration/call counts. Hot loops accumulate locally and
+    /// flush once at their owner boundary. Timed spans for the same work must
+    /// use `finish(0)` so the weighted estimate is not added a second time.
+    #[inline]
+    pub(crate) fn record_exact_work(stage: ExecutorSearchStage, work_items: u64) {
+        #[cfg(any(feature = "search-stage-profiling", feature = "wasm-stage-profiling"))]
+        if work_items != 0 {
+            ACTIVE_PROFILE.with(|profile| {
+                let mut profile = profile.borrow_mut();
+                if let Some(profile) = profile.as_mut() {
+                    let total = &mut profile.totals[stage as usize];
+                    total.work_item_count = total.work_item_count.saturating_add(work_items);
+                }
+            });
+        }
+        #[cfg(not(any(feature = "search-stage-profiling", feature = "wasm-stage-profiling")))]
+        let _ = (stage, work_items);
+    }
+
     #[cfg(any(feature = "search-stage-profiling", feature = "wasm-stage-profiling"))]
     fn record(&mut self, work_items: u64) {
         if self.finished {
@@ -686,6 +745,8 @@ pub struct ExecutorSearchProfileStage {
     /// interval on one thread or across workers.
     pub duration_ns: u64,
     pub invocation_count: u64,
+    /// Stage-defined work units. Ordinary sampled spans scale this field;
+    /// stages using `record_exact_work` publish an unsampled owner total.
     pub work_item_count: u64,
 }
 
@@ -807,6 +868,34 @@ mod tests {
             .iter()
             .find(|stage| stage.name == STAGE.name())
             .expect("fixed stage")
+    }
+
+    #[test]
+    fn worker_profile_exact_work_is_not_scaled_or_counted_as_a_timed_call() {
+        SearchStageSpan::record_exact_work(STAGE, 99);
+        let session = ExecutorSearchProfileSession::start().unwrap();
+        SearchStageSpan::begin_scaled(STAGE, 1024).finish(0);
+        SearchStageSpan::record_exact_work(STAGE, 7);
+        let worker = WorkerSearchProfile::capture();
+        worker.measure(|| {
+            SearchStageSpan::begin_scaled(STAGE, 2048).finish(0);
+            SearchStageSpan::record_exact_work(STAGE, 11);
+            SearchStageSpan::record_exact_work(ExecutorSearchStage::WasmGeometrySupportRows, 31);
+        });
+        let (caller, pooled) = session.finish_partitioned();
+        assert_eq!(stage(&caller).invocation_count, 1024);
+        assert_eq!(stage(&caller).work_item_count, 7);
+        assert_eq!(stage(&pooled).invocation_count, 2048);
+        assert_eq!(stage(&pooled).work_item_count, 11);
+        let exact_only = pooled
+            .iter()
+            .find(|row| row.name == ExecutorSearchStage::WasmGeometrySupportRows.name())
+            .unwrap();
+        assert_eq!(exact_only.duration_ns, 0);
+        assert_eq!(exact_only.invocation_count, 0);
+        assert_eq!(exact_only.work_item_count, 31);
+        let subsequent = ExecutorSearchProfileSession::start().unwrap();
+        assert_eq!(stage(&subsequent.finish()).work_item_count, 0);
     }
 
     #[test]

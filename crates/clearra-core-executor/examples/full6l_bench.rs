@@ -1,6 +1,6 @@
 //! Native Rust PC diagnostics for the complete finite P1P7P7 source.
 //!
-//! Build with `--release --features parallel,local-search-ab,wasm-stage-profiling`
+//! Build with `--release --features parallel,wasm-stage-profiling`
 //! and compile-time `CLEARRA_SOURCE_COMMIT`. Full runs require clearra-manage's
 //! benchmark-search profile. `--small` is a one-I executable-contract check.
 //! The diagnostic deadline starts before source preparation; cancellation does
@@ -14,11 +14,7 @@ use clearra_core_domain::{
     runtime_cpu_capacity::CpuCapacity,
 };
 use clearra_core_executor::{CoreExecutionResult, WasmCpuSearchBackend};
-#[cfg(all(
-    feature = "wasm-stage-profiling",
-    feature = "local-search-ab",
-    not(target_family = "wasm")
-))]
+#[cfg(all(feature = "wasm-stage-profiling", not(target_family = "wasm")))]
 use clearra_core_executor::{ExecutorSearchProfileSession, ExecutorSearchProfileStage};
 use clearra_objectives::policy::objective_policy::ObjectivePolicy;
 use clearra_pc_graph::request::{
@@ -87,7 +83,6 @@ impl Fixture {
 enum Objective {
     Unique,
     Chance,
-    Global,
 }
 
 impl Objective {
@@ -95,7 +90,6 @@ impl Objective {
         match self {
             Self::Unique => "unique",
             Self::Chance => "chance",
-            Self::Global => "global",
         }
     }
 }
@@ -159,7 +153,6 @@ fn options() -> Result<Options, String> {
                 options.objective = match args.next().as_deref() {
                     Some("unique") => Objective::Unique,
                     Some("chance") => Objective::Chance,
-                    Some("global") => Objective::Global,
                     _ => return Err(usage()),
                 };
                 selected_objective = true;
@@ -186,7 +179,7 @@ fn options() -> Result<Options, String> {
 }
 
 fn usage() -> String {
-    "usage: full6l_bench compile|run [--small] [--objective unique|chance|global] [--profile] [--cancel-after-seconds N]".into()
+    "usage: full6l_bench compile|run [--small] [--objective unique|chance] [--profile] [--cancel-after-seconds N]".into()
 }
 
 fn run(options: &Options, report: &mut Value) -> Result<(), String> {
@@ -359,8 +352,6 @@ fn compile(query: &PcScenarioQuery, objective: Objective) -> Result<SearchProble
         Objective::Unique => ProblemCompiler::compile_scenario_pc(query),
         Objective::Chance => ProblemCompiler::compile_scenario_percent(query)
             .map(SearchProblem::with_pc_chance_probability_v2_evidence),
-        Objective::Global => ProblemCompiler::compile_scenario_percent(query)
-            .map(SearchProblem::with_pc_global_probability_v1_evidence),
     }
     .map_err(|error| format!("problem compilation: {error:?}"))
 }
@@ -442,7 +433,6 @@ fn validate_compiled(
     };
     let expected_evidence = match objective {
         Objective::Chance => PcChanceEvidencePolicy::PcProbabilityV2,
-        Objective::Global => PcChanceEvidencePolicy::PcGlobalProbabilityV1,
         Objective::Unique => PcChanceEvidencePolicy::Disabled,
     };
     if universe.pattern_count() != fixture.patterns()
@@ -558,32 +548,11 @@ fn record_result(
         "piece_source_id": evidence.piece_source_id(), "pattern_universe_id": evidence.pattern_universe_id().get(),
         "pattern_weight_model_id": evidence.pattern_weight_model_id().get(),
     }));
-    let global_evidence = result.pc_global_probability_evidence();
-    let global_matches = global_evidence.is_some_and(|evidence| {
-        evidence.problem().matches_search_problem(problem)
-            && evidence.coverage().pattern_count() == options.fixture.patterns()
-            && evidence.covered_pattern_count() == covered as usize
-            && evidence.coverage().word_count() == words.len()
-            && words
-                .iter()
-                .enumerate()
-                .all(|(index, word)| evidence.coverage().word_at(index) == *word)
-    });
-    report["global_probability_evidence"] = global_evidence.map_or(Value::Null, |evidence| {
-        json!({
-            "completion": evidence.completion().as_str(),
-            "enumeration_complete": evidence.enumeration_complete(),
-            "covered_pattern_count": evidence.covered_pattern_count(),
-            "pattern_count": evidence.coverage().pattern_count(),
-            "matches_executed_problem_and_public_coverage": global_matches,
-        })
-    });
     report["result_retained_bytes"] = json!(result.checked_resource_retained_bytes());
     let count_complete = result.unique_field("count_complete") == Some("true");
     let probability_complete = result.unique_field("probability_complete") == Some("true");
     report["count_complete"] = json!(count_complete);
     report["probability_complete"] = json!(probability_complete);
-    report["enumeration_complete"] = json!(result.bool_field("enumeration_complete"));
     let evidence_complete = match options.objective {
         Objective::Unique => true,
         Objective::Chance => evidence.is_some_and(|evidence| {
@@ -591,13 +560,6 @@ fn record_result(
                 && evidence.pattern_count() == options.fixture.patterns()
                 && evidence.problem().matches_search_problem(problem)
         }),
-        Objective::Global => {
-            global_matches
-                && global_evidence.is_some_and(|evidence| {
-                    result.bool_field("enumeration_complete")
-                        == Some(evidence.enumeration_complete())
-                })
-        }
     };
     let complete = probability_complete
         && evidence_complete
@@ -683,39 +645,23 @@ impl ProgressSink for DiagnosticProgress {
     }
 }
 
-#[cfg(all(
-    feature = "wasm-stage-profiling",
-    feature = "local-search-ab",
-    not(target_family = "wasm")
-))]
+#[cfg(all(feature = "wasm-stage-profiling", not(target_family = "wasm")))]
 type Profile = Option<ExecutorSearchProfileSession>;
-#[cfg(not(all(
-    feature = "wasm-stage-profiling",
-    feature = "local-search-ab",
-    not(target_family = "wasm")
-)))]
+#[cfg(not(all(feature = "wasm-stage-profiling", not(target_family = "wasm"))))]
 type Profile = ();
 
 fn start_profile(enabled: bool) -> Result<Profile, String> {
-    #[cfg(all(
-        feature = "wasm-stage-profiling",
-        feature = "local-search-ab",
-        not(target_family = "wasm")
-    ))]
+    #[cfg(all(feature = "wasm-stage-profiling", not(target_family = "wasm")))]
     {
         enabled
             .then(ExecutorSearchProfileSession::start)
             .transpose()
             .map_err(|error| format!("stage profile: {error:?}"))
     }
-    #[cfg(not(all(
-        feature = "wasm-stage-profiling",
-        feature = "local-search-ab",
-        not(target_family = "wasm")
-    )))]
+    #[cfg(not(all(feature = "wasm-stage-profiling", not(target_family = "wasm"))))]
     {
         if enabled {
-            Err("--profile requires native --features local-search-ab,wasm-stage-profiling".into())
+            Err("--profile requires native --features wasm-stage-profiling".into())
         } else {
             Ok(())
         }
@@ -723,26 +669,18 @@ fn start_profile(enabled: bool) -> Result<Profile, String> {
 }
 
 fn finish_profile(profile: Profile) -> Value {
-    #[cfg(all(
-        feature = "wasm-stage-profiling",
-        feature = "local-search-ab",
-        not(target_family = "wasm")
-    ))]
+    #[cfg(all(feature = "wasm-stage-profiling", not(target_family = "wasm")))]
     {
         profile.map_or(Value::Null, |profile| {
             let (caller, workers) = profile.finish_partitioned();
-            let rows = |stages: Vec<ExecutorSearchProfileStage>| stages.into_iter().filter(|stage| stage.invocation_count != 0).map(|stage| json!({
+            let rows = |stages: Vec<ExecutorSearchProfileStage>| stages.into_iter().filter(|stage| stage.invocation_count != 0 || stage.work_item_count != 0).map(|stage| json!({
                 "name": stage.name, "duration_ns": stage.duration_ns,
                 "invocation_count": stage.invocation_count, "work_item_count": stage.work_item_count,
             })).collect::<Vec<_>>();
-            json!({ "timing_contract": "accumulated overlapping/nested spans; not exclusive wall time", "caller": rows(caller), "pooled_workers": rows(workers) })
+            json!({ "timing_contract": "accumulated overlapping/nested spans; not exclusive wall time", "geometry_work_contract": "family substage work counts are exact owner totals; sampled duration and invocation counts remain weighted estimates", "caller": rows(caller), "pooled_workers": rows(workers) })
         })
     }
-    #[cfg(not(all(
-        feature = "wasm-stage-profiling",
-        feature = "local-search-ab",
-        not(target_family = "wasm")
-    )))]
+    #[cfg(not(all(feature = "wasm-stage-profiling", not(target_family = "wasm"))))]
     {
         let () = profile;
         Value::Null

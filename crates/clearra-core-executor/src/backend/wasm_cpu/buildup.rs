@@ -4410,6 +4410,94 @@ fn certified_language_result(coverage: Option<StandardBagCoverageResult>) -> Can
     }
 }
 
+#[cfg(test)]
+mod certified_language_tests {
+    use super::*;
+    use clearra_supply::{
+        bag::BagState,
+        hold_automaton::{HoldAutomatonState, SupplyProvenanceId},
+        piece_source::PieceSourceId,
+        PatternUniverseMaterializer,
+    };
+
+    #[test]
+    fn truncated_standard_bag_prefix_cannot_make_a_candidate_buildable() {
+        // The retained source has the same multiset as both candidate words.
+        // Only I,O is an actual original queue; O,I belongs outside the prefix.
+        let universe = PatternUniverseMaterializer::standard_7_bag(2, 1, 0x77).unwrap();
+        assert!(!universe.complete());
+        assert_eq!(
+            universe.sequence_at(0).as_ref(),
+            &[PieceKind::I, PieceKind::O]
+        );
+        let initial = HoldAutomatonState::new(
+            PieceSourceId::new(0x77),
+            0,
+            None,
+            0,
+            BagState::fresh_standard_7_bag().packed_remainder_key(),
+            SupplyProvenanceId(0x77),
+        );
+        let mut supply = StandardBagCoverage::for_universe(&universe, initial, false, false)
+            .unwrap()
+            .unwrap();
+        let mut languages = PieceOrderLanguageCache::default();
+        for (word, expected) in [
+            ([PieceKind::O, PieceKind::I], false),
+            ([PieceKind::I, PieceKind::O], true),
+        ] {
+            let nodes = (0..=2)
+                .map(|depth| BuildOrderNodeSpec {
+                    edge_start: depth,
+                    edge_count: u32::from(depth < 2),
+                    depth: depth as u8,
+                    accepting: depth == 2,
+                })
+                .collect();
+            let edges = word
+                .iter()
+                .enumerate()
+                .map(|(depth, &piece)| {
+                    BuildOrderGraph::edge(
+                        depth as u32 + 1,
+                        depth as u8,
+                        piece,
+                        RotationState::Zero,
+                        0,
+                        0,
+                        0,
+                    )
+                })
+                .collect();
+            let graph = BuildOrderGraph::from_topological_parts(nodes, edges, 0, 0, true).unwrap();
+            let root = languages.canonicalize(&graph).unwrap();
+            let coverage = supply
+                .cover_language(&languages, root, &ExecutionControl::default())
+                .unwrap();
+            // Both full-bag roots are nonempty. The old root != REJECT test
+            // would therefore have accepted the out-of-prefix O,I candidate.
+            assert_ne!(coverage.root, 0);
+            assert_eq!(coverage.covered_pattern_count, usize::from(expected));
+            assert_eq!(coverage.covers_any_pattern, expected);
+            assert_eq!(coverage.witness_pattern_id, expected.then_some(0));
+            assert_eq!(
+                supply
+                    .materialize_root(coverage.root)
+                    .unwrap()
+                    .to_owned_words(),
+                vec![u64::from(expected)]
+            );
+            let candidate = certified_language_result(Some(coverage));
+            assert_eq!(candidate.buildable, expected);
+            assert_eq!(candidate.symbolic_coverage_root.is_some(), expected);
+            assert_eq!(
+                candidate.symbolic_covered_pattern_count,
+                usize::from(expected)
+            );
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn verify_candidate_with_projection(
     problem: &SearchProblem,

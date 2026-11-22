@@ -498,7 +498,6 @@ impl DomainPropagation {
         (status, propagation)
     }
 
-    #[cfg(any(feature = "local-search-ab", test))]
     pub fn compile_minimum_cutoff(
         catalog: &GeometryCatalog,
         remaining: u64,
@@ -847,6 +846,14 @@ fn union_cells(parents: &mut [u8; 64], left: u8, right: u8) {
 mod tests {
     use super::*;
     use clearra_core_domain::piece::piece_kind::PieceKind;
+    use clearra_pc_graph::request::{
+        PcCountPolicy, PcExecutionPolicy, PcQueueInput, PcScenarioBoard, PcScenarioQuery,
+        PieceWindow, SupplyWindowSize,
+    };
+    use clearra_problem::ProblemCompiler;
+    use clearra_rules::profile::builtin_rules::srs_plus;
+    use clearra_supply::queue::queue_pattern_expression::QueuePatternExpression;
+    use clearra_supply::QueueObservationPolicy;
 
     // Separated 4x4 chambers have both local parent changes and cells
     // guaranteed unaffected by a choice in the other chamber. The initial
@@ -1013,6 +1020,183 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn minimum_domain_cutoff_matches_full6l_factorized_target_prefixes() {
+        let query = PcScenarioQuery::new(
+            PcScenarioBoard::standard_10(6, 0),
+            PcQueueInput::pattern_expression(QueuePatternExpression::parse("P1P7P7", 0).unwrap()),
+            PieceWindow::new(15),
+        )
+        .with_rule(srs_plus())
+        .with_allow_hold(true)
+        .with_exact_pieces(Some(15))
+        .with_supply_window_size(SupplyWindowSize::new(15))
+        .with_count_policy(PcCountPolicy::CountUnique)
+        .with_queue_observation_policy(QueueObservationPolicy::FullQueueOracle)
+        .with_execution_policy(PcExecutionPolicy::mvp_default().with_max_patterns(0));
+        let problem = ProblemCompiler::compile_scenario_pc(&query).unwrap();
+        let catalog = GeometryCatalog::compile(&problem).unwrap();
+        assert_eq!(catalog.height(), 6);
+        assert_eq!(catalog.initial_board(), 0);
+        assert_eq!(catalog.required_cells(), (1_u64 << 60) - 1);
+        assert!(
+            (0..catalog.skeleton_count() as u32).any(|row| {
+                catalog
+                    .realizations(row)
+                    .iter()
+                    .any(|realization| realization.required_deleted_rows != 0)
+            }),
+            "use the actual PC inverse-line-clear catalog, not a build-only catalog"
+        );
+
+        // Read the seven target inventories from the finite source's actual
+        // factorization without enumerating its 177,811,200 queue ordinals.
+        let layout = problem
+            .piece_source()
+            .materialized_universe()
+            .unwrap()
+            .complete_factorized_layout()
+            .unwrap();
+        assert_eq!(layout.pattern_count(), 177_811_200);
+        assert_eq!(layout.full_sequence_len(), 15);
+        assert_eq!(layout.visible_sequence_len(), 15);
+        let segments: Vec<_> = layout.segments().collect();
+        assert_eq!(
+            segments
+                .iter()
+                .map(|segment| segment.draw_count())
+                .collect::<Vec<_>>(),
+            [1, 7, 7]
+        );
+        let mut base = [0_u8; 7];
+        for segment in &segments[1..] {
+            assert_eq!(segment.draw_count(), segment.choices().len());
+            for &piece in segment.choices() {
+                base[piece_index(piece)] += 1;
+            }
+        }
+        assert_eq!(base, [2; 7]);
+        let targets: Vec<_> = segments[0]
+            .choices()
+            .iter()
+            .map(|&piece| {
+                let mut target = base;
+                target[piece_index(piece)] += 1;
+                target
+            })
+            .collect();
+        assert_eq!(targets.len(), 7);
+        assert!(targets
+            .iter()
+            .all(|counts| counts.iter().copied().sum::<u8>() == 15));
+
+        let feasible_mask = |targets: &[[u8; 7]], used: [u8; 7]| {
+            let mut mask = 0;
+            for &target in targets {
+                if counts_dominate(target, used) {
+                    for piece in 0..7 {
+                        if used[piece] < target[piece] {
+                            mask |= 1 << piece;
+                        }
+                    }
+                }
+            }
+            mask
+        };
+        let mut states = 0;
+        let mut residual_states = 0;
+        let mut total_work = MinimumDomainSupportWork::default();
+        let mut check = |remaining: u64, pieces: u8| {
+            let (full_status, full_pivot, reference) =
+                DomainPropagation::compile_minimum_profiled(&catalog, remaining, pieces, false);
+            let (fast_status, fast_pivot, cutoff) =
+                DomainPropagation::compile_minimum_profiled(&catalog, remaining, pieces, true);
+            assert_eq!(
+                (fast_status, fast_pivot),
+                (full_status, full_pivot),
+                "remaining {remaining:#x}, pieces {pieces:#x}"
+            );
+            assert_eq!(
+                DomainPropagation::compile_minimum_cutoff(&catalog, remaining, pieces),
+                (full_status, full_pivot)
+            );
+            assert_eq!(reference.incidence_rows_skipped, 0);
+            assert_eq!(reference.cells_cut_off, 0);
+            assert_eq!(
+                cutoff.incidence_rows_scanned + cutoff.incidence_rows_skipped,
+                reference.incidence_rows_scanned
+            );
+            states += 1;
+            residual_states += usize::from(remaining != catalog.required_cells());
+            total_work.incidence_rows_scanned += cutoff.incidence_rows_scanned;
+            total_work.incidence_rows_skipped += cutoff.incidence_rows_skipped;
+            total_work.cells_cut_off += cutoff.cells_cut_off;
+            (full_status, full_pivot)
+        };
+
+        // Check both the shared-target search and every single-target shard.
+        // Three deterministic row choices produce actual disjoint prefixes;
+        // a dead prefix is also checked before the walk stops.
+        for scope in 0..=targets.len() {
+            let active_targets = if scope == targets.len() {
+                targets.as_slice()
+            } else {
+                &targets[scope..scope + 1]
+            };
+            for choice in 0..3 {
+                let mut remaining = catalog.required_cells();
+                let mut used = [0_u8; 7];
+                for _ in 0..=15 {
+                    let pieces = feasible_mask(active_targets, used);
+                    let (status, domain) = check(remaining, pieces);
+                    if remaining == 0 || status == DomainStatus::Empty {
+                        break;
+                    }
+                    let rows: Vec<_> = catalog
+                        .support(domain.pivot_cell)
+                        .iter()
+                        .copied()
+                        .filter(|&row| domain.row_allowed(&catalog, row, remaining, pieces))
+                        .collect();
+                    assert_eq!(rows.len(), domain.pivot_support_count);
+                    let row = rows[(rows.len() - 1) * choice / 2];
+                    let row = catalog.skeleton(row);
+                    remaining &= !row.cells;
+                    used[piece_index(row.piece)] += 1;
+                }
+            }
+        }
+        // Near EOF, each exact target also admits the one-kind residual
+        // obtained by spending all but one copy of a piece. These inputs
+        // exercise exhausted inventories even if a greedy prefix dies early.
+        for target in &targets {
+            for piece in 0..7 {
+                let mut used = *target;
+                used[piece] -= 1;
+                let pieces = feasible_mask(core::slice::from_ref(target), used);
+                assert_eq!(pieces, 1 << piece);
+                let row = (0..catalog.skeleton_count() as u32)
+                    .find(|&row| piece_index(catalog.skeleton(row).piece) == piece)
+                    .unwrap();
+                check(catalog.skeleton(row).cells, pieces);
+            }
+        }
+        check(0, 0);
+        assert!(states > 7 * 3);
+        assert!(residual_states > 7 * 3);
+        assert!(total_work.incidence_rows_scanned > 0);
+        assert!(total_work.incidence_rows_skipped > 0);
+        assert!(total_work.cells_cut_off > 0);
+        eprintln!(
+            "Full6L minimum-domain parity: {states} states, {residual_states} residual states, \
+             full {} incidences, cutoff {} scanned, {} skipped, {} cells cut off",
+            total_work.incidence_rows_scanned + total_work.incidence_rows_skipped,
+            total_work.incidence_rows_scanned,
+            total_work.incidence_rows_skipped,
+            total_work.cells_cut_off,
+        );
     }
 
     fn assert_matches_full(

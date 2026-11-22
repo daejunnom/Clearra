@@ -40,6 +40,12 @@ fn initial(hold_enabled: bool, held: Option<PieceKind>) -> HoldAutomatonState {
 }
 
 fn language(masks: &[u8]) -> (PieceOrderLanguageCache, u32) {
+    let mut cache = PieceOrderLanguageCache::default();
+    let root = append_language(&mut cache, masks);
+    (cache, root)
+}
+
+fn append_language(cache: &mut PieceOrderLanguageCache, masks: &[u8]) -> u32 {
     let mut specs = Vec::new();
     let mut edges = Vec::new();
     for (depth, &mask) in masks.iter().enumerate() {
@@ -70,9 +76,8 @@ fn language(masks: &[u8]) -> (PieceOrderLanguageCache, u32) {
         accepting: true,
     });
     let graph = BuildOrderGraph::from_topological_parts(specs, edges, 0, 0, true).unwrap();
-    let mut cache = PieceOrderLanguageCache::default();
-    let root = cache.canonicalize(&graph).unwrap();
-    (cache, root)
+    assert!(graph.nodes[graph.root as usize].live);
+    cache.canonicalize(&graph).unwrap()
 }
 
 /// Explicit original-queue oracle: every real draw uses the canonical finite
@@ -181,6 +186,180 @@ fn factorized_coverage_matches_every_original_queue_and_canonical_hold_branch() 
                 assert_eq!(coverage.materialize_global().unwrap(), expected_union);
             }
         }
+    }
+}
+
+#[test]
+fn factorized_live_language_empty_intersection_matches_all_108_original_queues() {
+    use PieceKind::{I, O, T};
+
+    let source = universe("[IOT]1[IOT]3[IOT]3");
+    assert_eq!(source.pattern_count(), 108);
+    // The parser deliberately expands <=4096 originals. Keep that exact
+    // 108-queue oracle, but exercise a real factorized owner by embedding the
+    // same length-seven queues in P1P3P3. Both tested words use only I/O/T and
+    // consume every draw, so any other original in that owner must be rejected.
+    let product_source = universe("P1P3P3");
+    assert_eq!(product_source.pattern_count(), 308_700);
+    assert!(product_source.complete_factorized_layout().is_some());
+    let three_draws = universe("P3");
+    assert_eq!(three_draws.pattern_count(), 210);
+    let three_draw_variants = (0..three_draws.pattern_count())
+        .map(|ordinal| three_draws.sequence_at(ordinal).into_owned())
+        .collect::<Vec<_>>();
+    let original_ordinals = (0..source.pattern_count())
+        .map(|ordinal| {
+            let queue = source.sequence_at(ordinal);
+            let first = PieceKind::STANDARD_TETROMINOES
+                .iter()
+                .position(|piece| *piece == queue[0])
+                .unwrap();
+            let middle = three_draw_variants
+                .iter()
+                .position(|variant| variant.as_slice() == &queue[1..4])
+                .unwrap();
+            let last = three_draw_variants
+                .iter()
+                .position(|variant| variant.as_slice() == &queue[4..7])
+                .unwrap();
+            let original =
+                (first * three_draws.pattern_count() + middle) * three_draws.pattern_count() + last;
+            assert_eq!(product_source.sequence_at(original), queue);
+            original
+        })
+        .collect::<Vec<_>>();
+    let mut unique_ordinals = original_ordinals.clone();
+    unique_ordinals.sort_unstable();
+    unique_ordinals.dedup();
+    assert_eq!(unique_ordinals.len(), source.pattern_count());
+    let initial = initial(true, None);
+    let mut coverage = StandardBagCoverage::for_universe(&product_source, initial, true, true)
+        .unwrap()
+        .unwrap();
+    let control = ExecutionControl::default();
+    let rejected_word = [I, I, I, O, O, T, T];
+    let rejected_masks = rejected_word.map(|piece| 1 << (piece_code(piece) - 1));
+    let positive_word = source.sequence_at(0);
+    for piece in PieceKind::STANDARD_TETROMINOES {
+        assert_eq!(
+            rejected_word.iter().filter(|&&item| item == piece).count(),
+            positive_word.iter().filter(|&&item| item == piece).count(),
+            "the rejected word has the same inventory as a real source queue"
+        );
+    }
+    let positive_masks = positive_word
+        .iter()
+        .map(|&piece| 1 << (piece_code(piece) - 1))
+        .collect::<Vec<_>>();
+    let (mut kinds, rejected_root) = language(&rejected_masks);
+    let positive_root = append_language(&mut kinds, &positive_masks);
+
+    // These are live acyclic kind languages, not physical certificates.
+    // I-count three forces the first source draw to be I. The third I is
+    // separated by at least two other bag pieces, while empty Hold can defer
+    // only one piece. Thus no original queue can play the III prefix.
+    // Keep one language owner and revisit the negative after a positive to
+    // check that the product memo cannot turn a live root into source evidence.
+    for (root, masks, expect_any) in [
+        (rejected_root, rejected_masks.as_slice(), false),
+        (positive_root, positive_masks.as_slice(), true),
+        (rejected_root, rejected_masks.as_slice(), false),
+    ] {
+        let node = kinds.node(root).unwrap();
+        assert!(!node.accepting);
+        assert_eq!(node.remaining_depth, 7);
+        let mut expected = PatternBitSet::new(product_source.pattern_count());
+        for ordinal in 0..source.pattern_count() {
+            if finite_oracle(&source.sequence_at(ordinal), initial, masks, true) {
+                expected
+                    .insert(PatternId::new(original_ordinals[ordinal]))
+                    .unwrap();
+            }
+        }
+        assert_eq!(!expected.is_empty(), expect_any);
+        let result = coverage.cover_language(&kinds, root, &control).unwrap();
+        assert_eq!(result.covers_any_pattern, expect_any);
+        assert_eq!(result.covered_pattern_count, expected.count_ones() as usize);
+        assert_eq!(
+            result.witness_pattern_id,
+            expected
+                .first_pattern()
+                .map(|pattern| pattern.index() as u32)
+        );
+        assert_eq!(coverage.materialize_root(result.root).unwrap(), expected);
+        if expect_any {
+            assert_eq!(result.witness_pattern_id, Some(0));
+            assert!(result.covered_pattern_count < source.pattern_count());
+        } else {
+            assert_eq!(result.root, REJECT);
+            assert_eq!(result.covered_pattern_count, 0);
+            assert_eq!(result.witness_pattern_id, None);
+        }
+    }
+}
+
+#[test]
+fn factorized_p1p7p7_live_matching_inventory_language_can_have_no_source_queue() {
+    use PieceKind::{I, J, L, O, S, T, Z};
+
+    let source = universe("P1P7P7");
+    assert_eq!(source.pattern_count(), 177_811_200);
+    let initial = initial(true, None);
+    let mut coverage = StandardBagCoverage::for_universe(&source, initial, true, true)
+        .unwrap()
+        .unwrap();
+    let control = ExecutionControl::default();
+    let rejected_word = [I, I, I, O, O, T, T, S, S, Z, Z, J, J, L, L];
+    let rejected_masks = rejected_word.map(|piece| 1 << (piece_code(piece) - 1));
+    let positive_word = source.sequence_at(0);
+    for piece in PieceKind::STANDARD_TETROMINOES {
+        assert_eq!(
+            rejected_word.iter().filter(|&&item| item == piece).count(),
+            positive_word.iter().filter(|&&item| item == piece).count()
+        );
+    }
+    let positive_masks = positive_word
+        .iter()
+        .map(|&piece| 1 << (piece_code(piece) - 1))
+        .collect::<Vec<_>>();
+    let (mut kinds, rejected_root) = language(&rejected_masks);
+    let positive_root = append_language(&mut kinds, &positive_masks);
+    assert!(!finite_oracle(
+        &positive_word,
+        initial,
+        &rejected_masks,
+        true
+    ));
+    assert!(finite_oracle(
+        &positive_word,
+        initial,
+        &positive_masks,
+        true
+    ));
+
+    // The same obstruction holds for the complete 1+7+7 finite source: its
+    // third I cannot arrive before the second bag. Matching inventory and a
+    // live DAG are insufficient. No 177,811,200-bit bitmap is materialized.
+    for (root, expect_any) in [
+        (rejected_root, false),
+        (positive_root, true),
+        (rejected_root, false),
+    ] {
+        let node = kinds.node(root).unwrap();
+        assert!(!node.accepting);
+        assert_eq!(node.remaining_depth, 15);
+        let result = coverage.cover_language(&kinds, root, &control).unwrap();
+        assert_eq!(result.covers_any_pattern, expect_any);
+        if expect_any {
+            assert!(result.covered_pattern_count > 0);
+            assert!(result.covered_pattern_count < source.pattern_count());
+            assert_eq!(result.witness_pattern_id, Some(0));
+        } else {
+            assert_eq!(result.root, REJECT);
+            assert_eq!(result.covered_pattern_count, 0);
+            assert_eq!(result.witness_pattern_id, None);
+        }
+        assert!(coverage.global_words.is_empty());
     }
 }
 

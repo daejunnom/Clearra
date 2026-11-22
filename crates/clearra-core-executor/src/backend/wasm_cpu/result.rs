@@ -37,8 +37,8 @@ pub use compact_pc_failed_queue::WasmCompactPcFailedQueueSession;
 #[path = "compact_tiling_parallel.rs"]
 mod compact_tiling_parallel;
 #[cfg(all(test, feature = "parallel"))]
-#[path = "result_global_probability_tests.rs"]
-mod global_probability_tests;
+#[path = "result_exhaustive_tests.rs"]
+mod exhaustive_tests;
 
 use crate::{
     pc_chance_coverage_evidence::{
@@ -55,8 +55,7 @@ use crate::{
         canonicalize_catalog_rows, pack_canonical_tiling_row_ids, read_packed_tiling_row,
         PackedTilingRows, TilingSolutionPageStore, PACKED_TILING_MAX_ROW_ID,
     },
-    CoreExecutionResult, CorePathStep, PcGlobalProbabilityCompletion, PcGlobalProbabilityEvidence,
-    PcTilingMemoryAdmissionEvidence,
+    CoreExecutionResult, CorePathStep, PcTilingMemoryAdmissionEvidence,
 };
 
 #[cfg(feature = "parallel")]
@@ -921,7 +920,6 @@ pub(crate) struct WasmExactSearchSession {
     coverage_rows: Vec<CoverageRow>,
     coverage_rows_complete: bool,
     pc_chance_coverage_evidence_available: bool,
-    global_probability_completion: Option<PcGlobalProbabilityCompletion>,
     distributed_minimum_cover_source_complete: bool,
     buildable_identities: ExactHashSet<TilingIdentityEntry>,
     compact_tiling_identities: Option<Vec<PackedTilingRows>>,
@@ -938,6 +936,7 @@ pub(crate) struct WasmExactSearchSession {
     pattern_verified_execution_count: usize,
     build_variant_count: u128,
     count_complete: bool,
+    candidate_verification_cancelled: bool,
     representative_path: Vec<CorePathStep>,
     representative_rank: Option<u64>,
     representative_identity: Option<StandardBoard64TilingIdentity>,
@@ -1762,7 +1761,7 @@ impl WasmExactSearchSession {
                 .ensure_memory_bound(retained_before_geometry, target_peak)
                 .map_err(WasmExactSearchError::resource_admission)?;
         }
-        let mut geometry = if external_geometry {
+        let geometry = if external_geometry {
             GeometrySearch::external_deferred(
                 universe,
                 &multiset_family,
@@ -1791,13 +1790,6 @@ impl WasmExactSearchSession {
                 )?
             }
         };
-        if !external_geometry
-            && problem
-                .pc_chance_evidence_policy()
-                .retains_pc_global_probability_evidence()
-        {
-            geometry.enable_streaming_probability()?;
-        }
         geometry_span.finish(geometry.targets().map_or(0, |targets| targets.len()) as u64);
         let peak_cpu_bytes = catalog
             .retained_bytes()
@@ -1865,7 +1857,6 @@ impl WasmExactSearchSession {
                     .queue_observation_policy()
                     .requires_observation_policy(),
             pc_chance_coverage_evidence_available: retain_pc_chance_coverage_evidence,
-            global_probability_completion: None,
             distributed_minimum_cover_source_complete: false,
             buildable_identities: ExactHashSet::default(),
             compact_tiling_identities: compact_tiling_identity_supported.then(Vec::new),
@@ -1885,6 +1876,7 @@ impl WasmExactSearchSession {
             pattern_verified_execution_count: 0,
             build_variant_count: 0,
             count_complete: true,
+            candidate_verification_cancelled: false,
             representative_path: Vec::new(),
             representative_rank: None,
             representative_identity: None,
@@ -2406,24 +2398,6 @@ impl WasmExactSearchSession {
             .map_err(|_| {
                 WasmExactSearchError::InvalidProblem("wasm_parallel_coverage_universe_mismatch")
             })?;
-        if self
-            .problem
-            .pc_chance_evidence_policy()
-            .retains_pc_global_probability_evidence()
-            && fresh_whole_family
-            && outcome.truncated_reason.is_none()
-            && !self.execution_control.is_cancelled()
-        {
-            self.global_probability_completion = if self.covered_patterns.count_ones() as usize
-                == self.covered_patterns.pattern_count()
-            {
-                Some(PcGlobalProbabilityCompletion::AllOriginalQueuesCovered)
-            } else if outcome.candidate_domain_exhausted {
-                Some(PcGlobalProbabilityCompletion::CandidateDomainExhausted)
-            } else {
-                None
-            };
-        }
         if self.problem.objective().kind() != ObjectiveKind::Tiling {
             let ordinal_chance_rows =
                 super::parallel_worker::retains_ordinal_chance_rows(&self.problem);
@@ -2746,24 +2720,6 @@ impl WasmExactSearchSession {
                     if let Some(outcome) = outcome {
                         return Ok(outcome);
                     }
-                    // This is a monotone positive certificate over the full
-                    // original universe, not candidate-domain exhaustion.
-                    // Keep external cancellation and count authority separate.
-                    if self
-                        .problem
-                        .pc_chance_evidence_policy()
-                        .retains_pc_global_probability_evidence()
-                        && control.partition().count() == 1
-                        && self.observation_family_production
-                            == ObservationFamilyProduction::InternalPending
-                        && (self.buildup_workspace.standard_bag_coverage_complete()
-                            || self.global_probability_completion
-                                == Some(PcGlobalProbabilityCompletion::AllOriginalQueuesCovered))
-                    {
-                        self.global_probability_completion =
-                            Some(PcGlobalProbabilityCompletion::AllOriginalQueuesCovered);
-                        return self.complete();
-                    }
                     if processed_candidates >= MAX_BUILDUP_CANDIDATES_PER_ADVANCE {
                         control.report_progress(
                             "wasm-exact-cover",
@@ -2779,16 +2735,6 @@ impl WasmExactSearchSession {
                 }
                 GeometryAdvance::Complete => {
                     self.finish_internal_observation_family(control);
-                    if self
-                        .problem
-                        .pc_chance_evidence_policy()
-                        .retains_pc_global_probability_evidence()
-                        && self.observation_family_production
-                            == ObservationFamilyProduction::Complete
-                    {
-                        self.global_probability_completion =
-                            Some(PcGlobalProbabilityCompletion::CandidateDomainExhausted);
-                    }
                     return self.complete();
                 }
             }
@@ -3768,10 +3714,6 @@ impl WasmExactSearchSession {
         }
         let retain_representative_trace = (!self.buildup_workspace.has_local_import()
             || super::uses_pc_placement_dependency(&self.problem))
-            && !self
-                .problem
-                .pc_chance_evidence_policy()
-                .retains_pc_global_probability_evidence()
             && self.problem.output_policy().retains_representative_trace()
             && self.representative_path.is_empty();
         let result = match verify_candidate(
@@ -3788,6 +3730,12 @@ impl WasmExactSearchSession {
         ) {
             Ok(result) => result,
             Err(WasmExactSearchError::Cancelled) => {
+                // Geometry consumed this candidate before verification. A
+                // later control cannot restore whole-family authority after
+                // cancellation left that candidate unverified.
+                self.observation_family_production = ObservationFamilyProduction::ExternalOrPartial;
+                self.count_complete = false;
+                self.candidate_verification_cancelled = true;
                 return Ok(Some(ExactSearchAdvance::Cancelled));
             }
             Err(error) => return Err(error),
@@ -3923,16 +3871,6 @@ impl WasmExactSearchSession {
                 solution_coverage = Some(candidate_coverage.clone());
             }
             self.record_build_coverage_row(coverage_row_id, candidate_coverage.clone())?;
-            if self
-                .problem
-                .pc_chance_evidence_policy()
-                .retains_pc_global_probability_evidence()
-                && self.covered_patterns.count_ones() as usize
-                    == self.covered_patterns.pattern_count()
-            {
-                self.global_probability_completion =
-                    Some(PcGlobalProbabilityCompletion::AllOriginalQueuesCovered);
-            }
         }
         if let Some(root) = result.symbolic_coverage_root {
             let materialized = (solution_coverage_required
@@ -4000,10 +3938,6 @@ impl WasmExactSearchSession {
             self.build_variant_count = next.unwrap_or(u128::MAX);
             self.count_complete &= next.is_some() && result.count_complete;
             if self.problem.output_policy().retains_representative_trace()
-                && !self
-                    .problem
-                    .pc_chance_evidence_policy()
-                    .retains_pc_global_probability_evidence()
                 && self
                     .representative_rank
                     .is_none_or(|rank| candidate_ordinal < rank)
@@ -4859,14 +4793,6 @@ impl WasmExactSearchSession {
             }
         }
         coverage_span.finish(u64::from(self.covered_patterns.count_ones()));
-        if self
-            .problem
-            .pc_chance_evidence_policy()
-            .retains_pc_global_probability_evidence()
-            && self.execution_control.is_cancelled()
-        {
-            return Ok(ExactSearchAdvance::Cancelled);
-        }
         self.finished = true;
         let result_span = SearchStageSpan::begin(ExecutorSearchStage::WasmResultCanonicalize);
         let scoring_requested = self.problem.objective().score().requested();
@@ -4909,12 +4835,7 @@ impl WasmExactSearchSession {
         let include_normalized_keys = matches!(role, ExactCompletionRole::Final);
         let result =
             self.build_result(include_normalized_keys, scoring_batch, terminal_identities)?;
-        if (scoring_requested
-            || self.canonical_tiling_terminal_authorized()
-            || self
-                .problem
-                .pc_chance_evidence_policy()
-                .retains_pc_global_probability_evidence())
+        if (scoring_requested || self.canonical_tiling_terminal_authorized())
             && matches!(
                 self.problem_retention,
                 SearchProblemRetention::ParentAuthorizedSharedInput { .. }
@@ -4923,14 +4844,6 @@ impl WasmExactSearchSession {
             self.validate_public_result_memory_with_future(&result, 0)?;
         }
         result_span.finish(solution_identity_count as u64);
-        if self
-            .problem
-            .pc_chance_evidence_policy()
-            .retains_pc_global_probability_evidence()
-            && self.execution_control.is_cancelled()
-        {
-            return Ok(ExactSearchAdvance::Cancelled);
-        }
         Ok(ExactSearchAdvance::Completed(result))
     }
 
@@ -5284,19 +5197,9 @@ impl WasmExactSearchSession {
         let coverage_bytes = coverage_clone_count.checked_mul(bitset_peak)?;
         let probability_bytes =
             identity_count.checked_mul(core::mem::size_of::<SolutionProbabilityReport>() as u128)?;
-        let pattern_weight_bytes = if self
-            .problem
-            .pc_chance_evidence_policy()
-            .retains_pc_global_probability_evidence()
-        {
-            // The global certificate borrows uniform source weights. No
-            // per-queue decimal weight strings are created by this purpose.
-            0
-        } else {
-            pattern_count.checked_mul(
-                (core::mem::size_of::<String>() as u128).checked_add(DECIMAL_U128_BACKING_BYTES)?,
-            )?
-        };
+        let pattern_weight_bytes = pattern_count.checked_mul(
+            (core::mem::size_of::<String>() as u128).checked_add(DECIMAL_U128_BACKING_BYTES)?,
+        )?;
         let trace_bytes = (self.representative_path.len() as u128)
             .checked_mul(core::mem::size_of::<CorePathStep>() as u128)?;
         let scoring_batch_bytes = scoring_batch.map_or(Some(0_u128), |batch| {
@@ -5453,21 +5356,11 @@ impl WasmExactSearchSession {
                 .get()
                 .to_string()
         };
-        let global_probability_requested = self
-            .problem
-            .pc_chance_evidence_policy()
-            .retains_pc_global_probability_evidence();
-        let global_probability_completion = self.global_probability_completion.filter(|_| {
-            include_normalized_keys
-                && self.truncated_reason.is_none()
-                && !self.execution_control.is_cancelled()
-        });
         let probability_complete = probability_calculated
             && universe.complete()
             && self.truncated_reason.is_none()
-            && (!global_probability_requested || global_probability_completion.is_some());
-        let count_complete = !global_probability_requested
-            && self.truncated_reason.is_none()
+            && !self.candidate_verification_cancelled;
+        let count_complete = self.truncated_reason.is_none()
             && self.count_complete
             && (!tiling_only || self.tiling_supply_projection_complete);
         let source_solution_count = tiling_solution_store
@@ -6405,22 +6298,6 @@ impl WasmExactSearchSession {
                 WasmExactSearchError::InvalidProblem("wasm_result_field_storage_unavailable")
             })?;
         fields.extend(field_values);
-        if global_probability_requested {
-            fields.try_reserve_exact(2).map_err(|_| {
-                WasmExactSearchError::InvalidProblem("wasm_result_field_storage_unavailable")
-            })?;
-            fields.extend([
-                field(
-                    "probability_completion_basis",
-                    global_probability_completion.map_or("incomplete", |basis| basis.as_str()),
-                ),
-                field(
-                    "enumeration_complete",
-                    global_probability_completion
-                        .is_some_and(PcGlobalProbabilityCompletion::enumeration_complete),
-                ),
-            ]);
-        }
         for (name, value) in [
             "observation_candidate_factors",
             "observation_proof_factors",
@@ -6988,39 +6865,6 @@ impl WasmExactSearchSession {
                 )
             })?;
         coverage_pattern_words.extend_from_slice(self.covered_patterns.words());
-        let pc_global_probability_evidence = if global_probability_requested {
-            if let Some(completion) = global_probability_completion {
-                if matches!(
-                    self.problem_retention,
-                    SearchProblemRetention::ParentAuthorizedSharedInput { .. }
-                ) {
-                    let future =
-                        PcGlobalProbabilityEvidence::checked_creation_future_bytes(&self.problem)
-                            .ok_or_else(|| {
-                            self.memory_projection_unavailable(
-                                "global probability evidence projection is unavailable",
-                            )
-                        })?;
-                    self.ensure_session_memory_bound(future)?;
-                }
-                Some(
-                    PcGlobalProbabilityEvidence::from_executed_problem(
-                        &self.problem,
-                        self.covered_patterns.clone(),
-                        completion,
-                    )
-                    .map_err(|_| {
-                        WasmExactSearchError::InvalidProblem(
-                            "wasm_pc_global_probability_evidence_mismatch",
-                        )
-                    })?,
-                )
-            } else {
-                None
-            }
-        } else {
-            None
-        };
         let mut representative_path = Vec::new();
         representative_path
             .try_reserve_exact(self.representative_path.len())
@@ -7108,9 +6952,6 @@ impl WasmExactSearchSession {
             .with_pc_score_problem_evidence(pc_score_problem_evidence);
         if let Some(evidence) = pc_chance_coverage_evidence {
             result = result.with_pc_chance_coverage_evidence(evidence);
-        }
-        if let Some(evidence) = pc_global_probability_evidence {
-            result = result.with_pc_global_probability_evidence(evidence);
         }
         if let Some(store) = tiling_solution_store {
             result = result.with_tiling_solution_page_store(store);

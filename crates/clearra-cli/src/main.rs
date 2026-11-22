@@ -14,7 +14,7 @@ fn run_cli_product() -> i32 {
         let stages: Vec<_> = session
             .finish()
             .into_iter()
-            .filter(|stage| stage.invocation_count != 0)
+            .filter(|stage| stage.invocation_count != 0 || stage.work_item_count != 0)
             .map(|stage| {
                 serde_json::json!({
                     "name": stage.name,

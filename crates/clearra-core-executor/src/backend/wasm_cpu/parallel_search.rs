@@ -62,7 +62,6 @@ pub(super) struct ParallelSearchOutcome {
     pub pattern_verified_execution_count: usize,
     pub build_variant_count: u128,
     pub count_complete: bool,
-    pub candidate_domain_exhausted: bool,
     pub representative_path: Vec<CorePathStep>,
     pub representative_candidate_id: Option<u64>,
     pub representative_pattern_id: Option<u32>,
@@ -925,7 +924,6 @@ fn merge_results(
         count_complete: merged.count_complete
             && truncated_reason.is_none()
             && candidate_domain_exhausted,
-        candidate_domain_exhausted,
         representative_path,
         representative_candidate_id: representative
             .map(|entry| entry.candidate.identity.bucket_hash()),

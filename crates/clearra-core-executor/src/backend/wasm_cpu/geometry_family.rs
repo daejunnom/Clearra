@@ -29,6 +29,9 @@ const _: () = assert!(core::mem::size_of::<FamilyNode>() == 16);
 #[derive(Debug)]
 pub(super) struct GeometrySolutionFamily {
     chunks: Vec<Vec<FamilyNode>>,
+    // Sum of actual backing capacities, including unused slots in the last
+    // chunk. Directory and intern-table capacities are accounted separately.
+    chunk_payload_capacity_bytes: usize,
     node_count: u32,
     intern_slots: Vec<u32>,
     intern_count: usize,
@@ -53,6 +56,7 @@ impl GeometrySolutionFamily {
         }
         Self {
             chunks: Vec::new(),
+            chunk_payload_capacity_bytes: 0,
             node_count: 0,
             intern_slots,
             intern_count: 0,
@@ -143,11 +147,7 @@ impl GeometrySolutionFamily {
 
     pub fn retained_bytes(&self) -> usize {
         self.chunks.capacity() * core::mem::size_of::<Vec<FamilyNode>>()
-            + self
-                .chunks
-                .iter()
-                .map(|chunk| chunk.capacity() * core::mem::size_of::<FamilyNode>())
-                .sum::<usize>()
+            + self.chunk_payload_capacity_bytes
             + self.intern_slots.capacity() * core::mem::size_of::<u32>()
     }
 
@@ -231,7 +231,10 @@ impl GeometrySolutionFamily {
         }
         self.node_count = checkpoint.node_count;
         let retained_chunks = (self.node_count as usize).div_ceil(FAMILY_NODE_CHUNK_CAPACITY);
-        self.chunks.truncate(retained_chunks);
+        for removed in self.chunks.drain(retained_chunks..) {
+            self.chunk_payload_capacity_bytes -=
+                removed.capacity() * core::mem::size_of::<FamilyNode>();
+        }
         if let Some(last) = self.chunks.last_mut() {
             let retained_in_last =
                 self.node_count as usize - (retained_chunks - 1) * FAMILY_NODE_CHUNK_CAPACITY;
@@ -277,37 +280,10 @@ impl GeometrySolutionFamily {
             .last()
             .is_none_or(|chunk| chunk.len() == FAMILY_NODE_CHUNK_CAPACITY);
         if needs_chunk {
-            if self.chunks.len() == self.chunks.capacity() {
-                let requested = self.chunks.len().checked_add(1)?;
-                let replacement_peak = (requested as u128)
-                    .checked_mul(core::mem::size_of::<Vec<FamilyNode>>() as u128)?
-                    .checked_add(self.retained_bytes() as u128)?;
-                if self
-                    .retained_limit_bytes
-                    .is_some_and(|limit| replacement_peak > limit)
-                {
-                    self.refused_retained_bytes = Some(replacement_peak);
-                    return None;
-                }
-                let mut replacement = Vec::new();
-                replacement.try_reserve_exact(requested).ok()?;
-                let replacement_bytes = (replacement.capacity() as u128)
-                    .checked_mul(core::mem::size_of::<Vec<FamilyNode>>() as u128)?;
-                let replacement_peak =
-                    (self.retained_bytes() as u128).checked_add(replacement_bytes)?;
-                if self
-                    .retained_limit_bytes
-                    .is_some_and(|limit| replacement_peak > limit)
-                {
-                    self.refused_retained_bytes = Some(replacement_peak);
-                    return None;
-                }
-                let old = core::mem::replace(&mut self.chunks, replacement);
-                self.chunks.extend(old);
-            }
-            let projected = (FAMILY_NODE_CHUNK_CAPACITY as u128)
-                .checked_mul(core::mem::size_of::<FamilyNode>() as u128)?
-                .checked_add(self.retained_bytes() as u128)?;
+            let requested_chunk_bytes = (FAMILY_NODE_CHUNK_CAPACITY as u128)
+                .checked_mul(core::mem::size_of::<FamilyNode>() as u128)?;
+            self.reserve_chunk_directory(requested_chunk_bytes)?;
+            let projected = (self.retained_bytes() as u128).checked_add(requested_chunk_bytes)?;
             if self
                 .retained_limit_bytes
                 .is_some_and(|limit| projected > limit)
@@ -317,9 +293,10 @@ impl GeometrySolutionFamily {
             }
             let mut chunk = Vec::new();
             chunk.try_reserve_exact(FAMILY_NODE_CHUNK_CAPACITY).ok()?;
-            let chunk_bytes = (chunk.capacity() as u128)
-                .checked_mul(core::mem::size_of::<FamilyNode>() as u128)?;
-            let projected = (self.retained_bytes() as u128).checked_add(chunk_bytes)?;
+            let chunk_bytes = chunk
+                .capacity()
+                .checked_mul(core::mem::size_of::<FamilyNode>())?;
+            let projected = (self.retained_bytes() as u128).checked_add(chunk_bytes as u128)?;
             if self
                 .retained_limit_bytes
                 .is_some_and(|limit| projected > limit)
@@ -327,12 +304,90 @@ impl GeometrySolutionFamily {
                 self.refused_retained_bytes = Some(projected);
                 return None;
             }
+            self.chunk_payload_capacity_bytes =
+                self.chunk_payload_capacity_bytes.checked_add(chunk_bytes)?;
             self.chunks.push(chunk);
         }
         let reference = self.node_count + 2;
         self.chunks.last_mut()?.push(node);
         self.node_count += 1;
         Some(reference)
+    }
+
+    fn reserve_chunk_directory(&mut self, next_chunk_bytes: u128) -> Option<()> {
+        if self.chunks.len() < self.chunks.capacity() {
+            return Some(());
+        }
+        let minimum = self.chunks.len().checked_add(1)?;
+        // A bounded owner keeps the previous minimal directory policy. Slack
+        // admitted now could otherwise reject a later chunk near the same cap,
+        // even when no directory growth is needed at that later boundary.
+        let preferred = if self.retained_limit_bytes.is_some() {
+            minimum
+        } else {
+            self.chunks
+                .capacity()
+                .checked_mul(2)
+                .unwrap_or(minimum)
+                .max(minimum)
+        };
+        let replacement = self.allocate_chunk_directory(preferred, next_chunk_bytes);
+        let replacement = match replacement {
+            Err(_) if preferred != minimum => {
+                // If the optional slack allocation fails, the smaller
+                // directory still preserves every existing node reference.
+                self.allocate_chunk_directory(minimum, next_chunk_bytes)
+            }
+            result => result,
+        };
+        let replacement = match replacement {
+            Ok(replacement) => replacement,
+            Err(required) => {
+                if let Some(required) = required {
+                    self.refused_retained_bytes = Some(required);
+                }
+                return None;
+            }
+        };
+        let old = core::mem::replace(&mut self.chunks, replacement);
+        self.chunks.extend(old);
+        Some(())
+    }
+
+    fn allocate_chunk_directory(
+        &self,
+        capacity: usize,
+        next_chunk_bytes: u128,
+    ) -> Result<Vec<Vec<FamilyNode>>, Option<u128>> {
+        let check_capacity = |capacity: usize| {
+            let replacement_bytes = (capacity as u128)
+                .checked_mul(core::mem::size_of::<Vec<FamilyNode>>() as u128)
+                .ok_or(None)?;
+            let current = self.retained_bytes() as u128;
+            let replacement_peak = current.checked_add(replacement_bytes).ok_or(None)?;
+            let old_directory_bytes = (self.chunks.capacity() as u128)
+                .checked_mul(core::mem::size_of::<Vec<FamilyNode>>() as u128)
+                .ok_or(None)?;
+            let with_next_chunk = current
+                .checked_sub(old_directory_bytes)
+                .and_then(|bytes| bytes.checked_add(replacement_bytes))
+                .and_then(|bytes| bytes.checked_add(next_chunk_bytes))
+                .ok_or(None)?;
+            let required = replacement_peak.max(with_next_chunk);
+            if self
+                .retained_limit_bytes
+                .is_some_and(|limit| required > limit)
+            {
+                Err(Some(required))
+            } else {
+                Ok(())
+            }
+        };
+        check_capacity(capacity)?;
+        let mut replacement = Vec::new();
+        replacement.try_reserve_exact(capacity).map_err(|_| None)?;
+        check_capacity(replacement.capacity())?;
+        Ok(replacement)
     }
 
     fn find_interned(&self, node: FamilyNode) -> Option<u32> {
@@ -445,7 +500,25 @@ fn node_hash(node: FamilyNode) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{GeometrySolutionFamily, FAMILY_EMPTY, FAMILY_INVALID};
+    use super::{
+        FamilyNode, GeometrySolutionFamily, FAMILY_EMPTY, FAMILY_INVALID,
+        FAMILY_NODE_CHUNK_CAPACITY,
+    };
+
+    fn assert_actual_retained_capacity(family: &GeometrySolutionFamily) {
+        let chunk_bytes = family
+            .chunks
+            .iter()
+            .map(|chunk| chunk.capacity() * core::mem::size_of::<FamilyNode>())
+            .sum::<usize>();
+        assert_eq!(family.chunk_payload_capacity_bytes, chunk_bytes);
+        assert_eq!(
+            family.retained_bytes(),
+            family.chunks.capacity() * core::mem::size_of::<Vec<FamilyNode>>()
+                + chunk_bytes
+                + family.intern_slots.capacity() * core::mem::size_of::<u32>()
+        );
+    }
 
     #[test]
     fn family_root_count_preserves_append_union_and_product_multiplicity() {
@@ -494,5 +567,95 @@ mod tests {
         one_under.set_retained_limit_bytes(Some(exact_cap - 1));
         assert!(one_under.append(7, FAMILY_EMPTY).is_none());
         assert!((one_under.retained_bytes() as u128) < exact_cap);
+    }
+
+    #[test]
+    fn family_bounded_directory_keeps_minimum_capacity_at_exact_cap() {
+        for one_under in [false, true] {
+            let mut family = GeometrySolutionFamily::new();
+            family.disable_interning();
+            family.set_retained_limit_bytes(Some(u128::MAX));
+            let existing_nodes = 5 * FAMILY_NODE_CHUNK_CAPACITY;
+            for row in 0..existing_nodes {
+                family.append(row as u32, FAMILY_EMPTY).unwrap();
+            }
+            assert_eq!(family.chunks.len(), 5);
+            assert_eq!(family.chunks.capacity(), 5);
+            assert_actual_retained_capacity(&family);
+            let chunk_bytes = family.chunks[0].capacity() * core::mem::size_of::<FamilyNode>();
+            let minimum_retained =
+                family.retained_bytes() + chunk_bytes + core::mem::size_of::<Vec<FamilyNode>>();
+            family.set_retained_limit_bytes(Some(minimum_retained as u128 - u128::from(one_under)));
+
+            let appended = family.append(existing_nodes as u32, FAMILY_EMPTY);
+            if one_under {
+                assert_eq!(appended, None);
+                assert_eq!(family.node_count() as usize, existing_nodes);
+                assert_eq!(family.chunks.len(), 5);
+                assert_eq!(
+                    family.refused_retained_bytes(),
+                    Some(minimum_retained as u128)
+                );
+            } else {
+                assert_eq!(appended, Some(existing_nodes as u32 + 2));
+                assert_eq!(family.chunks.len(), 6);
+                assert_eq!(family.chunks.capacity(), 6);
+                assert_eq!(family.retained_bytes(), minimum_retained);
+                assert_eq!(family.refused_retained_bytes(), None);
+            }
+            assert_actual_retained_capacity(&family);
+        }
+    }
+
+    #[test]
+    fn family_retained_capacity_stays_exact_after_partial_rewind_and_refill() {
+        let mut family = GeometrySolutionFamily::new();
+        let empty = family.checkpoint();
+        let prefix_count = FAMILY_NODE_CHUNK_CAPACITY + 17;
+        let final_count = 4 * FAMILY_NODE_CHUNK_CAPACITY + 29;
+        let mut root = FAMILY_EMPTY;
+        for row in 0..prefix_count {
+            root = family.append(row as u32, root).unwrap();
+        }
+        let prefix_root = root;
+        let prefix = family.checkpoint();
+        let prefix_chunk_bytes = family.chunk_payload_capacity_bytes;
+        assert_actual_retained_capacity(&family);
+        for row in prefix_count..final_count {
+            root = family.append(row as u32, root).unwrap();
+        }
+        let expected_root = root;
+        let expected_nodes = (2..family.node_count() + 2)
+            .map(|reference| family.node(reference).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(family.chunks.len(), 5);
+        assert_eq!(family.chunks.capacity(), 8);
+        assert_actual_retained_capacity(&family);
+
+        family.rewind(prefix);
+        assert_eq!(family.node_count() as usize, prefix_count);
+        assert_eq!(family.chunks.len(), 2);
+        assert_eq!(family.chunks.last().unwrap().len(), 17);
+        assert!(family.chunks.last().unwrap().capacity() > 17);
+        assert_eq!(family.chunk_payload_capacity_bytes, prefix_chunk_bytes);
+        assert_actual_retained_capacity(&family);
+        root = prefix_root;
+        for row in prefix_count..final_count {
+            root = family.append(row as u32, root).unwrap();
+        }
+        assert_eq!(root, expected_root);
+        for (index, expected) in expected_nodes.iter().copied().enumerate() {
+            assert_eq!(family.node(index as u32 + 2), Some(expected));
+        }
+        assert_eq!(family.path_count(root), Some(1));
+        assert_actual_retained_capacity(&family);
+
+        family.rewind(empty);
+        assert_eq!(family.node_count(), 0);
+        assert!(family.chunks.is_empty());
+        assert_eq!(family.chunk_payload_capacity_bytes, 0);
+        assert_actual_retained_capacity(&family);
+        assert_eq!(family.append(0, FAMILY_EMPTY), Some(2));
+        assert_actual_retained_capacity(&family);
     }
 }

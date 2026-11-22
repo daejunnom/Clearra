@@ -20,13 +20,8 @@ use clearra_objectives::policy::objective_policy::ObjectivePolicy;
 use clearra_pc_graph::request::{
     OpeningPcSearchQuery, PcCountPolicy, PcScenarioQuery, PcSolutionProbabilityPolicy,
 };
-use clearra_problem::{
-    PcChanceEvidencePolicy, SearchOutputPolicy, SearchProblem, SearchProblemPreset,
-};
+use clearra_problem::{SearchOutputPolicy, SearchProblem, SearchProblemPreset};
 use clearra_supply::QueueObservationPolicy;
-
-mod global;
-pub use global::{PcGlobalProbabilityV1Result, PcGlobalProbabilityValidationError};
 
 const CHANCE_RESULT_CONTRACT: &str = "pc-probability.v2";
 
@@ -308,7 +303,6 @@ impl PcProbabilityV2Result {
 /// private and transient; only the recomputed compact report can escape.
 #[derive(Clone, Debug)]
 pub(crate) struct PcChanceCompiledAuthority {
-    evidence_policy: PcChanceEvidencePolicy,
     origin: PcChanceIngressOrigin,
     query: PcChanceQuerySnapshot,
     problem_preset: PcChanceProblemPreset,
@@ -361,20 +355,6 @@ impl PcChanceCompiledAuthority {
         origin: PcChanceIngressOrigin,
         problem: &SearchProblem,
     ) -> Result<Self, PcChanceExecutionError> {
-        Self::new_for_policy(
-            query,
-            origin,
-            problem,
-            PcChanceEvidencePolicy::PcProbabilityV2,
-        )
-    }
-
-    fn new_for_policy(
-        query: PcChanceQuerySnapshot,
-        origin: PcChanceIngressOrigin,
-        problem: &SearchProblem,
-        evidence_policy: PcChanceEvidencePolicy,
-    ) -> Result<Self, PcChanceExecutionError> {
         let problem_preset = query.problem_preset();
         if problem.preset() != problem_preset.search_problem_preset() {
             return Err(rejected(
@@ -384,13 +364,13 @@ impl PcChanceCompiledAuthority {
         if problem.output_policy() != SearchOutputPolicy::CoverageSummary {
             return Err(rejected("pc chance requires coverage-summary output"));
         }
-        if problem.pc_chance_evidence_policy() != evidence_policy {
-            return Err(rejected(match evidence_policy {
-                PcChanceEvidencePolicy::PcGlobalProbabilityV1 => {
-                    "compiled global probability problem is missing its explicit evidence marker"
-                }
-                _ => "compiled pc chance problem is missing the pc-probability.v2 evidence marker",
-            }));
+        if !problem
+            .pc_chance_evidence_policy()
+            .retains_pc_probability_v2_evidence()
+        {
+            return Err(rejected(
+                "compiled pc chance problem is missing the pc-probability.v2 evidence marker",
+            ));
         }
         if problem.backend_request().max_memory_mib().is_some() {
             return Err(rejected(
@@ -443,7 +423,6 @@ impl PcChanceCompiledAuthority {
         let board = problem.initial_board();
         let supply = problem.supply();
         Ok(Self {
-            evidence_policy,
             origin,
             query,
             problem_preset,
@@ -472,14 +451,6 @@ impl PcChanceCompiledAuthority {
         expected_problem: &SearchProblem,
         result: &CoreExecutionResult,
     ) -> Result<ValidatedPcChanceExecutionEvidence, PcChanceExecutionError> {
-        if self.evidence_policy != PcChanceEvidencePolicy::PcProbabilityV2
-            || expected_problem.pc_chance_evidence_policy()
-                != PcChanceEvidencePolicy::PcProbabilityV2
-        {
-            return Err(rejected(
-                "pc probability v2 requires its original coverage-row policy",
-            ));
-        }
         let critical_fields = critical_field_snapshot(result)?;
         require_field(result, "search_output_policy", "coverage-summary")?;
         require_usize(

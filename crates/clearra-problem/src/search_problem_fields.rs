@@ -238,10 +238,6 @@ mod pc_chance_evidence_policy {
         #[default]
         Disabled,
         PcProbabilityV2,
-        /// Purpose-separated global probability. A producer may finish after
-        /// proving every original queue successful without enumerating the
-        /// complete solution family or retaining candidate coverage rows.
-        PcGlobalProbabilityV1,
         /// Complete PC coverage, consumed only by the request-owned failed
         /// queue producer. The example bound is part of execution identity.
         PcFailedQueueV2 {
@@ -265,10 +261,6 @@ mod pc_chance_evidence_policy {
     impl PcChanceEvidencePolicy {
         pub const fn retains_pc_probability_v2_evidence(self) -> bool {
             matches!(self, Self::PcProbabilityV2)
-        }
-
-        pub const fn retains_pc_global_probability_evidence(self) -> bool {
-            matches!(self, Self::PcGlobalProbabilityV1)
         }
 
         pub const fn retains_pc_coverage_evidence(self) -> bool {

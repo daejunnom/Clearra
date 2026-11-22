@@ -277,18 +277,6 @@ enum PcChanceSpinPieceSelectorEvidence {
 }
 
 impl PcChanceProblemEvidence {
-    pub(crate) fn from_global_probability_search_problem(
-        problem: &SearchProblem,
-    ) -> Result<Self, PcChanceProblemEvidenceError> {
-        if !problem
-            .pc_chance_evidence_policy()
-            .retains_pc_global_probability_evidence()
-        {
-            return Err(PcChanceProblemEvidenceError::UnexpectedChanceEvidencePolicy);
-        }
-        Self::from_search_problem_fields(problem)
-    }
-
     fn from_search_problem(problem: &SearchProblem) -> Result<Self, PcChanceProblemEvidenceError> {
         if !problem
             .pc_chance_evidence_policy()

@@ -11,6 +11,8 @@ use clearra_supply::pattern_universe::{
     PatternPiecePositionIndexCompileSession, PieceMultisetKey,
 };
 
+use crate::performance::{profile_sample_scale, ExecutorSearchStage, SearchStageSpan};
+
 use super::{
     catalog::GeometryCatalog,
     exact_collections::ExactHashMap,
@@ -23,9 +25,9 @@ use super::{
     mix_digest, piece_index, WasmExactSearchError, MAX_BOARD64_PIECES,
 };
 
-#[path = "geometry_streaming.rs"]
-mod streaming;
-use streaming::StreamingGeometry;
+#[cfg(test)]
+#[path = "geometry_family_work_tests.rs"]
+mod family_work_tests;
 
 const NO_ROW: u32 = u32::MAX;
 const RESIDUAL_ENTRY_CHUNK_CAPACITY: usize = 4096;
@@ -44,7 +46,9 @@ fn minimum_domain_modes() -> (bool, bool) {
     static MODES: std::sync::OnceLock<(bool, bool)> = std::sync::OnceLock::new();
     *MODES.get_or_init(|| {
         (
-            std::env::var("CLEARRA_MINIMUM_DOMAIN_CUTOFF").as_deref() == Ok("1"),
+            // The exact incumbent cutoff is the production route. Local A/B
+            // runs may still request the old full incidence scan explicitly.
+            std::env::var("CLEARRA_MINIMUM_DOMAIN_CUTOFF").as_deref() != Ok("0"),
             std::env::var("CLEARRA_MINIMUM_DOMAIN_WORK").as_deref() == Ok("1"),
         )
     })
@@ -1006,6 +1010,113 @@ enum CompileAdvance {
     ResourceIncomplete,
 }
 
+#[derive(Clone, Copy)]
+#[repr(usize)]
+enum FamilyCompileStage {
+    ResidualLookup,
+    FeasiblePieces,
+    CheapProjection,
+    MinimumDomain,
+    AdvancedDomain,
+    AdvancedPrune,
+    ComponentPlan,
+    FamilyCommit,
+    SupportRows,
+}
+
+impl FamilyCompileStage {
+    fn search_stage(self) -> ExecutorSearchStage {
+        match self {
+            Self::ResidualLookup => ExecutorSearchStage::WasmGeometryResidualLookup,
+            Self::FeasiblePieces => ExecutorSearchStage::WasmGeometryFeasiblePieces,
+            Self::CheapProjection => ExecutorSearchStage::WasmGeometryCheapProjection,
+            Self::MinimumDomain => ExecutorSearchStage::WasmGeometryMinimumDomain,
+            Self::AdvancedDomain => ExecutorSearchStage::WasmGeometryAdvancedDomain,
+            Self::AdvancedPrune => ExecutorSearchStage::WasmGeometryAdvancedPrune,
+            Self::ComponentPlan => ExecutorSearchStage::WasmGeometryComponentPlan,
+            Self::FamilyCommit => ExecutorSearchStage::WasmGeometryFamilyCommit,
+            Self::SupportRows => ExecutorSearchStage::WasmGeometrySupportRows,
+        }
+    }
+}
+
+/// Timers are sampled, but work counts are exact. Keep the latter local while
+/// compiling and publish once when this owner is consumed or cancelled. A
+/// separate Drop owner lets the compiler move its family and memo without a
+/// per-advance TLS/RefCell update or a Drop implementation on FamilyCompiler.
+#[derive(Debug, Default)]
+struct FamilyCompileProfile {
+    #[cfg(any(
+        feature = "search-stage-profiling",
+        feature = "wasm-stage-profiling",
+        test
+    ))]
+    advance_calls: usize,
+    #[cfg(any(feature = "search-stage-profiling", feature = "wasm-stage-profiling"))]
+    work: [u64; 9],
+}
+
+impl FamilyCompileProfile {
+    #[inline]
+    fn advance(&mut self) {
+        #[cfg(any(
+            feature = "search-stage-profiling",
+            feature = "wasm-stage-profiling",
+            test
+        ))]
+        {
+            self.advance_calls = self.advance_calls.saturating_add(1);
+        }
+    }
+
+    #[inline]
+    fn add_work(&mut self, stage: FamilyCompileStage, items: u64) {
+        #[cfg(any(feature = "search-stage-profiling", feature = "wasm-stage-profiling"))]
+        {
+            self.work[stage as usize] = self.work[stage as usize].saturating_add(items);
+        }
+        #[cfg(not(any(feature = "search-stage-profiling", feature = "wasm-stage-profiling")))]
+        let _ = (stage, items);
+    }
+
+    #[inline]
+    fn begin(&mut self, stage: FamilyCompileStage, items: u64) -> SearchStageSpan {
+        self.add_work(stage, items);
+        #[cfg(any(
+            feature = "search-stage-profiling",
+            feature = "wasm-stage-profiling",
+            test
+        ))]
+        let scale = profile_sample_scale(self.advance_calls);
+        #[cfg(not(any(
+            feature = "search-stage-profiling",
+            feature = "wasm-stage-profiling",
+            test
+        )))]
+        let scale = profile_sample_scale(0);
+        SearchStageSpan::begin_scaled(stage.search_stage(), scale)
+    }
+}
+
+#[cfg(any(feature = "search-stage-profiling", feature = "wasm-stage-profiling"))]
+impl Drop for FamilyCompileProfile {
+    fn drop(&mut self) {
+        for stage in [
+            FamilyCompileStage::ResidualLookup,
+            FamilyCompileStage::FeasiblePieces,
+            FamilyCompileStage::CheapProjection,
+            FamilyCompileStage::MinimumDomain,
+            FamilyCompileStage::AdvancedDomain,
+            FamilyCompileStage::AdvancedPrune,
+            FamilyCompileStage::ComponentPlan,
+            FamilyCompileStage::FamilyCommit,
+            FamilyCompileStage::SupportRows,
+        ] {
+            SearchStageSpan::record_exact_work(stage.search_stage(), self.work[stage as usize]);
+        }
+    }
+}
+
 #[derive(Debug)]
 struct FamilyCompiler {
     targets: Arc<[TargetGroup]>,
@@ -1026,6 +1137,7 @@ struct FamilyCompiler {
     target_depth: u8,
     root_family: u32,
     expanded_nodes: usize,
+    profile: FamilyCompileProfile,
     peak_frontier: usize,
     domain_pruned_states: usize,
     hall_pruned_states: usize,
@@ -1075,6 +1187,7 @@ impl FamilyCompiler {
             target_depth,
             root_family: FAMILY_INVALID,
             expanded_nodes: 0,
+            profile: FamilyCompileProfile::default(),
             peak_frontier: 1,
             domain_pruned_states: 0,
             hall_pruned_states: 0,
@@ -1110,6 +1223,7 @@ impl FamilyCompiler {
             target_depth,
             root_family: FAMILY_INVALID,
             expanded_nodes: 0,
+            profile: FamilyCompileProfile::default(),
             peak_frontier: 1,
             domain_pruned_states: 0,
             hall_pruned_states: 0,
@@ -1147,6 +1261,7 @@ impl FamilyCompiler {
             target_depth,
             root_family: FAMILY_INVALID,
             expanded_nodes: 0,
+            profile: FamilyCompileProfile::default(),
             peak_frontier: 1,
             domain_pruned_states: 0,
             hall_pruned_states: 0,
@@ -1168,6 +1283,18 @@ impl FamilyCompiler {
     }
 
     fn advance(&mut self, catalog: &GeometryCatalog) -> CompileAdvance {
+        self.advance_with_work_reduction::<true>(catalog)
+    }
+
+    /// Both modes visit the same entered residuals and commit family nodes in
+    /// the same order. The reference mode keeps the old full minimum scan and
+    /// returns after each rejected support row for whole-family differential
+    /// tests. Production skips only work that cannot change that sequence.
+    fn advance_with_work_reduction<const REDUCE_WORK: bool>(
+        &mut self,
+        catalog: &GeometryCatalog,
+    ) -> CompileAdvance {
+        self.profile.advance();
         if self.stack.is_empty() {
             return CompileAdvance::Complete;
         }
@@ -1179,7 +1306,10 @@ impl FamilyCompiler {
                 packed_counts: pack_piece_counts(self.used_counts),
             };
             self.stack[top_index].key = key;
-            if let Some(family) = self.residual_memo.lookup(key) {
+            let stage = self.profile.begin(FamilyCompileStage::ResidualLookup, 1);
+            let cached = self.residual_memo.lookup(key);
+            stage.finish(0);
+            if let Some(family) = cached {
                 return self.finish_top(catalog, family, false);
             }
             self.expanded_nodes = self.expanded_nodes.saturating_add(1);
@@ -1199,13 +1329,18 @@ impl FamilyCompiler {
                 return self.finish_top(catalog, FAMILY_INVALID, true);
             }
 
+            let stage = self.profile.begin(FamilyCompileStage::FeasiblePieces, 1);
             let feasible_piece_mask = self.feasible_piece_mask();
-            if ProjectionReachabilityCache::cheap_residual_impossible(
+            stage.finish(0);
+            let stage = self.profile.begin(FamilyCompileStage::CheapProjection, 1);
+            let cheaply_impossible = ProjectionReachabilityCache::cheap_residual_impossible(
                 catalog.projection_catalog(),
                 &self.targets,
                 self.used_counts,
                 remaining,
-            ) {
+            );
+            stage.finish(0);
+            if cheaply_impossible {
                 self.column_pruned_states = self.column_pruned_states.saturating_add(1);
                 return self.finish_top(catalog, FAMILY_INVALID, true);
             }
@@ -1214,6 +1349,7 @@ impl FamilyCompiler {
                 advanced_analysis_enabled && self.compile_domain.allows_component_composition();
             let advanced_domain = advanced_analysis_enabled && catalog.initial_board() != 0;
             let (domain_status, domain, cell_piece_masks) = if advanced_domain {
+                let stage = self.profile.begin(FamilyCompileStage::AdvancedDomain, 1);
                 #[cfg(any(feature = "local-search-ab", test))]
                 let incremental_domain = self.incremental_domain;
                 #[cfg(not(any(feature = "local-search-ab", test)))]
@@ -1234,6 +1370,7 @@ impl FamilyCompiler {
                         self.same_tile_parents,
                     )
                 };
+                stage.finish(0);
                 #[cfg(any(feature = "local-search-ab", test))]
                 self.domain_metrics.record_advanced(
                     incremental_domain,
@@ -1250,11 +1387,13 @@ impl FamilyCompiler {
                     compilation.cell_piece_masks,
                 )
             } else {
+                let stage = self.profile.begin(FamilyCompileStage::MinimumDomain, 1);
                 #[cfg(any(feature = "local-search-ab", test))]
                 let (status, propagation) = {
                     self.domain_metrics
                         .record_minimum(self.resource_authoritative, self.target_depth);
                     let (cutoff, profile_work) = minimum_domain_modes();
+                    let cutoff = REDUCE_WORK && cutoff;
                     if profile_work {
                         let (status, propagation, work) =
                             DomainPropagation::compile_minimum_profiled(
@@ -1280,42 +1419,63 @@ impl FamilyCompiler {
                     }
                 };
                 #[cfg(not(any(feature = "local-search-ab", test)))]
-                let (status, propagation) =
-                    DomainPropagation::compile_minimum(catalog, remaining, feasible_piece_mask);
+                let (status, propagation) = if REDUCE_WORK {
+                    DomainPropagation::compile_minimum_cutoff(
+                        catalog,
+                        remaining,
+                        feasible_piece_mask,
+                    )
+                } else {
+                    DomainPropagation::compile_minimum(catalog, remaining, feasible_piece_mask)
+                };
+                stage.finish(0);
                 (status, propagation, [0; 64])
             };
             if domain_status == DomainStatus::Empty {
                 self.domain_pruned_states = self.domain_pruned_states.saturating_add(1);
                 return self.finish_top(catalog, FAMILY_INVALID, true);
             }
-            if advanced_domain
-                && (depth <= 2 || domain.pivot_support_count >= 5)
-                && hall_impossible(
+            let hall_enabled = advanced_domain && (depth <= 2 || domain.pivot_support_count >= 5);
+            let hall_impossible = if hall_enabled {
+                let stage = self.profile.begin(FamilyCompileStage::AdvancedPrune, 1);
+                let impossible = hall_impossible(
                     &self.targets,
                     self.used_counts,
                     remaining,
                     &cell_piece_masks,
-                )
-            {
+                );
+                stage.finish(0);
+                impossible
+            } else {
+                false
+            };
+            if hall_impossible {
                 self.hall_pruned_states = self.hall_pruned_states.saturating_add(1);
                 return self.finish_top(catalog, FAMILY_INVALID, true);
             }
             let exact_projection_enabled = advanced_domain
                 && remaining.count_ones() >= 24
                 && (depth <= 2 || domain.pivot_support_count >= 5);
-            if exact_projection_enabled
-                && self.projection_cache.exact_residual_impossible(
+            let exactly_impossible = if exact_projection_enabled {
+                let stage = self.profile.begin(FamilyCompileStage::AdvancedPrune, 1);
+                let impossible = self.projection_cache.exact_residual_impossible(
                     catalog.projection_catalog(),
                     &self.targets,
                     self.used_counts,
                     remaining,
-                )
-            {
+                );
+                stage.finish(0);
+                impossible
+            } else {
+                false
+            };
+            if exactly_impossible {
                 self.column_pruned_states = self.column_pruned_states.saturating_add(1);
                 return self.finish_top(catalog, FAMILY_INVALID, true);
             }
             if component_composition_enabled {
-                match compile_component_plan(
+                let stage = self.profile.begin(FamilyCompileStage::ComponentPlan, 1);
+                let plan = compile_component_plan(
                     catalog,
                     remaining,
                     depth,
@@ -1324,7 +1484,9 @@ impl FamilyCompiler {
                     &self.admissible_prefixes,
                     feasible_piece_mask,
                     &mut self.family,
-                ) {
+                );
+                stage.finish(0);
+                match plan {
                     ComponentPlanResult::NotApplicable => {}
                     ComponentPlanResult::Impossible => {
                         self.domain_pruned_states = self.domain_pruned_states.saturating_add(1);
@@ -1396,17 +1558,36 @@ impl FamilyCompiler {
             return CompileAdvance::Pending;
         }
         if frame.support_cursor < frame.support_end {
-            self.stack[top_index].support_cursor += 1;
-            let row_id = catalog.support(frame.support_cell)[frame.support_cursor];
-            let row = catalog.skeleton(row_id);
-            if !frame.domain.row_allowed(
-                catalog,
-                row_id,
-                frame.remaining,
-                frame.feasible_piece_mask,
-            ) {
-                return CompileAdvance::Pending;
+            let stage = self.profile.begin(FamilyCompileStage::SupportRows, 0);
+            let support = catalog.support(frame.support_cell);
+            let mut cursor = frame.support_cursor;
+            let mut selected_row = None;
+            while cursor < frame.support_end {
+                let row_id = support[cursor];
+                cursor += 1;
+                if frame.domain.row_allowed(
+                    catalog,
+                    row_id,
+                    frame.remaining,
+                    frame.feasible_piece_mask,
+                ) {
+                    selected_row = Some(row_id);
+                    break;
+                }
+                if !REDUCE_WORK {
+                    break;
+                }
             }
+            self.stack[top_index].support_cursor = cursor;
+            self.profile.add_work(
+                FamilyCompileStage::SupportRows,
+                (cursor - frame.support_cursor) as u64,
+            );
+            stage.finish(0);
+            let Some(row_id) = selected_row else {
+                return CompileAdvance::Pending;
+            };
+            let row = catalog.skeleton(row_id);
             self.used_counts[piece_index(row.piece)] += 1;
             if self.stack.try_reserve(1).is_err() {
                 self.used_counts[piece_index(row.piece)] -= 1;
@@ -1421,13 +1602,28 @@ impl FamilyCompiler {
             return CompileAdvance::Pending;
         }
 
-        let Some(family) = self.finalize_union(top_index) else {
+        let stage = self.profile.begin(FamilyCompileStage::FamilyCommit, 1);
+        let family = self.finalize_union(top_index);
+        stage.finish(0);
+        let Some(family) = family else {
             return CompileAdvance::ResourceIncomplete;
         };
         self.finish_top(catalog, family, true)
     }
 
     fn finish_top(
+        &mut self,
+        catalog: &GeometryCatalog,
+        suffix_family: u32,
+        memoize: bool,
+    ) -> CompileAdvance {
+        let stage = self.profile.begin(FamilyCompileStage::FamilyCommit, 1);
+        let result = self.finish_top_inner(catalog, suffix_family, memoize);
+        stage.finish(0);
+        result
+    }
+
+    fn finish_top_inner(
         &mut self,
         catalog: &GeometryCatalog,
         suffix_family: u32,
@@ -2971,8 +3167,6 @@ pub(super) struct GeometrySearch {
     target_preparation_mode: Option<TargetGroupPreparationMode>,
     compiler: Option<FamilyCompiler>,
     enumerator: Option<FamilyEnumerator>,
-    streaming: Option<StreamingGeometry>,
-    streaming_probability_requested: bool,
     expanded_nodes: usize,
     peak_frontier: usize,
     candidate_family_count: Option<u128>,
@@ -3716,46 +3910,6 @@ fn checked_target_nested_retained_bytes(targets: &[TargetGroup]) -> Option<u128>
 }
 
 impl GeometrySearch {
-    /// Select incremental exact cover only for an explicit probability-only
-    /// caller. Existing count/unique callers retain the full-family compiler.
-    /// A started compiler cannot be reinterpreted as a fresh search.
-    pub fn enable_streaming_probability(&mut self) -> Result<(), WasmExactSearchError> {
-        if self.streaming_probability_requested {
-            return Ok(());
-        }
-        if self.target_preparation.is_some()
-            && matches!(
-                self.target_preparation_mode.as_ref(),
-                Some(TargetGroupPreparationMode::Internal { .. })
-            )
-        {
-            self.streaming_probability_requested = true;
-            return Ok(());
-        }
-        self.activate_streaming_probability()?;
-        self.streaming_probability_requested = true;
-        Ok(())
-    }
-
-    fn activate_streaming_probability(&mut self) -> Result<(), WasmExactSearchError> {
-        if !self
-            .compiler
-            .as_ref()
-            .is_some_and(StreamingGeometry::can_start)
-            || self.enumerator.is_some()
-            || self.external_targets.is_some()
-        {
-            return Err(WasmExactSearchError::InvalidProblem(
-                "wasm_geometry_streaming_fresh_root_required",
-            ));
-        }
-        let compiler = self.compiler.take().expect("fresh compiler was checked");
-        self.streaming = Some(StreamingGeometry::from_compiler(compiler)?);
-        self.peak_frontier = 1;
-        self.candidate_family_count = None;
-        Ok(())
-    }
-
     pub(super) fn new_for_verifier_target(required_cells: u64, target: &TargetGroup) -> Self {
         // The verifier already owns the possible-pattern backing. Geometry
         // needs the same key and keeps only a reference to that backing.
@@ -3850,8 +4004,6 @@ impl GeometrySearch {
             target_preparation_mode: None,
             compiler: None,
             enumerator: None,
-            streaming: None,
-            streaming_probability_requested: false,
             expanded_nodes: 0,
             peak_frontier: 0,
             candidate_family_count: Some(0),
@@ -3970,8 +4122,6 @@ impl GeometrySearch {
             target_preparation_mode: Some(TargetGroupPreparationMode::Internal { required_cells }),
             compiler: None,
             enumerator: None,
-            streaming: None,
-            streaming_probability_requested: false,
             expanded_nodes: 0,
             peak_frontier: 0,
             candidate_family_count: None,
@@ -3996,8 +4146,6 @@ impl GeometrySearch {
                 Arc::clone(&shared.targets),
             )),
             enumerator: None,
-            streaming: None,
-            streaming_probability_requested: false,
             expanded_nodes: 0,
             peak_frontier: 0,
             candidate_family_count: None,
@@ -4025,8 +4173,6 @@ impl GeometrySearch {
                 Arc::clone(&shared.targets),
             )?),
             enumerator: None,
-            streaming: None,
-            streaming_probability_requested: false,
             expanded_nodes: 0,
             peak_frontier: 0,
             candidate_family_count: None,
@@ -4110,8 +4256,6 @@ impl GeometrySearch {
             target_preparation_mode: Some(TargetGroupPreparationMode::External),
             compiler: None,
             enumerator: None,
-            streaming: None,
-            streaming_probability_requested: false,
             expanded_nodes: 0,
             peak_frontier: 0,
             candidate_family_count: None,
@@ -4133,8 +4277,6 @@ impl GeometrySearch {
             target_preparation_mode: None,
             compiler: None,
             enumerator: None,
-            streaming: None,
-            streaming_probability_requested: false,
             expanded_nodes: 0,
             peak_frontier: 0,
             candidate_family_count: None,
@@ -4211,11 +4353,6 @@ impl GeometrySearch {
                                     Arc::clone(&shared.targets),
                                 ))
                             };
-                            if self.streaming_probability_requested {
-                                if let Err(error) = self.activate_streaming_probability() {
-                                    return GeometryAdvance::ResourceIncomplete(error.reason());
-                                }
-                            }
                         }
                         TargetGroupPreparationMode::External => {
                             self.external_targets = Some(shared);
@@ -4226,22 +4363,6 @@ impl GeometrySearch {
                     return GeometryAdvance::Pending;
                 }
             }
-        }
-        if self.streaming.is_some() {
-            // Both the shared inputs and the complete bounded DFS stack are
-            // already live. No transition allocates or grows traversal state.
-            if retained_limit_bytes.is_some_and(|limit| self.retained_bytes() as u128 > limit) {
-                return GeometryAdvance::ResourceIncomplete("geometry_memory_capacity_exceeded");
-            }
-            let streaming = self.streaming.as_mut().expect("streaming owner exists");
-            let advance = streaming.advance(catalog);
-            self.expanded_nodes = streaming.expanded_nodes;
-            self.peak_frontier = streaming.peak_frontier;
-            self.domain_pruned_states = streaming.domain_pruned_states;
-            if matches!(advance, GeometryAdvance::Complete) {
-                self.candidate_family_count = streaming.completed_count();
-            }
-            return advance;
         }
         let internal_limit = match retained_limit_bytes {
             Some(total_limit) => {
@@ -4357,10 +4478,22 @@ impl GeometrySearch {
         // distinct from the later per-worker Geometry traversal samples.
         let _stage =
             SearchStageSpan::begin(ExecutorSearchStage::WasmParallelGeometryCompileAndSplit);
-        if self.streaming_probability_requested {
+        let needed_compile = self.target_preparation.is_some() || self.compiler.is_some();
+        let mut path_counts = None;
+        #[cfg(all(feature = "local-search-ab", target_os = "linux"))]
+        let memory_probe = super::parallel_memory_peak::current();
+        let mut preparation_ticks = 0usize;
+        {
+            let stage = SearchStageSpan::begin(ExecutorSearchStage::WasmGeometryTargetPreparation);
             while self.target_preparation.is_some() {
                 if control.is_cancelled() {
                     return Err(WasmExactSearchError::Cancelled);
+                }
+                #[cfg(all(feature = "local-search-ab", target_os = "linux"))]
+                if let Some(probe) = &memory_probe {
+                    if preparation_ticks & 0x7ff == 0 {
+                        self.publish_parallel_preparation_memory(probe);
+                    }
                 }
                 match self.advance_internal(catalog, None, None) {
                     GeometryAdvance::Pending => {}
@@ -4373,39 +4506,61 @@ impl GeometrySearch {
                         ));
                     }
                 }
+                preparation_ticks = preparation_ticks.wrapping_add(1);
+                if preparation_ticks & 1023 == 0 {
+                    control.report_progress("geometry", self.expanded_nodes as u64, None);
+                }
             }
-            if control.is_cancelled() {
-                return Err(WasmExactSearchError::Cancelled);
-            }
-            return self.prepare_streaming_parallel(catalog, control, requested_workers);
+            stage.finish(preparation_ticks as u64);
         }
-        let needed_compile = self.target_preparation.is_some() || self.compiler.is_some();
-        let mut path_counts = None;
-        #[cfg(all(feature = "local-search-ab", target_os = "linux"))]
-        let memory_probe = super::parallel_memory_peak::current();
-        #[cfg(all(feature = "local-search-ab", target_os = "linux"))]
-        let mut diagnostic_ticks = 0usize;
-        while self.target_preparation.is_some() || self.compiler.is_some() {
+        if self.compiler.is_some() {
+            let stage = SearchStageSpan::begin(ExecutorSearchStage::WasmGeometryFamilyCompile);
+            loop {
+                if control.is_cancelled() {
+                    return Err(WasmExactSearchError::Cancelled);
+                }
+                #[cfg(all(feature = "local-search-ab", target_os = "linux"))]
+                if let Some(probe) = &memory_probe {
+                    if preparation_ticks & 0x7ff == 0 {
+                        self.publish_parallel_preparation_memory(probe);
+                    }
+                }
+                let advance = self
+                    .compiler
+                    .as_mut()
+                    .expect("geometry family compiler exists")
+                    .advance(catalog);
+                self.observe_compiler_metrics();
+                preparation_ticks = preparation_ticks.wrapping_add(1);
+                if preparation_ticks & 1023 == 0 {
+                    control.report_progress("geometry", self.expanded_nodes as u64, None);
+                }
+                match advance {
+                    CompileAdvance::Pending => {}
+                    CompileAdvance::Complete => break,
+                    CompileAdvance::ResourceIncomplete => {
+                        return Err(WasmExactSearchError::InvalidProblem(
+                            "geometry_solution_family_storage_unavailable",
+                        ));
+                    }
+                }
+            }
+            stage.finish(self.expanded_nodes as u64);
+            control.report_progress("geometry", self.expanded_nodes as u64, None);
             if control.is_cancelled() {
                 return Err(WasmExactSearchError::Cancelled);
             }
-            #[cfg(all(feature = "local-search-ab", target_os = "linux"))]
-            if let Some(probe) = &memory_probe {
-                if diagnostic_ticks & 0x7ff == 0 {
-                    self.publish_parallel_preparation_memory(probe);
-                }
-                diagnostic_ticks = diagnostic_ticks.wrapping_add(1);
-            }
-            match self.advance_internal(catalog, None, Some(&mut path_counts)) {
-                GeometryAdvance::Pending => {}
-                GeometryAdvance::ResourceIncomplete(reason) => {
-                    return Err(WasmExactSearchError::InvalidProblem(reason));
-                }
-                GeometryAdvance::Candidate(_) | GeometryAdvance::Complete => {
-                    return Err(WasmExactSearchError::InvalidProblem(
-                        "wasm_parallel_geometry_compile_state_invalid",
-                    ));
-                }
+            // Keep family construction separate from its first path-count
+            // table. The latter is reused by splitting, exactly as before.
+            let stage = SearchStageSpan::begin(ExecutorSearchStage::WasmGeometryPathCount);
+            let compiler = self.compiler.take().expect("completed geometry compiler");
+            let node_count = compiler.family.node_count();
+            let (enumerator, root_count) = compiler.into_enumerator(Some(&mut path_counts));
+            self.candidate_family_count = root_count;
+            self.enumerator = Some(enumerator);
+            stage.finish(u64::from(node_count));
+            if control.is_cancelled() {
+                return Err(WasmExactSearchError::Cancelled);
             }
         }
         let balanced_workers = self
@@ -4417,17 +4572,34 @@ impl GeometrySearch {
             // A caller may hand us a family compiled by the ordinary serial
             // path, which only retained a scalar. This is a new handoff, so
             // build its one transient table only when there is a split seed.
+            let stage = SearchStageSpan::begin(ExecutorSearchStage::WasmGeometryPathCount);
             path_counts = self
                 .enumerator
                 .as_ref()
                 .filter(|enumerator| enumerator.tasks.len() == 1)
                 .and_then(|enumerator| enumerator.family.path_count_table());
+            stage.finish(path_counts.as_ref().map_or(0, |counts| counts.len() as u64));
+        }
+        // This is the complete geometric candidate count, not accepted
+        // solutions or covered queues. Publish it once so diagnostics can
+        // separate preparation scale from exhaustive verification progress.
+        control.report_progress(
+            "geometry-candidate-family",
+            0,
+            self.candidate_family_count
+                .and_then(|count| u64::try_from(count).ok()),
+        );
+        if control.is_cancelled() {
+            return Err(WasmExactSearchError::Cancelled);
         }
         #[cfg(all(feature = "local-search-ab", target_os = "linux"))]
         if let Some(probe) = &memory_probe {
             self.publish_parallel_preparation_memory(probe);
         }
-        Ok(self.prepare_compiled_parallel(balanced_workers, path_counts))
+        let stage = SearchStageSpan::begin(ExecutorSearchStage::WasmGeometryTaskSplit);
+        let prepared = self.prepare_compiled_parallel(balanced_workers, path_counts);
+        stage.finish(balanced_workers as u64);
+        Ok(prepared)
     }
 
     /// Prepares an exact partition of the bounded compact terminal geometry;
@@ -4651,8 +4823,6 @@ impl GeometrySearch {
                 compiler: None,
                 candidate_family_count: enumerator.candidate_count,
                 enumerator: Some(enumerator),
-                streaming: None,
-                streaming_probability_requested: false,
                 expanded_nodes: usize::from(index == 0) * self.expanded_nodes,
                 peak_frontier: usize::from(index == 0) * self.peak_frontier,
                 domain_pruned_states: usize::from(index == 0) * self.domain_pruned_states,
@@ -4769,14 +4939,9 @@ impl GeometrySearch {
     }
 
     pub fn targets(&self) -> Option<&[TargetGroup]> {
-        self.streaming
+        self.enumerator
             .as_ref()
-            .map(StreamingGeometry::targets)
-            .or_else(|| {
-                self.enumerator
-                    .as_ref()
-                    .map(|enumerator| enumerator.targets.as_ref())
-            })
+            .map(|enumerator| enumerator.targets.as_ref())
             .or_else(|| {
                 self.external_targets
                     .as_ref()
@@ -4814,9 +4979,6 @@ impl GeometrySearch {
     }
 
     fn checked_active_target_nested_retained_bytes(&self) -> Option<u128> {
-        if let Some(streaming) = self.streaming.as_ref() {
-            return streaming.checked_target_nested_retained_bytes();
-        }
         let internal = self
             .compiler
             .as_ref()
@@ -4853,11 +5015,6 @@ impl GeometrySearch {
             .unwrap_or(usize::MAX);
         current_target_nested_bytes
             .saturating_add(self.shared_family_bytes)
-            .saturating_add(
-                self.streaming
-                    .as_ref()
-                    .map_or(0, StreamingGeometry::retained_bytes),
-            )
             .saturating_add(
                 self.compiler
                     .as_ref()
