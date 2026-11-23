@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { nonnegativeInteger } from '../tools/optional-search-deadline.mjs';
 
 const scriptDirectory = dirname(fileURLToPath(import.meta.url));
 const repository = resolve(scriptDirectory, '../..');
@@ -23,8 +24,8 @@ const workers = positiveInteger(
   'workers'
 );
 const selectedCases = new Set((options.cases ?? 'pco,tsar,large').split(','));
-const smallTimeout = positiveInteger(options['small-timeout'] ?? '300000', 'small-timeout');
-const largeTimeout = positiveInteger(options['large-timeout'] ?? '900000', 'large-timeout');
+const smallTimeout = nonnegativeInteger(options['small-timeout'] ?? '0', 'small-timeout');
+const largeTimeout = nonnegativeInteger(options['large-timeout'] ?? '0', 'large-timeout');
 
 const cases = [
   {

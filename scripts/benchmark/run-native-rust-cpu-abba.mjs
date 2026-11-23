@@ -3,13 +3,14 @@
 // --binary selects the candidate; the four revision flags opt into an exact
 // Rust-vs-Rust comparison with a separately managed baseline executable.
 import assert from 'node:assert/strict';
-import { spawn, spawnSync } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { pathToFileURL } from 'node:url';
+import { createManagedSearchOwner } from '../tools/managed-search-owner.mjs';
 
 const ARM_ORDER = Object.freeze(['native-c', 'rust-cpu', 'rust-cpu', 'native-c']);
 const RUST_REVISION_ORDER = Object.freeze(['rust-baseline', 'rust-candidate', 'rust-candidate', 'rust-baseline']);
@@ -48,7 +49,7 @@ export function compilePlan(argv) {
   const workers = parseIntegerOption(options['--workers'], 1, 256, 'workers');
   assert(CASES[caseId].workers === undefined || workers === CASES[caseId].workers,
     'fixed-2l fixture is qualified only at one worker');
-  const timeout = parseIntegerOption(options['--timeout-seconds'], 1, 1800, 'timeout-seconds');
+  const timeout = parseIntegerOption(options['--timeout-seconds'] ?? '0', 0, 1800, 'timeout-seconds');
   if (REVISION_FLAGS.some(flag => Object.hasOwn(options, flag))) {
     assert(REVISION_FLAGS.every(flag => Object.hasOwn(options, flag)),
       'Rust revision ABBA requires --baseline-binary, --baseline-commit, --baseline-sha256 and --candidate-sha256');
@@ -63,7 +64,7 @@ export function compilePlan(argv) {
 }
 
 function parseIntegerOption(text, min, max, name) {
-  assert(/^[1-9][0-9]*$/.test(text ?? '') && integer(Number(text), min, max), 'invalid ' + name);
+  assert(/^(?:0|[1-9][0-9]*)$/.test(text ?? '') && integer(Number(text), min, max), 'invalid ' + name);
   return Number(text);
 }
 
@@ -193,12 +194,12 @@ export function summarize(samples, failure, schedule = ARM_ORDER) {
   };
 }
 
-async function main(argv) {
+async function main(argv, searchOwner) {
   const started = performance.now();
   const hosted = process.env.GITHUB_ACTIONS === 'true' && process.env.RUNNER_OS === 'Linux';
   const supervised = process.env.CLEARRA_RUNTIME_SUPERVISED === '1' &&
     process.env.CLEARRA_RUNTIME_PROFILE === 'local-service';
-  assert(hosted || supervised, 'use a finite hosted CI job or the managed local-service orchestrator');
+  assert(hosted || supervised, 'use a hosted CI job or a managed local-service orchestrator with --no-timeout');
   const { options, caseId, workers, timeout, schedule } = compilePlan(argv);
   const manager = fs.realpathSync(options['--manager']);
   const output = path.resolve(options['--output']);
@@ -268,7 +269,7 @@ async function main(argv) {
   let identity, failure, revisionParallelism;
   let missingTreeProof = false;
   for (const [index, arm] of schedule.entries()) {
-    if (!hosted && performance.now() - started + timeout * 1_000 + GUARD_MS > LOCAL_LEASE_MS) {
+    if (timeout > 0 && !hosted && performance.now() - started + timeout * 1_000 + GUARD_MS > LOCAL_LEASE_MS) {
       failure = 'outer-lease-budget-exhausted-before-sample-admission';
       break;
     }
@@ -288,9 +289,9 @@ async function main(argv) {
     process.stderr.write('[native-rust-cpu-abba] ' + caseId + ' ' + name + ' started\n');
     try {
       process.exitCode = 2; // Never await another fixture without a matched tree-stopped receipt.
-      const run = await invoke(manager, [
+      const run = await invoke(searchOwner, manager, [
         'runtime', 'run', '--producer', 'benchmark', '--profile', 'benchmark-search',
-        '--timeout', String(timeout), '--', ...command,
+        '--timeout', String(timeout), '--cancel-on-stdin-eof', '--', ...command,
       ]);
       const outcome = executionReceipt(run);
       sample.supervisor = outcome;
@@ -306,7 +307,7 @@ async function main(argv) {
       if (processTreeStopped) process.exitCode = 0;
       assert(processTreeStopped && !run.overflow, 'owned process tree not confirmed stopped or output overflow');
       if (outcome.reason !== 'normal') {
-        if (['timeout', 'memory-limit', 'memory-pressure', 'process-limit', 'output-limit', 'cancelled'].includes(outcome.reason) ||
+        if (['timeout', 'memory-limit', 'memory-pressure', 'process-limit', 'output-limit', 'cancelled', 'owner-lease-ended'].includes(outcome.reason) ||
             (outcome.reason === 'signal' && [2, 9, 15].includes(outcome.child_termination?.signal))) {
           sample.state = 'censored';
         }
@@ -437,9 +438,9 @@ function executionReceipt(run) {
   return receipt.outcome;
 }
 
-function invoke(command, args) {
+function invoke(searchOwner, command, args) {
   return new Promise((resolve, reject) => {
-    const child = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+    const child = searchOwner.spawn(command, args, { windowsHide: true });
     let stdout = '', stderr = '', bytes = 0, overflow = false;
     child.stdout.setEncoding('utf8');
     child.stderr.setEncoding('utf8');
@@ -462,8 +463,11 @@ async function sha256(filename) {
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  try { await main(process.argv.slice(2)); } catch (error) {
+  const searchOwner = createManagedSearchOwner();
+  try { await main(process.argv.slice(2), searchOwner); } catch (error) {
     process.stderr.write('[native-rust-cpu-abba] ' + error.message + '\n');
     if (process.exitCode !== 2) process.exitCode = 1;
+  } finally {
+    searchOwner.dispose();
   }
 }

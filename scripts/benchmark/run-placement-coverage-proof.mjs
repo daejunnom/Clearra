@@ -1,7 +1,7 @@
 // A local-only exact mapping qualification, not ABBA timing or release authority.
 // Each capture and comparison acquires a native benchmark-search lease. The
 // JS orchestrator owns no solver directly and never nests a Linux supervisor.
-import { spawn, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import {
   createReadStream, existsSync, lstatSync, mkdirSync, readFileSync,
@@ -12,6 +12,7 @@ import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { isDeepStrictEqual } from "node:util";
 import { assertManagedBuildTransaction } from "../tools/clearra-build-policy.mjs";
+import { createManagedSearchOwner } from "../tools/managed-search-owner.mjs";
 import {
   DEFAULT_PLACEMENT_EXPERIMENT, placementExperiment, unprofiledEmptyMinimumRoute,
 } from "./placement-experiment-contract.mjs";
@@ -104,18 +105,18 @@ const CASES = Object.freeze({
   small: Object.freeze({
     name: "one-I-preflight", universe: "small-i", solutions: 1, queues: 1,
     board: "0x3f0", height: 1, placed: 1, supplied: 1, supply: "I",
-    hold: "disabled", defaultTimeout: 120, maxTimeout: 300, comparisonTimeout: 60,
+    hold: "disabled", defaultTimeout: 0, maxTimeout: 300, comparisonTimeout: 60,
   }),
   p7: Object.freeze({
     name: "nonempty-4L-P7-srs-plus", universe: "p7", solutions: 246, queues: 5_040,
     board: "0x3c0f03c0f", height: 4, placed: 6, supplied: 7, supply: "P7", rule: "srs-plus",
     hold: "enabled-empty", candidates: 2_260, pairs: 79_288,
-    defaultTimeout: 180, maxTimeout: 300, comparisonTimeout: 60,
+    defaultTimeout: 0, maxTimeout: 300, comparisonTimeout: 60,
   }),
   p7p4: Object.freeze({
     name: "empty-4L-P7P4-jstris180", universe: "p7p4", solutions: 456_459, queues: 4_233_600,
     board: "0", height: 4, placed: 10, supplied: 11, supply: "P7P4",
-    hold: "enabled-empty", defaultTimeout: 1_800, maxTimeout: 2_400, comparisonTimeout: 900,
+    hold: "enabled-empty", defaultTimeout: 0, maxTimeout: 2_400, comparisonTimeout: 900,
   }),
 });
 const REFERENCE_HASH = "cts1:2fcbc950acdffa31";
@@ -178,10 +179,10 @@ export function parseProofArguments(argv) {
   const buildProfile = options["--build-profile"] ?? "release";
   requireThat(buildProfile === "release" || (key !== "p7p4" && buildProfile === "debug"),
   "Debug binaries can be used only for preflights, not P7P4");
-  const raw = options["--timeout-seconds"] ?? String(fixture.defaultTimeout);
+  const raw = options["--timeout-seconds"] ?? "0";
   const timeout = Number(raw);
-  requireThat(/^[1-9]\d*$/u.test(raw) && Number.isSafeInteger(timeout) && timeout <= fixture.maxTimeout,
-    "Invalid finite timeout for the selected fixture");
+  requireThat(/^(?:0|[1-9]\d*)$/u.test(raw) && Number.isSafeInteger(timeout) && timeout <= fixture.maxTimeout,
+    "Invalid finite timeout for the selected fixture (0 means unlimited)");
   return { id, sourceCommit, key, fixture, timeout, buildProfile, experiment, wslHostVolume };
 }
 
@@ -200,7 +201,7 @@ export function proofSchedule(options, binary, artifactRoot) {
   const candidate = arm("candidate", "1", "-b");
   return [
     reference, candidate, {
-      name: "comparison", value: "0", timeout: options.fixture.comparisonTimeout,
+      name: "comparison", value: "0", timeout: options.timeout === 0 ? 0 : options.fixture.comparisonTimeout,
       args: ["--compare-coverage", reference.artifact, candidate.artifact],
     },
   ].map((step) => ({ ...step, experiment, command: [binary, ...step.args] }));
@@ -226,7 +227,7 @@ export function classifyProofRuntime(receipt, execution, step) {
     outcome.timeout_seconds === step.timeout && outcome.automatic_retry === false &&
     isDeepStrictEqual(outcome.command, step.command), step.name + ": receipt does not bind this invocation");
   const signal = outcome.child_termination?.kind === "unix-signal" ? outcome.child_termination.signal : null;
-  if (["timeout", "memory-limit", "memory-pressure", "output-limit", "process-limit", "cancelled"].includes(outcome.reason) ||
+  if (["timeout", "memory-limit", "memory-pressure", "output-limit", "process-limit", "cancelled", "owner-lease-ended"].includes(outcome.reason) ||
       (outcome.reason === "signal" && [2, 9, 15].includes(signal)) ||
       strictDiskLimitObserved(receipt, execution, step)) return "censored";
   if (execution.overflow || execution.code !== 0 || execution.signal != null ||
@@ -582,15 +583,15 @@ export function benchmarkEnvironment(environment, step) {
 
 export function composeRuntimeArgs(root, step) {
   return ["--root", root, "runtime", "run", "--producer", "benchmark", "--profile", "benchmark-search",
-    "--timeout", String(step.timeout), "--", ...step.command];
+    "--timeout", String(step.timeout), "--cancel-on-stdin-eof", "--", ...step.command];
 }
 
-export function captureChild(manager, args, cwd, env) {
+export function captureChild(manager, args, cwd, env, searchOwner) {
   return new Promise((resolvePromise, reject) => {
     // POSIX terminal cancellation belongs to the JS launcher, not the
     // manager. The manager alone owns and enforces the active solver lease.
-    const child = spawn(manager, args, { cwd, env, windowsHide: true,
-      detached: process.platform !== "win32", stdio: ["ignore", "pipe", "pipe"] });
+    const child = searchOwner.spawn(manager, args, { cwd, env, windowsHide: true,
+      detached: process.platform !== "win32" });
     const stdout = [], stderr = [];
     let size = 0, overflow = false;
     const collect = (parts) => (chunk) => {
@@ -750,10 +751,10 @@ function checkPlacementProofDisk(options, plan, artifactRoot, minimumFreeBytes) 
   return { minimum_free_bytes: minimumFreeBytes, volumes: observed };
 }
 
-async function main(argv) {
+async function main(argv, searchOwner) {
   const options = parseProofArguments(argv);
   requireThat(process.env.CLEARRA_RUNTIME_SUPERVISED !== "1",
-    "Run the orchestrator directly; it starts a separate finite native supervisor for each phase");
+    "Run the orchestrator directly; it starts a separate native supervisor for each phase");
   requireThat(!Object.keys(process.env).some((key) => key.toUpperCase() === "CLEARRA_EXPECTED_VCPUS"),
     "Remove CLEARRA_EXPECTED_VCPUS to keep native automatic all-logical worker selection");
   const root = realpathSync(resolve(dirname(fileURLToPath(import.meta.url)), "../.."));
@@ -796,7 +797,8 @@ async function main(argv) {
           checkPlacementProofDisk(options, diskPlan, artifactRoot, step.name === "comparison"
             ? diskPlan.minimumComparisonFreeBytes : diskPlan.minimumActiveArmFreeBytes);
         }
-        return captureChild(manager, composeRuntimeArgs(root, step), root, benchmarkEnvironment(process.env, step));
+        return captureChild(manager, composeRuntimeArgs(root, step), root,
+          benchmarkEnvironment(process.env, step), searchOwner);
       },
       receipt: (execution) => readSupervisorReceipt(execution, supervisorDirectory),
       assertArtifact: (path, expectedBytes) => {
@@ -817,16 +819,15 @@ async function main(argv) {
 }
 
 if (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.meta.url) {
-  for (const signal of ["SIGINT", "SIGTERM"]) {
-    process.on(signal, () => {
-      if (interrupted) return;
+  const searchOwner = createManagedSearchOwner({
+    onCancel: (signal) => {
       interrupted = signal;
       process.stderr.write("[placement-coverage-proof] cancelled: no further phase will start; " +
-        "the current native supervisor, if any, remains responsible for its finite lease\n");
-    });
-  }
-  main(process.argv.slice(2)).catch((error) => {
+        "waiting for the native supervisor to drain its owned process tree\n");
+    },
+  });
+  main(process.argv.slice(2), searchOwner).catch((error) => {
     process.stderr.write("[placement-coverage-proof] " + error.message + "\n");
     process.exitCode = 1;
-  });
+  }).finally(() => searchOwner.dispose());
 }

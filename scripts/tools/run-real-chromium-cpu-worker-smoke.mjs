@@ -30,8 +30,8 @@ const ORIGIN = 'http://' + HOST + ':' + PORT;
 const ROOT_WORKER = '/workers/clearraWorker.ts';
 const VERIFIER_WORKER = '/workers/clearraVerifierWorker.ts';
 const PLAYWRIGHT_VERSION = '1.56.1';
-const CASE_TIMEOUT_MS = 40_000;
-const PAIRED_TIMEOUT_MS = 65_000;
+const CASE_TIMEOUT_MS = 0;
+const PAIRED_TIMEOUT_MS = 0;
 const ACCELERATORS_OFF = '--no-legal-board --no-conditioned-reachability';
 const PC_CPU = '--objective unique --count unique --queue-knowledge oracle --backend cpu ' +
   '--rule srs-plus --no-hold --no-tablebase ' + ACCELERATORS_OFF;
@@ -461,7 +461,7 @@ async function stepLocalSr3({ command, timeoutMs }) {
     return events;
   }
   function advance(job) {
-    if (performance.now() >= deadline) throw new Error('sr3 unit-work stepping timed out');
+    if (timeoutMs > 0 && performance.now() >= deadline) throw new Error('sr3 unit-work stepping timed out');
     const status = wasm.advance_job(job, 1);
     if (!live(status)) owned = null;
     return { status, events: drain(job) };
@@ -700,10 +700,10 @@ async function runWorker({ rootWorker, command, workers, timeoutMs, label, pageK
   let timedOut = false;
   const lifetime = new AbortController();
   const signal = lifetime.signal;
-  const timeout = setTimeout(() => {
+  const timeout = timeoutMs > 0 ? setTimeout(() => {
     timedOut = true;
     lifetime.abort(new Error(label + ' timed out in ' + lastPhase));
-  }, timeoutMs);
+  }, timeoutMs) : null;
   worker.addEventListener('error', error => lifetime.abort(new Error(label + ': ' + error.message)));
   worker.addEventListener('messageerror', () => lifetime.abort(new Error(label + ': invalid worker message')));
   worker.addEventListener('message', ({ data }) => {

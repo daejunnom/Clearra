@@ -15,6 +15,8 @@ test('1800-second samples retain their timeout within an independently bounded o
   assert.equal(sampleFitsRemainingLease(0, 1_800_000, 7_200_000, 120_000), true);
   assert.equal(sampleFitsRemainingLease(5_280_000, 1_800_000, 7_200_000, 120_000), true);
   assert.equal(sampleFitsRemainingLease(5_280_001, 1_800_000, 7_200_000, 120_000), false);
+  assert.equal(sampleFitsRemainingLease(9_000_000, 0, 7_200_000, 120_000), true);
+  assert.equal(sampleFitsRemainingLease(9_000_000, 1_800_000, 0, 120_000), true);
   assert.throws(() => sampleFitsRemainingLease(-1, 1_800_000, 7_200_000, 120_000));
 });
 

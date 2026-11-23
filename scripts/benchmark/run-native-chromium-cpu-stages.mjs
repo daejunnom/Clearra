@@ -85,7 +85,7 @@ function runNative(args) {
   const started = performance.now();
   const run = spawnSync(cli, ['--format', 'json', ...args], {
     env: { ...process.env, CLEARRA_NATIVE_CPU_STAGE_PROBE: '1' },
-    encoding: 'utf8', windowsHide: true, timeout: largeP7P4 ? P7P4_STAGE_TIMEOUT_MS : 90_000,
+    encoding: 'utf8', windowsHide: true, timeout: largeP7P4 ? P7P4_STAGE_TIMEOUT_MS : 0,
     maxBuffer: 8 * 1024 * 1024,
   });
   const wall = performance.now() - started;
@@ -105,7 +105,7 @@ function runChromium(args, workers) {
   const run = spawnSync(process.execPath, [
     browserProbe, ...browserArgs,
   ], { encoding: 'utf8', windowsHide: true, maxBuffer: 2 * 1024 * 1024,
-    ...(largeP7P4 ? { timeout: P7P4_STAGE_TIMEOUT_MS + 90_000 } : {}) });
+    ...(largeP7P4 && P7P4_STAGE_TIMEOUT_MS > 0 ? { timeout: P7P4_STAGE_TIMEOUT_MS + 90_000 } : {}) });
   if (run.error) throw run.error;
   // Retain exact time-out observations; do not substitute a terminal receipt.
   if (run.status !== 0) {

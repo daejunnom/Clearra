@@ -3,7 +3,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { parseAdoptionArguments } from "./run-placement-graph-adoption.mjs";
 import {
-  assertExactComparison, benchmarkEnvironment, classifyProofRuntime, collectPlacementCoverageProof,
+  assertExactComparison, benchmarkEnvironment, classifyProofRuntime, collectPlacementCoverageProof, composeRuntimeArgs,
   parseProofArguments, placementProofDiskPlan, proofSchedule, validatedProofArm,
 } from "./run-placement-coverage-proof.mjs";
 
@@ -178,13 +178,14 @@ function mockIo(options, steps, change = (_, input) => input) {
   };
 }
 
-test("finite parsing rejects implicit workload, traversal, repeats, and excessive timeout", () => {
+test("unlimited parsing preserves explicit finite budgets and rejects malformed requests", () => {
   assert.throws(() => parseProofArguments([]), /Usage/u);
   assert.throws(() => parseProofArguments(["--case", "large", "--id", "a", "--source-sha", source]), /Usage/u);
   assert.throws(() => parseProofArguments(["--case", "small", "--id", "..", "--source-sha", source]), /Usage/u);
   assert.throws(() => parseProofArguments(cli("small", ["--timeout-seconds", "301"])), /finite timeout/u);
   assert.throws(() => parseProofArguments(cli("p7p4", ["--case", "p7p4"])), /Distinct/u);
-  assert.equal(parseProofArguments(cli("p7p4")).timeout, 1_800);
+  assert.equal(parseProofArguments(cli("p7p4")).timeout, 0);
+  assert.equal(parseProofArguments(cli("p7p4", ["--timeout-seconds", "0"])).timeout, 0);
   assert.equal(parseProofArguments(cli("small", ["--timeout-seconds", "12"])).timeout, 12);
 });
 
@@ -193,6 +194,8 @@ test("capture order holds all other axes fixed and uses separate new slots befor
   assert.deepEqual(reference.args, ["--coverage-slot", "proof-42-a"]);
   assert.deepEqual(candidate.args, ["--coverage-slot", "proof-42-b"]);
   assert.deepEqual(comparison.args, ["--compare-coverage", reference.artifact, candidate.artifact]);
+  assert.deepEqual([reference.timeout, candidate.timeout, comparison.timeout], [0, 0, 0]);
+  assert(composeRuntimeArgs("/workspace", reference).includes("--cancel-on-stdin-eof"));
   assert.deepEqual(proofSchedule(parseProofArguments(cli("small")), binary, artifacts)[0].args,
     ["--small", "--coverage-slot", "proof-42-a"]);
 });

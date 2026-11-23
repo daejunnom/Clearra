@@ -1,29 +1,33 @@
 // Local-only same-binary storage A/B. The supervisor owns each timed solver
 // tree independently; no build, download, asset regeneration or deployment.
 import assert from 'node:assert/strict';
-import { spawn, spawnSync } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import { basename, isAbsolute, join, resolve } from 'node:path';
 import { performance } from 'node:perf_hooks';
+import { createManagedSearchOwner } from '../tools/managed-search-owner.mjs';
 import { abbaSchedule, assertWorkerExecution, semanticIdentity, sampleFitsRemainingLease } from './v081-accelerator-abba-core.mjs';
 import { PRIVATE_WORKER_MEMORY_SCOPE, SHARED_WORKER_MEMORY_SCOPE, readWorkerMemoryAccounting } from './v081-worker-memory-accounting.mjs';
 import { assertProductMemoCaseSelection, productMemoAbbaEnvironment, productMemoAbbaSelection, workerMemoBenchmarkCase } from './v081-product-memo-abba-core.mjs';
 
 const BYTE_LIMIT = 8 * 1024 * 1024;
+const searchOwner = createManagedSearchOwner();
 try { await main(process.argv.slice(2)); } catch (error) {
   process.stderr.write(`[worker-memo-abba] ${error.message}\n`);
   process.exitCode = 1;
+} finally {
+  searchOwner.dispose();
 }
 
 async function main(argv) {
   const started = performance.now();
-  // The orchestrator has a separate finite lease. Every solver below acquires
+  // The orchestrator has a separate owner lease. Every solver below acquires
   // the memory-intensive slot itself, never competing with its own parent.
   if (process.env.CLEARRA_RUNTIME_SUPERVISED !== '1' ||
       process.env.CLEARRA_RUNTIME_PROFILE !== 'local-service') {
-    throw new Error('the finite orchestrator requires runtime run --profile local-service; samples use benchmark-search');
+    throw new Error('the orchestrator requires runtime run --profile local-service --no-timeout; samples use benchmark-search');
   }
   const options = {};
   const allowed = new Set(['--binary', '--manager', '--owner-root', '--source-root', '--output', '--workers', '--timeout-seconds', '--candidate', '--case', '--rounds']);
@@ -36,7 +40,7 @@ async function main(argv) {
     if (!isAbsolute(options[key] ?? '')) throw new Error(`${key} requires an absolute path`);
   }
   const workers = Number(options['--workers'] ?? '11');
-  const timeout = Number(options['--timeout-seconds'] ?? '1800');
+  const timeout = Number(options['--timeout-seconds'] ?? '0');
   const candidate = options['--candidate'] ?? 'compact';
   const entry = workerMemoBenchmarkCase(options['--case']);
   const rounds = Number(options['--rounds'] ?? '1');
@@ -46,7 +50,7 @@ async function main(argv) {
   const schedule = abbaSchedule(rounds);
   productMemoAbbaSelection(candidate, 'treatment');
   if (!Number.isSafeInteger(workers) || workers < 1 || workers > os.availableParallelism() ||
-      !Number.isSafeInteger(timeout) || timeout < 1 || timeout > 1800) throw new Error('invalid worker count or finite sample timeout');
+      !Number.isSafeInteger(timeout) || timeout < 0 || timeout > 1800) throw new Error('invalid worker count or sample timeout (0 means unlimited)');
   if (workers < 2) throw new Error('memo ownership A/B requires native parallel exit accounting; serial memory is not measured by this harness');
   const owner = fs.realpathSync(options['--owner-root']), source = fs.realpathSync(options['--source-root']);
   const binary = fs.realpathSync(options['--binary']), manager = fs.realpathSync(options['--manager']);
@@ -74,7 +78,7 @@ async function main(argv) {
     component_scope: PRIVATE_WORKER_MEMORY_SCOPE,
     shared_component_scope: SHARED_WORKER_MEMORY_SCOPE,
     nested_component_scope: 'memo-payload-is-included-in-private-standard-bag-owner',
-    orchestrator_profile: 'local-service', outer_lease_ms: 7_200_000,
+    orchestrator_profile: 'local-service', outer_lease_ms: timeout === 0 ? 0 : 7_200_000,
     accelerators: 'both-disabled', tablebase: 'disabled', release_gate: 'not-evaluated',
   };
   write('manifest.json', manifest);
@@ -87,7 +91,7 @@ async function main(argv) {
       '--count', 'unique', '--backend', 'cpu', '--no-tablebase', '--rule', 'srs-plus',
       '--workers', '2', '--no-legal-board', '--no-conditioned-reachability'];
     const checked = await invoke(manager, ['runtime', 'run', '--producer', 'benchmark', '--profile', 'benchmark-search',
-      '--timeout', '60', '--', binary, ...args], owner, productMemoAbbaEnvironment(process.env, selected));
+      '--timeout', String(timeout), '--cancel-on-stdin-eof', '--', binary, ...args], owner, productMemoAbbaEnvironment(process.env, selected));
     if (checked.code !== 0 || checked.overflow) throw new Error(`memo ${arm} preflight failed without starting the timed suite`);
     const value = JSON.parse(checked.stdout.split(/(?:^|\r?\n)clearra_runtime_receipt=/)[0].trim());
     assert.equal(value.summary.backend_selected, 'wasm-cpu');
@@ -118,7 +122,7 @@ async function main(argv) {
     const sampleId = `${slot.round}-${slot.slot}-${storage}`;
     process.stderr.write(`[worker-memo-abba] ${entry.id} ${sampleId} started\n`);
     const execution = await invoke(manager, ['runtime', 'run', '--producer', 'benchmark', '--profile', 'benchmark-search',
-      '--timeout', String(timeout), '--', binary, ...args], owner,
+      '--timeout', String(timeout), '--cancel-on-stdin-eof', '--', binary, ...args], owner,
       productMemoAbbaEnvironment(process.env, selection));
     const sample = { ...slot, storage, memo_selection: selection, state: 'invalid', reason: null, wall_ms: execution.wallMs, command_args: args };
     try {
@@ -130,7 +134,7 @@ async function main(argv) {
       sample.memory_pressure_events = outcome.memory_pressure_events;
       sample.performance_adoption_eligible = outcome.memory_pressure_events === 0;
       try { assertNormalReceipt(execution, outcome); } catch (error) {
-        sample.state = outcome.reason === 'timeout' || outcome.reason.includes('memory') ? 'censored' : 'invalid';
+        sample.state = ['timeout', 'owner-lease-ended'].includes(outcome.reason) || outcome.reason.includes('memory') ? 'censored' : 'invalid';
         throw error;
       }
       const value = JSON.parse(execution.stdout.split(/(?:^|\r?\n)clearra_runtime_receipt=/)[0].trim());
@@ -203,7 +207,7 @@ function checkedCommand(command, args, cwd) {
 }
 function invoke(command, args, cwd, env) {
   return new Promise((resolvePromise, reject) => {
-    const started = performance.now(), child = spawn(command, args, { cwd, env, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    const started = performance.now(), child = searchOwner.spawn(command, args, { cwd, env, windowsHide: true });
     let stdout = '', stderr = '', bytes = 0, overflow = false;
     const collect = (stream, append) => stream.on('data', chunk => {
       bytes += chunk.length;

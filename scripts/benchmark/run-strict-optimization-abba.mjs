@@ -5,6 +5,7 @@ import { existsSync, mkdirSync, realpathSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { isDeepStrictEqual } from "node:util";
+import { createManagedSearchOwner } from "../tools/managed-search-owner.mjs";
 import {
   acquireProofOwnership, benchmarkEnvironment, captureChild, checkedCommand,
   classifyProofRuntime, composeRuntimeArgs, COVERAGE_ROOT, coverageExperiment,
@@ -65,14 +66,14 @@ export function parseStrictOptimizationArguments(argv) {
   const key = options["--case"] ?? "p7p4";
   const id = options["--id"];
   const source = options["--source-sha"];
-  const timeout = Number(options["--timeout-seconds"] ?? "1800");
+  const timeout = Number(options["--timeout-seconds"] ?? "0");
   const workers = Number(options["--workers"] ?? "8");
   const baseline = options["--baseline"] ?? BASELINE;
   const workspace = options["--workspace"];
   requireThat(Object.hasOwn(AXES, axis) && Object.hasOwn(CASES, key) &&
     (baseline === HISTORICAL_BASELINE || (baseline === BASELINE && axis !== "union-memo")) &&
     /^[a-z0-9][a-z0-9-]{0,47}$/u.test(id ?? "") && /^[a-f0-9]{40}$/u.test(source ?? "") &&
-    Number.isSafeInteger(timeout) && timeout > 0 && timeout <= 1800 &&
+    Number.isSafeInteger(timeout) && timeout >= 0 && timeout <= 1800 &&
     Number.isSafeInteger(workers) && workers >= 2 && workers <= 128,
   "Invalid strict optimization ABBA options");
   requireThat(key === "p7p4" || (axis !== "frontier" && axis !== "subsumption"),
@@ -180,7 +181,7 @@ export function summarizeStrictOptimization(samples) {
   };
 }
 
-async function main(argv) {
+async function main(argv, searchOwner) {
   const options = parseStrictOptimizationArguments(argv);
   requireThat(process.env.CLEARRA_RUNTIME_SUPERVISED !== "1",
     "Each ABBA sample owns a separate native supervisor; do not nest the orchestrator");
@@ -221,7 +222,7 @@ async function main(argv) {
       await verify();
       console.log(`${options.axis}: starting ${step.name}`);
       const result = await captureChild(manager, composeRuntimeArgs(root, step), root,
-        strictOptimizationEnvironment(process.env, options.axis, step));
+        strictOptimizationEnvironment(process.env, options.axis, step), searchOwner);
       const receipt = readSupervisorReceipt(result, stateReceiptDirectory(process.env));
       write(step.name + "-runtime", receipt);
       const runtime = classifyProofRuntime(receipt, result, step);
@@ -257,11 +258,9 @@ async function main(argv) {
 }
 
 if (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.meta.url) {
-  for (const signal of ["SIGINT", "SIGTERM"]) {
-    process.on(signal, () => { interrupted = true; });
-  }
-  main(process.argv.slice(2)).catch((error) => {
+  const searchOwner = createManagedSearchOwner({ onCancel: () => { interrupted = true; } });
+  main(process.argv.slice(2), searchOwner).catch((error) => {
     process.stderr.write(`${error.message}\n`);
     process.exitCode = 1;
-  });
+  }).finally(() => searchOwner.dispose());
 }

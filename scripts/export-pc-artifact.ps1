@@ -31,8 +31,8 @@ param(
     [switch]$VerboseLog,
     [ValidateSet('NativeCReference', 'RustFamily')]
     [string]$Engine = 'NativeCReference',
-    [ValidateRange(1, 7200)]
-    [int]$RustTimeoutSeconds = 1800
+    [ValidateRange(0, 7200)]
+    [int]$RustTimeoutSeconds = 0
 )
 
 $ErrorActionPreference = 'Stop'

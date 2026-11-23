@@ -176,14 +176,8 @@ fn run_command(
     let profile = required_option(&mut arguments, "--profile")?
         .to_string_lossy()
         .into_owned();
-    let timeout_seconds = take_option(&mut arguments, "--timeout")
-        .map(|value| {
-            value
-                .to_string_lossy()
-                .parse::<u64>()
-                .map_err(|_| Error::usage("--timeout must be an integer"))
-        })
-        .transpose()?;
+    let timeout_seconds = take_timeout(&mut arguments)?;
+    let cancel_on_stdin_eof = take_flag(&mut arguments, "--cancel-on-stdin-eof");
     require_empty(&arguments)?;
     let outcome = runtime::run(
         repository,
@@ -194,6 +188,7 @@ fn run_command(
             timeout_seconds,
             command,
             keep_stdin_open: false,
+            cancel_on_stdin_eof,
             extra_env: Default::default(),
             echo: true,
         },
@@ -218,7 +213,14 @@ fn wsl_command(
     if action_text == "verify" {
         let distribution = take_option(&mut arguments, "--distribution");
         require_empty(&arguments)?;
-        let outcome = wsl::run_entry(repository, policy, distribution.as_deref(), "verify", &[])?;
+        let outcome = wsl::run_entry(
+            repository,
+            policy,
+            distribution.as_deref(),
+            "verify",
+            &[],
+            None,
+        )?;
         eprintln!("clearra_runtime_receipt={}", outcome.receipt.display());
         return Ok(outcome.return_code);
     }
@@ -236,6 +238,7 @@ fn wsl_command(
         .to_string_lossy()
         .into_owned();
     let distribution = take_option(&mut arguments, "--distribution");
+    let timeout_seconds = take_timeout(&mut arguments)?;
     require_empty(&arguments)?;
     let outcome = wsl::run_entry(
         repository,
@@ -243,6 +246,7 @@ fn wsl_command(
         distribution.as_deref(),
         &entry,
         &guest_arguments,
+        timeout_seconds,
     )?;
     eprintln!("clearra_runtime_receipt={}", outcome.receipt.display());
     if let Some(code) = &outcome.error_code {
@@ -284,6 +288,27 @@ fn take_flag(arguments: &mut Vec<OsString>, name: &str) -> bool {
     }
 }
 
+fn take_timeout(arguments: &mut Vec<OsString>) -> Result<Option<u64>> {
+    let unlimited = take_flag(arguments, "--no-timeout");
+    let explicit = take_option(arguments, "--timeout");
+    if unlimited && explicit.is_some() {
+        return Err(Error::usage(
+            "--no-timeout and --timeout are mutually exclusive",
+        ));
+    }
+    if unlimited {
+        return Ok(Some(0));
+    }
+    explicit
+        .map(|value| {
+            value
+                .to_string_lossy()
+                .parse::<u64>()
+                .map_err(|_| Error::usage("--timeout must be an integer; 0 means unlimited"))
+        })
+        .transpose()
+}
+
 fn require_empty(arguments: &[OsString]) -> Result<()> {
     if arguments.is_empty() {
         Ok(())
@@ -303,9 +328,9 @@ fn print_help() {
          clearra-manage [--root PATH] storage audit\n\
          clearra-manage [--root PATH] storage verify --path PATH [--force-unmanaged-output --force-reason REASON]\n\
          clearra-manage [--root PATH] runtime audit\n\
-         clearra-manage [--root PATH] runtime run --producer ID --profile ID [--timeout SECONDS] -- COMMAND...\n\
+         clearra-manage [--root PATH] runtime run --producer ID --profile ID [--timeout SECONDS | --no-timeout] [--cancel-on-stdin-eof] -- COMMAND...\n\
          clearra-manage [--root PATH] runtime wsl verify [--distribution NAME]\n\
-         clearra-manage [--root PATH] runtime wsl run [--distribution NAME] --entry ID -- ARGUMENTS..."
+         clearra-manage [--root PATH] runtime wsl run [--distribution NAME] [--timeout SECONDS | --no-timeout] --entry ID -- ARGUMENTS..."
     );
 }
 
@@ -325,5 +350,31 @@ mod tests {
             Some(OsString::from("control"))
         );
         assert_eq!(values, vec![OsString::from("tail")]);
+    }
+
+    #[test]
+    fn timeout_parser_preserves_explicit_unlimited_and_finite_choices() {
+        assert_eq!(take_timeout(&mut Vec::new()).unwrap(), None);
+        for (arguments, expected) in [
+            (vec!["--no-timeout"], 0),
+            (vec!["--timeout", "0"], 0),
+            (vec!["--timeout", "900"], 900),
+        ] {
+            let mut arguments = arguments.into_iter().map(OsString::from).collect();
+            assert_eq!(take_timeout(&mut arguments).unwrap(), Some(expected));
+            assert!(arguments.is_empty());
+        }
+    }
+
+    #[test]
+    fn timeout_parser_rejects_conflicting_or_malformed_choices() {
+        for arguments in [
+            vec!["--no-timeout", "--timeout", "0"],
+            vec!["--timeout", "-1"],
+            vec!["--timeout", "1.5"],
+        ] {
+            let mut arguments = arguments.into_iter().map(OsString::from).collect();
+            assert!(take_timeout(&mut arguments).is_err());
+        }
     }
 }

@@ -77,7 +77,11 @@ done
 [[ "$UNIT" =~ ^clearra-rust-[0-9]+-[0-9]+$ ]] || exit 2
 [[ "$MEMORY_MAX" =~ ^[1-9][0-9]+$ ]] || exit 2
 [[ "$TASKS_MAX" =~ ^[1-9][0-9]*$ ]] || exit 2
-[[ "$RUNTIME_MAX" =~ ^[1-9][0-9]*$ ]] || exit 2
+[[ "$RUNTIME_MAX" =~ ^(0|[1-9][0-9]*)$ ]] || exit 2
+runtime_max_property="${RUNTIME_MAX}s"
+if [[ "$RUNTIME_MAX" == 0 ]]; then
+    runtime_max_property=infinity
+fi
 [[ "$GRACE" =~ ^[1-9][0-9]{0,3}$ ]] || exit 2
 [[ "$ENTRY" =~ ^[a-z0-9-]+$ && -f "$GUEST" && ! -L "$GUEST" ]] || exit 2
 source "${GUEST%/*}/clearra-wsl-source-storage.sh"
@@ -156,7 +160,7 @@ systemd_arguments=(
     --property "MemorySwapMax=0"
     --property "TasksMax=$TASKS_MAX"
     --property "OOMPolicy=kill"
-    --property "RuntimeMaxSec=${RUNTIME_MAX}s"
+    --property "RuntimeMaxSec=$runtime_max_property"
     --property "TimeoutStopSec=${GRACE}s"
     --property "KillMode=control-group"
     --setenv "CLEARRA_WSL_LEASE_DIR=$lease_dir"

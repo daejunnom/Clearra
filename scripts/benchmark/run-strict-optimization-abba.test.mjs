@@ -16,6 +16,9 @@ test("strict mechanism comparisons are ABBA only and repeated-kind axes require 
   const schedule = strictOptimizationSchedule(opts, "/abs/example");
   assert.equal(schedule.map(({ arm }) => arm).join(""), "ABBA");
   assert.equal(new Set(schedule.map(({ timeout }) => timeout)).size, 1);
+  assert.equal(opts.timeout, 0);
+  assert.equal(parseStrictOptimizationArguments(cli("subsumption", "--timeout-seconds", "0")).timeout, 0);
+  assert.equal(parseStrictOptimizationArguments(cli("subsumption", "--timeout-seconds", "1800")).timeout, 1800);
   assert.throws(() => parseStrictOptimizationArguments(cli("frontier", "--case", "p7")), /Repeated-kind/);
   assert.throws(() => parseStrictOptimizationArguments(cli("union-memo", "--timeout-seconds", "1801")), /Invalid/);
 });

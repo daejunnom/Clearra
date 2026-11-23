@@ -62,6 +62,8 @@ test('plan binds exactly C/Rust/Rust/C, one timeout, and deliberate serial fixtu
   assert.deepEqual(full.schedule, [C, R, R, C]);
   assert.equal(full.workers, 11);
   assert.equal(full.timeout, 1800);
+  assert.equal(compilePlan([...options, '--case', 'full-p7p4', '--workers', '11']).timeout, 0);
+  assert.equal(compilePlan([...options, '--case', 'full-p7p4', '--workers', '11', '--timeout-seconds', '0']).timeout, 0);
   assert.throws(() => compilePlan([...options, '--case', 'fixed-2l', '--workers', '2', '--timeout-seconds', '60']), /one worker/);
   assert.throws(() => compilePlan([...options, '--case', 'full-p7p4', '--workers', '11', '--timeout-seconds', '1801']), /timeout/);
   assert.throws(() => compilePlan([...options, '--case', 'full-p7p4', '--workers', '11', '--max-candidates', '1000000']), /option/);

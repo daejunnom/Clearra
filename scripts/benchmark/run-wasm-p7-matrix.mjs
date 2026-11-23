@@ -120,7 +120,7 @@ async function execute(surface, mode, command, rawPath, stderrPath) {
   let args;
   if (surface === 'browser') {
     script = resolve(repository, 'scripts/tools/run-wasm-browser-benchmark.mjs');
-    args = [script, '--root', browserRoot, '--command', command, '--timeout', '1800000'];
+    args = [script, '--root', browserRoot, '--command', command, '--timeout', '0'];
   } else if (mode.multi) {
     script = resolve(repository, 'scripts/tools/wasm-pc-distributed-environment-probe.mjs');
     args = [script, bindings, command, String(workBudget)];

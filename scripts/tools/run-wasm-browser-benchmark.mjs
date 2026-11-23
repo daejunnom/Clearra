@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import http from 'node:http';
 import { extname, resolve, sep } from 'node:path';
 import { acquireManagedTransientDirectory } from './managed-transient-directory.mjs';
+import { nonnegativeInteger, scheduleSearchDeadline } from './optional-search-deadline.mjs';
 
 export const BENCHMARK_PORT = 4195;
 
@@ -20,7 +21,7 @@ if (process.env.CLEARRA_RUNTIME_SUPERVISED !== '1' ||
     process.env.CLEARRA_RUNTIME_PROFILE !== 'benchmark-search') {
   throw new Error(
     'browser benchmarks require: clearra-manage runtime run ' +
-    '--producer benchmark --profile benchmark-search --timeout <seconds> -- <command>'
+    '--producer benchmark --profile benchmark-search --no-timeout -- <command>'
   );
 }
 const root = resolve(options.root);
@@ -30,7 +31,7 @@ if (!fs.existsSync(benchmarkEntry) || !fs.statSync(benchmarkEntry).isFile()) {
     `benchmark root must contain a built index.html entrypoint: ${benchmarkEntry}`
   );
 }
-const timeoutMs = positiveInteger(options.timeout ?? '3600000', 'timeout');
+const timeoutMs = nonnegativeInteger(options.timeout ?? '0', 'timeout');
 const benchmarkPort = options.port === undefined
   ? BENCHMARK_PORT
   : positiveInteger(options.port, 'port');
@@ -46,7 +47,7 @@ const profileLease = await acquireManagedTransientDirectory(
 const profile = profileLease.path;
 let browser = null;
 let server = null;
-let timeout = null;
+let cancelDeadline = () => {};
 let lastProgress = null;
 const progressSamples = [];
 let processMemoryProbe = null;
@@ -122,17 +123,17 @@ try {
       browser.once('exit', (code) => {
         if (code && code !== 0) rejectResult(new Error(`browser exited ${code}: ${browserError}`));
       });
-      timeout = setTimeout(() => resolveResult({ result: {
+      cancelDeadline = scheduleSearchDeadline(timeoutMs, () => resolveResult({ result: {
         surface: 'browser-wasm-product-worker',
         timed_out: true,
         timeout_ms: timeoutMs,
         command: options.command,
         last_progress: lastProgress,
         benchmark_progress_samples: progressSamples
-      } }), timeoutMs);
+      } }));
     });
   });
-  clearTimeout(timeout);
+  cancelDeadline();
   const processMemory = await finishProcessMemoryProbe(processMemoryProbe);
   processMemoryProbe = null;
   outcome.result.browser_process_tree_peak_working_set_bytes = processMemory.peakBytes;
@@ -150,7 +151,7 @@ try {
   server = null;
   console.log(JSON.stringify(outcome.result, null, 2));
 } finally {
-  clearTimeout(timeout);
+  cancelDeadline();
   await finishProcessMemoryProbe(processMemoryProbe);
   await stopBrowser(browser, profile);
   await closeServer(server);

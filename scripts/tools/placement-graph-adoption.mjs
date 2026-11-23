@@ -90,14 +90,15 @@ function runtimeOutcome(runtime, label) {
   const stamp = RUN_ID.exec(outcome?.run_id ?? "");
   requireThat(runtime?.schema_id === RUNTIME_SCHEMA && stamp && BigInt(stamp[1]) > 0n &&
     outcome.profile === "benchmark-search" && asPositiveInt(outcome.duration_ms) &&
-    asPositiveInt(outcome.timeout_seconds) && Number.isSafeInteger(outcome.return_code) &&
+    Number.isSafeInteger(outcome.timeout_seconds) && outcome.timeout_seconds >= 0 &&
+    Number.isSafeInteger(outcome.return_code) &&
     outcome.automatic_retry === false, `${label}: invalid supervised benchmark receipt`);
   return { outcome, stampNs: BigInt(stamp[1]) };
 }
 
 function outcomeState(outcome) {
   const signal = outcome.child_termination?.kind === "unix-signal" ? outcome.child_termination.signal : null;
-  if (["timeout", "memory-limit", "memory-pressure", "output-limit", "process-limit", "cancelled"].includes(outcome.reason) ||
+  if (["timeout", "memory-limit", "memory-pressure", "output-limit", "process-limit", "cancelled", "owner-lease-ended"].includes(outcome.reason) ||
       (outcome.reason === "signal" && [2, 9, 15].includes(signal))) return "censored";
   if (outcome.return_code !== 0 || outcome.reason !== "normal" || outcome.error_code !== null ||
       outcome.supervisor_termination_reason !== null || outcome.process_tree_stopped !== true ||

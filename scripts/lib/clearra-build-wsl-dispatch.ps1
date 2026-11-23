@@ -23,10 +23,11 @@ function New-ClearraManagedWslEntryArguments(
             throw 'Managed WSL entry arguments may not contain control characters.'
         }
     }
+    $timeoutArguments = if ($Entry -eq 'pc-runtime-build-batch') { @('--timeout', '0') } else { @() }
     return [string[]]@(
         '--root', $root, 'runtime', 'wsl', 'run'
     ) + @(New-ClearraWslDistributionArguments $Distribution) +
-        [string[]]@('--entry', $Entry, '--') + [string[]]$CommandArguments
+        [string[]]@('--entry', $Entry) + $timeoutArguments + @('--') + [string[]]$CommandArguments
 }
 
 function New-ClearraWslDistributionArguments([string]$Distribution) {

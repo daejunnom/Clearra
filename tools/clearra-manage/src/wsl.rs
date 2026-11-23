@@ -17,6 +17,7 @@ pub fn run_entry(
     distribution: Option<&OsStr>,
     entry_name: &str,
     arguments: &[OsString],
+    timeout_override: Option<u64>,
 ) -> Result<RunOutcome> {
     if !cfg!(windows) {
         return Err(Error::runtime(
@@ -59,9 +60,10 @@ pub fn run_entry(
     let session = windows_to_wsl(&repository.join("scripts/runtime/clearra-wsl-session.sh"))?;
     let guest = windows_to_wsl(&repository.join("scripts/runtime/clearra-wsl-guest.sh"))?;
     let profile = policy.profile(&contract.profile)?;
-    let requested_timeout = contract.timeout_seconds.unwrap_or(profile.timeout_seconds);
-    let cleanup_budget = 60u64.min(requested_timeout.saturating_sub(1).max(1));
-    let guest_timeout = requested_timeout.saturating_sub(cleanup_budget).max(1);
+    let requested_timeout = timeout_override
+        .or(contract.timeout_seconds)
+        .unwrap_or(profile.timeout_seconds);
+    let guest_timeout = guest_timeout_seconds(requested_timeout);
     let host_snapshot = runtime::current_memory_snapshot()?;
     let admission = runtime::calculate_admission(policy, &contract.profile, host_snapshot)?;
     // The guest forbids swap. Its cgroup must therefore remain within host
@@ -124,7 +126,7 @@ pub fn run_entry(
     command.extend(guest_arguments);
 
     // Lease EOF lets the guest stop its own service on unexpected host exit;
-    // its separate RuntimeMaxSec remains bounded if transport is interrupted.
+    // its separate RuntimeMaxSec follows the explicit finite/unlimited choice.
     // The return value and receipt below describe the Windows launcher.
     runtime::run(
         repository,
@@ -135,10 +137,19 @@ pub fn run_entry(
             timeout_seconds: Some(requested_timeout),
             command,
             keep_stdin_open: true,
+            cancel_on_stdin_eof: false,
             extra_env: BTreeMap::new(),
             echo: true,
         },
     )
+}
+
+fn guest_timeout_seconds(requested: u64) -> u64 {
+    if requested == 0 {
+        return 0;
+    }
+    let cleanup_budget = 60_u64.min(requested.saturating_sub(1).max(1));
+    requested.saturating_sub(cleanup_budget).max(1)
 }
 
 fn wsl_guest_command(distribution: Option<&OsStr>) -> Result<Vec<OsString>> {
@@ -506,6 +517,14 @@ impl WslLease {
 mod tests {
     use super::*;
     use crate::policy::Policy;
+
+    #[test]
+    fn guest_timeout_preserves_unlimited_and_finite_cleanup_reserves() {
+        assert_eq!(guest_timeout_seconds(0), 0);
+        assert_eq!(guest_timeout_seconds(1), 1);
+        assert_eq!(guest_timeout_seconds(30), 1);
+        assert_eq!(guest_timeout_seconds(900), 840);
+    }
 
     fn test_staging(label: &str) -> OwnedTemporaryDirectory {
         let repository = Path::new(env!("CARGO_MANIFEST_DIR"))

@@ -59,13 +59,14 @@ export function abbaSchedule(rounds) {
       .map((arm, slot) => ({ round: round + 1, slot: slot + 1, arm }))).flat();
 }
 
-// Keep the requested per-sample timeout intact. An outer finite lease may
-// instead prevent admitting another sample; that is not a completed timing.
+// Zero is an unlimited search. An explicitly finite sample budget can still
+// be checked against an explicitly finite outer lease without shortening it.
 export function sampleFitsRemainingLease(elapsedMs, sampleTimeoutMs, leaseMs, reserveMs) {
   if (![elapsedMs, sampleTimeoutMs, leaseMs, reserveMs].every(Number.isSafeInteger) ||
-      elapsedMs < 0 || sampleTimeoutMs < 1 || leaseMs < 1 || reserveMs < 0) {
-    throw new Error('invalid finite benchmark lease accounting');
+      elapsedMs < 0 || sampleTimeoutMs < 0 || leaseMs < 0 || reserveMs < 0) {
+    throw new Error('invalid benchmark lease accounting');
   }
+  if (sampleTimeoutMs === 0 || leaseMs === 0) return true;
   return elapsedMs <= leaseMs - sampleTimeoutMs - reserveMs;
 }
 

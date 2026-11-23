@@ -584,7 +584,7 @@
         "pc-runtime-build-batch": {
           "profile": "benchmark-search",
           "requires_source": true,
-          "timeout_seconds": 7200,
+          "timeout_seconds": 0,
           "output_path_options": [
             "--host-output"
           ]

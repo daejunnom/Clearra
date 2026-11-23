@@ -81,6 +81,7 @@ pub struct RunOptions {
     pub timeout_seconds: Option<u64>,
     pub command: Vec<OsString>,
     pub keep_stdin_open: bool,
+    pub cancel_on_stdin_eof: bool,
     pub extra_env: BTreeMap<OsString, OsString>,
     pub echo: bool,
 }
@@ -98,6 +99,7 @@ pub struct RunOutcome {
     pub supervisor_termination_reason: Option<String>,
     pub duration_ms: u128,
     pub timeout_seconds: u64,
+    pub cancel_on_stdin_eof: bool,
     pub output_bytes: u64,
     pub output_limit_bytes: u64,
     pub peak_memory_bytes: Option<u64>,
@@ -455,9 +457,9 @@ pub fn run(repository: &Path, policy: &Policy, options: RunOptions) -> Result<Ru
             options.profile
         )));
     }
-    if timeout == 0 || timeout > profile.maximum_timeout_seconds {
+    if timeout > profile.maximum_timeout_seconds {
         return Err(Error::usage(format!(
-            "timeout for {} must be between 1 and {} seconds",
+            "timeout for {} must be 0 (unlimited) or at most {} seconds",
             options.profile, profile.maximum_timeout_seconds
         )));
     }
@@ -586,7 +588,16 @@ pub fn run(repository: &Path, policy: &Policy, options: RunOptions) -> Result<Ru
         Arc::clone(&output_exceeded),
     );
 
-    let timeout_at = started + Duration::from_secs(timeout);
+    let timeout_at = (timeout != 0).then(|| started + Duration::from_secs(timeout));
+    // The launcher owns this pipe. Its exit or cancellation closes stdin even
+    // when no elapsed-time deadline is installed. This reader owns no child
+    // handles; the supervisor remains the only process-tree cleanup owner.
+    let owner_ended = options.cancel_on_stdin_eof.then(|| {
+        let ended = Arc::new(AtomicBool::new(false));
+        let reader_ended = Arc::clone(&ended);
+        thread::spawn(move || observe_owner_lease(std::io::stdin().lock(), &reader_ended));
+        ended
+    });
     let sample_interval = Duration::from_secs_f64(
         policy
             .runtime_policy
@@ -632,7 +643,18 @@ pub fn run(repository: &Path, policy: &Policy, options: RunOptions) -> Result<Ru
                 .map_err(|error| Error::io("wait after output limit", error))?;
             break;
         }
-        if Instant::now() >= timeout_at {
+        if owner_ended
+            .as_ref()
+            .is_some_and(|ended| ended.load(Ordering::Acquire))
+        {
+            forced_reason = Some(("owner-lease-ended", "E_CLEARRA_OWNER_LEASE_ENDED"));
+            terminate_tree(&mut child, &containment, profile.termination_grace_seconds);
+            status = child
+                .wait()
+                .map_err(|error| Error::io("wait after owner lease ended", error))?;
+            break;
+        }
+        if timeout_at.is_some_and(|deadline| Instant::now() >= deadline) {
             forced_reason = Some(("timeout", "E_CLEARRA_PROCESS_TIMEOUT"));
             terminate_tree(&mut child, &containment, profile.termination_grace_seconds);
             status = child
@@ -775,12 +797,26 @@ pub fn run(repository: &Path, policy: &Policy, options: RunOptions) -> Result<Ru
         thread::sleep(Duration::from_millis(50));
     }
     drop(stdin_lease.take());
-    let stdout = stdout_thread
-        .join()
-        .map_err(|_| Error::runtime("stdout collector panicked"))?;
-    let stderr = stderr_thread
-        .join()
-        .map_err(|_| Error::runtime("stderr collector panicked"))?;
+    // Descendants can retain the direct child's output pipes. Drain the owned
+    // process group before waiting for those pipe readers to see EOF.
+    let mut active = containment.active_processes();
+    let mut tree_stopped = active == Some(0);
+    if !tree_stopped {
+        containment.force_terminate();
+        let cleanup_until =
+            Instant::now() + Duration::from_secs(profile.termination_grace_seconds.max(1));
+        while Instant::now() < cleanup_until {
+            active = containment.active_processes();
+            if active == Some(0) {
+                tree_stopped = true;
+                break;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        if forced_reason.is_none() {
+            forced_reason = Some(("tree-not-stopped", "E_CLEARRA_PROCESS_TREE_NOT_STOPPED"));
+        }
+    }
     let kernel_memory_peak = containment.kernel_memory_peak();
     let sampled_memory_peak = sampled_memory_peak(observed_peak);
     // Keep the existing convenience field, but retain the two provenances
@@ -788,16 +824,12 @@ pub fn run(repository: &Path, policy: &Policy, options: RunOptions) -> Result<Ru
     let peak = kernel_memory_peak
         .or(sampled_memory_peak)
         .map(|measurement| measurement.bytes);
-    let active = containment.active_processes();
-    let mut tree_stopped = active.unwrap_or(0) == 0;
-    if !tree_stopped {
-        containment.force_terminate();
-        thread::sleep(Duration::from_millis(100));
-        tree_stopped = containment.active_processes().unwrap_or(0) == 0;
-        if forced_reason.is_none() {
-            forced_reason = Some(("tree-not-stopped", "E_CLEARRA_PROCESS_TREE_NOT_STOPPED"));
-        }
-    }
+    let stdout = stdout_thread
+        .join()
+        .map_err(|_| Error::runtime("stdout collector panicked"))?;
+    let stderr = stderr_thread
+        .join()
+        .map_err(|_| Error::runtime("stderr collector panicked"))?;
     // Neither a near-limit peak nor a SIGKILL proves an OOM. Only an explicit
     // supervisor decision owns our memory-limit and pressure failure reasons.
     let child_termination = ChildTermination::from_status(status);
@@ -824,6 +856,7 @@ pub fn run(repository: &Path, policy: &Policy, options: RunOptions) -> Result<Ru
         supervisor_termination_reason: forced_reason.map(|(reason, _)| reason.to_owned()),
         duration_ms: started.elapsed().as_millis(),
         timeout_seconds: timeout,
+        cancel_on_stdin_eof: options.cancel_on_stdin_eof,
         output_bytes: total_output.load(Ordering::Relaxed),
         output_limit_bytes: profile.output_limit_bytes,
         peak_memory_bytes: peak,
@@ -901,13 +934,24 @@ fn collect_output<R: Read + Send + 'static>(
     })
 }
 
+fn observe_owner_lease(mut reader: impl Read, ended: &AtomicBool) {
+    let mut buffer = [0_u8; 256];
+    loop {
+        match reader.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => break,
+        }
+    }
+    ended.store(true, Ordering::Release);
+}
+
 fn terminate_tree(child: &mut Child, containment: &Containment, grace_seconds: u64) {
     containment.request_termination(child);
     let deadline = Instant::now() + Duration::from_secs(grace_seconds);
     while Instant::now() < deadline {
-        if child.try_wait().ok().flatten().is_some()
-            && containment.active_processes().unwrap_or(0) == 0
-        {
+        if child.try_wait().ok().flatten().is_some() && containment.active_processes() == Some(0) {
             return;
         }
         thread::sleep(Duration::from_millis(50));
@@ -1570,6 +1614,46 @@ pub(crate) fn pid_alive(_: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn owner_lease_waits_for_eof_after_nonempty_input() {
+        use std::sync::mpsc;
+
+        struct LeaseReader(mpsc::Receiver<Option<u8>>);
+        impl Read for LeaseReader {
+            fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+                match self.0.recv().expect("test lease sender") {
+                    Some(byte) => {
+                        bytes[0] = byte;
+                        Ok(1)
+                    }
+                    None => Ok(0),
+                }
+            }
+        }
+        let (sender, receiver) = mpsc::channel();
+        let ended = Arc::new(AtomicBool::new(false));
+        let observed = Arc::clone(&ended);
+        let reader = thread::spawn(move || observe_owner_lease(LeaseReader(receiver), &observed));
+        sender.send(Some(1)).unwrap();
+        assert!(!ended.load(Ordering::Acquire));
+        sender.send(None).unwrap();
+        reader.join().unwrap();
+        assert!(ended.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn owner_lease_io_failure_ends_the_lease() {
+        struct FailedReader;
+        impl Read for FailedReader {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe))
+            }
+        }
+        let ended = AtomicBool::new(false);
+        observe_owner_lease(FailedReader, &ended);
+        assert!(ended.load(Ordering::Acquire));
+    }
 
     fn profile() -> ResourceProfile {
         ResourceProfile {

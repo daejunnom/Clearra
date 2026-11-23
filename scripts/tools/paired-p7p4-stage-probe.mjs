@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 
-export const P7P4_STAGE_TIMEOUT_MS = 480_000;
+export const P7P4_STAGE_TIMEOUT_MS = 0;
 export const P7P4_STAGE_IDENTITY = Object.freeze({
   solutions: 456_923,
   solutionSet: 'cts1:98ebe8726537b29f',

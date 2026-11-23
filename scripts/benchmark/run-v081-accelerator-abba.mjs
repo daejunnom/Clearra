@@ -8,6 +8,7 @@ import os from 'node:os';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { performance } from 'node:perf_hooks';
+import { nonnegativeInteger, scheduleSearchDeadline } from '../tools/optional-search-deadline.mjs';
 import {
   PAIRS, abbaSchedule, assertIsolatedAcceleratorCounters, classifyExecution,
   assertWorkerExecution, commandArgs, semanticIdentity,
@@ -34,7 +35,7 @@ async function main(argv) {
   const options = parseOptions(argv);
   if (process.env.CLEARRA_RUNTIME_SUPERVISED !== '1' ||
       process.env.CLEARRA_RUNTIME_PROFILE !== 'benchmark-search') {
-    throw new Error('run under clearra-manage runtime run --producer benchmark --profile benchmark-search');
+    throw new Error('run under clearra-manage runtime run --producer benchmark --profile benchmark-search --no-timeout');
   }
   const entry = validateCases(JSON.parse(fs.readFileSync(fixturePath, 'utf8')))
     .find(candidate => candidate.id === options.case);
@@ -43,8 +44,8 @@ async function main(argv) {
   if (options.workers > os.availableParallelism() && !options.allowOversubscription) {
     throw new Error('requested workers exceed visible processors; use --allow-oversubscription explicitly');
   }
-  // Preserve the 1800-second sample contract. Pre/postflight work consumes
-  // the outer lease; admission below stops before a sample would overrun it.
+  // Explicit finite budgets retain their admission accounting. Unlimited
+  // samples also require an unlimited outer manager invocation.
   if (4 * options.rounds * options.timeoutMs > MAX_LEASE_MS) {
     throw new Error('worst-case run exceeds the supervised 120-minute lease; use smaller batches');
   }
@@ -82,7 +83,7 @@ async function main(argv) {
     oversubscribed: options.workers > os.availableParallelism(),
     rounds_requested: options.rounds,
     timeout_ms_per_sample: options.timeoutMs,
-    outer_lease_ms: MAX_LEASE_MS,
+    outer_lease_ms: options.timeoutMs === 0 ? 0 : MAX_LEASE_MS,
     postflight_reserve_ms: 120_000,
     executable_sha256: binarySha256,
     fixture_sha256: fixtureSha256,
@@ -274,7 +275,7 @@ function parseOptions(argv) {
     pair: options['--pair'],
     workers: positiveInteger(options['--workers'], '--workers'),
     rounds: positiveInteger(options['--rounds'] ?? '2', '--rounds'),
-    timeoutMs: positiveInteger(options['--timeout-ms'] ?? '300000', '--timeout-ms'),
+    timeoutMs: nonnegativeInteger(options['--timeout-ms'] ?? '0', '--timeout-ms'),
     runId,
     legalRoot: requiredAbsolute(options['--legal-root'], '--legal-root'),
     conditionedRoot: requiredAbsolute(options['--conditioned-root'], '--conditioned-root'),
@@ -424,7 +425,7 @@ async function invoke(binary, args, env, timeoutMs, memoryProbeOptions = null) {
     let stderrBytes = 0;
     let overflow = false;
     let timedOut = false;
-    const timeout = setTimeout(() => { timedOut = true; child.kill(); }, timeoutMs);
+    const cancelDeadline = scheduleSearchDeadline(timeoutMs, () => { timedOut = true; child.kill(); });
     child.stdout.on('data', chunk => {
       stdoutBytes += chunk.length;
       if (stdoutBytes > MAX_STDOUT) {
@@ -437,9 +438,9 @@ async function invoke(binary, args, env, timeoutMs, memoryProbeOptions = null) {
       if (stderrBytes > MAX_STDERR) { overflow = true; child.kill(); }
       else stderr += chunk.toString('utf8');
     });
-    child.once('error', error => { clearTimeout(timeout); rejectResult(error); });
+    child.once('error', error => { cancelDeadline(); rejectResult(error); });
     child.once('close', code => {
-      clearTimeout(timeout);
+      cancelDeadline();
       void finishProcessTreeMemoryProbe(memoryProbe).then(memory => {
         resolveResult({ exitCode: code, stdout, stderr, timedOut, overflow,
           wallMs: performance.now() - started,

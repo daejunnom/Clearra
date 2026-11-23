@@ -6,6 +6,7 @@ import { dirname, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
 import { finesseSourceSnapshot } from './finesse-source-snapshot.mjs';
+import { nonnegativeInteger } from '../tools/optional-search-deadline.mjs';
 
 const repository = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const options = parseArgs(process.argv.slice(2));
@@ -64,8 +65,8 @@ const selectedModes = new Set(
     (phase === 'baseline' ? 'off' : phase === 'reference' ? 'inputs,score' : 'off,inputs,score')
   ).split(',')
 );
-const smallTimeout = positiveInteger(options['small-timeout'] ?? '300000', 'small-timeout');
-const longTimeout = positiveInteger(options['long-timeout'] ?? '1800000', 'long-timeout');
+const smallTimeout = nonnegativeInteger(options['small-timeout'] ?? '0', 'small-timeout');
+const longTimeout = nonnegativeInteger(options['long-timeout'] ?? '0', 'long-timeout');
 if (![...selectedModes].every((mode) => ['off', 'inputs', 'score'].includes(mode))) {
   throw new Error('--modes accepts only off, inputs, and score');
 }

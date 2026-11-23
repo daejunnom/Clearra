@@ -3,6 +3,7 @@ import { mkdirSync, realpathSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { isDeepStrictEqual } from "node:util";
+import { createManagedSearchOwner } from "../tools/managed-search-owner.mjs";
 
 import { evaluatePlacementGraphAdoption, placementAdoptionTimingProtocol } from "../tools/placement-graph-adoption.mjs";
 import { DEFAULT_PLACEMENT_EXPERIMENT, placementExperiment } from "./placement-experiment-contract.mjs";
@@ -242,10 +243,10 @@ export async function collectPlacementGraphAdoption(options, custody, proof, sch
 
 let interrupted = null;
 
-async function main(argv) {
+async function main(argv, searchOwner) {
   const options = parseAdoptionArguments(argv);
   requireThat(process.env.CLEARRA_RUNTIME_SUPERVISED !== "1",
-    "Run the timing orchestrator directly; each workload uses its own finite native supervisor");
+    "Run the timing orchestrator directly; each workload uses its own native supervisor");
   requireThat(!Object.keys(process.env).some((key) => key.toUpperCase() === "CLEARRA_EXPECTED_VCPUS"),
     "Remove CLEARRA_EXPECTED_VCPUS to keep native automatic all-logical worker selection");
   const root = realpathSync(resolve(dirname(fileURLToPath(import.meta.url)), "../.."));
@@ -292,7 +293,7 @@ async function main(argv) {
     evidence = await collectPlacementGraphAdoption(options, custody, proof, schedule, {
       checkInputs,
       execute: (step) => captureChild(manager, composeRuntimeArgs(root, step), root,
-        benchmarkEnvironment(process.env, step)),
+        benchmarkEnvironment(process.env, step), searchOwner),
       receipt: (execution) => readSupervisorReceipt(execution, supervisorDirectory),
       write: (name, value) => writeFileSync(join(outputRoot, name), JSON.stringify(value, null, 2) + "\n", { flag: "wx" }),
     });
@@ -306,16 +307,15 @@ async function main(argv) {
 }
 
 if (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.meta.url) {
-  for (const signal of ["SIGINT", "SIGTERM"]) {
-    process.on(signal, () => {
-      if (interrupted) return;
+  const searchOwner = createManagedSearchOwner({
+    onCancel: (signal) => {
       interrupted = signal;
       process.stderr.write("[placement-graph-adoption] cancelled: no further trial will start; " +
-        "the current native supervisor, if any, remains responsible for its finite lease\n");
-    });
-  }
-  main(process.argv.slice(2)).catch((error) => {
+        "waiting for the native supervisor to drain its owned process tree\n");
+    },
+  });
+  main(process.argv.slice(2), searchOwner).catch((error) => {
     process.stderr.write("[placement-graph-adoption] " + error.message + "\n");
     process.exitCode = 1;
-  });
+  }).finally(() => searchOwner.dispose());
 }
