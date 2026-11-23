@@ -600,3 +600,23 @@ namespace의 codex와 collector용 bash/ps만 보여 주므로, 이를 host 전�
 [`symbolic-cell-occupancy-2026-11-23.md`](symbolic-cell-occupancy-2026-11-23.md)에 분리했다.
 이 추가 감사는 이미 보존된 자료만 읽었으며, 새 실행·probe·정리·이동·삭제·업로드를
 수행하지 않았다. 다른 프로젝트와 공용 cache는 변경하지 않았다.
+
+## 13. 2026-11-24 사용자 확인과 새 비교 환경
+
+사용자가 이번 대화에서 **Mosk 자료 정리를 직접 요청했다고 확인했다.** §10의
+"실제 변경 주체와 변경 절차는 알 수 없다"는 문구는 당시 filesystem metadata만으로
+판단한 관측 범위다. 이제 정리가 사용자 요청에 따른 작업이었다는 맥락을 추가한다.
+이 확인만으로 구체적인 이동 명령, 파일별 보존 결과 또는 변경 시각을 새로 검증한
+것은 아니다. Clearra 작업에서는 Mosk 자료를 정리하거나 링크를 따라 읽지 않았다.
+
+후속 작업은 scratch가 초기화된 환경에서 원격 feature commit
+`671584db1d1c5b023ee1d82fbbf72421654c4d0e`를 복구하여 진행했다. 이전 ignored raw
+자료와 build cache는 새 checkout에 없으며, Git에 보존된 검토 요약을 과거 증거로
+사용한다. 새 legacy/current P7P4는 같은 복구 바이너리로 순차 실행하고, 실행 전후
+filesystem·메모리 경계와 별도의 커널 종료 시 최대 RSS를 남긴다. 과거 환경의 실패
+시간을 이번 실행의 성능 기준으로 섞지 않는다.
+
+새 비교와 후속 변경의 완료 여부·메모리 범위는
+[`p7p4-comparison-and-memory-2026-11-24.md`](p7p4-comparison-and-memory-2026-11-24.md)에
+기록한다. 이번 실행에서 공간 정리나 Google Drive 보존이 필요해진 것으로 가정하지
+않으며, 다른 프로젝트와 공용 cache의 보존 경계를 계속 지킨다.
