@@ -1,7 +1,7 @@
 //! Explicit native entry point for the direct symbolic family research path.
 //!
 //! `compile` prepares and reports the request without calling the solver.
-//! `run` calls only `solve_symbolic_family`; there is no candidate fallback.
+//! `run` calls the explicitly selected symbolic path; there is no fallback.
 //! No elapsed-time deadline is installed. Large or unbounded runs belong inside
 //! the repository's managed runtime, just like other search diagnostics.
 
@@ -17,7 +17,10 @@ use clearra_core_domain::execution_cancellation::{
 };
 use clearra_core_domain::piece::piece_kind::PieceKind;
 use clearra_core_domain::runtime_cpu_capacity::CpuCapacity;
-use clearra_core_executor::{solve_symbolic_family, SymbolicFamilyLimits, SymbolicFamilyReport};
+use clearra_core_executor::{
+    solve_symbolic_family, solve_symbolic_family_with_cell_occupancy, SymbolicFamilyLimits,
+    SymbolicFamilyReport,
+};
 use clearra_objectives::policy::objective_policy::ObjectivePolicy;
 use clearra_pc_graph::request::{
     PcCountPolicy, PcExecutionPolicy, PcQueueInput, PcScenarioBoard, PcScenarioQuery,
@@ -43,6 +46,7 @@ const USAGE: &str = "usage: symbolic_family compile|run --height 1..6 --queue PA
   --initial-hold I|O|T|S|Z|J|L  enable Hold with this held piece\n\
   --source-draws N              explicit finite source window\n\
                                default full pattern length\n\
+  --cell-occupancy              use exact original-cell images for movement\n\
   --max-geometry-nodes N        explicit geometry bound; 0 means unlimited\n\
   --max-set-nodes N             explicit ZDD bound; 0 means unlimited\n\
   --max-predicate-nodes N       explicit Boolean bound; 0 means unlimited\n\
@@ -69,6 +73,7 @@ struct Options {
     hold: bool,
     initial_hold: Option<PieceKind>,
     source_draws: Option<usize>,
+    cell_occupancy: bool,
     limits: SymbolicFamilyLimits,
     page_size: usize,
     page_offset: u128,
@@ -137,6 +142,7 @@ fn parse_options(mut args: impl Iterator<Item = String>) -> Result<Options, Stri
         hold: false,
         initial_hold: None,
         source_draws: None,
+        cell_occupancy: false,
         limits: SymbolicFamilyLimits::default(),
         page_size: 0,
         page_offset: 0,
@@ -145,6 +151,7 @@ fn parse_options(mut args: impl Iterator<Item = String>) -> Result<Options, Stri
     let mut hold_selection = None;
     while let Some(option) = args.next() {
         match option.as_str() {
+            "--cell-occupancy" if !options.cell_occupancy => options.cell_occupancy = true,
             "--height" => options.height = number(args.next(), &option)?,
             "--board" => {
                 let value = argument(args.next(), &option)?.replace('_', "");
@@ -294,6 +301,11 @@ fn query(options: &Options, hardware_limit: usize) -> Result<PcScenarioQuery, St
 fn execute(options: &Options, output: &mut Value) -> Result<(), String> {
     let capacity = CpuCapacity::current();
     output["mode"] = json!(if options.run { "run" } else { "compile" });
+    output["movement_variable_space"] = json!(if options.cell_occupancy {
+        "original-cells"
+    } else {
+        "catalog-rows"
+    });
     output["request"] = json!({
         "height": options.height,
         "board_hex": format!("0x{:x}", options.board),
@@ -347,7 +359,11 @@ fn execute(options: &Options, output: &mut Value) -> Result<(), String> {
     });
     let control =
         ExecutionControl::new(ExecutionCancellationToken::new()).with_progress_sink(progress);
-    let outcome = solve_symbolic_family(&problem, options.limits, &control);
+    let outcome = if options.cell_occupancy {
+        solve_symbolic_family_with_cell_occupancy(&problem, options.limits, &control)
+    } else {
+        solve_symbolic_family(&problem, options.limits, &control)
+    };
     output["search_seconds"] = json!(search_started.elapsed().as_secs_f64());
     let mut result = outcome.map_err(|error| error.to_string())?;
     output["search_complete"] = json!(true);
@@ -467,6 +483,8 @@ fn describe_problem(problem: &SearchProblem) -> Result<Value, String> {
 fn describe_result(report: &SymbolicFamilyReport) -> Value {
     let ranks = report.ranks.iter().map(|rank| json!({
         "placed_pieces": rank.placed_pieces,
+        "cell_support_work_steps": rank.cell_support_work_steps.to_string(),
+        "cell_support_cached_nodes": rank.cell_support_cached_nodes.to_string(),
         "supply_states": rank.supply_states.to_string(),
         "joint_members": rank.joint_members.to_string(),
         "set_nodes_before_compaction": rank.set_nodes_before_compaction.to_string(),
@@ -484,8 +502,14 @@ fn describe_result(report: &SymbolicFamilyReport) -> Value {
         "rotation_guard_single_mask": rank.rotation_guard_single_mask.to_string(),
         "rotation_guard_ordered": rank.rotation_guard_ordered.to_string(),
         "rotation_ordered_prior_terms": rank.rotation_ordered_prior_terms.to_string(),
+        "vertical_seed_edges": rank.vertical_seed_edges.to_string(),
+        "vertical_seed_updates": rank.vertical_seed_updates.to_string(),
+        "early_reached_rejections": rank.early_reached_rejections.to_string(),
         "legal_row_queries": rank.legal_row_queries.to_string(),
         "geometry_filters": rank.geometry_filters.to_string(),
+        "ready_row_projections": rank.ready_row_projections.to_string(),
+        "piece_domain_builds": rank.piece_domain_builds.to_string(),
+        "source_semijoins": rank.source_semijoins.to_string(),
         "compatibility_cache_bytes_estimate": rank.compatibility_cache_bytes_estimate.to_string(),
         "compatibility_cache_peak_bytes_estimate": rank.compatibility_cache_peak_bytes_estimate.to_string(),
         "compatibility_cache_releases": rank.compatibility_cache_releases,
@@ -498,6 +522,8 @@ fn describe_result(report: &SymbolicFamilyReport) -> Value {
         "covered_source_count": report.covered_source_count.to_string(),
         "original_source_count": report.source_count.to_string(),
         "solution_source_pairs": report.solution_source_pairs.to_string(),
+        "movement_variable_space": report.movement_variable_space,
+        "geometry_filter_scope": report.geometry_filter_scope,
         "catalog_rows": report.catalog_rows.to_string(),
         "geometry_nodes": report.geometry_nodes.to_string(),
         "geometry_bytes_estimate": report.geometry_bytes_estimate.to_string(),

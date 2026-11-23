@@ -24,8 +24,8 @@ use clearra_core_domain::solution::normalized_tiling_solution::{
     StandardBoard64TilingIdentity,
 };
 use clearra_core_executor::{
-    solve_symbolic_family, CoreExecutionResult, SymbolicFamilyLimits, SymbolicFamilyReport,
-    WasmCpuSearchBackend,
+    solve_symbolic_family, solve_symbolic_family_with_cell_occupancy, CoreExecutionResult,
+    SymbolicFamilyLimits, SymbolicFamilyReport, WasmCpuSearchBackend,
 };
 use clearra_objectives::policy::objective_policy::ObjectivePolicy;
 use clearra_pc_graph::request::{
@@ -48,19 +48,20 @@ const PLACEMENTS: usize = 10;
 const PAGE_SIZE: usize = 2_048;
 const ABSENT: u64 = u64::MAX;
 const SCHEMA: &str = "clearra.symbolic-family-comparison-run.v1";
-const USAGE: &str = "usage:\n  symbolic_family_compare --backend legacy|symbolic --output-prefix PATH [--archive-only]\n  symbolic_family_compare --compare LEGACY_PREFIX SYMBOLIC_PREFIX [--output-prefix PATH]\n\nThe fixed request is empty 4L, Jstris180, 10 locks, actual Standard7Bag 11 draws,\nenabled empty Hold, FullQueueOracle, CountUnique, Omit, Summary. No time limit\nor candidate fallback is installed. Runs require managed benchmark-search.\nPrefixes must be new and below _local/artifacts; parent directories must exist.\nSymbolic runs save CTK4 before any identity export. --archive-only skips\nidentity/source enumeration and is valid only with --backend symbolic.\nThe comparison requires complete identity and global source sets, not their joint relation.";
+const USAGE: &str = "usage:\n  symbolic_family_compare --backend legacy|symbolic|symbolic-cells --output-prefix PATH [--archive-only]\n  symbolic_family_compare --compare LEGACY_PREFIX SYMBOLIC_PREFIX [--output-prefix PATH]\n\nThe fixed request is empty 4L, Jstris180, 10 locks, actual Standard7Bag 11 draws,\nenabled empty Hold, FullQueueOracle, CountUnique, Omit, Summary. No time limit\nor candidate fallback is installed. Runs require managed benchmark-search.\nPrefixes must be new and below _local/artifacts; parent directories must exist.\nSymbolic runs save CTK4 before any identity export. --archive-only skips\nidentity/source enumeration and is valid with either symbolic backend.\nThe symbolic-cells backend uses exact cell images and a fused original-family filter.\nThe comparison requires complete identity and global source sets, not their joint relation.";
 
 #[derive(Clone, Copy)]
 enum Backend {
     Legacy,
     Symbolic,
+    SymbolicCells,
 }
 
 impl Backend {
     fn name(self) -> &'static str {
         match self {
             Self::Legacy => "legacy",
-            Self::Symbolic => "symbolic",
+            Self::Symbolic | Self::SymbolicCells => "symbolic",
         }
     }
 }
@@ -129,7 +130,8 @@ fn parse(mut args: impl Iterator<Item = String>) -> Result<Command, String> {
                 backend = Some(match args.next().as_deref() {
                     Some("legacy") => Backend::Legacy,
                     Some("symbolic") => Backend::Symbolic,
-                    _ => return Err("--backend requires legacy or symbolic".into()),
+                    Some("symbolic-cells") => Backend::SymbolicCells,
+                    _ => return Err("--backend requires legacy, symbolic or symbolic-cells".into()),
                 });
             }
             "--output-prefix" if prefix.is_none() => {
@@ -146,7 +148,7 @@ fn parse(mut args: impl Iterator<Item = String>) -> Result<Command, String> {
     }
     match (backend, comparison, prefix) {
         (Some(backend), None, Some(prefix))
-            if !archive_only || matches!(backend, Backend::Symbolic) =>
+            if !archive_only || matches!(backend, Backend::Symbolic | Backend::SymbolicCells) =>
         {
             Ok(Command::Run {
                 backend,
@@ -174,6 +176,16 @@ fn run(backend: Backend, prefix: &Path, archive_only: bool) -> Result<(), String
         "implicit_deadline_seconds": null, "coverage_capture": false,
         "candidate_fallback": false,
         "archive_only": archive_only,
+        "movement_variable_space": match backend {
+            Backend::Legacy => "physical-board",
+            Backend::Symbolic => "catalog-rows",
+            Backend::SymbolicCells => "original-cells",
+        },
+        "geometry_filter_scope": match backend {
+            Backend::Legacy => "legacy-candidate",
+            Backend::Symbolic => "row-extension",
+            Backend::SymbolicCells => "piece-union",
+        },
         "identity_export_complete": false,
         "global_coverage_export_complete": false,
         "build": {
@@ -297,9 +309,16 @@ fn execute(
             report["coverage_export_seconds"] = json!(started.elapsed().as_secs_f64());
             report["evidence_seconds"] = json!(evidence_started.elapsed().as_secs_f64());
         }
-        Backend::Symbolic => {
-            let outcome =
-                solve_symbolic_family(&problem, SymbolicFamilyLimits::default(), &control);
+        Backend::Symbolic | Backend::SymbolicCells => {
+            let outcome = if matches!(backend, Backend::SymbolicCells) {
+                solve_symbolic_family_with_cell_occupancy(
+                    &problem,
+                    SymbolicFamilyLimits::default(),
+                    &control,
+                )
+            } else {
+                solve_symbolic_family(&problem, SymbolicFamilyLimits::default(), &control)
+            };
             report["search_seconds"] = json!(search_started.elapsed().as_secs_f64());
             let mut result = outcome.map_err(|error| error.to_string())?;
             report["symbolic_report"] = symbolic_report(result.report());
@@ -321,9 +340,13 @@ fn execute(
                 json!(result.report().covered_source_count.to_string());
             search_checkpoint(artifacts, report, progress)?;
             let evidence_started = Instant::now();
-            progress
-                .phase
-                .store((PHASES.len() - 1) as u32, Ordering::Relaxed);
+            progress.phase.store(
+                PHASES
+                    .iter()
+                    .position(|&phase| phase == "archive")
+                    .expect("archive diagnostic phase") as u32,
+                Ordering::Relaxed,
+            );
             report["archive"] = symbolic_archive::persist(
                 &mut result,
                 &artifacts.archive,
@@ -645,6 +668,8 @@ fn popcount(words: &[u64]) -> u64 {
 fn symbolic_report(report: &SymbolicFamilyReport) -> Value {
     let ranks = report.ranks.iter().map(|rank| json!({
         "placed_pieces": rank.placed_pieces, "supply_states": rank.supply_states,
+        "cell_support_work_steps": rank.cell_support_work_steps.to_string(),
+        "cell_support_cached_nodes": rank.cell_support_cached_nodes,
         "joint_members": rank.joint_members.to_string(),
         "set_nodes_before_compaction": rank.set_nodes_before_compaction,
         "set_nodes_after_compaction": rank.set_nodes_after_compaction,
@@ -659,7 +684,13 @@ fn symbolic_report(report: &SymbolicFamilyReport) -> Value {
         "rotation_guard_single_mask": rank.rotation_guard_single_mask.to_string(),
         "rotation_guard_ordered": rank.rotation_guard_ordered.to_string(),
         "rotation_ordered_prior_terms": rank.rotation_ordered_prior_terms.to_string(),
+        "vertical_seed_edges": rank.vertical_seed_edges.to_string(),
+        "vertical_seed_updates": rank.vertical_seed_updates.to_string(),
+        "early_reached_rejections": rank.early_reached_rejections.to_string(),
         "legal_row_queries": rank.legal_row_queries.to_string(), "geometry_filters": rank.geometry_filters.to_string(),
+        "ready_row_projections": rank.ready_row_projections.to_string(),
+        "piece_domain_builds": rank.piece_domain_builds.to_string(),
+        "source_semijoins": rank.source_semijoins.to_string(),
         "compatibility_cache_bytes_estimate": rank.compatibility_cache_bytes_estimate,
         "compatibility_cache_peak_bytes_estimate": rank.compatibility_cache_peak_bytes_estimate,
         "compatibility_cache_releases": rank.compatibility_cache_releases,
@@ -671,6 +702,8 @@ fn symbolic_report(report: &SymbolicFamilyReport) -> Value {
         "unique_solution_count": report.unique_solution_count.to_string(),
         "covered_source_count": report.covered_source_count.to_string(),
         "source_count": report.source_count.to_string(), "solution_source_pairs": report.solution_source_pairs.to_string(),
+        "movement_variable_space": report.movement_variable_space,
+        "geometry_filter_scope": report.geometry_filter_scope,
         "catalog_rows": report.catalog_rows, "geometry_nodes": report.geometry_nodes,
         "geometry_bytes_estimate": report.geometry_bytes_estimate,
         "geometry_released_construction_bytes": report.geometry_released_construction_bytes,
@@ -972,6 +1005,9 @@ const PHASES: &[&str] = &[
     "final_compact",
     "result_release",
     "archive",
+    "piece_union",
+    "piece_down",
+    "row_intersect",
 ];
 
 const MOVEMENT_PHASES: [&str; 9] = [
@@ -991,6 +1027,11 @@ struct PieceProgressState {
     private_nodes: AtomicU64,
     private_bytes: AtomicU64,
     released_builder_bytes: AtomicU64,
+    compactions: AtomicU64,
+    reclaimed_nodes: AtomicU64,
+    compaction_work: AtomicU64,
+    discarded_apply_entries: AtomicU64,
+    compaction_peak_temporary_bytes: AtomicU64,
 }
 
 impl PieceProgressState {
@@ -1000,6 +1041,11 @@ impl PieceProgressState {
             private_nodes: AtomicU64::new(ABSENT),
             private_bytes: AtomicU64::new(ABSENT),
             released_builder_bytes: AtomicU64::new(ABSENT),
+            compactions: AtomicU64::new(ABSENT),
+            reclaimed_nodes: AtomicU64::new(ABSENT),
+            compaction_work: AtomicU64::new(ABSENT),
+            discarded_apply_entries: AtomicU64::new(ABSENT),
+            compaction_peak_temporary_bytes: AtomicU64::new(ABSENT),
         }
     }
 
@@ -1008,6 +1054,13 @@ impl PieceProgressState {
         self.private_nodes.store(ABSENT, Ordering::Relaxed);
         self.private_bytes.store(ABSENT, Ordering::Relaxed);
         self.released_builder_bytes.store(ABSENT, Ordering::Relaxed);
+        self.compactions.store(ABSENT, Ordering::Relaxed);
+        self.reclaimed_nodes.store(ABSENT, Ordering::Relaxed);
+        self.compaction_work.store(ABSENT, Ordering::Relaxed);
+        self.discarded_apply_entries
+            .store(ABSENT, Ordering::Relaxed);
+        self.compaction_peak_temporary_bytes
+            .store(ABSENT, Ordering::Relaxed);
     }
 }
 
@@ -1023,6 +1076,8 @@ struct ProgressState {
     work_boolean: AtomicU64,
     work_down: AtomicU64,
     work_bridge: AtomicU64,
+    work_cell_support: AtomicU64,
+    cell_support_entries: AtomicU64,
     storage_zdd_nodes: AtomicU64,
     storage_zdd_retained_bytes: AtomicU64,
     storage_compatibility_memo_entries: AtomicU64,
@@ -1057,6 +1112,8 @@ impl ProgressState {
             work_boolean: AtomicU64::new(0),
             work_down: AtomicU64::new(0),
             work_bridge: AtomicU64::new(0),
+            work_cell_support: AtomicU64::new(0),
+            cell_support_entries: AtomicU64::new(0),
             storage_zdd_nodes: AtomicU64::new(ABSENT),
             storage_zdd_retained_bytes: AtomicU64::new(ABSENT),
             storage_compatibility_memo_entries: AtomicU64::new(ABSENT),
@@ -1098,6 +1155,11 @@ impl ProgressState {
                 "private_nodes": optional(&state.private_nodes).map(|value| value.to_string()),
                 "private_retained_bytes_estimate": optional(&state.private_bytes).map(|value| value.to_string()),
                 "released_builder_bytes_estimate": optional(&state.released_builder_bytes).map(|value| value.to_string()),
+                "compactions": optional(&state.compactions).map(|value| value.to_string()),
+                "reclaimed_nodes": optional(&state.reclaimed_nodes).map(|value| value.to_string()),
+                "compaction_work_steps": optional(&state.compaction_work).map(|value| value.to_string()),
+                "discarded_apply_entries": optional(&state.discarded_apply_entries).map(|value| value.to_string()),
+                "compaction_peak_temporary_bytes_estimate": optional(&state.compaction_peak_temporary_bytes).map(|value| value.to_string()),
             })
         }).collect::<Vec<_>>();
         json!({
@@ -1110,8 +1172,10 @@ impl ProgressState {
                 "boolean": self.work_boolean.load(Ordering::Relaxed).to_string(),
                 "down": self.work_down.load(Ordering::Relaxed).to_string(),
                 "bridge": self.work_bridge.load(Ordering::Relaxed).to_string(),
+                "cell_support_included_in_bridge": self.work_cell_support.load(Ordering::Relaxed).to_string(),
             },
             "latest_symbolic_storage": {
+                "cell_support_entries": self.cell_support_entries.load(Ordering::Relaxed).to_string(),
                 "joint_zdd_nodes": optional(&self.storage_zdd_nodes).map(|value| value.to_string()),
                 "joint_zdd_retained_bytes_estimate": optional(&self.storage_zdd_retained_bytes).map(|value| value.to_string()),
                 "compatibility_memo_entries": optional(&self.storage_compatibility_memo_entries).map(|value| value.to_string()),
@@ -1162,6 +1226,13 @@ impl ProgressSink for ProgressState {
                     "private_nodes" => Some(&state.private_nodes),
                     "private_bytes" => Some(&state.private_bytes),
                     "released_builder_bytes" => Some(&state.released_builder_bytes),
+                    "compactions" => Some(&state.compactions),
+                    "reclaimed_nodes" => Some(&state.reclaimed_nodes),
+                    "compaction_work" => Some(&state.compaction_work),
+                    "discarded_apply_entries" => Some(&state.discarded_apply_entries),
+                    "compaction_peak_temporary_bytes" => {
+                        Some(&state.compaction_peak_temporary_bytes)
+                    }
                     _ => None,
                 };
                 if let Some(destination) = destination {
@@ -1191,6 +1262,12 @@ impl ProgressSink for ProgressState {
             "symbolic_work_boolean" => self.work_boolean.store(event.completed, Ordering::Relaxed),
             "symbolic_work_down" => self.work_down.store(event.completed, Ordering::Relaxed),
             "symbolic_work_bridge" => self.work_bridge.store(event.completed, Ordering::Relaxed),
+            "symbolic_cell_support_work" => self
+                .work_cell_support
+                .store(event.completed, Ordering::Relaxed),
+            "symbolic_cell_support_entries" => self
+                .cell_support_entries
+                .store(event.completed, Ordering::Relaxed),
             "symbolic_storage_zdd_nodes" => self
                 .storage_zdd_nodes
                 .store(event.completed, Ordering::Relaxed),

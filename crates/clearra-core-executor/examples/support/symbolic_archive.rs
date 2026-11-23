@@ -24,6 +24,11 @@ pub fn movement_parallel(report: &SymbolicFamilyParallelReport) -> Value {
         "private_node_peak_sum_upper_bound": report.private_node_peak_sum_upper_bound,
         "private_retained_bytes_sum_estimate": report.private_retained_bytes_sum_estimate,
         "released_builder_bytes_sum_estimate": report.released_builder_bytes_sum_estimate,
+        "predicate_compactions": report.predicate_compactions.to_string(),
+        "predicate_reclaimed_nodes": report.predicate_reclaimed_nodes.to_string(),
+        "predicate_compaction_work_steps": report.predicate_compaction_work_steps.to_string(),
+        "predicate_discarded_apply_entries": report.predicate_discarded_apply_entries.to_string(),
+        "compaction_peak_temporary_bytes_sum_estimate": report.compaction_peak_temporary_bytes_sum_estimate,
         "predicate_work_steps": report.predicate_work_steps.to_string(),
         "estimate_scope": "private sums are not simultaneous peaks or RSS",
     })

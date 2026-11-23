@@ -25,6 +25,7 @@ use super::{
     geometry_partial_family::{ZddArena, ZddError, ZddId, ZddLimits},
     reachability::{symbolic_family::SymbolicOccupancy, SharedReachabilityTemplates},
     symbolic_boolean::{BooleanArena, BooleanError, BooleanId, BooleanLimits},
+    symbolic_cell_bridge::CellFamilyBridge,
     symbolic_family_bridge::FamilyBridge,
     symbolic_family_supply::{SymbolicFamilySupply, SymbolicSupplyError, SymbolicSupplyState},
     WasmExactSearchError,
@@ -117,6 +118,8 @@ impl From<SymbolicSupplyError> for SymbolicFamilyError {
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct SymbolicFamilyRankReport {
+    pub cell_support_work_steps: u64,
+    pub cell_support_cached_nodes: usize,
     pub placed_pieces: usize,
     pub supply_states: usize,
     pub joint_members: u128,
@@ -130,6 +133,9 @@ pub struct SymbolicFamilyRankReport {
     pub guarded_movement_edges: usize,
     /// Transfers considered while propagating actual reached deltas.
     pub movement_propagations: u64,
+    pub vertical_seed_edges: u64,
+    pub vertical_seed_updates: u64,
+    pub early_reached_rejections: u64,
     pub rotation_candidate_checks: u64,
     pub rotation_candidates_pruned: u64,
     pub rotation_guard_no_prior: u64,
@@ -139,9 +145,16 @@ pub struct SymbolicFamilyRankReport {
     pub rotation_ordered_prior_terms: u64,
     pub legal_row_queries: u64,
     pub geometry_filters: u64,
+    /// Ready source roots projected while preparing the shared piece family.
+    pub ready_row_projections: u64,
+    /// Additional distinct piece domains, excluding the common rank domain.
+    pub piece_domain_builds: u64,
+    /// Exact row/source semijoins after a shared legal/geometry decision.
+    pub source_semijoins: u64,
     /// Retained capacity after completed-piece memo releases in this rank.
     pub compatibility_cache_bytes_estimate: usize,
-    /// Largest retained capacity at a completed-piece boundary, before release.
+    /// Largest retained capacity when a piece's geometry work finishes, before
+    /// release. Cell batching releases it before the original-source joins.
     /// Excludes allocator and transient rehash storage; this is not peak RSS.
     pub compatibility_cache_peak_bytes_estimate: usize,
     pub compatibility_cache_releases: usize,
@@ -167,6 +180,13 @@ pub struct SymbolicFamilyParallelReport {
     /// Construction-only private indexes released before worker publication.
     pub released_builder_bytes_sum_estimate: usize,
     pub predicate_work_steps: u64,
+    pub predicate_compactions: u64,
+    pub predicate_reclaimed_nodes: u64,
+    /// Included in predicate_work_steps; do not add it a second time.
+    pub predicate_compaction_work_steps: u64,
+    pub predicate_discarded_apply_entries: u64,
+    /// Sum of individual scratch peaks, not a simultaneous memory peak.
+    pub compaction_peak_temporary_bytes_sum_estimate: usize,
 }
 
 /// Counts refer to unique normalized placement identities and original source
@@ -175,6 +195,10 @@ pub struct SymbolicFamilyParallelReport {
 /// neither peak RSS nor a process memory upper bound.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct SymbolicFamilyReport {
+    /// Physical predicates use placement identities or original occupied cells.
+    pub movement_variable_space: &'static str,
+    /// Unit of the measured geometry_filters calls, not a candidate count.
+    pub geometry_filter_scope: &'static str,
     pub catalog_rows: usize,
     pub geometry_nodes: usize,
     pub geometry_bytes_estimate: usize,
@@ -330,6 +354,25 @@ pub fn solve_symbolic_family(
     limits: SymbolicFamilyLimits,
     control: &ExecutionControl,
 ) -> Result<SymbolicFamilyResult, SymbolicFamilyError> {
+    solve_with_occupancy::<false>(problem, limits, control)
+}
+
+/// Opt-in physical quotient. Original placement/source identities remain in
+/// the joint ZDD; only movement predicates use original cell occupancy.
+/// No candidate enumeration or fallback to the row-variable path is used.
+pub fn solve_symbolic_family_with_cell_occupancy(
+    problem: &SearchProblem,
+    limits: SymbolicFamilyLimits,
+    control: &ExecutionControl,
+) -> Result<SymbolicFamilyResult, SymbolicFamilyError> {
+    solve_with_occupancy::<true>(problem, limits, control)
+}
+
+fn solve_with_occupancy<const CELLS: bool>(
+    problem: &SearchProblem,
+    limits: SymbolicFamilyLimits,
+    control: &ExecutionControl,
+) -> Result<SymbolicFamilyResult, SymbolicFamilyError> {
     validate_scope(problem, control)?;
     // Markers update an optional diagnostic context; the sink owns sampling.
     // No clock, formatting or logging belongs in these operation boundaries.
@@ -366,6 +409,16 @@ pub fn solve_symbolic_family(
     )
     .map_err(geometry_error)?;
     let mut report = SymbolicFamilyReport {
+        movement_variable_space: if CELLS {
+            "original-cells"
+        } else {
+            "catalog-rows"
+        },
+        geometry_filter_scope: if CELLS {
+            "piece-union"
+        } else {
+            "row-extension"
+        },
         catalog_rows: catalog.skeleton_count(),
         geometry_nodes: geometry.family.node_count() as usize,
         geometry_bytes_estimate: geometry.family.retained_bytes(),
@@ -385,6 +438,26 @@ pub fn solve_symbolic_family(
         .try_reserve_exact(row_count as usize)
         .map_err(|_| SymbolicFamilyError::Resource("symbolic_catalog_mask_allocation"))?;
     row_cells.extend((0..row_count).map(|row| catalog.skeleton(row).cells));
+    let mut bridge = if CELLS {
+        let mut cells = Vec::new();
+        cells
+            .try_reserve_exact(row_cells.len())
+            .map_err(|_| SymbolicFamilyError::Resource("symbolic_catalog_mask_allocation"))?;
+        cells.extend_from_slice(&row_cells);
+        MovementBridge::Cells(CellFamilyBridge::new(
+            cells,
+            catalog.initial_board(),
+            u32::from(catalog.width()) * u32::from(catalog.height()),
+            limits.max_work_per_arena,
+            limits.max_memo_entries,
+        )?)
+    } else {
+        MovementBridge::Rows(FamilyBridge::new(
+            row_count,
+            limits.max_work_per_arena,
+            limits.max_memo_entries,
+        ))
+    };
     phase("symbolic_phase_compatibility_certificate");
     let mut down = GeometryCompatibilityFilter::new(
         &geometry.family,
@@ -396,7 +469,11 @@ pub fn solve_symbolic_family(
     )?;
     phase("symbolic_phase_occupancy");
     let mut predicates = BooleanArena::new(
-        row_count,
+        if CELLS {
+            u32::from(catalog.width()) * u32::from(catalog.height())
+        } else {
+            row_count
+        },
         BooleanLimits {
             max_nodes: limits.max_predicate_nodes,
             max_work: limits.max_work_per_arena,
@@ -405,7 +482,11 @@ pub fn solve_symbolic_family(
     )?;
     predicates.set_cancellation(control.cancellation.clone());
     predicates.set_progress_sink(control.progress_sink.clone());
-    let occupancy = SymbolicOccupancy::compile(&catalog, &mut predicates, control)?;
+    let occupancy = if CELLS {
+        SymbolicOccupancy::compile_cells(&catalog, &mut predicates, control)?
+    } else {
+        SymbolicOccupancy::compile(&catalog, &mut predicates, control)?
+    };
     let persistent_predicates = predicates.checkpoint();
     phase("symbolic_phase_templates");
     let templates = match super::ordered_kick_authority(problem, catalog.width(), catalog.height())
@@ -421,11 +502,6 @@ pub fn solve_symbolic_family(
             )
         }
     };
-    let mut bridge = FamilyBridge::new(
-        row_count,
-        limits.max_work_per_arena,
-        limits.max_memo_entries,
-    );
     phase("symbolic_phase_initial_down");
     let initial = down.filter_extendible(&mut sets, supply.root())?;
     let mut current = BTreeMap::new();
@@ -440,26 +516,31 @@ pub fn solve_symbolic_family(
             Some(target_depth as u64),
         );
         phase("symbolic_phase_rank_domain");
-        let mut joint = ZddId::EMPTY;
+        let mut rows = ZddId::EMPTY;
         for &root in current.values() {
-            joint = sets.union(joint, root)?;
+            let projected = sets.project_prefix(root, row_count)?;
+            rows = sets.union(rows, projected)?;
         }
-        if joint == ZddId::EMPTY {
+        if rows == ZddId::EMPTY {
             break;
         }
-        let domain = bridge.domain(&sets, &mut predicates, joint, control)?;
+        let domain = bridge.domain(&sets, &mut predicates, rows, control)?;
         phase("symbolic_phase_board");
         let board = occupancy.for_domain(&mut predicates, domain, control)?;
         let mut next = BTreeMap::new();
         let compatibility_start = down.metrics();
+        let cell_support_start = bridge.support_work_steps();
         let mut rank_report = SymbolicFamilyRankReport {
             placed_pieces: rank + 1,
             compatibility_cache_peak_bytes_estimate: down.retained_bytes(),
             ..SymbolicFamilyRankReport::default()
         };
-        // Supply transitions depend on kind and state, not on physical rows.
-        // Prepare them once so movement workers share one immutable board.
+        // Project the ready row family once per piece. Movement depends on
+        // this physical domain; the original state/source relation remains
+        // attached until the exact semijoin when its rows are extended.
         let mut ready_by_piece = BTreeMap::new();
+        let mut ready_rows_by_piece = BTreeMap::new();
+        let mut domains_by_rows = BTreeMap::from([(rows, domain)]);
         let mut pieces = Vec::new();
         pieces
             .try_reserve_exact(PieceKind::STANDARD_TETROMINOES.len())
@@ -478,8 +559,23 @@ pub fn solve_symbolic_family(
             if ready.is_empty() {
                 continue;
             }
+            let mut ready_rows = ZddId::EMPTY;
+            for &root in ready.values() {
+                let projected = sets.project_prefix(root, row_count)?;
+                rank_report.ready_row_projections += 1;
+                ready_rows = sets.union(ready_rows, projected)?;
+            }
+            let piece_domain = if let Some(&cached) = domains_by_rows.get(&ready_rows) {
+                cached
+            } else {
+                let compiled = bridge.domain(&sets, &mut predicates, ready_rows, control)?;
+                domains_by_rows.insert(ready_rows, compiled);
+                rank_report.piece_domain_builds += 1;
+                compiled
+            };
             ready_by_piece.insert(piece, ready);
-            pieces.push(piece);
+            ready_rows_by_piece.insert(piece, ready_rows);
+            pieces.push((piece, piece_domain));
         }
         let requested_workers = problem.backend_policy().workers();
         #[cfg(all(feature = "parallel", not(target_family = "wasm")))]
@@ -499,7 +595,7 @@ pub fn solve_symbolic_family(
         {
             let mut consume_piece =
                 |piece: PieceKind,
-                 predicate_owner: &BooleanArena,
+                 predicate_owner: &mut BooleanArena,
                  legal_rows: &[(u32, BooleanId)],
                  work: super::reachability::symbolic_family::SymbolicReachabilityWork|
                  -> Result<(), SymbolicFamilyError> {
@@ -511,6 +607,9 @@ pub fn solve_symbolic_family(
                     rank_report.movement_poses += work.poses;
                     rank_report.guarded_movement_edges += work.guarded_edges;
                     rank_report.movement_propagations += work.propagation_edges;
+                    rank_report.vertical_seed_edges += work.vertical_seed_edges;
+                    rank_report.vertical_seed_updates += work.vertical_seed_updates;
+                    rank_report.early_reached_rejections += work.early_reached_rejections;
                     rank_report.rotation_candidate_checks += work.rotation_candidate_checks;
                     rank_report.rotation_candidates_pruned += work.rotation_candidates_pruned;
                     rank_report.rotation_guard_no_prior += work.rotation_guard_no_prior;
@@ -520,6 +619,56 @@ pub fn solve_symbolic_family(
                     rank_report.rotation_ordered_prior_terms += work.rotation_ordered_prior_terms;
                     phase("symbolic_phase_rows");
                     let ready = &ready_by_piece[&piece];
+                    let ready_rows = ready_rows_by_piece[&piece];
+                    let mut consume_extension =
+                        |sets: &mut ZddArena,
+                         row_id: u32,
+                         selected: ZddId,
+                         extended: ZddId,
+                         allowed: ZddId,
+                         rank_report: &mut SymbolicFamilyRankReport|
+                         -> Result<(), SymbolicFamilyError> {
+                            if allowed == ZddId::EMPTY {
+                                return Ok(());
+                            }
+                            // Legality excludes an already-selected row, so
+                            // add/remove is a bijection. Keep the original
+                            // state/source relation through the semijoin.
+                            let allowed_before = if allowed == extended {
+                                selected
+                            } else {
+                                sets.remove(allowed, row_id)?
+                            };
+                            for (&state, &root) in ready {
+                                check_cancelled(control)?;
+                                phase("symbolic_phase_row_bridge");
+                                let selected = if allowed_before == ready_rows {
+                                    root
+                                } else {
+                                    rank_report.source_semijoins += 1;
+                                    sets.filter_prefix(root, allowed_before, row_count)?
+                                };
+                                if selected == ZddId::EMPTY {
+                                    continue;
+                                }
+                                phase("symbolic_phase_row_add");
+                                let extendible = sets.add(selected, row_id)?;
+                                phase("symbolic_phase_row_merge");
+                                merge_root(&mut next, state, extendible, sets)?;
+                            }
+                            Ok(())
+                        };
+                    let mut extensions = Vec::new();
+                    if CELLS {
+                        extensions
+                            .try_reserve_exact(legal_rows.len())
+                            .map_err(|_| {
+                                SymbolicFamilyError::Resource(
+                                    "symbolic_piece_extensions_allocation",
+                                )
+                            })?;
+                    }
+                    let mut all_extended = ZddId::EMPTY;
                     for &(row_id, legal) in legal_rows {
                         check_cancelled(control)?;
                         control.report_progress(
@@ -531,47 +680,85 @@ pub fn solve_symbolic_family(
                         if legal == BooleanId::FALSE {
                             continue;
                         }
-                        for (&state, &root) in ready {
-                            phase("symbolic_phase_row_bridge");
-                            let selected =
-                                bridge.filter(&mut sets, predicate_owner, root, legal, control)?;
-                            if selected == ZddId::EMPTY {
-                                continue;
-                            }
-                            phase("symbolic_phase_row_add");
-                            let extended = sets.add(selected, row_id)?;
-                            rank_report.geometry_filters += 1;
-                            phase("symbolic_phase_row_down");
-                            // Geometry depends only on placement rows. Give
-                            // its memo canonical row prefixes, independent
-                            // of queue/Hold suffix identity, then restrict the
-                            // original relation without changing correlations.
-                            let rows = sets.project_prefix(extended, row_count)?;
-                            let allowed = down.filter_extendible(&mut sets, rows)?;
-                            let extendible = if allowed == rows {
-                                extended
-                            } else {
-                                sets.filter_prefix(extended, allowed, row_count)?
-                            };
-                            phase("symbolic_phase_row_merge");
-                            merge_root(&mut next, state, extendible, &mut sets)?;
+                        phase("symbolic_phase_row_bridge");
+                        let selected = bridge.filter(
+                            &mut sets,
+                            predicate_owner,
+                            ready_rows,
+                            legal,
+                            control,
+                        )?;
+                        if selected == ZddId::EMPTY {
+                            continue;
                         }
+                        phase("symbolic_phase_row_add");
+                        let extended = sets.add(selected, row_id)?;
+                        if CELLS {
+                            // Geometry is a predicate of the extended row set,
+                            // independent of which legal row was added last.
+                            phase("symbolic_phase_piece_union");
+                            all_extended = sets.union(all_extended, extended)?;
+                            extensions.push((row_id, selected, extended));
+                            continue;
+                        }
+                        rank_report.geometry_filters += 1;
+                        phase("symbolic_phase_row_down");
+                        let allowed = down.filter_extendible(&mut sets, extended)?;
+                        consume_extension(
+                            &mut sets,
+                            row_id,
+                            selected,
+                            extended,
+                            allowed,
+                            &mut rank_report,
+                        )?;
                     }
-                    // Every query for this piece has been consumed. The next
-                    // piece can recompute derived geometry answers exactly;
-                    // the accepted joint roots remain owned by the ZDD arena.
-                    // Release both memo maps without resetting work or metrics.
-                    rank_report.compatibility_cache_peak_bytes_estimate = rank_report
-                        .compatibility_cache_peak_bytes_estimate
-                        .max(down.retained_bytes());
-                    down.clear_memo();
-                    rank_report.compatibility_cache_releases += 1;
-                    control.report_progress("symbolic_storage_compatibility_memo_entries", 0, None);
-                    control.report_progress(
-                        "symbolic_storage_compatibility_retained_bytes",
-                        down.retained_bytes() as u64,
-                        None,
-                    );
+                    if CELLS {
+                        control.report_progress(
+                            "symbolic_context_piece",
+                            piece.as_ascii() as u64,
+                            None,
+                        );
+                        let accepted = if all_extended == ZddId::EMPTY {
+                            ZddId::EMPTY
+                        } else {
+                            rank_report.geometry_filters += 1;
+                            phase("symbolic_phase_piece_down");
+                            down.filter_extendible(&mut sets, all_extended)?
+                        };
+                        // A = (union E_r) intersect Down(F). Since E_r is a
+                        // subset of that union, A intersect E_r equals
+                        // E_r intersect Down(F) exactly.
+                        // Release derived geometry maps before reconstructing
+                        // the original row/source transitions from these roots.
+                        release_compatibility_memo(&mut down, &mut rank_report, control);
+                        if accepted != ZddId::EMPTY {
+                            for (row_id, selected, extended) in extensions {
+                                check_cancelled(control)?;
+                                control.report_progress(
+                                    "symbolic_context_row",
+                                    u64::from(row_id),
+                                    Some(u64::from(row_count)),
+                                );
+                                phase("symbolic_phase_row_intersect");
+                                let allowed = if accepted == all_extended {
+                                    extended
+                                } else {
+                                    sets.intersection(accepted, extended)?
+                                };
+                                consume_extension(
+                                    &mut sets,
+                                    row_id,
+                                    selected,
+                                    extended,
+                                    allowed,
+                                    &mut rank_report,
+                                )?;
+                            }
+                        }
+                    } else {
+                        release_compatibility_memo(&mut down, &mut rank_report, control);
+                    }
                     Ok(())
                 };
             #[cfg(all(feature = "parallel", not(target_family = "wasm")))]
@@ -592,7 +779,7 @@ pub fn solve_symbolic_family(
                     |movement| {
                         consume_piece(
                             movement.piece,
-                            &movement.predicates,
+                            &mut movement.predicates,
                             &movement.legal_rows,
                             movement.work,
                         )
@@ -612,17 +799,30 @@ pub fn solve_symbolic_family(
                 parallel_report.released_builder_bytes_sum_estimate =
                     parallel.released_builder_bytes_sum_estimate;
                 parallel_report.predicate_work_steps = parallel.predicate_work_steps;
+                parallel_report.predicate_compactions = parallel.predicate_compactions;
+                parallel_report.predicate_reclaimed_nodes = parallel.predicate_reclaimed_nodes;
+                parallel_report.predicate_compaction_work_steps =
+                    parallel.predicate_compaction_work_steps;
+                parallel_report.predicate_discarded_apply_entries =
+                    parallel.predicate_discarded_apply_entries;
+                parallel_report.compaction_peak_temporary_bytes_sum_estimate =
+                    parallel.compaction_peak_temporary_bytes_sum_estimate;
             }
             if parallel_reason.is_some() {
-                for piece in pieces {
+                for (piece, piece_domain) in pieces {
                     control.report_progress(
                         "symbolic_context_piece",
                         piece.as_ascii() as u64,
                         None,
                     );
                     phase("symbolic_phase_movement");
-                    let relation =
-                        board.compile_piece(&mut predicates, &templates, piece, control)?;
+                    let relation = board.compile_piece_in_domain(
+                        &mut predicates,
+                        &templates,
+                        piece,
+                        piece_domain,
+                        control,
+                    )?;
                     let work = relation.work();
                     let mut legal_rows = Vec::new();
                     super::symbolic_movement_progress::report_phase(
@@ -648,7 +848,8 @@ pub fn solve_symbolic_family(
                         })?;
                         legal_rows.push((row_id, legal));
                     }
-                    consume_piece(piece, &predicates, &legal_rows, work)?;
+                    drop(relation);
+                    consume_piece(piece, &mut predicates, &legal_rows, work)?;
                 }
             }
         }
@@ -676,8 +877,14 @@ pub fn solve_symbolic_family(
             .guard_misses
             .saturating_sub(compatibility_start.guard_misses);
         rank_report.set_nodes_before_compaction = sets.node_count();
+        rank_report.cell_support_work_steps = bridge.support_work_steps() - cell_support_start;
+        rank_report.cell_support_cached_nodes = bridge.support_cache_entries();
         phase("symbolic_phase_rank_compact");
         down.clear_memo();
+        bridge.clear_support_cache();
+        if CELLS {
+            control.report_progress("symbolic_cell_support_entries", 0, None);
+        }
         rank_report.set_compaction_peak_bytes_estimate =
             compact_layer(&mut sets, &mut supply, &mut next)?;
         rank_report.set_nodes_after_compaction = sets.node_count();
@@ -765,6 +972,103 @@ pub fn solve_symbolic_family(
             / PieceKind::STANDARD_TETROMINOES.len(),
         report,
     })
+}
+
+fn release_compatibility_memo(
+    down: &mut GeometryCompatibilityFilter<'_>,
+    report: &mut SymbolicFamilyRankReport,
+    control: &ExecutionControl,
+) {
+    report.compatibility_cache_peak_bytes_estimate = report
+        .compatibility_cache_peak_bytes_estimate
+        .max(down.retained_bytes());
+    down.clear_memo();
+    report.compatibility_cache_releases += 1;
+    control.report_progress("symbolic_storage_compatibility_memo_entries", 0, None);
+    control.report_progress(
+        "symbolic_storage_compatibility_retained_bytes",
+        down.retained_bytes() as u64,
+        None,
+    );
+}
+
+/// The two spaces have different variable meanings. Keep dispatch at the
+/// domain/filter boundary so cell IDs can never enter the row bridge.
+enum MovementBridge {
+    Rows(FamilyBridge),
+    Cells(CellFamilyBridge),
+}
+
+impl MovementBridge {
+    fn domain(
+        &mut self,
+        sets: &ZddArena,
+        predicates: &mut BooleanArena,
+        root: ZddId,
+        control: &ExecutionControl,
+    ) -> Result<BooleanId, SymbolicFamilyError> {
+        match self {
+            Self::Rows(bridge) => bridge.domain(sets, predicates, root, control),
+            Self::Cells(bridge) => bridge.domain(sets, predicates, root, control),
+        }
+    }
+
+    fn filter(
+        &mut self,
+        sets: &mut ZddArena,
+        predicates: &mut BooleanArena,
+        root: ZddId,
+        condition: BooleanId,
+        control: &ExecutionControl,
+    ) -> Result<ZddId, SymbolicFamilyError> {
+        match self {
+            Self::Rows(bridge) => bridge.filter(sets, predicates, root, condition, control),
+            Self::Cells(bridge) => {
+                // All legal row roots precede this checkpoint. Cofactor
+                // residuals and local memo IDs die before rewind, including
+                // on refusal. Only the original ZDD owns the returned result.
+                let checkpoint = predicates.checkpoint();
+                let result = bridge.filter(sets, predicates, root, condition, control);
+                let cleanup = predicates
+                    .rewind(checkpoint)
+                    .map_err(SymbolicFamilyError::from);
+                match result {
+                    Err(error) => Err(error),
+                    Ok(result) => {
+                        cleanup?;
+                        Ok(result)
+                    }
+                }
+            }
+        }
+    }
+
+    fn work_steps(&self) -> u64 {
+        match self {
+            Self::Rows(bridge) => bridge.work_steps(),
+            Self::Cells(bridge) => bridge.work_steps(),
+        }
+    }
+
+    fn support_work_steps(&self) -> u64 {
+        match self {
+            Self::Rows(_) => 0,
+            Self::Cells(bridge) => bridge.support_work_steps(),
+        }
+    }
+
+    fn support_cache_entries(&self) -> usize {
+        match self {
+            Self::Rows(_) => 0,
+            Self::Cells(bridge) => bridge.support_cache_entries(),
+        }
+    }
+
+    fn clear_support_cache(&mut self) {
+        if let Self::Cells(bridge) = self {
+            bridge.clear_support_cache();
+        }
+    }
 }
 
 fn geometry_keys(

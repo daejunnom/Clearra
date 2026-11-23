@@ -58,9 +58,15 @@ pub(super) struct ParallelMovementReport {
     pub predicate_apply_cache_hits: u64,
     /// Sum of per-piece private peaks, NOT an observed simultaneous peak.
     pub private_node_peak_sum_upper_bound: usize,
-    /// Sum at publication; omits transient stacks and is NOT peak RSS.
+    /// Sum after consumption, just before release; omits transient stacks and
+    /// is NOT peak RSS. Cell cofactor backing capacity can remain at this point.
     pub private_retained_bytes_sum_estimate: usize,
     pub released_builder_bytes_sum_estimate: usize,
+    pub predicate_compactions: u64,
+    pub predicate_reclaimed_nodes: u64,
+    pub predicate_compaction_work_steps: u64,
+    pub predicate_discarded_apply_entries: u64,
+    pub compaction_peak_temporary_bytes_sum_estimate: usize,
 }
 
 pub(super) fn parallel_movement_fallback_reason(
@@ -88,10 +94,10 @@ pub(super) fn run_piece_movements(
     board: &SymbolicBoard<'_>,
     predicates: &mut BooleanArena,
     templates: &SharedReachabilityTemplates,
-    pieces: &[PieceKind],
+    pieces: &[(PieceKind, BooleanId)],
     requested_workers: usize,
     control: &ExecutionControl,
-    mut consume: impl FnMut(&PieceMovement) -> Result<(), SymbolicFamilyError>,
+    mut consume: impl FnMut(&mut PieceMovement) -> Result<(), SymbolicFamilyError>,
 ) -> Result<ParallelMovementReport, SymbolicFamilyError> {
     if control.is_cancelled() {
         return Err(SymbolicFamilyError::Cancelled);
@@ -101,12 +107,17 @@ pub(super) fn run_piece_movements(
     {
         return Err(SymbolicFamilyError::Unsupported(reason));
     }
-    for (index, piece) in pieces.iter().enumerate() {
-        if !PieceKind::STANDARD_TETROMINOES.contains(piece) || pieces[..index].contains(piece) {
+    for (index, (piece, domain)) in pieces.iter().enumerate() {
+        if !PieceKind::STANDARD_TETROMINOES.contains(piece)
+            || pieces[..index]
+                .iter()
+                .any(|(previous, _)| previous == piece)
+        {
             return Err(SymbolicFamilyError::InvalidProblem(
                 "symbolic_parallel_piece_tasks",
             ));
         }
+        predicates.validate(*domain)?;
     }
     let worker_count = requested_workers.min(pieces.len());
     let prefix = predicates.freeze_prefix()?;
@@ -171,7 +182,7 @@ pub(super) fn run_piece_movements(
                             break;
                         }
                         let index = next_piece.fetch_add(1, Ordering::Relaxed);
-                        let Some(&piece) = pieces.get(index) else {
+                        let Some(&(piece, domain)) = pieces.get(index) else {
                             break;
                         };
                         active = true;
@@ -182,6 +193,7 @@ pub(super) fn run_piece_movements(
                                 Arc::clone(&prefix),
                                 templates,
                                 piece,
+                                domain,
                                 control,
                                 stop,
                                 progress.as_ref(),
@@ -222,7 +234,7 @@ pub(super) fn run_piece_movements(
             }
         }
         drop(sender);
-        while let Ok(movement) = receiver.recv() {
+        while let Ok(mut movement) = receiver.recv() {
             let piece = movement.piece;
             symbolic_movement_progress::report_phase(
                 control,
@@ -230,14 +242,18 @@ pub(super) fn run_piece_movements(
                 MovementPhase::Consuming,
                 &movement.predicates,
             );
+            if !stop.is_cancelled() {
+                if let Err(error) = consume(&mut movement) {
+                    fail(&first_error, &stop, error);
+                }
+            }
+            // Cell-space filtering constructs short-lived cofactor residuals
+            // in this owner. Account and flush after the consumer on success
+            // and failure; row-space consumption remains read-only.
+            movement.predicates.flush_work_progress();
             let recorded = record_movement(&mut report, predicates, &movement);
             if let Err(error) = recorded {
                 fail(&first_error, &stop, error);
-            }
-            if !stop.is_cancelled() {
-                if let Err(error) = consume(&movement) {
-                    fail(&first_error, &stop, error);
-                }
             }
             // Drop the completed suffix before accepting another. Workers may
             // still hold private suffixes while blocked on their own send.
@@ -301,6 +317,7 @@ fn compile_piece(
     prefix: Arc<FrozenBooleanPrefix>,
     templates: &SharedReachabilityTemplates,
     piece: PieceKind,
+    domain: BooleanId,
     control: &ExecutionControl,
     stop: &CancellationToken,
     progress: Option<&Arc<SharedProgress>>,
@@ -319,7 +336,8 @@ fn compile_piece(
         predicates.set_progress_sink(Some(Arc::clone(progress) as Arc<dyn ProgressSink>));
     }
     let result = (|| {
-        let relation = board.compile_piece(&mut predicates, templates, piece, control)?;
+        let relation =
+            board.compile_piece_in_domain(&mut predicates, templates, piece, domain, control)?;
         let work = relation.work();
         let mut legal_rows = Vec::new();
         symbolic_movement_progress::report_phase(
@@ -335,6 +353,33 @@ fn compile_piece(
         }
         Ok::<_, SymbolicFamilyError>((legal_rows, work))
     })();
+    let finalized = (|| {
+        let (mut legal_rows, work) = result?;
+        // The relation, free/reached roots and operation-local work are gone.
+        // Only final legal roots survive in this suffix; the shared board is
+        // pinned in the immutable prefix. Keep the ordinary growth trigger.
+        if predicates.private_compaction_due() {
+            let mut roots = Vec::new();
+            roots
+                .try_reserve_exact(legal_rows.len())
+                .map_err(allocation)?;
+            roots.extend(legal_rows.iter().map(|&(_, root)| root));
+            predicates.compact_private(&mut [&mut roots])?;
+            for ((_, root), &remapped) in legal_rows.iter_mut().zip(&roots) {
+                *root = remapped;
+            }
+        }
+        // Row filtering only reads predicates. Cell filtering constructs
+        // cofactor residuals, so it retains the unique table while dropping
+        // the now-unused movement apply cache before publication.
+        let released_builder_bytes_estimate = if board.uses_cell_variables() {
+            predicates.release_private_apply_cache()?
+        } else {
+            predicates.seal_for_reading()?
+        };
+        Ok::<_, SymbolicFamilyError>((legal_rows, work, released_builder_bytes_estimate))
+    })();
+    // Flush the complete work tail on both success and a finalization error.
     if let Some(progress) = &progress {
         progress.report(ExecutionProgress::new(
             "symbolic_work_boolean",
@@ -342,11 +387,7 @@ fn compile_piece(
             None,
         ));
     }
-    let (legal_rows, work) = result?;
-    // Every root is final. The coordinator only reads nodes through the bridge;
-    // retaining private interning/apply maps would prolong their ownership
-    // while this worker waits to publish and while its rows are consumed.
-    let released_builder_bytes_estimate = predicates.seal_for_reading()?;
+    let (legal_rows, work, released_builder_bytes_estimate) = finalized?;
     if let Some(sink) = &control.progress_sink {
         symbolic_movement_progress::report_metric(
             sink.as_ref(),
@@ -394,6 +435,26 @@ fn record_movement(
         .released_builder_bytes_sum_estimate
         .checked_add(movement.released_builder_bytes_estimate)
         .ok_or_else(overflow)?;
+    report.predicate_compactions = report
+        .predicate_compactions
+        .checked_add(movement.predicates.compaction_count())
+        .ok_or_else(overflow)?;
+    report.predicate_reclaimed_nodes = report
+        .predicate_reclaimed_nodes
+        .checked_add(movement.predicates.compaction_reclaimed_nodes())
+        .ok_or_else(overflow)?;
+    report.predicate_compaction_work_steps = report
+        .predicate_compaction_work_steps
+        .checked_add(movement.predicates.compaction_work_steps())
+        .ok_or_else(overflow)?;
+    report.predicate_discarded_apply_entries = report
+        .predicate_discarded_apply_entries
+        .checked_add(movement.predicates.compaction_discarded_apply_entries())
+        .ok_or_else(overflow)?;
+    report.compaction_peak_temporary_bytes_sum_estimate = report
+        .compaction_peak_temporary_bytes_sum_estimate
+        .checked_add(movement.predicates.compaction_peak_temporary_bytes())
+        .ok_or_else(overflow)?;
     report.movement_work.poses = report
         .movement_work
         .poses
@@ -415,6 +476,18 @@ fn record_movement(
         .checked_add(movement.work.family_updates)
         .ok_or_else(overflow)?;
     for (counter, additional) in [
+        (
+            &mut report.movement_work.vertical_seed_edges,
+            movement.work.vertical_seed_edges,
+        ),
+        (
+            &mut report.movement_work.vertical_seed_updates,
+            movement.work.vertical_seed_updates,
+        ),
+        (
+            &mut report.movement_work.early_reached_rejections,
+            movement.work.early_reached_rejections,
+        ),
         (
             &mut report.movement_work.rotation_candidate_checks,
             movement.work.rotation_candidate_checks,
@@ -506,6 +579,15 @@ impl ProgressSink for PieceProgress {
         let metric = match progress.stage {
             "symbolic_storage_boolean_private_nodes" => Some(MovementMetric::PrivateNodes),
             "symbolic_storage_boolean_private_bytes" => Some(MovementMetric::PrivateBytes),
+            "symbolic_storage_boolean_compactions" => Some(MovementMetric::Compactions),
+            "symbolic_storage_boolean_reclaimed_nodes" => Some(MovementMetric::ReclaimedNodes),
+            "symbolic_storage_boolean_compaction_work" => Some(MovementMetric::CompactionWork),
+            "symbolic_storage_boolean_discarded_apply_entries" => {
+                Some(MovementMetric::DiscardedApplyEntries)
+            }
+            "symbolic_storage_boolean_compaction_peak_temporary_bytes" => {
+                Some(MovementMetric::CompactionPeakTemporaryBytes)
+            }
             _ => None,
         };
         if let Some(metric) = metric {
@@ -619,7 +701,7 @@ mod tests {
             &board,
             &mut owner,
             &templates,
-            &pieces,
+            &pieces.map(|piece| (piece, domain)),
             9,
             &control,
             |movement| {
@@ -683,7 +765,7 @@ mod tests {
             &board,
             &mut owner,
             &templates,
-            &[PieceKind::I, PieceKind::O],
+            &[(PieceKind::I, domain), (PieceKind::O, domain)],
             2,
             &control,
             |_| Err(failure),

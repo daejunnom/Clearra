@@ -110,6 +110,8 @@ mod standard_bag_product_memo;
 #[cfg(feature = "symbolic-family")]
 mod symbolic_boolean;
 #[cfg(feature = "symbolic-family")]
+mod symbolic_cell_bridge;
+#[cfg(feature = "symbolic-family")]
 mod symbolic_family;
 #[cfg(feature = "symbolic-family")]
 mod symbolic_family_bridge;
@@ -125,10 +127,10 @@ mod symbolic_family_supply;
 mod symbolic_movement_progress;
 #[cfg(feature = "symbolic-family")]
 pub use symbolic_family::{
-    solve_symbolic_family, SymbolicFamilyArchive, SymbolicFamilyArchiveError,
-    SymbolicFamilyArchiveScope, SymbolicFamilyError, SymbolicFamilyLimits,
-    SymbolicFamilyParallelReport, SymbolicFamilyRankReport, SymbolicFamilyReport,
-    SymbolicFamilyResult,
+    solve_symbolic_family, solve_symbolic_family_with_cell_occupancy, SymbolicFamilyArchive,
+    SymbolicFamilyArchiveError, SymbolicFamilyArchiveScope, SymbolicFamilyError,
+    SymbolicFamilyLimits, SymbolicFamilyParallelReport, SymbolicFamilyRankReport,
+    SymbolicFamilyReport, SymbolicFamilyResult,
 };
 #[cfg(test)]
 mod static_influence_integration_tests;

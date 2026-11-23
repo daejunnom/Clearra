@@ -51,10 +51,10 @@ pub mod tiling_solution_store;
 
 #[cfg(feature = "symbolic-family")]
 pub use backend::{
-    solve_symbolic_family, SymbolicFamilyArchive, SymbolicFamilyArchiveError,
-    SymbolicFamilyArchiveScope, SymbolicFamilyError, SymbolicFamilyLimits,
-    SymbolicFamilyParallelReport, SymbolicFamilyRankReport, SymbolicFamilyReport,
-    SymbolicFamilyResult,
+    solve_symbolic_family, solve_symbolic_family_with_cell_occupancy, SymbolicFamilyArchive,
+    SymbolicFamilyArchiveError, SymbolicFamilyArchiveScope, SymbolicFamilyError,
+    SymbolicFamilyLimits, SymbolicFamilyParallelReport, SymbolicFamilyRankReport,
+    SymbolicFamilyReport, SymbolicFamilyResult,
 };
 
 pub use backend::{

@@ -1,4 +1,4 @@
-//! Exact lock predicates over a request's catalog row-selection variables.
+//! Exact lock predicates over row-selection or original-cell variables.
 //!
 //! Original occupancy is compiled once. Row deletion, compaction and movement
 //! are restricted to the caller's current partial-selection domain, rather
@@ -28,11 +28,20 @@ use super::{
 
 const MAX_ROWS: usize = 6;
 
-/// Request-lifetime expressions. Variable `r` selects catalog row ID `r`.
-/// The caller reserves these variables before allocating source variables.
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum OccupancyVariableSpace {
+    CatalogRows,
+    OriginalCells,
+}
+
+/// Request-lifetime expressions in one explicitly chosen variable space.
+/// Row mode maps variable r to catalog row r; cell mode maps c to original
+/// board cell c. Source variables are never part of this physical relation.
 pub(in super::super) struct SymbolicOccupancy<'catalog> {
     catalog: &'catalog GeometryCatalog,
     arena_owner: u64,
+    variable_space: OccupancyVariableSpace,
+    valid_domain: BooleanId,
     original: [BooleanId; 64],
 }
 
@@ -41,6 +50,7 @@ pub(in super::super) struct SymbolicOccupancy<'catalog> {
 pub(in super::super) struct SymbolicBoard<'catalog> {
     catalog: &'catalog GeometryCatalog,
     arena_owner: u64,
+    variable_space: OccupancyVariableSpace,
     domain: BooleanId,
     occupied: [BooleanId; 64],
     deleted: [BooleanId; MAX_ROWS],
@@ -55,6 +65,11 @@ pub(in super::super) struct SymbolicReachabilityWork {
     pub guarded_edges: usize,
     pub propagation_edges: u64,
     pub family_updates: u64,
+    /// Downward certificate intersections, each on an immutable topology edge.
+    pub vertical_seed_edges: u64,
+    pub vertical_seed_updates: u64,
+    /// Transfers rejected before evaluating collision or ordered-kick guards.
+    pub early_reached_rejections: u64,
     pub rotation_candidate_checks: u64,
     pub rotation_candidates_pruned: u64,
     pub rotation_guard_no_prior: u64,
@@ -69,6 +84,8 @@ pub(in super::super) struct SymbolicReachabilityWork {
 pub(in super::super) struct SymbolicPieceRelation<'board, 'catalog> {
     board: &'board SymbolicBoard<'catalog>,
     arena_owner: u64,
+    /// The supplied piece domain intersected with the board's base domain.
+    domain: BooleanId,
     piece: PieceKind,
     template: Arc<ReachabilityTemplate>,
     locks: Vec<BooleanId>,
@@ -80,6 +97,32 @@ impl<'catalog> SymbolicOccupancy<'catalog> {
         catalog: &'catalog GeometryCatalog,
         arena: &mut BooleanArena,
         control: &ExecutionControl,
+    ) -> Result<Self, BooleanError> {
+        Self::compile_variables(catalog, arena, control, OccupancyVariableSpace::CatalogRows)
+    }
+
+    /// Compile primitive original-cell variables, without expanding a row
+    /// family or building a row-to-cell relation. The caller supplies its exact
+    /// cell image (or a proved superset) to for_domain and pulls predicates back
+    /// to the original row/source relation before accepting an extension.
+    pub(in super::super) fn compile_cells(
+        catalog: &'catalog GeometryCatalog,
+        arena: &mut BooleanArena,
+        control: &ExecutionControl,
+    ) -> Result<Self, BooleanError> {
+        Self::compile_variables(
+            catalog,
+            arena,
+            control,
+            OccupancyVariableSpace::OriginalCells,
+        )
+    }
+
+    fn compile_variables(
+        catalog: &'catalog GeometryCatalog,
+        arena: &mut BooleanArena,
+        control: &ExecutionControl,
+        variable_space: OccupancyVariableSpace,
     ) -> Result<Self, BooleanError> {
         check_cancelled(control)?;
         let (width, height) = dimensions(catalog)?;
@@ -96,9 +139,11 @@ impl<'catalog> SymbolicOccupancy<'catalog> {
         let row_count = u32::try_from(catalog.skeleton_count())
             .map_err(|_| BooleanError::Unsupported("symbolic_catalog_row_count"))?;
         let mut original = [BooleanId::FALSE; 64];
-        for (cell, root) in original[..area].iter_mut().enumerate() {
-            if initial & (1_u64 << cell) != 0 {
-                *root = BooleanId::TRUE;
+        if variable_space == OccupancyVariableSpace::CatalogRows {
+            for (cell, root) in original[..area].iter_mut().enumerate() {
+                if initial & (1_u64 << cell) != 0 {
+                    *root = BooleanId::TRUE;
+                }
             }
         }
         // Descending IDs prepend an earlier BDD variable to each cell's OR.
@@ -114,24 +159,44 @@ impl<'catalog> SymbolicOccupancy<'catalog> {
             {
                 return Err(BooleanError::InvalidInput("symbolic_catalog_row"));
             }
-            let selected = arena.variable(row_id)?;
-            let mut cells = row.cells;
-            while cells != 0 {
-                let cell = cells.trailing_zeros() as usize;
-                cells &= cells - 1;
-                original[cell] = arena.or(selected, original[cell])?;
+            if variable_space == OccupancyVariableSpace::CatalogRows {
+                let selected = arena.variable(row_id)?;
+                let mut cells = row.cells;
+                while cells != 0 {
+                    let cell = cells.trailing_zeros() as usize;
+                    cells &= cells - 1;
+                    original[cell] = arena.or(selected, original[cell])?;
+                }
+            }
+        }
+        let mut valid_domain = BooleanId::TRUE;
+        if variable_space == OccupancyVariableSpace::OriginalCells {
+            // Descending construction keeps this fixed-input constraint
+            // linear in the board area. It does not enumerate occupied masks.
+            for cell in (0..area).rev() {
+                check_cancelled(control)?;
+                let variable = cell as u32;
+                original[cell] = arena.variable(variable)?;
+                let bit = 1_u64 << cell;
+                if initial & bit != 0 {
+                    valid_domain = arena.mk(variable, BooleanId::FALSE, valid_domain)?;
+                } else if catalog.required_cells() & bit == 0 {
+                    valid_domain = arena.mk(variable, valid_domain, BooleanId::FALSE)?;
+                }
             }
         }
         Ok(Self {
             catalog,
             arena_owner: arena.owner_id(),
+            variable_space,
+            valid_domain,
             original,
         })
     }
 
-    /// Pull occupancy back to one exact live row-set domain. Overlapping
-    /// catalog alternatives are allowed; the caller's Down(F) domain supplies
-    /// their compatibility. This function does not grant geometric membership.
+    /// Interpret occupancy in the chosen variable space and fixed-input scope.
+    /// Row compatibility or an original-cell image remains the caller's
+    /// authority. This function does not grant geometric membership.
     pub(in super::super) fn for_domain(
         &self,
         arena: &mut BooleanArena,
@@ -141,7 +206,7 @@ impl<'catalog> SymbolicOccupancy<'catalog> {
         self.check_owner(arena)?;
         check_cancelled(control)?;
         // This also validates a nonterminal domain before deriving any roots.
-        let domain = arena.and(domain, BooleanId::TRUE)?;
+        let domain = arena.and(domain, self.valid_domain)?;
         let (width, height) = dimensions(self.catalog)?;
         let mut deleted = [BooleanId::FALSE; MAX_ROWS];
         for (y, root) in deleted[..height].iter_mut().enumerate() {
@@ -203,6 +268,7 @@ impl<'catalog> SymbolicOccupancy<'catalog> {
         Ok(SymbolicBoard {
             catalog: self.catalog,
             arena_owner: self.arena_owner,
+            variable_space: self.variable_space,
             domain,
             occupied,
             deleted,
@@ -219,6 +285,10 @@ impl<'catalog> SymbolicOccupancy<'catalog> {
 }
 
 impl<'catalog> SymbolicBoard<'catalog> {
+    pub(in super::super) fn uses_cell_variables(&self) -> bool {
+        self.variable_space == OccupancyVariableSpace::OriginalCells
+    }
+
     pub(in super::super) fn domain(&self) -> BooleanId {
         self.domain
     }
@@ -245,7 +315,39 @@ impl<'catalog> SymbolicBoard<'catalog> {
         piece: PieceKind,
         control: &ExecutionControl,
     ) -> Result<SymbolicPieceRelation<'board, 'catalog>, BooleanError> {
+        self.compile_piece_in_domain(arena, templates, piece, self.domain, control)
+    }
+
+    /// Restrict movement to a source-admitted piece domain while sharing the
+    /// base board's exact occupancy, deleted-row and frame expressions.
+    pub(in super::super) fn compile_piece_in_domain<'board>(
+        &'board self,
+        arena: &mut BooleanArena,
+        templates: &SharedReachabilityTemplates,
+        piece: PieceKind,
+        domain: BooleanId,
+        control: &ExecutionControl,
+    ) -> Result<SymbolicPieceRelation<'board, 'catalog>, BooleanError> {
+        self.compile_piece_with_vertical_seed::<true>(arena, templates, piece, domain, control)
+    }
+
+    // The unseeded specialization exists only in finite correctness fixtures.
+    // Both paths retain the same complete physical movement fixed point.
+    fn compile_piece_with_vertical_seed<'board, const SEED_VERTICAL: bool>(
+        &'board self,
+        arena: &mut BooleanArena,
+        templates: &SharedReachabilityTemplates,
+        piece: PieceKind,
+        domain: BooleanId,
+        control: &ExecutionControl,
+    ) -> Result<SymbolicPieceRelation<'board, 'catalog>, BooleanError> {
         self.check_owner(arena)?;
+        // Only a board owned by the pinned prefix may outlive a moving fork
+        // suffix. Preexisting private roots may belong to another caller, so
+        // only a fresh suffix is owned completely by this piece operation.
+        // Fork-local boards and reused scratch keep the non-collecting path.
+        let collect_private =
+            self.arena_owner != arena.owner_id() && arena.private_node_count() == 0;
         check_cancelled(control)?;
         if !PieceKind::STANDARD_TETROMINOES.contains(&piece)
             || templates.width != self.catalog.width()
@@ -259,6 +361,7 @@ impl<'catalog> SymbolicBoard<'catalog> {
                 "symbolic_unconnected_kick_profile",
             ));
         }
+        let mut domain = arena.and(self.domain, domain)?;
         // This owner binds the complete imported ordered table, not merely a
         // nominal profile ID, and supplies the exact existing sky authority.
         let template = templates.template(piece);
@@ -268,46 +371,70 @@ impl<'catalog> SymbolicBoard<'catalog> {
             ..SymbolicReachabilityWork::default()
         };
         symbolic_movement_progress::report_phase(control, piece, MovementPhase::Free, arena);
-        let outside_domain = arena.not(self.domain)?;
+        let mut outside_domain = arena.not(domain)?;
         let mut free = filled_vec(count, BooleanId::FALSE)?;
-        for (source, root) in free.iter_mut().enumerate() {
+        for source in 0..count {
             check_cancelled(control)?;
             let mut cells = template.state_masks[source];
             if cells == INVALID_STATE_MASK {
                 continue;
             }
-            // Occupancy already vanishes outside domain. Build only the
-            // collision predicate here; seed admission supplies domain once.
+            // Occupancy remains in the shared base domain. Build only the
+            // collision predicate here; seeds supply this piece's domain.
             // Repeating domain can duplicate domain-conditioned intermediates.
-            let mut allowed = BooleanId::TRUE;
-            while cells != 0 && allowed != BooleanId::FALSE {
-                let cell = cells.trailing_zeros() as usize;
-                cells &= cells - 1;
-                let empty = arena.not(self.occupied[cell])?;
-                allowed = arena.and(allowed, empty)?;
+            {
+                let mut allowed = BooleanId::TRUE;
+                while cells != 0 && allowed != BooleanId::FALSE {
+                    let cell = cells.trailing_zeros() as usize;
+                    cells &= cells - 1;
+                    let empty = arena.not(self.occupied[cell])?;
+                    allowed = arena.and(allowed, empty)?;
+                }
+                // A collision predicate equal to !domain admits no in-domain
+                // assignment. Its values outside domain are unobservable
+                // because every reached/pending family stays inside domain.
+                free[source] = if allowed == outside_domain {
+                    BooleanId::FALSE
+                } else {
+                    allowed
+                };
             }
-            // A collision predicate equal to !domain admits no in-domain
-            // assignment. Its values outside domain are unobservable because
-            // every reached/pending family remains inside domain.
-            *root = if allowed == outside_domain {
-                BooleanId::FALSE
-            } else {
-                allowed
-            };
+            if collect_movement_garbage(
+                arena,
+                collect_private,
+                &mut domain,
+                &mut free,
+                &mut [],
+                &mut [],
+            )? {
+                // This complement shares the domain's node. Recreate its ID
+                // after relocation; no transfer-local root survives the call.
+                outside_domain = arena.not(domain)?;
+            }
         }
 
+        collect_movement_garbage(
+            arena,
+            collect_private,
+            &mut domain,
+            &mut free,
+            &mut [],
+            &mut [],
+        )?;
         symbolic_movement_progress::report_phase(control, piece, MovementPhase::Edges, arena);
         let (offsets, edges) = compile_transfers(&template, &free, control, &mut work)?;
         symbolic_movement_progress::report_phase(control, piece, MovementPhase::Propagation, arena);
         let reachable = propagate(
             arena,
-            self.domain,
+            &mut domain,
             &offsets,
             &edges,
             &template.sky_seeds,
-            &free,
+            &mut free,
             &self.occupied,
             &template.rotation_targets,
+            SEED_VERTICAL.then_some(template.translation_targets.as_slice()),
+            collect_private,
             control,
             &mut work,
         )?;
@@ -336,6 +463,7 @@ impl<'catalog> SymbolicBoard<'catalog> {
         Ok(SymbolicPieceRelation {
             board: self,
             arena_owner: arena.owner_id(),
+            domain,
             piece,
             template,
             locks,
@@ -352,7 +480,10 @@ impl<'catalog> SymbolicBoard<'catalog> {
 }
 
 impl SymbolicPieceRelation<'_, '_> {
-    /// Return domain ∩ !selected(row) ∩ exact ILC/grounded/reachable lock.
+    /// Return domain ∩ pending(row) ∩ exact ILC/grounded/reachable lock.
+    /// Cell mode requires every original target cell to be empty: a surviving
+    /// occupied cell collides, while a deleted target row has no realization.
+    /// This also excludes an already-selected row after the exact pullback.
     /// Down(F) after adding the row remains the caller's geometric constraint.
     pub(in super::super) fn legal_row(
         &self,
@@ -372,9 +503,26 @@ impl SymbolicPieceRelation<'_, '_> {
         if row.piece != self.piece {
             return Err(BooleanError::InvalidInput("symbolic_row_piece"));
         }
-        let selected = arena.variable(row_id)?;
-        let pending = arena.not(selected)?;
-        let available = arena.and(self.board.domain, pending)?;
+        let available = match self.board.variable_space {
+            OccupancyVariableSpace::CatalogRows => {
+                let selected = arena.variable(row_id)?;
+                let pending = arena.not(selected)?;
+                arena.and(self.domain, pending)?
+            }
+            OccupancyVariableSpace::OriginalCells => {
+                let mut available = self.domain;
+                let mut cells = row.cells;
+                while cells != 0 && available != BooleanId::FALSE {
+                    check_cancelled(control)?;
+                    let cell = cells.trailing_zeros();
+                    cells &= cells - 1;
+                    let occupied = arena.variable(cell)?;
+                    let empty = arena.not(occupied)?;
+                    available = arena.and(available, empty)?;
+                }
+                available
+            }
+        };
         if available == BooleanId::FALSE {
             return Ok(BooleanId::FALSE);
         }
@@ -562,110 +710,207 @@ fn append_edge(
     Ok(())
 }
 
+/// Lift the existing positive sky/vertical-entry certificate to exact board
+/// families. A descending pass closes only downward translations, so every
+/// admitted assignment has an actual path from this template's sky seeds.
+/// A failed certificate is unknown: all other translations and ordered kicks
+/// remain in the subsequent fixed point. Row-selection correlations stay in
+/// the Boolean roots; this does not assume independent occupied cells.
+fn seed_vertical_closure(
+    arena: &mut BooleanArena,
+    domain: &mut BooleanId,
+    free: &mut [BooleanId],
+    translation_targets: &[[u16; 3]],
+    reached: &mut [BooleanId],
+    collect_private: bool,
+    control: &ExecutionControl,
+    work: &mut SymbolicReachabilityWork,
+) -> Result<(), BooleanError> {
+    if translation_targets.len() != reached.len() {
+        return Err(BooleanError::InvalidInput("symbolic_vertical_topology"));
+    }
+    for source in (0..reached.len()).rev() {
+        check_cancelled(control)?;
+        let down = translation_targets[source][0];
+        if down == INVALID_STATE_INDEX {
+            continue;
+        }
+        let target = usize::from(down);
+        // Existing state IDs increase with y within each rotation. Refuse a
+        // changed topology instead of silently using an invalid DAG order.
+        if target >= source {
+            return Err(BooleanError::InvalidInput("symbolic_vertical_order"));
+        }
+        if reached[source] == BooleanId::FALSE || reached[source] == reached[target] {
+            continue;
+        }
+        {
+            increment(&mut work.vertical_seed_edges)?;
+            let admitted = arena.and(reached[source], free[target])?;
+            let combined = arena.or(reached[target], admitted)?;
+            if combined != reached[target] {
+                reached[target] = combined;
+                increment(&mut work.vertical_seed_updates)?;
+            }
+        }
+        collect_movement_garbage(arena, collect_private, domain, free, reached, &mut [])?;
+    }
+    Ok(())
+}
+
+/// Call only after all transfer-local roots are dead. Domains and free roots
+/// survive propagation and must be remapped along with reached/pending roots.
+/// The immutable board expressions are pinned by the checked prefix owner.
+fn collect_movement_garbage(
+    arena: &mut BooleanArena,
+    eligible: bool,
+    domain: &mut BooleanId,
+    free: &mut [BooleanId],
+    reached: &mut [BooleanId],
+    pending: &mut [BooleanId],
+) -> Result<bool, BooleanError> {
+    if eligible && arena.private_compaction_due() {
+        let mut roots = [std::slice::from_mut(domain), free, reached, pending];
+        return Ok(arena.compact_private(&mut roots)?.compacted);
+    }
+    Ok(false)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn propagate(
     arena: &mut BooleanArena,
-    domain: BooleanId,
+    domain: &mut BooleanId,
     offsets: &[usize],
     edges: &[Edge],
     seeds: &[u16],
-    free: &[BooleanId],
+    free: &mut [BooleanId],
     occupied: &[BooleanId; 64],
     prior_targets: &[u16],
+    vertical_targets: Option<&[[u16; 3]]>,
+    collect_private: bool,
     control: &ExecutionControl,
     work: &mut SymbolicReachabilityWork,
 ) -> Result<Vec<BooleanId>, BooleanError> {
     let count = free.len();
     let mut reached = filled_vec(count, BooleanId::FALSE)?;
+    for &seed in seeds {
+        check_cancelled(control)?;
+        let seed = usize::from(seed);
+        let admitted = arena.and(*domain, free[seed])?;
+        reached[seed] = arena.or(reached[seed], admitted)?;
+    }
+    if let Some(translation_targets) = vertical_targets {
+        seed_vertical_closure(
+            arena,
+            domain,
+            free,
+            translation_targets,
+            &mut reached,
+            collect_private,
+            control,
+            work,
+        )?;
+    }
     let mut pending = filled_vec(count, BooleanId::FALSE)?;
+    pending.copy_from_slice(&reached);
     let mut queue = VecDeque::new();
     queue
         .try_reserve(count)
         .map_err(|_| BooleanError::Allocation)?;
-    for &seed in seeds {
-        check_cancelled(control)?;
-        let seed = usize::from(seed);
-        let admitted = arena.and(domain, free[seed])?;
-        let was_pending = pending[seed] != BooleanId::FALSE;
-        reached[seed] = arena.or(reached[seed], admitted)?;
-        pending[seed] = arena.or(pending[seed], admitted)?;
-        if !was_pending && pending[seed] != BooleanId::FALSE {
-            queue.push_back(seed);
+    for (source, &root) in pending.iter().enumerate() {
+        if root != BooleanId::FALSE {
+            queue.push_back(source);
         }
     }
     while let Some(source) = queue.pop_front() {
         check_cancelled(control)?;
-        let delta = std::mem::replace(&mut pending[source], BooleanId::FALSE);
-        let mut prior_cursors = [None; 3];
-        let mut remaining = [delta; 3];
-        // Inductively delta is inside domain and the source's free family.
-        // Every edge intersects it with target-free conditions, so no edge
-        // needs another domain/source gate and no outside assignment enters.
-        for edge in &edges[offsets[source]..offsets[source + 1]] {
-            check_cancelled(control)?;
-            work.propagation_edges = work
-                .propagation_edges
-                .checked_add(1)
-                .ok_or(BooleanError::CountOverflow)?;
-            let candidate = arena.and(delta, free[edge.target])?;
-            if candidate == BooleanId::FALSE {
-                continue;
-            }
-            let contribution = match edge.guard {
-                TransferGuard::TargetFree => candidate,
-                TransferGuard::SingleCell { cell } => {
-                    arena.and(candidate, occupied[usize::from(cell)])?
+        {
+            let delta = std::mem::replace(&mut pending[source], BooleanId::FALSE);
+            let mut prior_cursors = [None; 3];
+            let mut remaining = [delta; 3];
+            // Inductively delta is inside domain and the source's free family.
+            // Every edge intersects it with target-free conditions, so no edge
+            // needs another domain/source gate and no outside assignment enters.
+            for edge in &edges[offsets[source]..offsets[source + 1]] {
+                check_cancelled(control)?;
+                work.propagation_edges = work
+                    .propagation_edges
+                    .checked_add(1)
+                    .ok_or(BooleanError::CountOverflow)?;
+                // Reuse the already-proved target family before evaluating its
+                // cell/kick dependencies. The target remains unchanged until this
+                // transfer is admitted, so its contribution is already novel.
+                let unseen = arena.not(reached[edge.target])?;
+                let unexplored = arena.and(delta, unseen)?;
+                if unexplored == BooleanId::FALSE {
+                    increment(&mut work.early_reached_rejections)?;
+                    continue;
                 }
-                TransferGuard::BlockedPriorPose { pose } => {
-                    let blocked = arena.not(free[usize::from(pose)])?;
-                    arena.and(candidate, blocked)?
+                let candidate = arena.and(unexplored, free[edge.target])?;
+                if candidate == BooleanId::FALSE {
+                    continue;
                 }
-                TransferGuard::Ordered {
-                    slot,
-                    prior_offset,
-                    prior_count,
-                } => {
-                    let slot = usize::from(slot);
-                    let start = prior_offset as usize;
-                    let end = start
-                        .checked_add(prior_count as usize)
-                        .ok_or(BooleanError::CountOverflow)?;
-                    let cursor = prior_cursors[slot].get_or_insert(start);
-                    // This prefix is target-independent and resets for each
-                    // source-pop/slot. Never store candidate here: admitting
-                    // this target must not erase a later kick's assignments.
-                    // Read every original prior, including skipped descriptors,
-                    // and advance each term at most once for this delta/slot.
-                    while *cursor < end && remaining[slot] != BooleanId::FALSE {
-                        check_cancelled(control)?;
-                        let prior = usize::from(prior_targets[*cursor]);
-                        let blocked = arena.not(free[prior])?;
-                        remaining[slot] = arena.and(remaining[slot], blocked)?;
-                        *cursor += 1;
-                        increment(&mut work.rotation_ordered_prior_terms)?;
+                let novel = match edge.guard {
+                    TransferGuard::TargetFree => candidate,
+                    TransferGuard::SingleCell { cell } => {
+                        arena.and(candidate, occupied[usize::from(cell)])?
                     }
-                    arena.and(candidate, remaining[slot])?
+                    TransferGuard::BlockedPriorPose { pose } => {
+                        let blocked = arena.not(free[usize::from(pose)])?;
+                        arena.and(candidate, blocked)?
+                    }
+                    TransferGuard::Ordered {
+                        slot,
+                        prior_offset,
+                        prior_count,
+                    } => {
+                        let slot = usize::from(slot);
+                        let start = prior_offset as usize;
+                        let end = start
+                            .checked_add(prior_count as usize)
+                            .ok_or(BooleanError::CountOverflow)?;
+                        let cursor = prior_cursors[slot].get_or_insert(start);
+                        // This prefix is target-independent and resets for each
+                        // source-pop/slot. Never store candidate here: admitting
+                        // this target must not erase a later kick's assignments.
+                        // Read every original prior, including skipped descriptors,
+                        // and advance each term at most once for this delta/slot.
+                        while *cursor < end && remaining[slot] != BooleanId::FALSE {
+                            check_cancelled(control)?;
+                            let prior = usize::from(prior_targets[*cursor]);
+                            let blocked = arena.not(free[prior])?;
+                            remaining[slot] = arena.and(remaining[slot], blocked)?;
+                            *cursor += 1;
+                            increment(&mut work.rotation_ordered_prior_terms)?;
+                        }
+                        arena.and(candidate, remaining[slot])?
+                    }
+                };
+                if novel == BooleanId::FALSE {
+                    continue;
                 }
-            };
-            if contribution == BooleanId::FALSE {
-                continue;
+                reached[edge.target] = arena.or(reached[edge.target], novel)?;
+                let was_pending = pending[edge.target] != BooleanId::FALSE;
+                pending[edge.target] = arena.or(pending[edge.target], novel)?;
+                if !was_pending {
+                    queue.push_back(edge.target);
+                }
+                work.family_updates = work
+                    .family_updates
+                    .checked_add(1)
+                    .ok_or(BooleanError::CountOverflow)?;
             }
-            let unseen = arena.not(reached[edge.target])?;
-            let novel = arena.and(contribution, unseen)?;
-            if novel == BooleanId::FALSE {
-                continue;
-            }
-            reached[edge.target] = arena.or(reached[edge.target], novel)?;
-            let was_pending = pending[edge.target] != BooleanId::FALSE;
-            pending[edge.target] = arena.or(pending[edge.target], novel)?;
-            if !was_pending {
-                queue.push_back(edge.target);
-            }
-            work.family_updates = work
-                .family_updates
-                .checked_add(1)
-                .ok_or(BooleanError::CountOverflow)?;
         }
+        // delta/remaining/candidate/novel are all out of scope. The complete
+        // surviving private root set is exactly these four mutable slices.
+        collect_movement_garbage(
+            arena,
+            collect_private,
+            domain,
+            free,
+            &mut reached,
+            &mut pending,
+        )?;
     }
     Ok(reached)
 }

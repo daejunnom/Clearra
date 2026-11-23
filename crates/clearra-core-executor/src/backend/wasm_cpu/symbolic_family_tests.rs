@@ -106,6 +106,41 @@ fn compare(query: &PcScenarioQuery) -> SymbolicFamilyResult {
             u128::from(coverage.covered_patterns().count_ones()),
             "per-identity source relation",
         );
+        let universe = problem.piece_source().materialized_universe().unwrap();
+        if universe.pattern_count() <= 64 {
+            let identity = coverage.identity();
+            let mut rows = Vec::new();
+            for index in 0..identity.placement_count() {
+                let placement = identity.placement(index).unwrap();
+                rows.push(
+                    symbolic
+                        .catalog
+                        .skeleton_id(placement.piece(), placement.cells_mask())
+                        .unwrap(),
+                );
+            }
+            rows.sort_unstable();
+            let row_count = symbolic.catalog.skeleton_count() as u32;
+            for ordinal in 0..universe.pattern_count() {
+                let queue = universe.sequence_at(ordinal);
+                let variables = rows.iter().copied().chain(queue.iter().enumerate().map(
+                    |(position, &piece)| {
+                        row_count + position as u32 * 7 + super::super::piece_index(piece) as u32
+                    },
+                ));
+                let expected = coverage.covered_patterns().words()[ordinal / 64]
+                    & (1_u64 << (ordinal % 64))
+                    != 0;
+                assert_eq!(
+                    symbolic
+                        .sets
+                        .contains(symbolic.accepted, variables)
+                        .unwrap(),
+                    expected,
+                    "exact identity/source pair at ordinal {ordinal}",
+                );
+            }
+        }
     }
     let before = symbolic.identity_page(0, 3).unwrap();
     symbolic.compact().unwrap();
@@ -122,6 +157,187 @@ fn compare(query: &PcScenarioQuery) -> SymbolicFamilyResult {
         .unwrap()
         .is_empty());
     symbolic
+}
+
+#[test]
+fn symbolic_family_shared_row_checks_preserve_distinct_source_and_hold_relations() {
+    // A six-column well can be tiled in different ways. Two fresh draws plus
+    // the initial I exercise distinct source tails and terminal Hold release.
+    let required = 0x3f | (0x3f << 10);
+    let request = query(2, 0xfffff ^ required, 3, PcQueueInput::standard_7_bag())
+        .with_supply_window_size(SupplyWindowSize::new(2))
+        .with_allow_hold(true)
+        .with_hold_piece(Some(PieceKind::I))
+        .with_rule(jstris_180());
+    let result = compare(&request);
+    assert_eq!(result.report.source_count, 42);
+    assert!(result.report.unique_solution_count > 1);
+    assert!(result.report.covered_source_count > 1);
+    assert!(result.report.covered_source_count < result.report.source_count);
+    assert!(result
+        .report
+        .ranks
+        .iter()
+        .any(|rank| rank.source_semijoins > 0));
+}
+
+fn assert_same_joint_family(
+    actual: &mut SymbolicFamilyResult,
+    expected: &mut SymbolicFamilyResult,
+    problem: &SearchProblem,
+) {
+    let actual_ids: BTreeSet<_> = actual
+        .identity_page(0, 10_000)
+        .unwrap()
+        .into_iter()
+        .collect();
+    let expected_ids: BTreeSet<_> = expected
+        .identity_page(0, 10_000)
+        .unwrap()
+        .into_iter()
+        .collect();
+    assert_eq!(
+        actual_ids, expected_ids,
+        "physical quotient preserves identities"
+    );
+    assert_eq!(
+        actual.report.unique_solution_count,
+        expected.report.unique_solution_count
+    );
+    assert_eq!(
+        actual.report.covered_source_count,
+        expected.report.covered_source_count
+    );
+    assert_eq!(
+        actual.report.solution_source_pairs,
+        expected.report.solution_source_pairs
+    );
+    let universe = problem.piece_source().materialized_universe().unwrap();
+    assert!(universe.pattern_count() <= 64);
+    for identity in actual_ids {
+        let mut rows = Vec::new();
+        for index in 0..identity.placement_count() {
+            let placement = identity.placement(index).unwrap();
+            let row = actual
+                .catalog
+                .skeleton_id(placement.piece(), placement.cells_mask())
+                .unwrap();
+            assert_eq!(
+                expected
+                    .catalog
+                    .skeleton_id(placement.piece(), placement.cells_mask()),
+                Some(row)
+            );
+            rows.push(row);
+        }
+        rows.sort_unstable();
+        let row_count = actual.catalog.skeleton_count() as u32;
+        for ordinal in 0..universe.pattern_count() {
+            let queue = universe.sequence_at(ordinal);
+            let variables =
+                rows.iter()
+                    .copied()
+                    .chain(queue.iter().enumerate().map(|(position, &piece)| {
+                        row_count + position as u32 * 7 + super::super::piece_index(piece) as u32
+                    }));
+            assert_eq!(
+                actual
+                    .sets
+                    .contains(actual.accepted, variables.clone())
+                    .unwrap(),
+                expected
+                    .sets
+                    .contains(expected.accepted, variables)
+                    .unwrap(),
+                "original identity/source pair at ordinal {ordinal}",
+            );
+        }
+    }
+}
+
+#[test]
+fn symbolic_family_cell_occupancy_preserves_full_source_pairs_for_all_builtin_kicks() {
+    let required = 0x3f | (0x3f << 10);
+    for rule in [no_kick(), srs(), srs_plus(), srs_x(), jstris_180()] {
+        let request = query(2, 0xfffff ^ required, 3, PcQueueInput::standard_7_bag())
+            .with_supply_window_size(SupplyWindowSize::new(2))
+            .with_allow_hold(true)
+            .with_hold_piece(Some(PieceKind::I))
+            .with_rule(rule);
+        let mut expected = compare(&request);
+        let problem = ProblemCompiler::compile_scenario_pc(&request).unwrap();
+        let mut actual = solve_symbolic_family_with_cell_occupancy(
+            &problem,
+            limits(),
+            &ExecutionControl::default(),
+        )
+        .unwrap();
+        assert_eq!(actual.report.movement_variable_space, "original-cells");
+        assert_same_joint_family(&mut actual, &mut expected, &problem);
+    }
+}
+
+#[cfg(all(feature = "parallel", not(target_family = "wasm")))]
+#[test]
+fn symbolic_family_cell_occupancy_keeps_parallel_owner_and_cofactor_lifetimes() {
+    let required = 0x3f | (0x3f << 10);
+    let request = query(2, 0xfffff ^ required, 3, PcQueueInput::standard_7_bag())
+        .with_supply_window_size(SupplyWindowSize::new(2))
+        .with_allow_hold(true)
+        .with_hold_piece(Some(PieceKind::I))
+        .with_rule(jstris_180());
+    let policy = request
+        .execution_policy()
+        .clone()
+        .with_use_all_logical_processors(true)
+        .with_workers(9);
+    let request = request.with_execution_policy(policy);
+    let problem = ProblemCompiler::compile_scenario_pc(&request).unwrap();
+    let mut expected = compare(&request);
+    let mut actual = solve_symbolic_family_with_cell_occupancy(
+        &problem,
+        SymbolicFamilyLimits::default(),
+        &ExecutionControl::default(),
+    )
+    .unwrap();
+    assert_same_joint_family(&mut actual, &mut expected, &problem);
+    if problem.backend_policy().workers() > 1 {
+        assert!(actual
+            .report
+            .ranks
+            .iter()
+            .any(|rank| rank.movement_parallel.spawned_workers > 1));
+    }
+}
+
+#[test]
+fn symbolic_family_cell_occupancy_refusal_and_cancellation_never_fall_back() {
+    let request = query(2, 0xfc3f0, 2, fixed(vec![PieceKind::I; 2])).with_rule(jstris_180());
+    let problem = ProblemCompiler::compile_scenario_pc(&request).unwrap();
+    let refusal = SymbolicFamilyLimits {
+        // Two terminal IDs are the minimum valid arena. The first primitive
+        // cell must then fail with a resource error, not invalid configuration.
+        max_predicate_nodes: 2,
+        ..limits()
+    };
+    assert_eq!(
+        solve_symbolic_family_with_cell_occupancy(&problem, refusal, &ExecutionControl::default())
+            .err(),
+        Some(SymbolicFamilyError::Resource(
+            "symbolic_predicate_node_limit"
+        )),
+    );
+    let cancellation = CancellationToken::new();
+    cancellation.handle().cancel();
+    assert_eq!(
+        solve_symbolic_family_with_cell_occupancy(
+            &problem,
+            limits(),
+            &ExecutionControl::new(cancellation)
+        )
+        .err(),
+        Some(SymbolicFamilyError::Cancelled),
+    );
 }
 
 #[test]
