@@ -8,8 +8,11 @@
 //! valid after a failed operation. Only explicit compaction changes IDs.
 
 use core::mem::size_of;
+use std::sync::Arc;
 
-use clearra_core_domain::execution_cancellation::CancellationToken;
+use clearra_core_domain::execution_cancellation::{
+    CancellationToken, ExecutionProgress, ProgressSink,
+};
 
 use super::{
     exact_collections::ExactHashMap,
@@ -19,6 +22,8 @@ use super::{
 #[cfg(test)]
 #[path = "geometry_partial_family_tests.rs"]
 mod tests;
+
+const WORK_PROGRESS_MASK: u64 = (1 << 18) - 1;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub(super) struct ZddId(u32);
@@ -82,14 +87,18 @@ struct WorkBudget {
     limits: ZddLimits,
     steps: u64,
     cancellation: Option<CancellationToken>,
+    progress_sink: Option<Arc<dyn ProgressSink>>,
+    progress_stage: &'static str,
 }
 
 impl WorkBudget {
-    fn new(limits: ZddLimits) -> Self {
+    fn new(limits: ZddLimits, progress_stage: &'static str) -> Self {
         Self {
             limits,
             steps: 0,
             cancellation: None,
+            progress_sink: None,
+            progress_stage,
         }
     }
 
@@ -113,6 +122,15 @@ impl WorkBudget {
             return Err(ZddError::WorkLimit);
         }
         self.steps = self.steps.saturating_add(1);
+        if self.steps & WORK_PROGRESS_MASK == 0 {
+            if let Some(sink) = &self.progress_sink {
+                sink.report(ExecutionProgress::new(
+                    self.progress_stage,
+                    self.steps,
+                    None,
+                ));
+            }
+        }
         Ok(())
     }
 
@@ -216,7 +234,7 @@ impl ZddArena {
             unary: ExactHashMap::default(),
             counts: ExactHashMap::default(),
             scratch_memo_entries: 0,
-            budget: WorkBudget::new(limits),
+            budget: WorkBudget::new(limits, "symbolic_work_zdd"),
             metrics: ZddMetrics::default(),
             epoch: 0,
         }
@@ -224,6 +242,10 @@ impl ZddArena {
 
     pub(super) fn set_cancellation(&mut self, cancellation: CancellationToken) {
         self.budget.cancellation = Some(cancellation);
+    }
+
+    pub(super) fn set_progress_sink(&mut self, progress_sink: Option<Arc<dyn ProgressSink>>) {
+        self.budget.progress_sink = progress_sink;
     }
 
     pub(super) fn node_count(&self) -> usize {
@@ -267,6 +289,49 @@ impl ZddArena {
             .copied()
             .map(Some)
             .ok_or(ZddError::InvalidFamily)
+    }
+
+    /// Tests one strictly increasing member without allocating or changing
+    /// arena state. Variables omitted from a ZDD branch are absent, including
+    /// every remaining variable after UNIT. Invalid input order is rejected
+    /// even when an earlier variable already rules out membership.
+    pub(super) fn contains(
+        &self,
+        mut root: ZddId,
+        variables: impl IntoIterator<Item = u32>,
+    ) -> Result<bool, ZddError> {
+        self.node(root)?;
+        let mut previous = None;
+        let mut possible = true;
+        for variable in variables {
+            if previous.is_some_and(|prior| prior >= variable) {
+                return Err(ZddError::InvalidVariableOrder);
+            }
+            previous = Some(variable);
+            if !possible {
+                continue;
+            }
+            loop {
+                match self.node(root)? {
+                    Some(node) if node.variable < variable => root = node.low,
+                    Some(node) if node.variable == variable => {
+                        root = node.high;
+                        break;
+                    }
+                    _ => {
+                        possible = false;
+                        break;
+                    }
+                }
+            }
+        }
+        if !possible {
+            return Ok(false);
+        }
+        while let Some(node) = self.node(root)? {
+            root = node.low;
+        }
+        Ok(root == ZddId::UNIT)
     }
 
     /// High-empty reduction is the ZDD rule. Equal low/high branches must
@@ -908,13 +973,17 @@ impl<'a> GeometryDownView<'a> {
             unique: ExactHashMap::default(),
             derivatives: ExactHashMap::default(),
             filter_memo_entries: 0,
-            budget: WorkBudget::new(limits),
+            budget: WorkBudget::new(limits, "symbolic_work_down"),
             metrics: GeometryDownMetrics::default(),
         })
     }
 
     pub(super) fn set_cancellation(&mut self, cancellation: CancellationToken) {
         self.budget.cancellation = Some(cancellation);
+    }
+
+    pub(super) fn set_progress_sink(&mut self, progress_sink: Option<Arc<dyn ProgressSink>>) {
+        self.budget.progress_sink = progress_sink;
     }
 
     /// Bind the original catalog's row masks once. In a valid exact cover,

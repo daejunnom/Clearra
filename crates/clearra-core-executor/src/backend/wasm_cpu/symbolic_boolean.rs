@@ -6,10 +6,14 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
-use clearra_core_domain::execution_cancellation::CancellationToken;
+use clearra_core_domain::execution_cancellation::{
+    CancellationToken, ExecutionProgress, ProgressSink,
+};
 
 static NEXT_OWNER: AtomicU64 = AtomicU64::new(1);
+const WORK_PROGRESS_MASK: u64 = (1 << 18) - 1;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub(super) struct BooleanId(u32);
@@ -78,6 +82,7 @@ pub(super) struct BooleanArena {
     variable_count: u32,
     limits: BooleanLimits,
     cancellation: Option<CancellationToken>,
+    progress_sink: Option<Arc<dyn ProgressSink>>,
     nodes: Vec<BooleanNode>,
     unique: HashMap<UniqueKey, BooleanId>,
     applied: HashMap<ApplyKey, BooleanId>,
@@ -112,6 +117,7 @@ impl BooleanArena {
             variable_count,
             limits,
             cancellation: None,
+            progress_sink: None,
             nodes,
             unique: HashMap::new(),
             applied: HashMap::new(),
@@ -123,6 +129,10 @@ impl BooleanArena {
 
     pub fn set_cancellation(&mut self, token: CancellationToken) {
         self.cancellation = Some(token);
+    }
+
+    pub fn set_progress_sink(&mut self, progress_sink: Option<Arc<dyn ProgressSink>>) {
+        self.progress_sink = progress_sink;
     }
 
     pub const fn owner_id(&self) -> u64 {
@@ -388,6 +398,15 @@ impl BooleanArena {
             .work
             .checked_add(1)
             .ok_or(BooleanError::CountOverflow)?;
+        if self.work & WORK_PROGRESS_MASK == 0 {
+            if let Some(sink) = &self.progress_sink {
+                sink.report(ExecutionProgress::new(
+                    "symbolic_work_boolean",
+                    self.work,
+                    None,
+                ));
+            }
+        }
         Ok(())
     }
 

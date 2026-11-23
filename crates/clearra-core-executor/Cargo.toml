@@ -36,6 +36,10 @@ required-features = ["native-c-core"]
 name = "symbolic_family"
 required-features = ["symbolic-family"]
 
+[[example]]
+name = "symbolic_family_compare"
+required-features = ["symbolic-family", "parallel"]
+
 [dependencies]
 clearra-accelerator-activation = { path = "../clearra-accelerator-activation" }
 clearra-build-coverage = { path = "../clearra-build-coverage" }

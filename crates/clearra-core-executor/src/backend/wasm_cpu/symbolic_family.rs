@@ -166,12 +166,39 @@ pub struct SymbolicFamilyResult {
     accepted: ZddId,
     identities: ZddId,
     covered_sources: ZddId,
+    source_length: usize,
     report: SymbolicFamilyReport,
 }
 
 impl SymbolicFamilyResult {
     pub fn report(&self) -> &SymbolicFamilyReport {
         &self.report
+    }
+
+    /// Full original queue length, including draws hidden by source projection.
+    pub const fn source_length(&self) -> usize {
+        self.source_length
+    }
+
+    /// Whether at least one accepted identity covers this full original queue.
+    /// This is global source membership, not a per-identity relation check.
+    /// It allocates no nodes or scratch storage and leaves counts and caches
+    /// unchanged. `PieceKind` admits only the seven standard tetrominoes.
+    pub fn covers_source(&self, source: &[PieceKind]) -> Result<bool, SymbolicFamilyError> {
+        if source.len() != self.source_length {
+            return Err(SymbolicFamilyError::InvalidProblem(
+                "symbolic_output_source_length",
+            ));
+        }
+        let row_count = u32::try_from(self.catalog.skeleton_count())
+            .map_err(|_| SymbolicFamilyError::InvalidProblem("symbolic_output_variable_range"))?;
+        let piece_count = PieceKind::STANDARD_TETROMINOES.len() as u32;
+        // Supply compilation checked the entire original-source variable
+        // range. Each queue selects one variable from its position's block.
+        let variables = source.iter().enumerate().map(|(position, &piece)| {
+            row_count + position as u32 * piece_count + super::piece_index(piece) as u32
+        });
+        Ok(self.sets.contains(self.covered_sources, variables)?)
     }
 
     /// Extract only the requested page. `offset` skips counted DAG branches;
@@ -244,12 +271,19 @@ impl SymbolicFamilyResult {
 /// It has no implicit time limit and no candidate-enumeration fallback. The
 /// feature does not activate this path in product dispatch. First-success
 /// ordered kicks use the active verified table, including imported tables.
+/// Diagnostic sinks receive frequent phase/context markers and coarse work
+/// pulses. Keep these callbacks lightweight; sampling, clocks and logging
+/// belong to the diagnostic owner rather than a row-operation callback.
 pub fn solve_symbolic_family(
     problem: &SearchProblem,
     limits: SymbolicFamilyLimits,
     control: &ExecutionControl,
 ) -> Result<SymbolicFamilyResult, SymbolicFamilyError> {
     validate_scope(problem, control)?;
+    // Markers update an optional diagnostic context; the sink owns sampling.
+    // No clock, formatting or logging belongs in these operation boundaries.
+    let phase = |stage| control.report_progress(stage, 0, None);
+    phase("symbolic_phase_catalog");
     let catalog = GeometryCatalog::compile(problem).map_err(geometry_error)?;
     let target_depth = catalog.required_cells().count_ones() as usize / 4;
     if problem.exact_pieces() != Some(target_depth) || target_depth == 0 {
@@ -266,8 +300,12 @@ pub fn solve_symbolic_family(
     };
     let mut sets = ZddArena::new(set_limits);
     sets.set_cancellation(control.cancellation.clone());
+    sets.set_progress_sink(control.progress_sink.clone());
+    phase("symbolic_phase_source");
     let mut supply = SymbolicFamilySupply::compile(problem, row_count, &mut sets)?;
+    phase("symbolic_phase_targets");
     let keys = geometry_keys(problem, target_depth, &mut supply, &mut sets)?;
+    phase("symbolic_phase_geometry");
     let geometry = compile_symbolic_geometry(
         &catalog,
         keys,
@@ -293,6 +331,7 @@ pub fn solve_symbolic_family(
         .map_err(|_| SymbolicFamilyError::Resource("symbolic_rank_report_allocation"))?;
     let mut down = GeometryDownView::new(&geometry.family, geometry.root, row_count, set_limits)?;
     down.set_cancellation(control.cancellation.clone());
+    down.set_progress_sink(control.progress_sink.clone());
     let mut row_cells = Vec::new();
     row_cells
         .try_reserve_exact(row_count as usize)
@@ -300,6 +339,7 @@ pub fn solve_symbolic_family(
     row_cells.extend((0..row_count).map(|row| catalog.skeleton(row).cells));
     down.set_row_cells(&row_cells)?;
     drop(row_cells);
+    phase("symbolic_phase_occupancy");
     let mut predicates = BooleanArena::new(
         row_count,
         BooleanLimits {
@@ -309,8 +349,10 @@ pub fn solve_symbolic_family(
         },
     )?;
     predicates.set_cancellation(control.cancellation.clone());
+    predicates.set_progress_sink(control.progress_sink.clone());
     let occupancy = SymbolicOccupancy::compile(&catalog, &mut predicates, control)?;
     let persistent_predicates = predicates.checkpoint();
+    phase("symbolic_phase_templates");
     let templates = match super::ordered_kick_authority(problem, catalog.width(), catalog.height())
         .map_err(geometry_error)?
     {
@@ -329,6 +371,7 @@ pub fn solve_symbolic_family(
         limits.max_work_per_arena,
         limits.max_memo_entries,
     );
+    phase("symbolic_phase_initial_down");
     let initial = down.filter_extendible(&mut sets, supply.root())?;
     let mut current = BTreeMap::new();
     if initial != ZddId::EMPTY {
@@ -336,6 +379,12 @@ pub fn solve_symbolic_family(
     }
     for rank in 0..target_depth {
         check_cancelled(control)?;
+        control.report_progress(
+            "symbolic_context_rank",
+            (rank + 1) as u64,
+            Some(target_depth as u64),
+        );
+        phase("symbolic_phase_rank_domain");
         let mut joint = ZddId::EMPTY;
         for &root in current.values() {
             joint = sets.union(joint, root)?;
@@ -344,6 +393,7 @@ pub fn solve_symbolic_family(
             break;
         }
         let domain = bridge.domain(&sets, &mut predicates, joint, control)?;
+        phase("symbolic_phase_board");
         let board = occupancy.for_domain(&mut predicates, domain, control)?;
         let mut next = BTreeMap::new();
         let mut rank_report = SymbolicFamilyRankReport {
@@ -351,6 +401,8 @@ pub fn solve_symbolic_family(
             ..SymbolicFamilyRankReport::default()
         };
         for piece in PieceKind::STANDARD_TETROMINOES {
+            control.report_progress("symbolic_context_piece", piece.as_ascii() as u64, None);
+            phase("symbolic_phase_supply");
             // Compile the small supply product once per kind, not per row.
             let mut ready = BTreeMap::new();
             for (&state, &root) in &current {
@@ -363,33 +415,52 @@ pub fn solve_symbolic_family(
             if ready.is_empty() {
                 continue;
             }
+            phase("symbolic_phase_movement");
             let relation = board.compile_piece(&mut predicates, &templates, piece, control)?;
             let work = relation.work();
             rank_report.movement_poses += work.poses;
             rank_report.guarded_movement_edges += work.guarded_edges;
             rank_report.movement_propagations += work.propagation_edges;
+            phase("symbolic_phase_rows");
             for row_id in 0..row_count {
                 if catalog.skeleton(row_id).piece != piece {
                     continue;
                 }
                 check_cancelled(control)?;
+                control.report_progress(
+                    "symbolic_context_row",
+                    u64::from(row_id),
+                    Some(u64::from(row_count)),
+                );
                 rank_report.legal_row_queries += 1;
+                phase("symbolic_phase_row_legal");
                 let legal = relation.legal_row(&mut predicates, row_id, control)?;
                 if legal == BooleanId::FALSE {
                     continue;
                 }
                 for (&state, &root) in &ready {
+                    phase("symbolic_phase_row_bridge");
                     let selected = bridge.filter(&mut sets, &predicates, root, legal, control)?;
                     if selected == ZddId::EMPTY {
                         continue;
                     }
+                    phase("symbolic_phase_row_add");
                     let extended = sets.add(selected, row_id)?;
                     rank_report.geometry_filters += 1;
+                    phase("symbolic_phase_row_down");
                     let extendible = down.filter_extendible(&mut sets, extended)?;
+                    phase("symbolic_phase_row_merge");
                     merge_root(&mut next, state, extendible, &mut sets)?;
                 }
             }
         }
+        // Reassert the rank to clear stale piece/row context for shared work.
+        control.report_progress(
+            "symbolic_context_rank",
+            (rank + 1) as u64,
+            Some(target_depth as u64),
+        );
+        phase("symbolic_phase_rank_count");
         let mut joint_next = ZddId::EMPTY;
         for &root in next.values() {
             joint_next = sets.union(joint_next, root)?;
@@ -399,12 +470,14 @@ pub fn solve_symbolic_family(
         rank_report.predicate_nodes = predicates.node_count();
         rank_report.derivative_nodes = down.generated_node_count();
         rank_report.set_nodes_before_compaction = sets.node_count();
+        phase("symbolic_phase_rank_compact");
         rank_report.set_compaction_peak_bytes_estimate =
             compact_layer(&mut sets, &mut supply, &mut next)?;
         rank_report.set_nodes_after_compaction = sets.node_count();
         report.ranks.push(rank_report);
         // Only request-lifetime U(S) expressions survive. The arena keeps its
         // capacity for the next rank; this is logical reuse, not an RSS claim.
+        phase("symbolic_phase_predicate_rewind");
         drop(board);
         predicates.rewind(persistent_predicates)?;
         current = next;
@@ -415,6 +488,8 @@ pub fn solve_symbolic_family(
         );
     }
     check_cancelled(control)?;
+    control.report_progress("symbolic_context_clear", 0, None);
+    phase("symbolic_phase_accepted");
     let mut accepted = ZddId::EMPTY;
     // An early empty layer is complete emptiness. A resource error above never
     // reaches this completion path and cannot publish an empty success result.
@@ -425,18 +500,21 @@ pub fn solve_symbolic_family(
             }
         }
     }
+    phase("symbolic_phase_identity_project");
     let mut source_variables = Vec::new();
     source_variables
         .try_reserve_exact((supply.variable_count() - row_count) as usize)
         .map_err(|_| SymbolicFamilyError::Resource("symbolic_projection_allocation"))?;
     source_variables.extend(supply.source_variables());
     let identities = sets.project(accepted, &source_variables)?;
+    phase("symbolic_phase_source_project");
     let mut row_variables = Vec::new();
     row_variables
         .try_reserve_exact(row_count as usize)
         .map_err(|_| SymbolicFamilyError::Resource("symbolic_projection_allocation"))?;
     row_variables.extend(0..row_count);
     let covered_sources = sets.project(accepted, &row_variables)?;
+    phase("symbolic_phase_final_count");
     report.unique_solution_count = sets.count(identities)?;
     report.covered_source_count = sets.count(covered_sources)?;
     report.solution_source_pairs = sets.count(accepted)?;
@@ -448,6 +526,7 @@ pub fn solve_symbolic_family(
     report.retained_predicate_bytes_estimate = predicates.retained_bytes();
     report.retained_derivative_bytes_estimate = down.retained_bytes();
     let mut roots = [accepted, identities, covered_sources];
+    phase("symbolic_phase_final_compact");
     report.result_compaction_peak_bytes_estimate = sets.compact(&mut roots)?.peak_retained_bytes;
     report.set_nodes_created = sets.metrics().created_nodes;
     report.set_apply_misses = sets.metrics().apply_misses;
@@ -456,6 +535,7 @@ pub fn solve_symbolic_family(
     report.retained_set_bytes_estimate = sets.retained_bytes();
     // The result owns neither the original geometry DAG, its derivative memo,
     // nor movement predicates. Only accepted sets and the catalog survive.
+    phase("symbolic_phase_result_release");
     drop(down);
     drop(geometry);
     drop(occupancy);
@@ -465,6 +545,8 @@ pub fn solve_symbolic_family(
         accepted: roots[0],
         identities: roots[1],
         covered_sources: roots[2],
+        source_length: (supply.variable_count() - row_count) as usize
+            / PieceKind::STANDARD_TETROMINOES.len(),
         report,
     })
 }

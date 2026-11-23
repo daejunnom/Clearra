@@ -14,6 +14,8 @@ use super::{
     symbolic_family::SymbolicFamilyError,
 };
 
+const WORK_PROGRESS_MASK: u64 = (1 << 18) - 1;
+
 pub(super) struct FamilyBridge {
     row_count: u32,
     max_work: u64,
@@ -263,6 +265,9 @@ impl FamilyBridge {
             .ok_or(SymbolicFamilyError::Resource(
                 "symbolic_bridge_work_overflow",
             ))?;
+        if self.work & WORK_PROGRESS_MASK == 0 {
+            control.report_progress("symbolic_work_bridge", self.work, None);
+        }
         Ok(())
     }
 }

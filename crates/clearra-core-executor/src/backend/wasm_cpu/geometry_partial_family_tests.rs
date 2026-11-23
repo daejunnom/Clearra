@@ -79,6 +79,59 @@ fn zero_suppression_and_canonical_union_preserve_set_meaning() {
 }
 
 #[test]
+fn contains_preserves_zero_suppressed_membership_without_mutating_the_arena() {
+    let mut arena = arena();
+    let root = family(&mut arena, &[&[], &[1, 4], &[2], &[3, 70], &[u32::MAX]]);
+    let before = (
+        arena.node_count(),
+        arena.metrics(),
+        arena.work_steps(),
+        arena.epoch(),
+        arena.retained_bytes(),
+    );
+    for member in [&[][..], &[1, 4], &[2], &[3, 70], &[u32::MAX]] {
+        assert_eq!(arena.contains(root, member.iter().copied()), Ok(true));
+    }
+    for missing in [&[0][..], &[1], &[1, 3, 4], &[1, 4, 5], &[3], &[70]] {
+        assert_eq!(arena.contains(root, missing.iter().copied()), Ok(false));
+    }
+    assert_eq!(arena.contains(ZddId::EMPTY, []), Ok(false));
+    assert_eq!(arena.contains(ZddId::EMPTY, [1]), Ok(false));
+    assert_eq!(arena.contains(ZddId::UNIT, []), Ok(true));
+    assert_eq!(arena.contains(ZddId::UNIT, [1]), Ok(false));
+    assert_eq!(
+        (
+            arena.node_count(),
+            arena.metrics(),
+            arena.work_steps(),
+            arena.epoch(),
+            arena.retained_bytes(),
+        ),
+        before,
+    );
+}
+
+#[test]
+fn contains_rejects_invalid_roots_and_unordered_members() {
+    let mut arena = arena();
+    let root = singleton(&mut arena, &[1, 4]);
+    assert_eq!(
+        arena.contains(ZddId(u32::MAX), []),
+        Err(ZddError::InvalidFamily),
+    );
+    for root in [ZddId::EMPTY, ZddId::UNIT, root] {
+        assert_eq!(
+            arena.contains(root, [1, 1]),
+            Err(ZddError::InvalidVariableOrder),
+        );
+        assert_eq!(
+            arena.contains(root, [4, 1]),
+            Err(ZddError::InvalidVariableOrder),
+        );
+    }
+}
+
+#[test]
 fn binary_operations_use_absence_for_missing_variables() {
     let mut arena = arena();
     let left = family(&mut arena, &[&[], &[1], &[1, 4], &[3, 70]]);
@@ -176,6 +229,12 @@ fn iterative_operations_do_not_use_the_call_stack_for_variable_depth() {
     assert_eq!(page[0].first(), Some(&0));
     assert_eq!(page[0].last(), Some(&4095));
     assert!(!page[0].contains(&2048));
+    assert_eq!(arena.contains(root, 0..4096), Ok(true));
+    assert_eq!(arena.contains(removed, 0..4096), Ok(false));
+    assert_eq!(
+        arena.contains(removed, (0..4096).filter(|&variable| variable != 2048)),
+        Ok(true),
+    );
 }
 
 #[test]

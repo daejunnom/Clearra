@@ -492,6 +492,15 @@ struct DiagnosticProgress {
 
 impl ProgressSink for DiagnosticProgress {
     fn report(&self, progress: ExecutionProgress) {
+        // The comparison harness owns the detailed atomic-context sampler.
+        // These markers can occur per row; this simple CLI keeps only its
+        // existing geometry/rank reports instead of logging each transition.
+        if progress.stage.starts_with("symbolic_phase_")
+            || progress.stage.starts_with("symbolic_context_")
+            || progress.stage.starts_with("symbolic_work_")
+        {
+            return;
+        }
         let mut last = self.last.lock().expect("diagnostic progress state");
         if last.0 != progress.stage || last.1.elapsed() >= Duration::from_secs(1) {
             eprintln!(

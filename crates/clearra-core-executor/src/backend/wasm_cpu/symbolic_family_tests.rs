@@ -153,17 +153,44 @@ fn symbolic_family_preserves_line_clear_frames_for_every_builtin_profile() {
         assert!(result.report.unique_solution_count > 0);
         assert_eq!(result.report.covered_source_count, 1);
         assert_eq!(result.report.ranks.len(), 2);
+        assert_eq!(result.source_length(), 2);
+        assert_eq!(result.covers_source(&[PieceKind::I; 2]), Ok(true));
+        assert_eq!(
+            result.covers_source(&[PieceKind::I, PieceKind::O]),
+            Ok(false),
+        );
     }
 }
 
 #[test]
 fn symbolic_family_retains_queue_correlations_through_hold_and_terminal_projection() {
+    use PieceKind::{I, J, L, O, S, T, Z};
+
     for hold in [false, true] {
         // Hidden P7 completions retain their original source identities. The
         // separated holes can consume their two visible draws only as II.
         let result = compare(&query(2, 0xfff0, 2, pattern("[IO]1[IO]1P7")).with_allow_hold(hold));
         assert_eq!(result.report.source_count, 20_160);
         assert_eq!(result.report.covered_source_count, 5_040);
+        assert_eq!(result.source_length(), 9);
+        assert_eq!(result.covers_source(&[I, I, I, O, T, S, Z, J, L]), Ok(true));
+        assert_eq!(result.covers_source(&[I, I, L, J, Z, S, T, O, I]), Ok(true));
+        assert_eq!(
+            result.covers_source(&[I, O, I, O, T, S, Z, J, L]),
+            Ok(false)
+        );
+        assert_eq!(
+            result.covers_source(&[I, I, I, I, T, S, Z, J, L]),
+            Ok(false)
+        );
+        for wrong_length in [&[][..], &[I, I], &[I, I, I, O, T, S, Z, J, L, I]] {
+            assert_eq!(
+                result.covers_source(wrong_length),
+                Err(SymbolicFamilyError::InvalidProblem(
+                    "symbolic_output_source_length",
+                )),
+            );
+        }
     }
     let held = compare(
         &query(2, 0xfc3f0, 2, fixed(vec![PieceKind::O, PieceKind::I]))
@@ -171,6 +198,8 @@ fn symbolic_family_retains_queue_correlations_through_hold_and_terminal_projecti
             .with_hold_piece(Some(PieceKind::I)),
     );
     assert_eq!(held.report.covered_source_count, 1);
+    assert_eq!(held.covers_source(&[PieceKind::O, PieceKind::I]), Ok(true),);
+    assert_eq!(held.covers_source(&[PieceKind::I; 2]), Ok(false));
 }
 
 #[test]
@@ -178,6 +207,10 @@ fn symbolic_family_empty_refusal_and_cancellation_are_different_outcomes() {
     let impossible = query(2, 0xfc3f0, 2, fixed(vec![PieceKind::I, PieceKind::O]));
     let result = compare(&impossible);
     assert_eq!(result.report.unique_solution_count, 0);
+    assert_eq!(
+        result.covers_source(&[PieceKind::I, PieceKind::O]),
+        Ok(false),
+    );
     let problem =
         ProblemCompiler::compile_scenario_pc(&query(2, 0xfc3f0, 2, fixed(vec![PieceKind::I; 2])))
             .unwrap();
