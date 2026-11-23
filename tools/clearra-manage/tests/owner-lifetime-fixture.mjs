@@ -6,6 +6,11 @@ switch (process.argv[2]) {
   case 'normal':
     setTimeout(() => console.log('fixture-complete'), 150);
     break;
+  case 'self-signal':
+    // This test-only child owns the target PID. The supervisor must preserve
+    // its signal status without inventing a prior termination request.
+    process.kill(process.pid, 'SIGKILL');
+    break;
   case 'cancel':
     console.log('fixture-ready');
     setTimeout(() => console.log('unexpected-late-success'), 2_500);

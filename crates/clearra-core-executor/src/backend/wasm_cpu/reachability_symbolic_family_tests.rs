@@ -250,10 +250,16 @@ fn symbolic_row_legality_matches_independent_physics_for_all_builtin_kicks() {
         let occupancy = SymbolicOccupancy::compile(&catalog, &mut arena, &control).unwrap();
         let domain = free_selection_domain(&mut arena, catalog.skeleton_count(), &chosen);
         let board = occupancy.for_domain(&mut arena, domain, &control).unwrap();
+        let outside = arena.not(domain).unwrap();
         for piece in PieceKind::STANDARD_TETROMINOES {
             let relation = board
                 .compile_piece(&mut arena, &templates, piece, &control)
                 .unwrap();
+            // Check the movement result before legal_row's availability gate:
+            // collision-only guards must never publish an outside-domain lock.
+            for &lock in &relation.locks {
+                assert_eq!(arena.and(lock, outside).unwrap(), BooleanId::FALSE);
+            }
             let rows: Vec<_> = (0..catalog.skeleton_count() as u32)
                 .filter(|&row| catalog.skeleton(row).piece == piece)
                 .collect();
@@ -302,18 +308,221 @@ fn symbolic_row_legality_matches_independent_physics_for_all_builtin_kicks() {
     assert!(gap_targets > 0);
 }
 
-fn ordered_profile(reorder: bool) -> VerifiedKickTableProfile {
+#[test]
+fn symbolic_collision_only_transfers_keep_reached_inside_the_seed_domain() {
+    let control = ExecutionControl::default();
+    let mut arena = BooleanArena::new(3, BooleanLimits::default()).unwrap();
+    let selected_domain = arena.variable(0).unwrap();
+    let blocker = arena.variable(1).unwrap();
+    let excluded = arena.variable(2).unwrap();
+    let included = arena.not(excluded).unwrap();
+    let domain = arena.and(selected_domain, included).unwrap();
+    let occupied = arena.and(domain, blocker).unwrap();
+    let free_target = arena.not(occupied).unwrap();
+    // Outside domain all collision predicates are true. Seeding, rather than
+    // a later lock or row gate, must reject those otherwise admitted worlds.
+    let free = [BooleanId::TRUE, free_target, BooleanId::TRUE];
+    let edges = [
+        Edge {
+            target: 1,
+            guard: TransferGuard::TargetFree,
+        },
+        Edge {
+            target: 2,
+            guard: TransferGuard::TargetFree,
+        },
+        Edge {
+            target: 0,
+            guard: TransferGuard::TargetFree,
+        },
+    ];
+    let mut work = SymbolicReachabilityWork::default();
+    let reached = propagate(
+        &mut arena,
+        domain,
+        &[0, 1, 2, 3],
+        &edges,
+        &[0],
+        &free,
+        &[BooleanId::FALSE; 64],
+        &[],
+        &control,
+        &mut work,
+    )
+    .unwrap();
+    for assignment in 0..8 {
+        let in_domain = assignment & 1 != 0 && assignment & 4 == 0;
+        for (pose, &root) in reached.iter().enumerate() {
+            let expected = in_domain && (pose == 0 || assignment & 2 == 0);
+            assert_eq!(
+                arena.evaluate(root, |variable| assignment & (1 << variable) != 0),
+                expected
+            );
+        }
+    }
+    let outside = arena.not(domain).unwrap();
+    for &root in &reached {
+        assert_eq!(arena.and(root, outside).unwrap(), BooleanId::FALSE);
+    }
+    let none = propagate(
+        &mut arena,
+        BooleanId::FALSE,
+        &[0, 1, 2, 3],
+        &edges,
+        &[0],
+        &free,
+        &[BooleanId::FALSE; 64],
+        &[],
+        &control,
+        &mut work,
+    )
+    .unwrap();
+    assert_eq!(none, [BooleanId::FALSE; 3]);
+}
+
+#[test]
+fn symbolic_transfer_descriptors_keep_priority_slots_and_requeued_deltas_exact() {
+    let control = ExecutionControl::default();
+    let mut arena = BooleanArena::new(4, BooleanLimits::default()).unwrap();
+    let domain = arena.variable(3).unwrap();
+    let mut occupied = [BooleanId::FALSE; 64];
+    for (cell, root) in occupied[..3].iter_mut().enumerate() {
+        let variable = arena.variable(cell as u32).unwrap();
+        *root = arena.and(domain, variable).unwrap();
+    }
+    let free_a = arena.not(occupied[0]).unwrap();
+    let free_b = arena.not(occupied[1]).unwrap();
+    let free_c = arena.not(occupied[2]).unwrap();
+    let free = [
+        BooleanId::TRUE,
+        free_c,
+        free_c,
+        free_c,
+        free_a,
+        free_b,
+        BooleanId::TRUE,
+        BooleanId::TRUE,
+        BooleanId::TRUE,
+        BooleanId::TRUE,
+        free_a,
+    ];
+    // Slot 0's original sequence is [4, 3, 5, 6]; slot 1's is [5, 7].
+    // Poses 4 and 5 have no transfer descriptor but remain first-success
+    // competitors. The earlier target 3 becomes a prior for target 6.
+    let prior_targets = [4, 3, 5, 6, 5, 7];
+    let edges = [
+        Edge {
+            target: 1,
+            guard: TransferGuard::SingleCell { cell: 0 },
+        },
+        Edge {
+            target: 2,
+            guard: TransferGuard::BlockedPriorPose { pose: 4 },
+        },
+        Edge {
+            target: 3,
+            guard: TransferGuard::Ordered {
+                slot: 0,
+                prior_offset: 0,
+                prior_count: 1,
+            },
+        },
+        Edge {
+            target: 6,
+            guard: TransferGuard::Ordered {
+                slot: 0,
+                prior_offset: 0,
+                prior_count: 3,
+            },
+        },
+        Edge {
+            target: 7,
+            guard: TransferGuard::Ordered {
+                slot: 1,
+                prior_offset: 4,
+                prior_count: 1,
+            },
+        },
+        // Seed 8 sends a first delta with a=true directly to pose 0. Seed 9
+        // sends a=false through pose 10, so pose 0 is processed a second time.
+        Edge {
+            target: 0,
+            guard: TransferGuard::SingleCell { cell: 0 },
+        },
+        Edge {
+            target: 10,
+            guard: TransferGuard::TargetFree,
+        },
+        Edge {
+            target: 0,
+            guard: TransferGuard::TargetFree,
+        },
+    ];
+    let mut work = SymbolicReachabilityWork::default();
+    let reached = propagate(
+        &mut arena,
+        domain,
+        &[0, 5, 5, 5, 5, 5, 5, 5, 5, 6, 7, 8],
+        &edges,
+        &[8, 9],
+        &free,
+        &occupied,
+        &prior_targets,
+        &control,
+        &mut work,
+    )
+    .unwrap();
+    for assignment in 0..16 {
+        let in_domain = assignment & 8 != 0;
+        let a = assignment & 1 != 0;
+        let b = assignment & 2 != 0;
+        let c = assignment & 4 != 0;
+        let expected = [
+            in_domain,
+            in_domain && a && !c,
+            in_domain && a && !c,
+            in_domain && a && !c,
+            false,
+            false,
+            in_domain && a && b && c,
+            in_domain && b,
+            in_domain,
+            in_domain,
+            in_domain && !a,
+        ];
+        for (pose, &root) in reached.iter().enumerate() {
+            assert_eq!(
+                arena.evaluate(root, |variable| assignment & (1 << variable) != 0),
+                expected[pose],
+                "assignment={assignment} pose={pose}",
+            );
+        }
+    }
+    // The first pop consumes three original slot-0 terms and one slot-1
+    // term. On requeue, slot 0 stops after one false term; slot 1 still runs.
+    // A target-conditioned prefix would incorrectly reject target 6, and a
+    // prefix reused across pops would lose a=false assignments at target 7.
+    assert_eq!(work.rotation_ordered_prior_terms, 6);
+    eprintln!(
+        "symbolic_transfer_descriptor_bytes={}",
+        std::mem::size_of::<Edge>()
+    );
+}
+
+fn ordered_profile(reorder: bool, first_repetitions: usize) -> VerifiedKickTableProfile {
     let selected = KickTransition::new(PieceKind::T, RotationState::Right, RotationState::Zero);
     let mut entries = SrsKicks::profile().entries().to_vec();
+    let entry = entries
+        .iter_mut()
+        .find(|entry| entry.transition() == selected)
+        .unwrap();
+    let mut offsets = entry.sequence().offsets().to_vec();
     if reorder {
-        let entry = entries
-            .iter_mut()
-            .find(|entry| entry.transition() == selected)
-            .unwrap();
-        let mut offsets = entry.sequence().offsets().to_vec();
         offsets[..=2].rotate_right(1);
-        *entry = KickTableEntry::new(selected, KickOffsetSequence::new(offsets));
     }
+    let mut repeated = vec![offsets[0]; first_repetitions];
+    repeated.extend_from_slice(&offsets[1..]);
+    *entry = KickTableEntry::new(selected, KickOffsetSequence::new(repeated));
     VerifiedKickTableProfile::try_new(KickTableProfile::new(
         KickTableProfileId::Srs90,
         RuleProfileId::Srs,
@@ -338,29 +547,99 @@ fn symbolic_imported_ordered_tables_keep_distinct_same_tag_answers() {
     let occupancy = SymbolicOccupancy::compile(&catalog, &mut arena, &control).unwrap();
     let domain = exact_selection_domain(&mut arena, catalog.skeleton_count(), &[]);
     let board = occupancy.for_domain(&mut arena, domain, &control).unwrap();
-    let mut answers = Vec::new();
-    for reordered in [false, true] {
-        let profile = ordered_profile(reordered);
-        let authority =
-            CompactKickAuthority::admit_profile(10, 2, RuleProfileId::Srs, &profile).unwrap();
-        let templates = SharedReachabilityTemplates::with_authority(authority);
-        let relation = board
-            .compile_piece(&mut arena, &templates, PieceKind::T, &control)
+    for repetitions in [1, 300] {
+        let mut answers = Vec::new();
+        for reordered in [false, true] {
+            let profile = ordered_profile(reordered, repetitions);
+            let authority =
+                CompactKickAuthority::admit_profile(10, 2, RuleProfileId::Srs, &profile).unwrap();
+            let templates = SharedReachabilityTemplates::with_authority(authority);
+            let relation = board
+                .compile_piece(&mut arena, &templates, PieceKind::T, &control)
+                .unwrap();
+            let outside = arena.not(domain).unwrap();
+            for &lock in &relation.locks {
+                assert_eq!(arena.and(lock, outside).unwrap(), BooleanId::FALSE);
+            }
+            let root = relation.legal_row(&mut arena, target, &control).unwrap();
+            let actual = value(&arena, root, &[]);
+            let anchors = reference_spawn_locks_for_ordered_profile(
+                10,
+                2,
+                INITIAL,
+                PieceKind::T,
+                profile.profile(),
+            )
             .unwrap();
-        let root = relation.legal_row(&mut arena, target, &control).unwrap();
-        let actual = value(&arena, root, &[]);
-        let anchors = reference_spawn_locks_for_ordered_profile(
-            10,
-            2,
-            INITIAL,
-            PieceKind::T,
-            profile.profile(),
-        )
-        .unwrap();
-        assert_eq!(actual, raw_row_is_legal(&catalog, &[], target, anchors));
-        answers.push(actual);
+            assert_eq!(actual, raw_row_is_legal(&catalog, &[], target, anchors));
+            if repetitions > 1 {
+                assert!(relation.work().rotation_candidates_pruned > 0);
+                assert!(relation
+                    .template
+                    .reverse_rotation_sources
+                    .iter()
+                    .any(|candidate| candidate.prior_target_count >= 300));
+            }
+            answers.push(actual);
+        }
+        assert_eq!(answers, [false, true]);
     }
-    assert_eq!(answers, [false, true]);
+}
+
+#[test]
+fn symbolic_rotation_lookup_reuses_exact_template_edges_and_original_ordinals() {
+    let mut checked = 0;
+    let mut pruned = 0;
+    super::super::with_global_kick_pruning(true, || {
+        for profile in PROFILES {
+            let templates = SharedReachabilityTemplates::new(4, 4, profile);
+            for piece in PieceKind::STANDARD_TETROMINOES {
+                let template = templates.template(piece);
+                for source in 0..template.state_masks.len() {
+                    for slot in 0..if template.allow_180 { 3 } else { 2 } {
+                        let transition = source * 3 + slot;
+                        let start = template.rotation_target_offsets[transition] as usize;
+                        let end = template.rotation_target_offsets[transition + 1] as usize;
+                        for candidate in start..end {
+                            let target = usize::from(template.rotation_targets[candidate]);
+                            let retained = retained_rotation_candidate(
+                                &template,
+                                source,
+                                slot,
+                                candidate - start,
+                                target,
+                            )
+                            .unwrap();
+                            let possible = super::super::edge_possible_in_cube(
+                                template.state_masks[source],
+                                template.state_masks[target],
+                                template.rotation_targets[start..candidate]
+                                    .iter()
+                                    .map(|&prior| template.state_masks[usize::from(prior)]),
+                                0,
+                                u64::MAX,
+                            );
+                            assert_eq!(retained.is_some(), possible);
+                            if let Some(retained) = retained {
+                                assert_eq!(usize::from(retained.source), source);
+                                assert_eq!(usize::from(retained.slot), slot);
+                                assert_eq!(retained.prior_target_count as usize, candidate - start);
+                                assert_eq!(
+                                    reverse_rotation_prior_targets(&template, retained),
+                                    &template.rotation_targets[start..candidate]
+                                );
+                            } else {
+                                pruned += 1;
+                            }
+                            checked += 1;
+                        }
+                    }
+                }
+            }
+        }
+    });
+    assert!(checked > 0);
+    assert!(pruned > 0);
 }
 
 #[test]

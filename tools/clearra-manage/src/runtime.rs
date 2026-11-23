@@ -3,6 +3,8 @@
 // and the receipt must describe the same lease and outcome.
 use serde::Serialize;
 use serde_json::json;
+#[cfg(unix)]
+use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
@@ -200,6 +202,20 @@ impl TerminationAudit {
             .store(true, Ordering::Relaxed);
     }
 
+    fn poll_child_exit(&self, child: &mut Child) -> bool {
+        if self.child_wait_status_observed.load(Ordering::Relaxed) {
+            return true;
+        }
+        if child.try_wait().ok().flatten().is_some() {
+            self.observe_child_wait_status();
+            true
+        } else {
+            // A failed poll is not proof of exit. Emergency cleanup must
+            // remain available when process status could not be observed.
+            false
+        }
+    }
+
     fn begin(
         &self,
         reason: &'static str,
@@ -277,6 +293,9 @@ impl TerminationAudit {
     }
 
     fn kill_child(&self, child: &mut Child, reason: &'static str, phase: &'static str) {
+        if self.poll_child_exit(child) {
+            return;
+        }
         let attempt = self.begin(
             reason,
             phase,
@@ -1125,7 +1144,7 @@ pub fn run(repository: &Path, policy: &Policy, options: RunOptions) -> Result<Ru
     // Descendants can retain the direct child's output pipes. Drain the owned
     // process group before waiting for those pipe readers to see EOF.
     let mut active = containment.active_processes();
-    let mut tree_stopped = active == Some(0);
+    let mut tree_stopped = containment.confirm_tree_stopped(true, active);
     if !tree_stopped {
         containment.force_terminate(
             forced_reason.map_or("remaining-descendants", |(reason, _)| reason),
@@ -1135,8 +1154,8 @@ pub fn run(repository: &Path, policy: &Policy, options: RunOptions) -> Result<Ru
             Instant::now() + Duration::from_secs(profile.termination_grace_seconds.max(1));
         while Instant::now() < cleanup_until {
             active = containment.active_processes();
-            if active == Some(0) {
-                tree_stopped = true;
+            tree_stopped = containment.confirm_tree_stopped(true, active);
+            if tree_stopped {
                 break;
             }
             thread::sleep(Duration::from_millis(50));
@@ -1287,14 +1306,15 @@ fn terminate_tree(
     containment.request_termination(child, reason, "termination-request");
     let deadline = Instant::now() + Duration::from_secs(grace_seconds);
     while Instant::now() < deadline {
-        let child_exited = child.try_wait().ok().flatten().is_some();
-        if child_exited {
-            containment.audit.observe_child_wait_status();
-        }
-        if child_exited && containment.active_processes() == Some(0) {
+        let child_exited = containment.audit.poll_child_exit(child);
+        if containment.confirm_tree_stopped(child_exited, containment.active_processes()) {
             return;
         }
         thread::sleep(Duration::from_millis(50));
+    }
+    let child_exited = containment.audit.poll_child_exit(child);
+    if containment.confirm_tree_stopped(child_exited, containment.active_processes()) {
+        return;
     }
     containment.force_terminate(reason, "termination-escalation");
     containment
@@ -1868,7 +1888,23 @@ impl Drop for Containment {
 struct Containment {
     process_group: i32,
     maximum_processes: u32,
+    // A numeric PGID is an authority only for this owned group's lifetime.
+    // Once its absence is confirmed, Drop must not signal a reused number.
+    cleanup_armed: Cell<bool>,
     audit: Arc<TerminationAudit>,
+}
+
+impl Containment {
+    fn confirm_tree_stopped(&self, child_exited: bool, active: Option<u32>) -> bool {
+        let stopped = child_exited && active == Some(0);
+        #[cfg(unix)]
+        if stopped {
+            self.cleanup_armed.set(false);
+        }
+        // Windows must still close its owned Job handle. Unlike a numeric
+        // PGID, the handle remains tied to the same kernel object until close.
+        stopped
+    }
 }
 
 #[cfg(unix)]
@@ -1882,11 +1918,15 @@ impl Containment {
         Ok(Self {
             process_group: child.id() as i32,
             maximum_processes,
+            cleanup_armed: Cell::new(true),
             audit,
         })
     }
 
     fn request_termination(&self, _: &mut Child, reason: &'static str, phase: &'static str) {
+        if !self.cleanup_armed.get() {
+            return;
+        }
         let attempt = self.audit.begin(
             reason,
             phase,
@@ -1900,11 +1940,17 @@ impl Containment {
         let os_error_code = (result != 0)
             .then(std::io::Error::last_os_error)
             .and_then(|error| error.raw_os_error());
+        if os_error_code == Some(libc::ESRCH) {
+            self.cleanup_armed.set(false);
+        }
         self.audit
             .finish(attempt, result == 0, Some(result), os_error_code);
     }
 
     fn force_terminate(&self, reason: &'static str, phase: &'static str) {
+        if !self.cleanup_armed.get() {
+            return;
+        }
         let attempt = self.audit.begin(
             reason,
             phase,
@@ -1918,6 +1964,9 @@ impl Containment {
         let os_error_code = (result != 0)
             .then(std::io::Error::last_os_error)
             .and_then(|error| error.raw_os_error());
+        if os_error_code == Some(libc::ESRCH) {
+            self.cleanup_armed.set(false);
+        }
         self.audit
             .finish(attempt, result == 0, Some(result), os_error_code);
     }
@@ -2031,6 +2080,75 @@ pub(crate) fn pid_alive(_: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    fn termination_fixture(script: &str) -> (Child, Containment, Arc<TerminationAudit>) {
+        let mut command = Command::new("sh");
+        command
+            .args(["-c", script])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        platform_prepare_command(&mut command);
+        let child = command.spawn().expect("start owned fixture");
+        let audit = Arc::new(TerminationAudit::new(
+            "termination-ownership-fixture",
+            Instant::now(),
+        ));
+        let containment =
+            Containment::attach(&child, u64::MAX, 8, Arc::clone(&audit)).expect("attach fixture");
+        (child, containment, audit)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn termination_ownership_completed_tree_retires_drop_signal() {
+        let (mut child, containment, audit) = termination_fixture("exit 0");
+        let status = child.wait().expect("reap completed fixture");
+        audit.observe_child_wait_status();
+        let stopped = containment.confirm_tree_stopped(true, containment.active_processes());
+        drop(containment);
+        assert!(status.success());
+        assert!(stopped);
+        assert!(audit.take_receipt_snapshot().attempts.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn termination_ownership_unconfirmed_tree_keeps_emergency_drop() {
+        use std::os::unix::process::ExitStatusExt;
+
+        let (mut child, containment, audit) = termination_fixture("read -r fixture");
+        let before_exit = containment.confirm_tree_stopped(false, Some(0));
+        let unknown_tree = containment.confirm_tree_stopped(true, None);
+        drop(containment);
+        // wait closes stdin as well, so a broken signal path cannot leave
+        // this finite fixture blocked on its input pipe.
+        let status = child.wait().expect("reap emergency fixture");
+        assert!(!before_exit);
+        assert!(!unknown_tree);
+        assert_eq!(status.signal(), Some(libc::SIGKILL));
+        let attempts = audit.take_receipt_snapshot().attempts;
+        assert_eq!(attempts.len(), 1);
+        assert_eq!(attempts[0].reason, "containment-drop");
+        assert!(!attempts[0].child_wait_status_observed);
+        assert!(attempts[0].succeeded);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn termination_ownership_reaped_child_skips_direct_fallback() {
+        let (mut child, containment, audit) = termination_fixture("exit 0");
+        let status = child.wait().expect("reap direct fixture");
+        audit.kill_child(&mut child, "fixture", "termination-direct-child");
+        let observed = audit.child_wait_status_observed.load(Ordering::Relaxed);
+        let stopped = containment.confirm_tree_stopped(observed, containment.active_processes());
+        drop(containment);
+        assert!(status.success());
+        assert!(observed);
+        assert!(stopped);
+        assert!(audit.take_receipt_snapshot().attempts.is_empty());
+    }
 
     #[cfg(unix)]
     #[test]

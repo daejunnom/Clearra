@@ -51,6 +51,16 @@ async function executeFixture(t, timeoutArguments, mode, cancelOnReady = false) 
   assert.equal(outcome.process_tree_stopped, true);
   assert.equal(outcome.descendant_processes_at_exit, 0);
   assert.equal(execution.signal, null);
+  const terminationEvents = execution.stderr.split(/\r?\n/u).flatMap((line) => {
+    try {
+      const event = JSON.parse(line);
+      return event.schema_id === 'clearra.runtime-termination-attempt.v1' ? [event] : [];
+    } catch { return []; }
+  });
+  if (process.platform !== 'win32') {
+    assert.equal(terminationEvents.some((event) => event.attempt.phase === 'drop-cleanup'), false,
+      'a confirmed stopped Unix group must not be signalled again by Drop');
+  }
   t.diagnostic(JSON.stringify({ receipt: paths[0][1], timeout_seconds: outcome.timeout_seconds,
     reason: outcome.reason, duration_ms: outcome.duration_ms, process_tree_stopped: outcome.process_tree_stopped }));
   return { ...execution, outcome };
@@ -61,7 +71,21 @@ test('timeout zero keeps the lease until ordinary completion', options, async (t
   assert.equal(result.code, 0);
   assert.equal(result.outcome.timeout_seconds, 0);
   assert.equal(result.outcome.reason, 'normal');
+  assert.deepEqual(result.outcome.termination_audit.attempts, []);
   assert.match(result.stdout, /fixture-complete/u);
+});
+
+test('child signal remains distinct from a supervisor termination request', {
+  ...options,
+  skip: options.skip || (process.platform === 'win32' ? 'Unix signal status fixture' : false),
+}, async (t) => {
+  const result = await executeFixture(t, ['--no-timeout'], 'self-signal');
+  assert.equal(result.code, 137);
+  assert.equal(result.outcome.reason, 'signal');
+  assert.deepEqual(result.outcome.child_termination,
+    { kind: 'unix-signal', signal: 9, core_dumped: false });
+  assert.equal(result.outcome.supervisor_termination_reason, null);
+  assert.deepEqual(result.outcome.termination_audit.attempts, []);
 });
 
 test('owner EOF cancels an unlimited run and prevents late success', options, async (t) => {

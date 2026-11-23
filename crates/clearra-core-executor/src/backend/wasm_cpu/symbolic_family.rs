@@ -126,8 +126,17 @@ pub struct SymbolicFamilyRankReport {
     pub predicate_nodes: usize,
     pub derivative_nodes: usize,
     pub movement_poses: usize,
+    /// Retained transfer descriptors, not materialized Boolean guard families.
     pub guarded_movement_edges: usize,
+    /// Transfers considered while propagating actual reached deltas.
     pub movement_propagations: u64,
+    pub rotation_candidate_checks: u64,
+    pub rotation_candidates_pruned: u64,
+    pub rotation_guard_no_prior: u64,
+    pub rotation_guard_single_bit: u64,
+    pub rotation_guard_single_mask: u64,
+    pub rotation_guard_ordered: u64,
+    pub rotation_ordered_prior_terms: u64,
     pub legal_row_queries: u64,
     pub geometry_filters: u64,
     /// Retained capacity after completed-piece memo releases in this rank.
@@ -155,6 +164,8 @@ pub struct SymbolicFamilyParallelReport {
     pub shared_prefix_retained_bytes_estimate: usize,
     pub private_node_peak_sum_upper_bound: usize,
     pub private_retained_bytes_sum_estimate: usize,
+    /// Construction-only private indexes released before worker publication.
+    pub released_builder_bytes_sum_estimate: usize,
     pub predicate_work_steps: u64,
 }
 
@@ -500,6 +511,13 @@ pub fn solve_symbolic_family(
                     rank_report.movement_poses += work.poses;
                     rank_report.guarded_movement_edges += work.guarded_edges;
                     rank_report.movement_propagations += work.propagation_edges;
+                    rank_report.rotation_candidate_checks += work.rotation_candidate_checks;
+                    rank_report.rotation_candidates_pruned += work.rotation_candidates_pruned;
+                    rank_report.rotation_guard_no_prior += work.rotation_guard_no_prior;
+                    rank_report.rotation_guard_single_bit += work.rotation_guard_single_bit;
+                    rank_report.rotation_guard_single_mask += work.rotation_guard_single_mask;
+                    rank_report.rotation_guard_ordered += work.rotation_guard_ordered;
+                    rank_report.rotation_ordered_prior_terms += work.rotation_ordered_prior_terms;
                     phase("symbolic_phase_rows");
                     let ready = &ready_by_piece[&piece];
                     for &(row_id, legal) in legal_rows {
@@ -591,6 +609,8 @@ pub fn solve_symbolic_family(
                     parallel.private_node_peak_sum_upper_bound;
                 parallel_report.private_retained_bytes_sum_estimate =
                     parallel.private_retained_bytes_sum_estimate;
+                parallel_report.released_builder_bytes_sum_estimate =
+                    parallel.released_builder_bytes_sum_estimate;
                 parallel_report.predicate_work_steps = parallel.predicate_work_steps;
             }
             if parallel_reason.is_some() {
@@ -605,6 +625,12 @@ pub fn solve_symbolic_family(
                         board.compile_piece(&mut predicates, &templates, piece, control)?;
                     let work = relation.work();
                     let mut legal_rows = Vec::new();
+                    super::symbolic_movement_progress::report_phase(
+                        control,
+                        piece,
+                        super::symbolic_movement_progress::MovementPhase::LegalRows,
+                        &predicates,
+                    );
                     for row_id in 0..row_count {
                         if catalog.skeleton(row_id).piece != piece {
                             continue;

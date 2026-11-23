@@ -1,5 +1,11 @@
 # Symbolic family: exact-cover 호환 필터, 공유 병렬 전이, CTK4 저장
 
+후속 기록: [소유권·알고리즘 재사용](symbolic-ownership-algorithm-reuse-2026-11-23.md)에서
+완료 worker의 생성용 map 해제, complemented edge, 기존 kick proof 재사용 및
+Boolean 간선 guard bank 제거의 실제 구현·검증·P7P4 결과를 다룬다.
+[종료 소유권 감사](2026-11-23-termination-ownership.md)는 내부 SIGKILL 경로와
+수정 후 실제 종료 증거를 구분한다. 아래 내용은 이전 구현 단계의 기록이다.
+
 작성일: 2026-11-23. 이 문서는 현재 작업트리의 구현, 확인된 유한 검증, 세 shipping
 Full4 실행의 미완료 관측을 정리한다. Row-prefix projection과 semijoin을 추가하기
 전후의 실행, 별도 CTK4 native 왕복 검증, 완료된 piece의 cache 수명 변경과 그

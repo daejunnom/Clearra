@@ -122,6 +122,8 @@ mod symbolic_family_parallel;
 #[cfg(feature = "symbolic-family")]
 mod symbolic_family_supply;
 #[cfg(feature = "symbolic-family")]
+mod symbolic_movement_progress;
+#[cfg(feature = "symbolic-family")]
 pub use symbolic_family::{
     solve_symbolic_family, SymbolicFamilyArchive, SymbolicFamilyArchiveError,
     SymbolicFamilyArchiveScope, SymbolicFamilyError, SymbolicFamilyLimits,

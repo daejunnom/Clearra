@@ -1,5 +1,10 @@
 # 빌드 중복과 SIGKILL 진단: 2026-11-23
 
+후속 기록: 내부 강제 종료 지점 전체 감사와 중복 정리 수정은
+[종료 소유권 감사](2026-11-23-termination-ownership.md), 이후 세 후보의 새 실측과
+Boolean 표현·간선 전파 변경은 [소유권·알고리즘 재사용 기록](symbolic-ownership-algorithm-reuse-2026-11-23.md)에
+있다. 아래 수치와 판정은 그 이전 구현 단계의 기록으로 보존한다.
+
 ## 1. 확인 범위와 현재 결론
 
 초기 Full4의 기존 경로와 symbolic 경로, 이후 compatibility filter, row-prefix,

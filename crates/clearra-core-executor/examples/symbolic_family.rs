@@ -477,6 +477,13 @@ fn describe_result(report: &SymbolicFamilyReport) -> Value {
         "movement_poses": rank.movement_poses.to_string(),
         "guarded_movement_edges": rank.guarded_movement_edges.to_string(),
         "movement_propagations": rank.movement_propagations.to_string(),
+        "rotation_candidate_checks": rank.rotation_candidate_checks.to_string(),
+        "rotation_candidates_pruned": rank.rotation_candidates_pruned.to_string(),
+        "rotation_guard_no_prior": rank.rotation_guard_no_prior.to_string(),
+        "rotation_guard_single_bit": rank.rotation_guard_single_bit.to_string(),
+        "rotation_guard_single_mask": rank.rotation_guard_single_mask.to_string(),
+        "rotation_guard_ordered": rank.rotation_guard_ordered.to_string(),
+        "rotation_ordered_prior_terms": rank.rotation_ordered_prior_terms.to_string(),
         "legal_row_queries": rank.legal_row_queries.to_string(),
         "geometry_filters": rank.geometry_filters.to_string(),
         "compatibility_cache_bytes_estimate": rank.compatibility_cache_bytes_estimate.to_string(),
@@ -538,6 +545,7 @@ impl ProgressSink for DiagnosticProgress {
             || progress.stage.starts_with("symbolic_context_")
             || progress.stage.starts_with("symbolic_work_")
             || progress.stage.starts_with("symbolic_storage_")
+            || progress.stage.starts_with("symbolic_movement_")
         {
             return;
         }

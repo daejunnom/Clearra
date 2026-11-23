@@ -26,6 +26,7 @@ use super::{
     },
     symbolic_boolean::{BooleanArena, BooleanId, FrozenBooleanPrefix},
     symbolic_family::SymbolicFamilyError,
+    symbolic_movement_progress::{self, MovementMetric, MovementPhase},
 };
 
 /// All roots belong to this predicate arena and are valid only during consume.
@@ -35,6 +36,8 @@ pub(super) struct PieceMovement {
     /// Includes false roots so the caller can count every actual legal query.
     pub legal_rows: Vec<(u32, BooleanId)>,
     pub work: SymbolicReachabilityWork,
+    /// Construction-only payload released before this result is published.
+    pub released_builder_bytes_estimate: usize,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -57,6 +60,7 @@ pub(super) struct ParallelMovementReport {
     pub private_node_peak_sum_upper_bound: usize,
     /// Sum at publication; omits transient stacks and is NOT peak RSS.
     pub private_retained_bytes_sum_estimate: usize,
+    pub released_builder_bytes_sum_estimate: usize,
 }
 
 pub(super) fn parallel_movement_fallback_reason(
@@ -114,6 +118,18 @@ pub(super) fn run_piece_movements(
         shared_prefix_retained_bytes_estimate: prefix.retained_bytes(),
         ..ParallelMovementReport::default()
     };
+    control.report_progress(
+        "symbolic_storage_boolean_shared_nodes",
+        prefix.node_count() as u64,
+        None,
+    );
+    control.report_progress(
+        "symbolic_storage_boolean_shared_bytes",
+        prefix.retained_bytes() as u64,
+        None,
+    );
+    control.report_progress("symbolic_storage_boolean_private_nodes", 0, None);
+    control.report_progress("symbolic_storage_boolean_private_bytes", 0, None);
     let stop = CancellationToken::new();
     let first_error = Arc::new(Mutex::new(None));
     let next_piece = AtomicUsize::new(0);
@@ -207,6 +223,13 @@ pub(super) fn run_piece_movements(
         }
         drop(sender);
         while let Ok(movement) = receiver.recv() {
+            let piece = movement.piece;
+            symbolic_movement_progress::report_phase(
+                control,
+                piece,
+                MovementPhase::Consuming,
+                &movement.predicates,
+            );
             let recorded = record_movement(&mut report, predicates, &movement);
             if let Err(error) = recorded {
                 fail(&first_error, &stop, error);
@@ -219,6 +242,7 @@ pub(super) fn run_piece_movements(
             // Drop the completed suffix before accepting another. Workers may
             // still hold private suffixes while blocked on their own send.
             drop(movement);
+            symbolic_movement_progress::report_released(control, piece);
         }
         for handle in handles {
             match handle.join() {
@@ -248,6 +272,20 @@ pub(super) fn run_piece_movements(
     // returns to the original owner. Do not change the original failure cause.
     drop(prefix);
     let thaw = predicates.thaw_prefix().map_err(SymbolicFamilyError::from);
+    if thaw.is_ok() {
+        control.report_progress("symbolic_storage_boolean_shared_nodes", 0, None);
+        control.report_progress("symbolic_storage_boolean_shared_bytes", 0, None);
+        control.report_progress(
+            "symbolic_storage_boolean_private_nodes",
+            predicates.private_node_count() as u64,
+            None,
+        );
+        control.report_progress(
+            "symbolic_storage_boolean_private_bytes",
+            predicates.private_retained_bytes() as u64,
+            None,
+        );
+    }
     match result {
         Err(error) => Err(error),
         Ok(report) => {
@@ -274,6 +312,7 @@ fn compile_piece(
         Arc::new(PieceProgress {
             shared: Arc::clone(shared),
             reported: AtomicU64::new(0),
+            piece,
         })
     });
     if let Some(progress) = &progress {
@@ -283,6 +322,12 @@ fn compile_piece(
         let relation = board.compile_piece(&mut predicates, templates, piece, control)?;
         let work = relation.work();
         let mut legal_rows = Vec::new();
+        symbolic_movement_progress::report_phase(
+            control,
+            piece,
+            MovementPhase::LegalRows,
+            &predicates,
+        );
         for row in board.row_ids(piece) {
             let legal = relation.legal_row(&mut predicates, row, control)?;
             legal_rows.try_reserve(1).map_err(allocation)?;
@@ -290,7 +335,7 @@ fn compile_piece(
         }
         Ok::<_, SymbolicFamilyError>((legal_rows, work))
     })();
-    if let Some(progress) = progress {
+    if let Some(progress) = &progress {
         progress.report(ExecutionProgress::new(
             "symbolic_work_boolean",
             predicates.work_steps(),
@@ -298,11 +343,25 @@ fn compile_piece(
         ));
     }
     let (legal_rows, work) = result?;
+    // Every root is final. The coordinator only reads nodes through the bridge;
+    // retaining private interning/apply maps would prolong their ownership
+    // while this worker waits to publish and while its rows are consumed.
+    let released_builder_bytes_estimate = predicates.seal_for_reading()?;
+    if let Some(sink) = &control.progress_sink {
+        symbolic_movement_progress::report_metric(
+            sink.as_ref(),
+            piece,
+            MovementMetric::ReleasedBuilderBytes,
+            released_builder_bytes_estimate as u64,
+        );
+    }
+    symbolic_movement_progress::report_phase(control, piece, MovementPhase::Published, &predicates);
     Ok(PieceMovement {
         piece,
         predicates,
         legal_rows,
         work,
+        released_builder_bytes_estimate,
     })
 }
 
@@ -331,6 +390,10 @@ fn record_movement(
         .private_retained_bytes_sum_estimate
         .checked_add(movement.predicates.private_retained_bytes())
         .ok_or_else(overflow)?;
+    report.released_builder_bytes_sum_estimate = report
+        .released_builder_bytes_sum_estimate
+        .checked_add(movement.released_builder_bytes_estimate)
+        .ok_or_else(overflow)?;
     report.movement_work.poses = report
         .movement_work
         .poses
@@ -351,6 +414,38 @@ fn record_movement(
         .family_updates
         .checked_add(movement.work.family_updates)
         .ok_or_else(overflow)?;
+    for (counter, additional) in [
+        (
+            &mut report.movement_work.rotation_candidate_checks,
+            movement.work.rotation_candidate_checks,
+        ),
+        (
+            &mut report.movement_work.rotation_candidates_pruned,
+            movement.work.rotation_candidates_pruned,
+        ),
+        (
+            &mut report.movement_work.rotation_guard_no_prior,
+            movement.work.rotation_guard_no_prior,
+        ),
+        (
+            &mut report.movement_work.rotation_guard_single_bit,
+            movement.work.rotation_guard_single_bit,
+        ),
+        (
+            &mut report.movement_work.rotation_guard_single_mask,
+            movement.work.rotation_guard_single_mask,
+        ),
+        (
+            &mut report.movement_work.rotation_guard_ordered,
+            movement.work.rotation_guard_ordered,
+        ),
+        (
+            &mut report.movement_work.rotation_ordered_prior_terms,
+            movement.work.rotation_ordered_prior_terms,
+        ),
+    ] {
+        *counter = counter.checked_add(additional).ok_or_else(overflow)?;
+    }
     report.completed_pieces += 1;
     Ok(())
 }
@@ -403,10 +498,28 @@ struct SharedProgress {
 struct PieceProgress {
     shared: Arc<SharedProgress>,
     reported: AtomicU64,
+    piece: PieceKind,
 }
 
 impl ProgressSink for PieceProgress {
     fn report(&self, progress: ExecutionProgress) {
+        let metric = match progress.stage {
+            "symbolic_storage_boolean_private_nodes" => Some(MovementMetric::PrivateNodes),
+            "symbolic_storage_boolean_private_bytes" => Some(MovementMetric::PrivateBytes),
+            _ => None,
+        };
+        if let Some(metric) = metric {
+            symbolic_movement_progress::report_metric(
+                self.shared.sink.as_ref(),
+                self.piece,
+                metric,
+                progress.completed,
+            );
+            return;
+        }
+        if progress.stage != "symbolic_work_boolean" {
+            return;
+        }
         let previous = self.reported.swap(progress.completed, Ordering::Relaxed);
         let Some(delta) = progress.completed.checked_sub(previous) else {
             return;
@@ -466,7 +579,9 @@ mod tests {
 
     impl ProgressSink for WorkProgress {
         fn report(&self, event: ExecutionProgress) {
-            assert_eq!(event.stage, "symbolic_work_boolean");
+            if event.stage != "symbolic_work_boolean" {
+                return;
+            }
             assert_eq!(event.total, None);
             self.0.lock().unwrap().push(event.completed);
         }
@@ -508,6 +623,8 @@ mod tests {
             9,
             &control,
             |movement| {
+                assert_eq!(movement.predicates.private_unique_retained_bytes(), 0);
+                assert_eq!(movement.predicates.private_apply_retained_bytes(), 0);
                 for &(row, legal) in &movement.legal_rows {
                     actual.push((row, movement.predicates.evaluate(legal, |_| false)));
                 }
@@ -522,6 +639,7 @@ mod tests {
         assert_eq!(report.spawned_workers, 3);
         assert!((1..=3).contains(&report.active_workers));
         assert_eq!(report.completed_pieces, 3);
+        assert!(report.released_builder_bytes_sum_estimate > 0);
         assert_eq!(
             owner.work_steps(),
             before_work + report.predicate_work_steps

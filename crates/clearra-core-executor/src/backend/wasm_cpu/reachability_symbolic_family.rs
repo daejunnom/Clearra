@@ -10,17 +10,20 @@
 //! only explicit Boolean-assignment table is the shared deleted-row frame,
 //! with at most 64 entries for the existing six-row movement authority.
 
-use std::{collections::VecDeque, sync::Arc};
+use std::collections::VecDeque;
+use std::sync::Arc;
 
-use clearra_core_domain::{execution_cancellation::ExecutionControl, piece::piece_kind::PieceKind};
+use clearra_core_domain::execution_cancellation::ExecutionControl;
+use clearra_core_domain::piece::piece_kind::PieceKind;
 
-use super::super::{
-    catalog::GeometryCatalog,
-    symbolic_boolean::{BooleanArena, BooleanError, BooleanId},
-};
+use super::super::catalog::GeometryCatalog;
+use super::super::symbolic_boolean::{BooleanArena, BooleanError, BooleanId};
+use super::super::symbolic_movement_progress::{self, MovementPhase};
 use super::{
-    state_from_index, state_index, ReachabilityTemplate, SharedReachabilityTemplates, State,
-    INVALID_STATE_INDEX, INVALID_STATE_MASK,
+    reverse_rotation_prior_targets, state_from_index, state_index, ReachabilityTemplate,
+    ReverseRotationSource, SharedReachabilityTemplates, State, INVALID_STATE_INDEX,
+    INVALID_STATE_MASK, NO_PRIOR_GUARD, ORDERED_GUARD, SINGLE_BIT_GUARD_BASE,
+    SINGLE_MASK_GUARD_BASE,
 };
 
 const MAX_ROWS: usize = 6;
@@ -47,9 +50,19 @@ pub(in super::super) struct SymbolicBoard<'catalog> {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(in super::super) struct SymbolicReachabilityWork {
     pub poses: usize,
+    /// Retained transfer descriptors, excluding already-impossible poses.
+    /// These are static conditions, not materialized Boolean edge families.
     pub guarded_edges: usize,
     pub propagation_edges: u64,
     pub family_updates: u64,
+    pub rotation_candidate_checks: u64,
+    pub rotation_candidates_pruned: u64,
+    pub rotation_guard_no_prior: u64,
+    pub rotation_guard_single_bit: u64,
+    pub rotation_guard_single_mask: u64,
+    pub rotation_guard_ordered: u64,
+    /// Original prior terms applied to source-pop deltas during propagation.
+    pub rotation_ordered_prior_terms: u64,
 }
 
 /// One piece and one current board domain, shared by every matching catalog row.
@@ -250,6 +263,12 @@ impl<'catalog> SymbolicBoard<'catalog> {
         // nominal profile ID, and supplies the exact existing sky authority.
         let template = templates.template(piece);
         let count = template.state_masks.len();
+        let mut work = SymbolicReachabilityWork {
+            poses: count,
+            ..SymbolicReachabilityWork::default()
+        };
+        symbolic_movement_progress::report_phase(control, piece, MovementPhase::Free, arena);
+        let outside_domain = arena.not(self.domain)?;
         let mut free = filled_vec(count, BooleanId::FALSE)?;
         for (source, root) in free.iter_mut().enumerate() {
             check_cancelled(control)?;
@@ -257,68 +276,42 @@ impl<'catalog> SymbolicBoard<'catalog> {
             if cells == INVALID_STATE_MASK {
                 continue;
             }
-            let mut allowed = self.domain;
+            // Occupancy already vanishes outside domain. Build only the
+            // collision predicate here; seed admission supplies domain once.
+            // Repeating domain can duplicate domain-conditioned intermediates.
+            let mut allowed = BooleanId::TRUE;
             while cells != 0 && allowed != BooleanId::FALSE {
                 let cell = cells.trailing_zeros() as usize;
                 cells &= cells - 1;
                 let empty = arena.not(self.occupied[cell])?;
                 allowed = arena.and(allowed, empty)?;
             }
-            *root = allowed;
+            // A collision predicate equal to !domain admits no in-domain
+            // assignment. Its values outside domain are unobservable because
+            // every reached/pending family remains inside domain.
+            *root = if allowed == outside_domain {
+                BooleanId::FALSE
+            } else {
+                allowed
+            };
         }
 
-        let mut edges = Vec::new();
-        let mut offsets = Vec::new();
-        offsets
-            .try_reserve_exact(count.checked_add(1).ok_or(BooleanError::CountOverflow)?)
-            .map_err(|_| BooleanError::Allocation)?;
-        for source in 0..count {
-            check_cancelled(control)?;
-            offsets.push(edges.len());
-            if free[source] == BooleanId::FALSE {
-                continue;
-            }
-            for &target in &template.translation_targets[source] {
-                if target != INVALID_STATE_INDEX {
-                    let target = usize::from(target);
-                    let guard = arena.and(free[source], free[target])?;
-                    append_edge(&mut edges, target, guard)?;
-                }
-            }
-            for slot in 0..if template.allow_180 { 3 } else { 2 } {
-                let transition = source * 3 + slot;
-                let start = template.rotation_target_offsets[transition] as usize;
-                let end = template.rotation_target_offsets[transition + 1] as usize;
-                let mut prior_blocked = free[source];
-                for &target in &template.rotation_targets[start..end] {
-                    if prior_blocked == BooleanId::FALSE {
-                        break;
-                    }
-                    let target = usize::from(target);
-                    let guard = arena.and(prior_blocked, free[target])?;
-                    append_edge(&mut edges, target, guard)?;
-                    // Even an unreachable or previously visited destination
-                    // suppresses later candidates whenever it is collision-free.
-                    let blocked = arena.not(free[target])?;
-                    prior_blocked = arena.and(prior_blocked, blocked)?;
-                }
-            }
-        }
-        offsets.push(edges.len());
-        let mut work = SymbolicReachabilityWork {
-            poses: count,
-            guarded_edges: edges.len(),
-            ..SymbolicReachabilityWork::default()
-        };
+        symbolic_movement_progress::report_phase(control, piece, MovementPhase::Edges, arena);
+        let (offsets, edges) = compile_transfers(&template, &free, control, &mut work)?;
+        symbolic_movement_progress::report_phase(control, piece, MovementPhase::Propagation, arena);
         let reachable = propagate(
             arena,
+            self.domain,
             &offsets,
             &edges,
             &template.sky_seeds,
             &free,
+            &self.occupied,
+            &template.rotation_targets,
             control,
             &mut work,
         )?;
+        symbolic_movement_progress::report_phase(control, piece, MovementPhase::Locks, arena);
         let mut locks = filled_vec(count, BooleanId::FALSE)?;
         for target in 0..count {
             check_cancelled(control)?;
@@ -391,10 +384,6 @@ impl SymbolicPieceRelation<'_, '_> {
                 continue;
             }
             check_cancelled(control)?;
-            let frame = arena.and(available, frame)?;
-            if frame == BooleanId::FALSE {
-                continue;
-            }
             let mut frame_locks = BooleanId::FALSE;
             for realization in catalog.instantiations(row_id, deleted as u16) {
                 check_cancelled(control)?;
@@ -416,7 +405,9 @@ impl SymbolicPieceRelation<'_, '_> {
             let accepted = arena.and(frame, frame_locks)?;
             result = arena.or(result, accepted)?;
         }
-        Ok(result)
+        // Availability is common to every frame. Factoring it out avoids
+        // rebuilding the row-specific gate for each physical realization.
+        arena.and(available, result)
     }
 
     pub(in super::super) fn work(&self) -> SymbolicReachabilityWork {
@@ -427,24 +418,160 @@ impl SymbolicPieceRelation<'_, '_> {
 #[derive(Clone, Copy)]
 struct Edge {
     target: usize,
-    guard: BooleanId,
+    guard: TransferGuard,
 }
 
-fn append_edge(edges: &mut Vec<Edge>, target: usize, guard: BooleanId) -> Result<(), BooleanError> {
-    if guard != BooleanId::FALSE {
-        edges.try_reserve(1).map_err(|_| BooleanError::Allocation)?;
-        edges.push(Edge { target, guard });
+/// Conditions over the immutable topology, evaluated only on a live delta.
+/// No variant owns a Boolean edge family or a copy of an ordered kick list.
+#[derive(Clone, Copy)]
+enum TransferGuard {
+    TargetFree,
+    SingleCell {
+        cell: u8,
+    },
+    BlockedPriorPose {
+        pose: u16,
+    },
+    Ordered {
+        slot: u8,
+        prior_offset: u32,
+        prior_count: u32,
+    },
+}
+
+/// There is deliberately no arena parameter: this stage retains topology
+/// descriptors without constructing any Boolean conjunction or negation.
+fn compile_transfers(
+    template: &ReachabilityTemplate,
+    free: &[BooleanId],
+    control: &ExecutionControl,
+    work: &mut SymbolicReachabilityWork,
+) -> Result<(Vec<usize>, Vec<Edge>), BooleanError> {
+    let count = free.len();
+    let mut edges = Vec::new();
+    let mut offsets = Vec::new();
+    offsets
+        .try_reserve_exact(count.checked_add(1).ok_or(BooleanError::CountOverflow)?)
+        .map_err(|_| BooleanError::Allocation)?;
+    for source in 0..count {
+        check_cancelled(control)?;
+        offsets.push(edges.len());
+        if free[source] == BooleanId::FALSE {
+            continue;
+        }
+        for &target in &template.translation_targets[source] {
+            if target != INVALID_STATE_INDEX && free[usize::from(target)] != BooleanId::FALSE {
+                append_edge(&mut edges, usize::from(target), TransferGuard::TargetFree)?;
+            }
+        }
+        for slot in 0..if template.allow_180 { 3 } else { 2 } {
+            let transition = source * 3 + slot;
+            let prior_offset = template.rotation_target_offsets[transition];
+            let start = prior_offset as usize;
+            let end = template.rotation_target_offsets[transition + 1] as usize;
+            for candidate in start..end {
+                check_cancelled(control)?;
+                increment(&mut work.rotation_candidate_checks)?;
+                let target = usize::from(template.rotation_targets[candidate]);
+                let Some(rotation) =
+                    retained_rotation_candidate(template, source, slot, candidate - start, target)?
+                else {
+                    increment(&mut work.rotation_candidates_pruned)?;
+                    continue;
+                };
+                if free[target] == BooleanId::FALSE {
+                    continue;
+                }
+                let guard = match rotation.free_endpoint_guard {
+                    ORDERED_GUARD => {
+                        increment(&mut work.rotation_guard_ordered)?;
+                        TransferGuard::Ordered {
+                            slot: rotation.slot,
+                            prior_offset,
+                            prior_count: rotation.prior_target_count,
+                        }
+                    }
+                    NO_PRIOR_GUARD => {
+                        increment(&mut work.rotation_guard_no_prior)?;
+                        TransferGuard::TargetFree
+                    }
+                    bit if bit < SINGLE_MASK_GUARD_BASE => {
+                        increment(&mut work.rotation_guard_single_bit)?;
+                        TransferGuard::SingleCell {
+                            cell: bit - SINGLE_BIT_GUARD_BASE,
+                        }
+                    }
+                    mask => {
+                        increment(&mut work.rotation_guard_single_mask)?;
+                        let prior = reverse_rotation_prior_targets(template, rotation);
+                        let &pose = prior
+                            .get(usize::from(mask - SINGLE_MASK_GUARD_BASE))
+                            .ok_or(BooleanError::InvalidInput("symbolic_rotation_guard"))?;
+                        TransferGuard::BlockedPriorPose { pose }
+                    }
+                };
+                append_edge(&mut edges, target, guard)?;
+            }
+        }
     }
+    offsets.push(edges.len());
+    work.guarded_edges = edges.len();
+    Ok((offsets, edges))
+}
+
+/// Reuse the template's global edge proof and endpoint-conditioned guard.
+/// CSR fill visits source, slot and original candidate ordinal in increasing
+/// order, so each target slice is sorted by this complete edge identity.
+/// A missing descriptor is a globally pruned edge, never a missing earlier
+/// first-success competitor: ORDERED guards still read the forward prefix.
+fn retained_rotation_candidate(
+    template: &ReachabilityTemplate,
+    source: usize,
+    slot: usize,
+    prior_count: usize,
+    target: usize,
+) -> Result<Option<ReverseRotationSource>, BooleanError> {
+    let source = u16::try_from(source).map_err(|_| BooleanError::CountOverflow)?;
+    let slot = u8::try_from(slot).map_err(|_| BooleanError::CountOverflow)?;
+    let prior_count = u32::try_from(prior_count).map_err(|_| BooleanError::CountOverflow)?;
+    let start = template.reverse_rotation_offsets[target] as usize;
+    let end = template.reverse_rotation_offsets[target + 1] as usize;
+    let candidates = &template.reverse_rotation_sources[start..end];
+    let index = candidates.binary_search_by_key(&(source, slot, prior_count), |candidate| {
+        (
+            candidate.source,
+            candidate.slot,
+            candidate.prior_target_count,
+        )
+    });
+    Ok(index.ok().map(|index| candidates[index]))
+}
+
+fn increment(value: &mut u64) -> Result<(), BooleanError> {
+    *value = value.checked_add(1).ok_or(BooleanError::CountOverflow)?;
+    Ok(())
+}
+
+fn append_edge(
+    edges: &mut Vec<Edge>,
+    target: usize,
+    guard: TransferGuard,
+) -> Result<(), BooleanError> {
+    edges.try_reserve(1).map_err(|_| BooleanError::Allocation)?;
+    edges.push(Edge { target, guard });
     Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
 fn propagate(
     arena: &mut BooleanArena,
+    domain: BooleanId,
     offsets: &[usize],
     edges: &[Edge],
     seeds: &[u16],
     free: &[BooleanId],
+    occupied: &[BooleanId; 64],
+    prior_targets: &[u16],
     control: &ExecutionControl,
     work: &mut SymbolicReachabilityWork,
 ) -> Result<Vec<BooleanId>, BooleanError> {
@@ -456,10 +583,12 @@ fn propagate(
         .try_reserve(count)
         .map_err(|_| BooleanError::Allocation)?;
     for &seed in seeds {
+        check_cancelled(control)?;
         let seed = usize::from(seed);
+        let admitted = arena.and(domain, free[seed])?;
         let was_pending = pending[seed] != BooleanId::FALSE;
-        reached[seed] = arena.or(reached[seed], free[seed])?;
-        pending[seed] = arena.or(pending[seed], free[seed])?;
+        reached[seed] = arena.or(reached[seed], admitted)?;
+        pending[seed] = arena.or(pending[seed], admitted)?;
         if !was_pending && pending[seed] != BooleanId::FALSE {
             queue.push_back(seed);
         }
@@ -467,12 +596,57 @@ fn propagate(
     while let Some(source) = queue.pop_front() {
         check_cancelled(control)?;
         let delta = std::mem::replace(&mut pending[source], BooleanId::FALSE);
+        let mut prior_cursors = [None; 3];
+        let mut remaining = [delta; 3];
+        // Inductively delta is inside domain and the source's free family.
+        // Every edge intersects it with target-free conditions, so no edge
+        // needs another domain/source gate and no outside assignment enters.
         for edge in &edges[offsets[source]..offsets[source + 1]] {
+            check_cancelled(control)?;
             work.propagation_edges = work
                 .propagation_edges
                 .checked_add(1)
                 .ok_or(BooleanError::CountOverflow)?;
-            let contribution = arena.and(delta, edge.guard)?;
+            let candidate = arena.and(delta, free[edge.target])?;
+            if candidate == BooleanId::FALSE {
+                continue;
+            }
+            let contribution = match edge.guard {
+                TransferGuard::TargetFree => candidate,
+                TransferGuard::SingleCell { cell } => {
+                    arena.and(candidate, occupied[usize::from(cell)])?
+                }
+                TransferGuard::BlockedPriorPose { pose } => {
+                    let blocked = arena.not(free[usize::from(pose)])?;
+                    arena.and(candidate, blocked)?
+                }
+                TransferGuard::Ordered {
+                    slot,
+                    prior_offset,
+                    prior_count,
+                } => {
+                    let slot = usize::from(slot);
+                    let start = prior_offset as usize;
+                    let end = start
+                        .checked_add(prior_count as usize)
+                        .ok_or(BooleanError::CountOverflow)?;
+                    let cursor = prior_cursors[slot].get_or_insert(start);
+                    // This prefix is target-independent and resets for each
+                    // source-pop/slot. Never store candidate here: admitting
+                    // this target must not erase a later kick's assignments.
+                    // Read every original prior, including skipped descriptors,
+                    // and advance each term at most once for this delta/slot.
+                    while *cursor < end && remaining[slot] != BooleanId::FALSE {
+                        check_cancelled(control)?;
+                        let prior = usize::from(prior_targets[*cursor]);
+                        let blocked = arena.not(free[prior])?;
+                        remaining[slot] = arena.and(remaining[slot], blocked)?;
+                        *cursor += 1;
+                        increment(&mut work.rotation_ordered_prior_terms)?;
+                    }
+                    arena.and(candidate, remaining[slot])?
+                }
+            };
             if contribution == BooleanId::FALSE {
                 continue;
             }

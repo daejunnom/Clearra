@@ -652,6 +652,13 @@ fn symbolic_report(report: &SymbolicFamilyReport) -> Value {
         "predicate_nodes": rank.predicate_nodes, "derivative_nodes": rank.derivative_nodes,
         "movement_poses": rank.movement_poses, "guarded_movement_edges": rank.guarded_movement_edges,
         "movement_propagations": rank.movement_propagations.to_string(),
+        "rotation_candidate_checks": rank.rotation_candidate_checks.to_string(),
+        "rotation_candidates_pruned": rank.rotation_candidates_pruned.to_string(),
+        "rotation_guard_no_prior": rank.rotation_guard_no_prior.to_string(),
+        "rotation_guard_single_bit": rank.rotation_guard_single_bit.to_string(),
+        "rotation_guard_single_mask": rank.rotation_guard_single_mask.to_string(),
+        "rotation_guard_ordered": rank.rotation_guard_ordered.to_string(),
+        "rotation_ordered_prior_terms": rank.rotation_ordered_prior_terms.to_string(),
         "legal_row_queries": rank.legal_row_queries.to_string(), "geometry_filters": rank.geometry_filters.to_string(),
         "compatibility_cache_bytes_estimate": rank.compatibility_cache_bytes_estimate,
         "compatibility_cache_peak_bytes_estimate": rank.compatibility_cache_peak_bytes_estimate,
@@ -967,6 +974,43 @@ const PHASES: &[&str] = &[
     "archive",
 ];
 
+const MOVEMENT_PHASES: [&str; 9] = [
+    "not_started",
+    "free",
+    "edges",
+    "propagation",
+    "locks",
+    "legal_rows",
+    "published",
+    "consuming",
+    "released",
+];
+
+struct PieceProgressState {
+    phase: AtomicU64,
+    private_nodes: AtomicU64,
+    private_bytes: AtomicU64,
+    released_builder_bytes: AtomicU64,
+}
+
+impl PieceProgressState {
+    fn new() -> Self {
+        Self {
+            phase: AtomicU64::new(0),
+            private_nodes: AtomicU64::new(ABSENT),
+            private_bytes: AtomicU64::new(ABSENT),
+            released_builder_bytes: AtomicU64::new(ABSENT),
+        }
+    }
+
+    fn reset(&self) {
+        self.phase.store(0, Ordering::Relaxed);
+        self.private_nodes.store(ABSENT, Ordering::Relaxed);
+        self.private_bytes.store(ABSENT, Ordering::Relaxed);
+        self.released_builder_bytes.store(ABSENT, Ordering::Relaxed);
+    }
+}
+
 struct ProgressState {
     started: Instant,
     phase: AtomicU32,
@@ -984,6 +1028,11 @@ struct ProgressState {
     storage_compatibility_memo_entries: AtomicU64,
     storage_compatibility_retained_bytes: AtomicU64,
     storage_generated_geometry_nodes: AtomicU64,
+    storage_boolean_parent_nodes: AtomicU64,
+    storage_boolean_parent_bytes: AtomicU64,
+    storage_boolean_shared_nodes: AtomicU64,
+    storage_boolean_shared_bytes: AtomicU64,
+    movement: [PieceProgressState; 7],
     event_count: AtomicU64,
     export_completed: AtomicU64,
     search_started_ns: AtomicU64,
@@ -1013,6 +1062,11 @@ impl ProgressState {
             storage_compatibility_memo_entries: AtomicU64::new(ABSENT),
             storage_compatibility_retained_bytes: AtomicU64::new(ABSENT),
             storage_generated_geometry_nodes: AtomicU64::new(ABSENT),
+            storage_boolean_parent_nodes: AtomicU64::new(ABSENT),
+            storage_boolean_parent_bytes: AtomicU64::new(ABSENT),
+            storage_boolean_shared_nodes: AtomicU64::new(ABSENT),
+            storage_boolean_shared_bytes: AtomicU64::new(ABSENT),
+            movement: std::array::from_fn(|_| PieceProgressState::new()),
             event_count: AtomicU64::new(0),
             export_completed: AtomicU64::new(0),
             search_started_ns: AtomicU64::new(0),
@@ -1037,6 +1091,15 @@ impl ProgressState {
         let compiler = self.geometry_compiler_finished_ns.load(Ordering::Relaxed);
         let search = self.search_started_ns.load(Ordering::Relaxed);
         let other = *self.other.lock().expect("progress event state");
+        let movement = self.movement.iter().zip(['I', 'O', 'T', 'S', 'Z', 'J', 'L']).map(|(state, piece)| {
+            json!({
+                "piece": piece,
+                "phase": MOVEMENT_PHASES.get(state.phase.load(Ordering::Relaxed) as usize),
+                "private_nodes": optional(&state.private_nodes).map(|value| value.to_string()),
+                "private_retained_bytes_estimate": optional(&state.private_bytes).map(|value| value.to_string()),
+                "released_builder_bytes_estimate": optional(&state.released_builder_bytes).map(|value| value.to_string()),
+            })
+        }).collect::<Vec<_>>();
         json!({
             "phase": PHASES[self.phase.load(Ordering::Relaxed) as usize],
             "rank": optional(&self.rank), "rank_total": self.rank_total.load(Ordering::Relaxed),
@@ -1054,7 +1117,13 @@ impl ProgressState {
                 "compatibility_memo_entries": optional(&self.storage_compatibility_memo_entries).map(|value| value.to_string()),
                 "compatibility_retained_bytes_estimate": optional(&self.storage_compatibility_retained_bytes).map(|value| value.to_string()),
                 "generated_geometry_nodes": optional(&self.storage_generated_geometry_nodes).map(|value| value.to_string()),
+                "boolean_parent_private_nodes": optional(&self.storage_boolean_parent_nodes).map(|value| value.to_string()),
+                "boolean_parent_private_retained_bytes_estimate": optional(&self.storage_boolean_parent_bytes).map(|value| value.to_string()),
+                "boolean_shared_prefix_nodes": optional(&self.storage_boolean_shared_nodes).map(|value| value.to_string()),
+                "boolean_shared_prefix_retained_bytes_estimate": optional(&self.storage_boolean_shared_bytes).map(|value| value.to_string()),
             },
+            "piece_movement": movement,
+            "movement_storage_scope": "latest payload estimates, not a simultaneous peak or RSS; parallel suffixes exclude the shared prefix, while sequential piece entries alias the parent and must not be summed",
             "event_count": self.event_count.load(Ordering::Relaxed).to_string(),
             "coverage_export_completed": self.export_completed.load(Ordering::Relaxed).to_string(),
             "geometry_completed_seconds_since_start": (geometry != 0).then_some(geometry as f64 / 1e9),
@@ -1071,6 +1140,36 @@ impl ProgressState {
 impl ProgressSink for ProgressState {
     fn report(&self, event: ExecutionProgress) {
         self.event_count.fetch_add(1, Ordering::Relaxed);
+        if let Some((piece, metric)) = event
+            .stage
+            .strip_prefix("symbolic_movement_")
+            .and_then(|stage| stage.split_once('_'))
+        {
+            let index = match piece {
+                "i" => Some(0),
+                "o" => Some(1),
+                "t" => Some(2),
+                "s" => Some(3),
+                "z" => Some(4),
+                "j" => Some(5),
+                "l" => Some(6),
+                _ => None,
+            };
+            if let Some(index) = index {
+                let state = &self.movement[index];
+                let destination = match metric {
+                    "phase" => Some(&state.phase),
+                    "private_nodes" => Some(&state.private_nodes),
+                    "private_bytes" => Some(&state.private_bytes),
+                    "released_builder_bytes" => Some(&state.released_builder_bytes),
+                    _ => None,
+                };
+                if let Some(destination) = destination {
+                    destination.store(event.completed, Ordering::Relaxed);
+                    return;
+                }
+            }
+        }
         // Only the two preparation boundaries read a clock in this callback.
         // Work pulses and row/context markers never format, sample RSS or do I/O.
         if event.stage == "symbolic_phase_compatibility_certificate"
@@ -1107,8 +1206,24 @@ impl ProgressSink for ProgressState {
             "symbolic_storage_generated_geometry_nodes" => self
                 .storage_generated_geometry_nodes
                 .store(event.completed, Ordering::Relaxed),
+            "symbolic_storage_boolean_private_nodes" => self
+                .storage_boolean_parent_nodes
+                .store(event.completed, Ordering::Relaxed),
+            "symbolic_storage_boolean_private_bytes" => self
+                .storage_boolean_parent_bytes
+                .store(event.completed, Ordering::Relaxed),
+            "symbolic_storage_boolean_shared_nodes" => self
+                .storage_boolean_shared_nodes
+                .store(event.completed, Ordering::Relaxed),
+            "symbolic_storage_boolean_shared_bytes" => self
+                .storage_boolean_shared_bytes
+                .store(event.completed, Ordering::Relaxed),
             "symbolic_context_rank" => {
-                self.rank.store(event.completed, Ordering::Relaxed);
+                if self.rank.swap(event.completed, Ordering::Relaxed) != event.completed {
+                    for movement in &self.movement {
+                        movement.reset();
+                    }
+                }
                 self.rank_total
                     .store(event.total.unwrap_or(0), Ordering::Relaxed);
                 self.piece.store(ABSENT, Ordering::Relaxed);

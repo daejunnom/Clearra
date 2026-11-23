@@ -15,6 +15,7 @@ export function runBoundedCommand(executable, arguments_, {
     let size = 0;
     let settled = false;
     let failure = null;
+    let groupCleanupArmed = true;
     let forceTimer;
     let drainTimer;
     const timeout = setTimeout(() => stop(new Error(`${label} timed out`)), timeoutMs);
@@ -41,7 +42,7 @@ export function runBoundedCommand(executable, arguments_, {
     if (signal?.aborted) cancelled();
 
     function send(exitSignal) {
-      if (!child.pid) return;
+      if (!child.pid || (grouped && !groupCleanupArmed)) return;
       try {
         if (grouped) process.kill(-child.pid, exitSignal);
         else {
@@ -49,7 +50,11 @@ export function runBoundedCommand(executable, arguments_, {
             { windowsHide: true, timeout: 2_000 }, () => {});
         }
       } catch (error) {
-        if (error.code !== "ESRCH") failure ??= error;
+        if (grouped && error.code === "ESRCH") {
+          // Once this group is absent, its numeric PGID no longer identifies
+          // our child tree. Later escalation/drain timers must not reuse it.
+          groupCleanupArmed = false;
+        } else if (error.code !== "ESRCH") failure ??= error;
       }
     }
 
