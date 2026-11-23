@@ -49,6 +49,8 @@ mod geometry_domain;
 mod geometry_family;
 #[cfg(all(test, feature = "parallel"))]
 mod geometry_parallel_tests;
+#[cfg(feature = "symbolic-family")]
+mod geometry_partial_family;
 mod geometry_projection;
 mod geometry_separator;
 #[cfg(test)]
@@ -103,6 +105,19 @@ mod setup_suffix_coverage;
 mod source_prefix;
 mod standard_bag_coverage;
 mod standard_bag_product_memo;
+#[cfg(feature = "symbolic-family")]
+mod symbolic_boolean;
+#[cfg(feature = "symbolic-family")]
+mod symbolic_family;
+#[cfg(feature = "symbolic-family")]
+mod symbolic_family_bridge;
+#[cfg(feature = "symbolic-family")]
+mod symbolic_family_supply;
+#[cfg(feature = "symbolic-family")]
+pub use symbolic_family::{
+    solve_symbolic_family, SymbolicFamilyError, SymbolicFamilyLimits, SymbolicFamilyRankReport,
+    SymbolicFamilyReport, SymbolicFamilyResult,
+};
 #[cfg(test)]
 mod static_influence_integration_tests;
 #[cfg(test)]

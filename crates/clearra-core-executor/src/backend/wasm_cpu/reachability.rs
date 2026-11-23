@@ -8,6 +8,10 @@
     )
 ))]
 use clearra_core_domain::execution_cancellation::ExecutionControl;
+
+#[cfg(feature = "symbolic-family")]
+#[path = "reachability_symbolic_family.rs"]
+pub(super) mod symbolic_family;
 use clearra_core_domain::piece::{piece_kind::PieceKind, rotation::RotationState};
 use clearra_piece_registry::standard::tetromino_registry::standard_tetromino_registry;
 use clearra_replay::{RotationRequest, ScoringLockEvidence};
@@ -2339,7 +2343,7 @@ pub(super) struct SharedReachabilityTemplates {
 }
 
 impl SharedReachabilityTemplates {
-    #[cfg(any(feature = "parallel", test))]
+    #[cfg(any(feature = "parallel", feature = "symbolic-family", test))]
     pub fn new(width: u8, height: u8, profile: KickTableProfileId) -> Self {
         Self {
             width,
@@ -2350,7 +2354,7 @@ impl SharedReachabilityTemplates {
         }
     }
 
-    #[cfg(any(feature = "parallel", test))]
+    #[cfg(any(feature = "parallel", feature = "symbolic-family", test))]
     pub fn with_authority(authority: super::compact_kick_authority::CompactKickAuthority) -> Self {
         let (width, height) = authority.dimensions();
         Self {

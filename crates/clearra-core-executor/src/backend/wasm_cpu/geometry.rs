@@ -1988,6 +1988,110 @@ pub(super) struct CompiledGeometryFamily {
     pub tablebase_pruned_states: usize,
 }
 
+/// Transfers only the compressed geometry expression to the symbolic solver.
+/// In particular, this does not allocate the completion oracle's traversal
+/// marks or a dense u128 path-count table, and does not construct an enumerator.
+#[cfg(feature = "symbolic-family")]
+pub(super) struct CompiledSymbolicGeometry {
+    pub family: GeometrySolutionFamily,
+    pub root: u32,
+    pub expanded_nodes: usize,
+    pub tablebase_pruned_states: usize,
+    pub released_construction_bytes: usize,
+}
+
+#[cfg(feature = "symbolic-family")]
+pub(super) fn compile_symbolic_geometry(
+    catalog: &GeometryCatalog,
+    mut keys: Vec<PieceMultisetKey>,
+    max_nodes: usize,
+    max_work: u64,
+    control: &ExecutionControl,
+) -> Result<CompiledSymbolicGeometry, WasmExactSearchError> {
+    if control.is_cancelled() {
+        return Err(WasmExactSearchError::Cancelled);
+    }
+    keys.sort_unstable();
+    keys.dedup();
+    let depth = catalog.required_cells().count_ones() / 4;
+    if keys.iter().any(|key| u32::from(key.total_count()) != depth) {
+        return Err(WasmExactSearchError::InvalidProblem(
+            "symbolic_geometry_multiset_depth",
+        ));
+    }
+    if keys.is_empty() {
+        return Ok(CompiledSymbolicGeometry {
+            family: GeometrySolutionFamily::new(),
+            root: FAMILY_INVALID,
+            expanded_nodes: 0,
+            tablebase_pruned_states: 0,
+            released_construction_bytes: 0,
+        });
+    }
+    let patterns = Arc::new(PatternBitSet::all(1));
+    let mut targets = Vec::new();
+    targets
+        .try_reserve_exact(keys.len())
+        .map_err(|_| WasmExactSearchError::InvalidProblem("symbolic_geometry_target_allocation"))?;
+    for key in keys {
+        targets.push(TargetGroup {
+            key,
+            pattern_index_id: 0,
+            possible_patterns: Arc::clone(&patterns),
+            pattern_index: None,
+        });
+    }
+    let mut compiler = FamilyCompiler::try_new(catalog.required_cells(), targets.into())?;
+    let mut work = 0_u64;
+    loop {
+        if control.is_cancelled() {
+            return Err(WasmExactSearchError::Cancelled);
+        }
+        if max_nodes != 0 && compiler.family.node_count() as usize > max_nodes {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "symbolic_geometry_node_limit",
+            ));
+        }
+        if max_work != 0 && work >= max_work {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "symbolic_geometry_work_limit",
+            ));
+        }
+        work = work
+            .checked_add(1)
+            .ok_or(WasmExactSearchError::InvalidProblem(
+                "symbolic_geometry_work_overflow",
+            ))?;
+        match compiler.advance(catalog) {
+            CompileAdvance::Pending => {}
+            CompileAdvance::ResourceIncomplete => {
+                return Err(WasmExactSearchError::InvalidProblem(
+                    "symbolic_geometry_allocation",
+                ));
+            }
+            CompileAdvance::Complete => {
+                if max_nodes != 0 && compiler.family.node_count() as usize > max_nodes {
+                    return Err(WasmExactSearchError::InvalidProblem(
+                        "symbolic_geometry_node_limit",
+                    ));
+                }
+                control.report_progress("symbolic_geometry", work, Some(work));
+                let released_construction_bytes = compiler.family.release_construction_index();
+                return Ok(CompiledSymbolicGeometry {
+                    family: compiler.family,
+                    root: compiler.root_family,
+                    expanded_nodes: compiler.expanded_nodes,
+                    tablebase_pruned_states: compiler.tablebase_pruned_states,
+                    released_construction_bytes,
+                });
+            }
+        }
+        if work & 8191 == 0 {
+            control.report_progress("symbolic_geometry", work, None);
+        }
+    }
+}
+
 impl GeometryFamilyCompileSession {
     pub fn new(
         required_cells: u64,

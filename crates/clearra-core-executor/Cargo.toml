@@ -24,10 +24,17 @@ placement-dependency-pc = []
 # Primitive oracle is linked only by local-only asset generation/qualification.
 # It is not consulted by product search.
 qualification-reference = []
+# Explicit research API for processing the geometry family without enumerating
+# complete candidates. It does not change the default product dispatch.
+symbolic-family = []
 
 [[example]]
 name = "native_rust_cpu_abba"
 required-features = ["native-c-core"]
+
+[[example]]
+name = "symbolic_family"
+required-features = ["symbolic-family"]
 
 [dependencies]
 clearra-accelerator-activation = { path = "../clearra-accelerator-activation" }

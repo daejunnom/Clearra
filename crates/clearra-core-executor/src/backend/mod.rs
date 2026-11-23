@@ -48,6 +48,11 @@ pub use wasm_cpu::{
     run_conditional_ordered_work, structural_order_experiment_totals, ConditionalOrderedWorkMode,
     StructuralOrderMetrics,
 };
+#[cfg(feature = "symbolic-family")]
+pub use wasm_cpu::{
+    solve_symbolic_family, SymbolicFamilyError, SymbolicFamilyLimits, SymbolicFamilyRankReport,
+    SymbolicFamilyReport, SymbolicFamilyResult,
+};
 #[cfg(all(
     feature = "local-search-ab",
     feature = "parallel",

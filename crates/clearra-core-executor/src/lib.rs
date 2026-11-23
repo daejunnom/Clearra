@@ -49,6 +49,12 @@ pub mod spin;
 pub(crate) mod terminal_supply_conformance;
 pub mod tiling_solution_store;
 
+#[cfg(feature = "symbolic-family")]
+pub use backend::{
+    solve_symbolic_family, SymbolicFamilyError, SymbolicFamilyLimits, SymbolicFamilyRankReport,
+    SymbolicFamilyReport, SymbolicFamilyResult,
+};
+
 pub use backend::{
     any_pc4_ilc_target_field, canonical_wasm_candidate_packet_batch_sha256,
     encode_canonical_wasm_candidate_packet_batch, enumerate_pc4_ilc_geometric_predecessor_fields,
