@@ -515,6 +515,7 @@ fn describe_result(report: &SymbolicFamilyReport) -> Value {
         "compatibility_cache_releases": rank.compatibility_cache_releases,
         "compatibility_filter_misses": rank.compatibility_filter_misses.to_string(),
         "compatibility_guard_misses": rank.compatibility_guard_misses.to_string(),
+        "compatibility_guard_suffix_elisions": rank.compatibility_guard_suffix_elisions.to_string(),
         "movement_parallel": symbolic_archive::movement_parallel(&rank.movement_parallel),
     })).collect::<Vec<_>>();
     json!({
@@ -543,6 +544,7 @@ fn describe_result(report: &SymbolicFamilyReport) -> Value {
         "compatibility_work_steps": report.compatibility_work_steps.to_string(),
         "compatibility_filter_misses": report.compatibility_filter_misses.to_string(),
         "compatibility_guard_misses": report.compatibility_guard_misses.to_string(),
+        "compatibility_guard_suffix_elisions": report.compatibility_guard_suffix_elisions.to_string(),
         "compatibility_saturated_unions": report.compatibility_saturated_unions.to_string(),
         "compatibility_union_remainder_calls": report.compatibility_union_remainder_calls.to_string(),
         "compatibility_union_remainder_created_nodes": report.compatibility_union_remainder_created_nodes.to_string(),

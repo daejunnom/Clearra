@@ -837,6 +837,15 @@ fn propagate(
                     .propagation_edges
                     .checked_add(1)
                     .ok_or(BooleanError::CountOverflow)?;
+                // Every delta is inside this piece's domain. A target that
+                // already covers it cannot gain a world, even when delta is
+                // only a proper subset. Reuse the existing root before any
+                // Boolean work. Later ordered edges still consume every
+                // original prior through their target-independent cursor.
+                if reached[edge.target] == *domain {
+                    increment(&mut work.early_reached_rejections)?;
+                    continue;
+                }
                 // Reuse the already-proved target family before evaluating its
                 // cell/kick dependencies. The target remains unchanged until this
                 // transfer is admitted, so its contribution is already novel.

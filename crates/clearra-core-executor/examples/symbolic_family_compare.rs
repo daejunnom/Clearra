@@ -1022,6 +1022,16 @@ const MOVEMENT_PHASES: [&str; 9] = [
     "released",
 ];
 
+const COMPATIBILITY_COUNTERS: [&str; 7] = [
+    "filter_misses",
+    "guard_misses",
+    "guard_suffix_elisions",
+    "saturated_unions",
+    "union_remainder_calls",
+    "union_remainder_created_nodes",
+    "union_remainder_work_steps",
+];
+
 struct PieceProgressState {
     phase: AtomicU64,
     private_nodes: AtomicU64,
@@ -1077,6 +1087,7 @@ struct ProgressState {
     work_down: AtomicU64,
     work_bridge: AtomicU64,
     work_cell_support: AtomicU64,
+    compatibility_counters: [AtomicU64; 7],
     cell_support_entries: AtomicU64,
     storage_zdd_nodes: AtomicU64,
     storage_zdd_retained_bytes: AtomicU64,
@@ -1087,6 +1098,7 @@ struct ProgressState {
     storage_boolean_parent_bytes: AtomicU64,
     storage_boolean_shared_nodes: AtomicU64,
     storage_boolean_shared_bytes: AtomicU64,
+    movement_ownership: AtomicU64,
     movement: [PieceProgressState; 7],
     event_count: AtomicU64,
     export_completed: AtomicU64,
@@ -1113,6 +1125,7 @@ impl ProgressState {
             work_down: AtomicU64::new(0),
             work_bridge: AtomicU64::new(0),
             work_cell_support: AtomicU64::new(0),
+            compatibility_counters: std::array::from_fn(|_| AtomicU64::new(ABSENT)),
             cell_support_entries: AtomicU64::new(0),
             storage_zdd_nodes: AtomicU64::new(ABSENT),
             storage_zdd_retained_bytes: AtomicU64::new(ABSENT),
@@ -1123,6 +1136,7 @@ impl ProgressState {
             storage_boolean_parent_bytes: AtomicU64::new(ABSENT),
             storage_boolean_shared_nodes: AtomicU64::new(ABSENT),
             storage_boolean_shared_bytes: AtomicU64::new(ABSENT),
+            movement_ownership: AtomicU64::new(ABSENT),
             movement: std::array::from_fn(|_| PieceProgressState::new()),
             event_count: AtomicU64::new(0),
             export_completed: AtomicU64::new(0),
@@ -1148,12 +1162,43 @@ impl ProgressState {
         let compiler = self.geometry_compiler_finished_ns.load(Ordering::Relaxed);
         let search = self.search_started_ns.load(Ordering::Relaxed);
         let other = *self.other.lock().expect("progress event state");
+        let compatibility_counters = COMPATIBILITY_COUNTERS
+            .iter()
+            .zip(&self.compatibility_counters)
+            .map(|(&name, value)| {
+                (
+                    name.to_owned(),
+                    json!(optional(value).map(|n| n.to_string())),
+                )
+            })
+            .collect::<serde_json::Map<_, _>>();
+        let rank = optional(&self.rank);
+        let ownership = self.movement_ownership.load(Ordering::Relaxed);
+        let mut group_tasks = [0_u64; 4];
+        let mut group_reported_bytes = [0_u64; 4];
+        let mut group_bytes = [0_u128; 4];
         let movement = self.movement.iter().zip(['I', 'O', 'T', 'S', 'Z', 'J', 'L']).map(|(state, piece)| {
+            let phase = state.phase.load(Ordering::Relaxed);
+            let private_bytes = optional(&state.private_bytes);
+            let group = match phase {
+                1..=5 => Some(0),
+                6 => Some(1),
+                7 => Some(2),
+                8 => Some(3),
+                _ => None,
+            };
+            if let Some(group) = group {
+                group_tasks[group] += 1;
+                if let Some(bytes) = private_bytes {
+                    group_reported_bytes[group] += 1;
+                    group_bytes[group] += u128::from(bytes);
+                }
+            }
             json!({
                 "piece": piece,
-                "phase": MOVEMENT_PHASES.get(state.phase.load(Ordering::Relaxed) as usize),
+                "phase": MOVEMENT_PHASES.get(phase as usize),
                 "private_nodes": optional(&state.private_nodes).map(|value| value.to_string()),
-                "private_retained_bytes_estimate": optional(&state.private_bytes).map(|value| value.to_string()),
+                "private_retained_bytes_estimate": private_bytes.map(|value| value.to_string()),
                 "released_builder_bytes_estimate": optional(&state.released_builder_bytes).map(|value| value.to_string()),
                 "compactions": optional(&state.compactions).map(|value| value.to_string()),
                 "reclaimed_nodes": optional(&state.reclaimed_nodes).map(|value| value.to_string()),
@@ -1162,9 +1207,29 @@ impl ProgressState {
                 "compaction_peak_temporary_bytes_estimate": optional(&state.compaction_peak_temporary_bytes).map(|value| value.to_string()),
             })
         }).collect::<Vec<_>>();
+        // These are sums of the latest diagnostic samples, not simultaneous RSS.
+        // Sequential piece entries alias the parent, so only private suffixes
+        // may be grouped without counting the same arena more than once.
+        let same_movement_context = rank == optional(&self.rank)
+            && ownership == self.movement_ownership.load(Ordering::Relaxed);
+        let movement_groups = (ownership == 1 && same_movement_context).then(|| {
+            ["computing", "published", "consuming", "released"]
+                .into_iter()
+                .enumerate()
+                .map(|(index, phase)| {
+                    json!({
+                        "phase": phase,
+                        "tasks": group_tasks[index],
+                        "tasks_with_reported_bytes": group_reported_bytes[index],
+                        "private_retained_bytes_estimate": (group_tasks[index] == group_reported_bytes[index])
+                            .then(|| group_bytes[index].to_string()),
+                    })
+                })
+                .collect::<Vec<_>>()
+        });
         json!({
             "phase": PHASES[self.phase.load(Ordering::Relaxed) as usize],
-            "rank": optional(&self.rank), "rank_total": self.rank_total.load(Ordering::Relaxed),
+            "rank": rank, "rank_total": self.rank_total.load(Ordering::Relaxed),
             "piece": optional(&self.piece).and_then(|piece| char::from_u32(piece as u32)),
             "row": optional(&self.row), "row_total": self.row_total.load(Ordering::Relaxed),
             "latest_arena_work": {
@@ -1174,6 +1239,7 @@ impl ProgressState {
                 "bridge": self.work_bridge.load(Ordering::Relaxed).to_string(),
                 "cell_support_included_in_bridge": self.work_cell_support.load(Ordering::Relaxed).to_string(),
             },
+            "latest_compatibility_counters": compatibility_counters,
             "latest_symbolic_storage": {
                 "cell_support_entries": self.cell_support_entries.load(Ordering::Relaxed).to_string(),
                 "joint_zdd_nodes": optional(&self.storage_zdd_nodes).map(|value| value.to_string()),
@@ -1187,6 +1253,13 @@ impl ProgressState {
                 "boolean_shared_prefix_retained_bytes_estimate": optional(&self.storage_boolean_shared_bytes).map(|value| value.to_string()),
             },
             "piece_movement": movement,
+            "movement_ownership": match ownership {
+                0 => "sequential-shared-parent",
+                1 => "parallel-private-suffixes",
+                _ => "not-reported",
+            },
+            "movement_private_groups": movement_groups,
+            "movement_same_context_at_sample_boundaries": same_movement_context,
             "movement_storage_scope": "latest payload estimates, not a simultaneous peak or RSS; parallel suffixes exclude the shared prefix, while sequential piece entries alias the parent and must not be summed",
             "event_count": self.event_count.load(Ordering::Relaxed).to_string(),
             "coverage_export_completed": self.export_completed.load(Ordering::Relaxed).to_string(),
@@ -1204,6 +1277,18 @@ impl ProgressState {
 impl ProgressSink for ProgressState {
     fn report(&self, event: ExecutionProgress) {
         self.event_count.fetch_add(1, Ordering::Relaxed);
+        if let Some(index) = event
+            .stage
+            .strip_prefix("symbolic_compatibility_")
+            .and_then(|name| {
+                COMPATIBILITY_COUNTERS
+                    .iter()
+                    .position(|counter| *counter == name)
+            })
+        {
+            self.compatibility_counters[index].store(event.completed, Ordering::Relaxed);
+            return;
+        }
         if let Some((piece, metric)) = event
             .stage
             .strip_prefix("symbolic_movement_")
@@ -1295,8 +1380,12 @@ impl ProgressSink for ProgressState {
             "symbolic_storage_boolean_shared_bytes" => self
                 .storage_boolean_shared_bytes
                 .store(event.completed, Ordering::Relaxed),
+            "symbolic_context_movement_ownership" => self
+                .movement_ownership
+                .store(event.completed, Ordering::Relaxed),
             "symbolic_context_rank" => {
                 if self.rank.swap(event.completed, Ordering::Relaxed) != event.completed {
+                    self.movement_ownership.store(ABSENT, Ordering::Relaxed);
                     for movement in &self.movement {
                         movement.reset();
                     }

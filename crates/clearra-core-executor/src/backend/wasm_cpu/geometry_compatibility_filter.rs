@@ -67,6 +67,9 @@ enum GuardFrame {
 pub(super) struct CompatibilityMetrics {
     pub(super) filter_misses: u64,
     pub(super) guard_misses: u64,
+    /// Whole row-variable suffixes preserved after the last possible conflict.
+    /// Source-variable and terminal suffixes are not counted here.
+    pub(super) guard_suffix_elisions: u64,
     pub(super) saturated_unions: u64,
     pub(super) union_remainder_calls: u64,
     pub(super) union_remainder_created_nodes: u64,
@@ -77,6 +80,9 @@ pub(super) struct GeometryCompatibilityFilter<'a> {
     family: &'a GeometrySolutionFamily,
     root: u32,
     row_cells: Vec<u64>,
+    /// One past the greatest conflicting row ID, excluding the guarded row.
+    /// Every variable at or above this cutoff is irrelevant to that guard.
+    guard_cutoffs: Vec<u32>,
     filtered: ExactHashMap<FilterKey, ZddId>,
     guarded: ExactHashMap<GuardKey, ZddId>,
     epoch: Option<u64>,
@@ -97,10 +103,12 @@ impl<'a> GeometryCompatibilityFilter<'a> {
         let mut budget = WorkBudget::new(limits, "symbolic_work_down").with_control(control);
         budget.check_cancelled()?;
         certify_exact_cover(family, root, &row_cells, required_cells, &mut budget)?;
+        let guard_cutoffs = compile_guard_cutoffs(&row_cells, &mut budget)?;
         Ok(Self {
             family,
             root,
             row_cells,
+            guard_cutoffs,
             filtered: ExactHashMap::default(),
             guarded: ExactHashMap::default(),
             epoch: None,
@@ -121,6 +129,7 @@ impl<'a> GeometryCompatibilityFilter<'a> {
     /// Backing capacity estimate, excluding allocator and operation stacks.
     pub(super) fn retained_bytes(&self) -> usize {
         self.row_cells.capacity() * size_of::<u64>()
+            + self.guard_cutoffs.capacity() * size_of::<u32>()
             + self.filtered.capacity() * (size_of::<FilterKey>() + size_of::<ZddId>() + 1)
             + self.guarded.capacity() * (size_of::<GuardKey>() + size_of::<ZddId>() + 1)
     }
@@ -306,6 +315,7 @@ impl<'a> GeometryCompatibilityFilter<'a> {
 
     fn guard(&mut self, arena: &mut ZddArena, joint: ZddId, row: u32) -> Result<ZddId, ZddError> {
         let cells = self.row_cells[row as usize];
+        let cutoff = self.guard_cutoffs[row as usize];
         let mut stack = Vec::new();
         push(&mut stack, GuardFrame::Visit(joint))?;
         let mut value = ZddId::EMPTY;
@@ -313,7 +323,18 @@ impl<'a> GeometryCompatibilityFilter<'a> {
             self.step(arena)?;
             match frame {
                 GuardFrame::Visit(root) => {
-                    if self.has_no_rows(arena, root)? {
+                    let Some(node) = arena.node(root)? else {
+                        value = root;
+                        continue;
+                    };
+                    // ZDD variables strictly increase along both children.
+                    // No later selected row can conflict; preserve the entire
+                    // original suffix, including its correlated source tail.
+                    if node.variable >= cutoff {
+                        if (node.variable as usize) < self.row_cells.len() {
+                            self.metrics.guard_suffix_elisions =
+                                self.metrics.guard_suffix_elisions.saturating_add(1);
+                        }
                         value = root;
                         continue;
                     }
@@ -322,7 +343,6 @@ impl<'a> GeometryCompatibilityFilter<'a> {
                         continue;
                     }
                     self.metrics.guard_misses = self.metrics.guard_misses.saturating_add(1);
-                    let node = arena.node(root)?.ok_or(ZddError::InvalidFamily)?;
                     if node.variable != row && self.row_cells[node.variable as usize] & cells != 0 {
                         push(&mut stack, GuardFrame::Elided(root))?;
                         push(&mut stack, GuardFrame::Visit(node.low))?;
@@ -373,6 +393,38 @@ impl<'a> GeometryCompatibilityFilter<'a> {
             // growth is a separate representation, never new geometry nodes.
             self.budget
                 .report_storage("symbolic_storage_generated_geometry_nodes", 0);
+            for (stage, value) in [
+                (
+                    "symbolic_compatibility_filter_misses",
+                    self.metrics.filter_misses,
+                ),
+                (
+                    "symbolic_compatibility_guard_misses",
+                    self.metrics.guard_misses,
+                ),
+                (
+                    "symbolic_compatibility_guard_suffix_elisions",
+                    self.metrics.guard_suffix_elisions,
+                ),
+                (
+                    "symbolic_compatibility_saturated_unions",
+                    self.metrics.saturated_unions,
+                ),
+                (
+                    "symbolic_compatibility_union_remainder_calls",
+                    self.metrics.union_remainder_calls,
+                ),
+                (
+                    "symbolic_compatibility_union_remainder_created_nodes",
+                    self.metrics.union_remainder_created_nodes,
+                ),
+                (
+                    "symbolic_compatibility_union_remainder_work_steps",
+                    self.metrics.union_remainder_work_steps,
+                ),
+            ] {
+                self.budget.report_counter(stage, value);
+            }
         }
         arena.checkpoint()
     }
@@ -399,6 +451,47 @@ impl<'a> GeometryCompatibilityFilter<'a> {
         self.guarded.insert(key, value);
         Ok(())
     }
+}
+
+/// Compile the last conflicting variable without scanning every row pair.
+/// IDs are stored as id + 1 so zero means no owner. The certified row count
+/// fits u32, hence even the final endpoint fits without a sentinel overflow.
+fn compile_guard_cutoffs(row_cells: &[u64], budget: &mut WorkBudget) -> Result<Vec<u32>, ZddError> {
+    let mut latest = [[0_u32; 2]; u64::BITS as usize];
+    for (row, &mask) in row_cells.iter().enumerate() {
+        budget.step()?;
+        let endpoint = u32::try_from(row + 1).map_err(|_| ZddError::InvalidGeometry)?;
+        let mut cells = mask;
+        while cells != 0 {
+            let cell = cells.trailing_zeros() as usize;
+            cells &= cells - 1;
+            // Ascending row IDs make this the new greatest owner of the cell.
+            latest[cell] = [endpoint, latest[cell][0]];
+        }
+    }
+    let mut cutoffs = Vec::new();
+    cutoffs
+        .try_reserve_exact(row_cells.len())
+        .map_err(|_| ZddError::Allocation)?;
+    for (row, &mask) in row_cells.iter().enumerate() {
+        budget.step()?;
+        let endpoint = u32::try_from(row + 1).map_err(|_| ZddError::InvalidGeometry)?;
+        let mut cutoff = 0;
+        let mut cells = mask;
+        while cells != 0 {
+            let cell = cells.trailing_zeros() as usize;
+            cells &= cells - 1;
+            let owners = latest[cell];
+            let other = if owners[0] == endpoint {
+                owners[1]
+            } else {
+                owners[0]
+            };
+            cutoff = cutoff.max(other);
+        }
+        cutoffs.push(cutoff);
+    }
+    Ok(cutoffs)
 }
 
 fn certify_exact_cover(

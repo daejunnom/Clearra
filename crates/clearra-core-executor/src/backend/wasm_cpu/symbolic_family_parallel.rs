@@ -29,15 +29,111 @@ use super::{
     symbolic_movement_progress::{self, MovementMetric, MovementPhase},
 };
 
-/// All roots belong to this predicate arena and are valid only during consume.
+/// Predicate roots remain accessible only while this result owns its queries.
+/// The consumer may finish the physical queries before its geometry work.
 pub(super) struct PieceMovement {
     pub piece: PieceKind,
-    pub predicates: BooleanArena,
-    /// Includes false roots so the caller can count every actual legal query.
-    pub legal_rows: Vec<(u32, BooleanId)>,
     pub work: SymbolicReachabilityWork,
+    queries: PieceQueryStorage,
     /// Construction-only payload released before this result is published.
     pub released_builder_bytes_estimate: usize,
+}
+
+// Keep the existing arena inline while it moves through the channel. Boxing
+// the live variant would add an allocation solely to reduce this enum's size.
+#[allow(clippy::large_enum_variant)]
+enum PieceQueryStorage {
+    Live {
+        predicates: BooleanArena,
+        /// Includes false roots so the caller can count every legal query.
+        legal_rows: Vec<(u32, BooleanId)>,
+    },
+    Released(PredicateAccounting),
+}
+
+/// Scalar evidence survives releasing the arena; no Boolean ID survives here.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PredicateAccounting {
+    work: u64,
+    apply_hits: u64,
+    peak_nodes: usize,
+    private_bytes: usize,
+    compactions: u64,
+    reclaimed_nodes: u64,
+    compaction_work: u64,
+    discarded_apply_entries: u64,
+    compaction_peak_temporary_bytes: usize,
+}
+
+impl PredicateAccounting {
+    fn capture(predicates: &BooleanArena) -> Self {
+        Self {
+            work: predicates.work_steps(),
+            apply_hits: predicates.apply_cache_hits(),
+            peak_nodes: predicates.peak_node_count(),
+            private_bytes: predicates.private_retained_bytes(),
+            compactions: predicates.compaction_count(),
+            reclaimed_nodes: predicates.compaction_reclaimed_nodes(),
+            compaction_work: predicates.compaction_work_steps(),
+            discarded_apply_entries: predicates.compaction_discarded_apply_entries(),
+            compaction_peak_temporary_bytes: predicates.compaction_peak_temporary_bytes(),
+        }
+    }
+}
+
+impl PieceMovement {
+    pub(super) fn query_inputs(
+        &mut self,
+    ) -> Result<(&mut BooleanArena, &[(u32, BooleanId)]), SymbolicFamilyError> {
+        match &mut self.queries {
+            PieceQueryStorage::Live {
+                predicates,
+                legal_rows,
+            } => Ok((predicates, legal_rows)),
+            PieceQueryStorage::Released(_) => Err(SymbolicFamilyError::InvalidProblem(
+                "symbolic_movement_queries_released",
+            )),
+        }
+    }
+
+    /// Close the query lifetime once, including during cancellation cleanup.
+    /// The exact work tail is flushed before dropping both owned allocations.
+    /// The shared prefix remains pinned by its other owners.
+    pub(super) fn release_queries(&mut self, control: &ExecutionControl) {
+        let accounting = match &self.queries {
+            PieceQueryStorage::Live { predicates, .. } => {
+                predicates.flush_work_progress();
+                PredicateAccounting::capture(predicates)
+            }
+            PieceQueryStorage::Released(_) => return,
+        };
+        let queries =
+            core::mem::replace(&mut self.queries, PieceQueryStorage::Released(accounting));
+        drop(queries);
+        symbolic_movement_progress::report_released(control, self.piece);
+    }
+
+    fn begin_consuming(&self, control: &ExecutionControl) -> Result<(), SymbolicFamilyError> {
+        let PieceQueryStorage::Live { predicates, .. } = &self.queries else {
+            return Err(SymbolicFamilyError::InvalidProblem(
+                "symbolic_movement_queries_released",
+            ));
+        };
+        symbolic_movement_progress::report_phase(
+            control,
+            self.piece,
+            MovementPhase::Consuming,
+            predicates,
+        );
+        Ok(())
+    }
+
+    fn predicate_accounting(&self) -> PredicateAccounting {
+        match &self.queries {
+            PieceQueryStorage::Live { predicates, .. } => PredicateAccounting::capture(predicates),
+            PieceQueryStorage::Released(accounting) => *accounting,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -58,8 +154,8 @@ pub(super) struct ParallelMovementReport {
     pub predicate_apply_cache_hits: u64,
     /// Sum of per-piece private peaks, NOT an observed simultaneous peak.
     pub private_node_peak_sum_upper_bound: usize,
-    /// Sum after consumption, just before release; omits transient stacks and
-    /// is NOT peak RSS. Cell cofactor backing capacity can remain at this point.
+    /// Sum after each piece's final physical query, just before release. This
+    /// omits transient stacks and is NOT peak RSS. Cofactor capacity can remain.
     pub private_retained_bytes_sum_estimate: usize,
     pub released_builder_bytes_sum_estimate: usize,
     pub predicate_compactions: u64,
@@ -235,30 +331,25 @@ pub(super) fn run_piece_movements(
         }
         drop(sender);
         while let Ok(mut movement) = receiver.recv() {
-            let piece = movement.piece;
-            symbolic_movement_progress::report_phase(
-                control,
-                piece,
-                MovementPhase::Consuming,
-                &movement.predicates,
-            );
+            if let Err(error) = movement.begin_consuming(control) {
+                fail(&first_error, &stop, error);
+            }
             if !stop.is_cancelled() {
                 if let Err(error) = consume(&mut movement) {
                     fail(&first_error, &stop, error);
                 }
             }
-            // Cell-space filtering constructs short-lived cofactor residuals
-            // in this owner. Account and flush after the consumer on success
-            // and failure; row-space consumption remains read-only.
-            movement.predicates.flush_work_progress();
+            // Cell batching may already have released its physical queries
+            // before Down/source work. Finalize here on every other path,
+            // including consumer errors and results drained after a failure.
+            movement.release_queries(control);
             let recorded = record_movement(&mut report, predicates, &movement);
             if let Err(error) = recorded {
                 fail(&first_error, &stop, error);
             }
-            // Drop the completed suffix before accepting another. Workers may
-            // still hold private suffixes while blocked on their own send.
+            // Only scalar accounting remains. Blocked workers can still own
+            // other private suffixes; the rendezvous is not a memory bound.
             drop(movement);
-            symbolic_movement_progress::report_released(control, piece);
         }
         for handle in handles {
             match handle.join() {
@@ -399,9 +490,11 @@ fn compile_piece(
     symbolic_movement_progress::report_phase(control, piece, MovementPhase::Published, &predicates);
     Ok(PieceMovement {
         piece,
-        predicates,
-        legal_rows,
         work,
+        queries: PieceQueryStorage::Live {
+            predicates,
+            legal_rows,
+        },
         released_builder_bytes_estimate,
     })
 }
@@ -412,8 +505,9 @@ fn record_movement(
     movement: &PieceMovement,
 ) -> Result<(), SymbolicFamilyError> {
     let overflow = || SymbolicFamilyError::Resource("symbolic_movement_accounting_overflow");
-    let work = movement.predicates.work_steps();
-    let hits = movement.predicates.apply_cache_hits();
+    let accounting = movement.predicate_accounting();
+    let work = accounting.work;
+    let hits = accounting.apply_hits;
     owner.record_fork_work(work, hits)?;
     report.predicate_work_steps = report
         .predicate_work_steps
@@ -425,11 +519,11 @@ fn record_movement(
         .ok_or_else(overflow)?;
     report.private_node_peak_sum_upper_bound = report
         .private_node_peak_sum_upper_bound
-        .checked_add(movement.predicates.peak_node_count() - report.shared_prefix_nodes)
+        .checked_add(accounting.peak_nodes - report.shared_prefix_nodes)
         .ok_or_else(overflow)?;
     report.private_retained_bytes_sum_estimate = report
         .private_retained_bytes_sum_estimate
-        .checked_add(movement.predicates.private_retained_bytes())
+        .checked_add(accounting.private_bytes)
         .ok_or_else(overflow)?;
     report.released_builder_bytes_sum_estimate = report
         .released_builder_bytes_sum_estimate
@@ -437,23 +531,23 @@ fn record_movement(
         .ok_or_else(overflow)?;
     report.predicate_compactions = report
         .predicate_compactions
-        .checked_add(movement.predicates.compaction_count())
+        .checked_add(accounting.compactions)
         .ok_or_else(overflow)?;
     report.predicate_reclaimed_nodes = report
         .predicate_reclaimed_nodes
-        .checked_add(movement.predicates.compaction_reclaimed_nodes())
+        .checked_add(accounting.reclaimed_nodes)
         .ok_or_else(overflow)?;
     report.predicate_compaction_work_steps = report
         .predicate_compaction_work_steps
-        .checked_add(movement.predicates.compaction_work_steps())
+        .checked_add(accounting.compaction_work)
         .ok_or_else(overflow)?;
     report.predicate_discarded_apply_entries = report
         .predicate_discarded_apply_entries
-        .checked_add(movement.predicates.compaction_discarded_apply_entries())
+        .checked_add(accounting.discarded_apply_entries)
         .ok_or_else(overflow)?;
     report.compaction_peak_temporary_bytes_sum_estimate = report
         .compaction_peak_temporary_bytes_sum_estimate
-        .checked_add(movement.predicates.compaction_peak_temporary_bytes())
+        .checked_add(accounting.compaction_peak_temporary_bytes)
         .ok_or_else(overflow)?;
     report.movement_work.poses = report
         .movement_work
@@ -705,10 +799,11 @@ mod tests {
             9,
             &control,
             |movement| {
-                assert_eq!(movement.predicates.private_unique_retained_bytes(), 0);
-                assert_eq!(movement.predicates.private_apply_retained_bytes(), 0);
-                for &(row, legal) in &movement.legal_rows {
-                    actual.push((row, movement.predicates.evaluate(legal, |_| false)));
+                let (predicates, legal_rows) = movement.query_inputs()?;
+                assert_eq!(predicates.private_unique_retained_bytes(), 0);
+                assert_eq!(predicates.private_apply_retained_bytes(), 0);
+                for &(row, legal) in legal_rows {
+                    actual.push((row, predicates.evaluate(legal, |_| false)));
                 }
                 Ok(())
             },
@@ -768,11 +863,72 @@ mod tests {
             &[(PieceKind::I, domain), (PieceKind::O, domain)],
             2,
             &control,
-            |_| Err(failure),
+            |movement| {
+                movement.release_queries(&control);
+                Err(failure)
+            },
         );
         assert!(matches!(result, Err(error) if error == failure));
         assert!(!control.is_cancelled());
         let prefix = owner.freeze_prefix().unwrap();
+        drop(prefix);
+        owner.thaw_prefix().unwrap();
+    }
+
+    #[test]
+    fn symbolic_parallel_release_keeps_accounting_and_drops_queries_during_cancellation() {
+        let mut owner = BooleanArena::new(2, BooleanLimits::default()).unwrap();
+        let first = owner.variable(0).unwrap();
+        let owner_work = owner.work_steps();
+        let prefix = owner.freeze_prefix().unwrap();
+        let mut predicates = BooleanArena::fork_prefix(Arc::clone(&prefix)).unwrap();
+        let progress = Arc::new(WorkProgress::default());
+        let control = ExecutionControl::default().with_progress_sink(progress.clone());
+        predicates.set_cancellation(control.cancellation.clone());
+        predicates.set_progress_sink(Some(progress.clone()));
+        let second = predicates.variable(1).unwrap();
+        let legal = predicates.and(first, second).unwrap();
+        assert_eq!(predicates.and(first, second).unwrap(), legal);
+        let mut movement = PieceMovement {
+            piece: PieceKind::I,
+            work: SymbolicReachabilityWork::default(),
+            queries: PieceQueryStorage::Live {
+                predicates,
+                legal_rows: vec![(0, legal)],
+            },
+            released_builder_bytes_estimate: 0,
+        };
+        let expected = movement.predicate_accounting();
+        assert!(expected.work > 0);
+        assert!(expected.apply_hits > 0);
+        assert!(expected.private_bytes > 0);
+        let prefix_owners = Arc::strong_count(&prefix);
+        control.cancellation.handle().cancel();
+        movement.release_queries(&control);
+        assert_eq!(Arc::strong_count(&prefix), prefix_owners - 1);
+        assert_eq!(movement.predicate_accounting(), expected);
+        assert!(matches!(
+            movement.query_inputs(),
+            Err(SymbolicFamilyError::InvalidProblem(
+                "symbolic_movement_queries_released"
+            )),
+        ));
+        movement.release_queries(&control);
+        assert_eq!(progress.0.lock().unwrap().as_slice(), &[expected.work]);
+        let mut report = ParallelMovementReport {
+            shared_prefix_nodes: prefix.node_count(),
+            ..ParallelMovementReport::default()
+        };
+        record_movement(&mut report, &mut owner, &movement).unwrap();
+        assert_eq!(owner.work_steps(), owner_work + expected.work);
+        assert_eq!(report.predicate_work_steps, expected.work);
+        assert_eq!(report.predicate_apply_cache_hits, expected.apply_hits);
+        assert_eq!(
+            report.private_retained_bytes_sum_estimate,
+            expected.private_bytes
+        );
+        assert_eq!(report.completed_pieces, 1);
+        drop(movement);
         drop(prefix);
         owner.thaw_prefix().unwrap();
     }

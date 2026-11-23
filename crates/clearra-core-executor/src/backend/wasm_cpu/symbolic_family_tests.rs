@@ -280,6 +280,29 @@ fn symbolic_family_cell_occupancy_preserves_full_source_pairs_for_all_builtin_ki
 #[cfg(all(feature = "parallel", not(target_family = "wasm")))]
 #[test]
 fn symbolic_family_cell_occupancy_keeps_parallel_owner_and_cofactor_lifetimes() {
+    use std::sync::{Arc, Mutex};
+
+    use clearra_core_domain::execution_cancellation::{ExecutionProgress, ProgressSink};
+
+    #[derive(Default)]
+    struct ReleaseProgress(Mutex<Vec<ExecutionProgress>>);
+
+    impl ProgressSink for ReleaseProgress {
+        fn report(&self, event: ExecutionProgress) {
+            if matches!(
+                event.stage,
+                "symbolic_context_rank"
+                    | "symbolic_context_piece"
+                    | "symbolic_context_movement_ownership"
+                    | "symbolic_phase_piece_down"
+            ) || (event.stage.starts_with("symbolic_movement_")
+                && event.stage.ends_with("_phase"))
+            {
+                self.0.lock().unwrap().push(event);
+            }
+        }
+    }
+
     let required = 0x3f | (0x3f << 10);
     let request = query(2, 0xfffff ^ required, 3, PcQueueInput::standard_7_bag())
         .with_supply_window_size(SupplyWindowSize::new(2))
@@ -294,19 +317,58 @@ fn symbolic_family_cell_occupancy_keeps_parallel_owner_and_cofactor_lifetimes() 
     let request = request.with_execution_policy(policy);
     let problem = ProblemCompiler::compile_scenario_pc(&request).unwrap();
     let mut expected = compare(&request);
+    let progress = Arc::new(ReleaseProgress::default());
+    let control = ExecutionControl::default().with_progress_sink(progress.clone());
     let mut actual = solve_symbolic_family_with_cell_occupancy(
         &problem,
         SymbolicFamilyLimits::default(),
-        &ExecutionControl::default(),
+        &control,
     )
     .unwrap();
     assert_same_joint_family(&mut actual, &mut expected, &problem);
+    let released_phase = super::super::symbolic_movement_progress::MovementPhase::Released as u64;
+    let mut rank = 0;
+    let mut piece = None;
+    let mut private_owners = false;
+    let mut released = BTreeSet::new();
+    let mut checked_batches = 0;
+    for &event in progress.0.lock().unwrap().iter() {
+        match event.stage {
+            "symbolic_context_rank" => {
+                rank = event.completed;
+                piece = None;
+            }
+            "symbolic_context_piece" => piece = Some(event.completed),
+            "symbolic_context_movement_ownership" => {
+                assert!(event.completed <= 1);
+                assert_eq!(event.total, None);
+                private_owners = event.completed == 1;
+            }
+            "symbolic_phase_piece_down" if private_owners => {
+                assert!(released.contains(&(rank, piece.expect("piece Down context"))));
+                checked_batches += 1;
+            }
+            _ if event.completed == released_phase => {
+                let released_piece = event
+                    .stage
+                    .strip_prefix("symbolic_movement_")
+                    .and_then(|stage| stage.strip_suffix("_phase"))
+                    .and_then(|piece| piece.bytes().next())
+                    .map(|piece| u64::from(piece.to_ascii_uppercase()));
+                if let Some(piece) = released_piece {
+                    released.insert((rank, piece));
+                }
+            }
+            _ => {}
+        }
+    }
     if problem.backend_policy().workers() > 1 {
         assert!(actual
             .report
             .ranks
             .iter()
             .any(|rank| rank.movement_parallel.spawned_workers > 1));
+        assert!(checked_batches > 0);
     }
 }
 

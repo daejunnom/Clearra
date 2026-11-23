@@ -127,12 +127,12 @@ impl WorkBudget {
     }
 
     pub(super) fn report_storage(&self, stage: &'static str, value: usize) {
+        self.report_counter(stage, u64::try_from(value).unwrap_or(u64::MAX));
+    }
+
+    pub(super) fn report_counter(&self, stage: &'static str, value: u64) {
         if let Some(sink) = &self.progress_sink {
-            sink.report(ExecutionProgress::new(
-                stage,
-                u64::try_from(value).unwrap_or(u64::MAX),
-                None,
-            ));
+            sink.report(ExecutionProgress::new(stage, value, None));
         }
     }
 

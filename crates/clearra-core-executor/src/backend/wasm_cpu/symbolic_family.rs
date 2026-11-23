@@ -160,6 +160,7 @@ pub struct SymbolicFamilyRankReport {
     pub compatibility_cache_releases: usize,
     pub compatibility_filter_misses: u64,
     pub compatibility_guard_misses: u64,
+    pub compatibility_guard_suffix_elisions: u64,
     pub movement_parallel: SymbolicFamilyParallelReport,
 }
 
@@ -224,6 +225,7 @@ pub struct SymbolicFamilyReport {
     pub compatibility_work_steps: u64,
     pub compatibility_filter_misses: u64,
     pub compatibility_guard_misses: u64,
+    pub compatibility_guard_suffix_elisions: u64,
     pub compatibility_saturated_unions: u64,
     pub compatibility_union_remainder_calls: u64,
     pub compatibility_union_remainder_created_nodes: u64,
@@ -586,6 +588,13 @@ fn solve_with_occupancy<const CELLS: bool>(
         );
         #[cfg(not(all(feature = "parallel", not(target_family = "wasm"))))]
         let parallel_reason = Some("native-parallel-feature-unavailable");
+        // One owner-mode marker per rank. Sequential piece samples refer to
+        // the shared parent and must not be summed as independent suffixes.
+        control.report_progress(
+            "symbolic_context_movement_ownership",
+            u64::from(parallel_reason.is_none()),
+            None,
+        );
         let mut parallel_report = SymbolicFamilyParallelReport {
             requested_workers,
             eligible_pieces: pieces.len(),
@@ -595,9 +604,8 @@ fn solve_with_occupancy<const CELLS: bool>(
         {
             let mut consume_piece =
                 |piece: PieceKind,
-                 predicate_owner: &mut BooleanArena,
-                 legal_rows: &[(u32, BooleanId)],
-                 work: super::reachability::symbolic_family::SymbolicReachabilityWork|
+                 work: super::reachability::symbolic_family::SymbolicReachabilityWork,
+                 mut queries: MovementQueries<'_>|
                  -> Result<(), SymbolicFamilyError> {
                     control.report_progress(
                         "symbolic_context_piece",
@@ -659,61 +667,69 @@ fn solve_with_occupancy<const CELLS: bool>(
                             Ok(())
                         };
                     let mut extensions = Vec::new();
-                    if CELLS {
-                        extensions
-                            .try_reserve_exact(legal_rows.len())
-                            .map_err(|_| {
-                                SymbolicFamilyError::Resource(
-                                    "symbolic_piece_extensions_allocation",
-                                )
-                            })?;
-                    }
                     let mut all_extended = ZddId::EMPTY;
-                    for &(row_id, legal) in legal_rows {
-                        check_cancelled(control)?;
-                        control.report_progress(
-                            "symbolic_context_row",
-                            u64::from(row_id),
-                            Some(u64::from(row_count)),
-                        );
-                        rank_report.legal_row_queries += 1;
-                        if legal == BooleanId::FALSE {
-                            continue;
-                        }
-                        phase("symbolic_phase_row_bridge");
-                        let selected = bridge.filter(
-                            &mut sets,
-                            predicate_owner,
-                            ready_rows,
-                            legal,
-                            control,
-                        )?;
-                        if selected == ZddId::EMPTY {
-                            continue;
-                        }
-                        phase("symbolic_phase_row_add");
-                        let extended = sets.add(selected, row_id)?;
+                    {
+                        let (predicate_owner, legal_rows) = queries.query_inputs()?;
                         if CELLS {
-                            // Geometry is a predicate of the extended row set,
-                            // independent of which legal row was added last.
-                            phase("symbolic_phase_piece_union");
-                            all_extended = sets.union(all_extended, extended)?;
-                            extensions.push((row_id, selected, extended));
-                            continue;
+                            extensions
+                                .try_reserve_exact(legal_rows.len())
+                                .map_err(|_| {
+                                    SymbolicFamilyError::Resource(
+                                        "symbolic_piece_extensions_allocation",
+                                    )
+                                })?;
                         }
-                        rank_report.geometry_filters += 1;
-                        phase("symbolic_phase_row_down");
-                        let allowed = down.filter_extendible(&mut sets, extended)?;
-                        consume_extension(
-                            &mut sets,
-                            row_id,
-                            selected,
-                            extended,
-                            allowed,
-                            &mut rank_report,
-                        )?;
+                        for &(row_id, legal) in legal_rows {
+                            check_cancelled(control)?;
+                            control.report_progress(
+                                "symbolic_context_row",
+                                u64::from(row_id),
+                                Some(u64::from(row_count)),
+                            );
+                            rank_report.legal_row_queries += 1;
+                            if legal == BooleanId::FALSE {
+                                continue;
+                            }
+                            phase("symbolic_phase_row_bridge");
+                            let selected = bridge.filter(
+                                &mut sets,
+                                predicate_owner,
+                                ready_rows,
+                                legal,
+                                control,
+                            )?;
+                            if selected == ZddId::EMPTY {
+                                continue;
+                            }
+                            phase("symbolic_phase_row_add");
+                            let extended = sets.add(selected, row_id)?;
+                            if CELLS {
+                                // Geometry is a predicate of the extended row set,
+                                // independent of which legal row was added last.
+                                phase("symbolic_phase_piece_union");
+                                all_extended = sets.union(all_extended, extended)?;
+                                extensions.push((row_id, selected, extended));
+                                continue;
+                            }
+                            rank_report.geometry_filters += 1;
+                            phase("symbolic_phase_row_down");
+                            let allowed = down.filter_extendible(&mut sets, extended)?;
+                            consume_extension(
+                                &mut sets,
+                                row_id,
+                                selected,
+                                extended,
+                                allowed,
+                                &mut rank_report,
+                            )?;
+                        }
                     }
                     if CELLS {
+                        // All Boolean/cofactor queries are finished. Only ZDD
+                        // roots survive into geometry and original-source work.
+                        // A borrowed sequential parent remains owned by its rank.
+                        #[cfg(all(feature = "parallel", not(target_family = "wasm")))]
+                        queries.release_private(control);
                         control.report_progress(
                             "symbolic_context_piece",
                             piece.as_ascii() as u64,
@@ -779,9 +795,8 @@ fn solve_with_occupancy<const CELLS: bool>(
                     |movement| {
                         consume_piece(
                             movement.piece,
-                            &mut movement.predicates,
-                            &movement.legal_rows,
                             movement.work,
+                            MovementQueries::Private(movement),
                         )
                     },
                 )?;
@@ -849,7 +864,14 @@ fn solve_with_occupancy<const CELLS: bool>(
                         legal_rows.push((row_id, legal));
                     }
                     drop(relation);
-                    consume_piece(piece, &mut predicates, &legal_rows, work)?;
+                    consume_piece(
+                        piece,
+                        work,
+                        MovementQueries::Borrowed {
+                            predicates: &mut predicates,
+                            legal_rows: &legal_rows,
+                        },
+                    )?;
                 }
             }
         }
@@ -876,6 +898,9 @@ fn solve_with_occupancy<const CELLS: bool>(
         rank_report.compatibility_guard_misses = compatibility_end
             .guard_misses
             .saturating_sub(compatibility_start.guard_misses);
+        rank_report.compatibility_guard_suffix_elisions = compatibility_end
+            .guard_suffix_elisions
+            .saturating_sub(compatibility_start.guard_suffix_elisions);
         rank_report.set_nodes_before_compaction = sets.node_count();
         rank_report.cell_support_work_steps = bridge.support_work_steps() - cell_support_start;
         rank_report.cell_support_cached_nodes = bridge.support_cache_entries();
@@ -938,6 +963,7 @@ fn solve_with_occupancy<const CELLS: bool>(
     report.compatibility_work_steps = down.work_steps();
     report.compatibility_filter_misses = down.metrics().filter_misses;
     report.compatibility_guard_misses = down.metrics().guard_misses;
+    report.compatibility_guard_suffix_elisions = down.metrics().guard_suffix_elisions;
     report.compatibility_saturated_unions = down.metrics().saturated_unions;
     report.compatibility_union_remainder_calls = down.metrics().union_remainder_calls;
     report.compatibility_union_remainder_created_nodes =
@@ -972,6 +998,39 @@ fn solve_with_occupancy<const CELLS: bool>(
             / PieceKind::STANDARD_TETROMINOES.len(),
         report,
     })
+}
+
+/// A sequential parent is borrowed; a private result can end its query lifetime
+/// before the caller finishes geometry/source work over the resulting ZDD IDs.
+enum MovementQueries<'a> {
+    Borrowed {
+        predicates: &'a mut BooleanArena,
+        legal_rows: &'a [(u32, BooleanId)],
+    },
+    #[cfg(all(feature = "parallel", not(target_family = "wasm")))]
+    Private(&'a mut super::symbolic_family_parallel::PieceMovement),
+}
+
+impl MovementQueries<'_> {
+    fn query_inputs(
+        &mut self,
+    ) -> Result<(&mut BooleanArena, &[(u32, BooleanId)]), SymbolicFamilyError> {
+        match self {
+            Self::Borrowed {
+                predicates,
+                legal_rows,
+            } => Ok((&mut **predicates, *legal_rows)),
+            #[cfg(all(feature = "parallel", not(target_family = "wasm")))]
+            Self::Private(movement) => movement.query_inputs(),
+        }
+    }
+
+    #[cfg(all(feature = "parallel", not(target_family = "wasm")))]
+    fn release_private(&mut self, control: &ExecutionControl) {
+        if let Self::Private(movement) = self {
+            movement.release_queries(control);
+        }
+    }
 }
 
 fn release_compatibility_memo(

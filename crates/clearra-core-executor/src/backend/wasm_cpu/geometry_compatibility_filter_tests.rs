@@ -25,6 +25,95 @@ fn singleton(arena: &mut ZddArena, variables: &[u32]) -> ZddId {
 }
 
 #[test]
+fn guard_suffix_cutoffs_match_pairwise_conflicts_and_exclude_only_self() {
+    // Distinct row identities can share a footprint. The greatest owner must
+    // be replaced by the second greatest only when it is the guarded row.
+    for cells in [
+        vec![0x0f, 0xf0, 0x55, 0xaa, 0x0f],
+        vec![0xf000_0000_0000_0000, 0x0f, 0xf000_0000_0000_0000],
+        vec![0x0f, 0xf0, 0xf00],
+    ] {
+        let mut budget = WorkBudget::new(ZddLimits::default(), "test_guard_cutoffs");
+        let cutoffs = compile_guard_cutoffs(&cells, &mut budget).unwrap();
+        for (row, &mask) in cells.iter().enumerate() {
+            let expected = cells
+                .iter()
+                .enumerate()
+                .filter(|&(other, &footprint)| other != row && footprint & mask != 0)
+                .map(|(other, _)| (other + 1) as u32)
+                .max()
+                .unwrap_or(0);
+            assert_eq!(cutoffs[row], expected, "row={row} cells={cells:?}");
+        }
+    }
+}
+
+#[test]
+fn guard_suffix_cutoff_preserves_correlated_tails_with_less_guard_work() {
+    let mut cells = vec![0x0f_u64, 0x0f];
+    cells.extend((1..8).map(|column| 0x0f_u64 << (column * 4)));
+    let row_count = cells.len() as u32;
+    let mut geometry = GeometrySolutionFamily::new();
+    let mut root = FAMILY_EMPTY;
+    for row in (2..row_count).rev() {
+        root = geometry.append(row, root).unwrap();
+    }
+    root = geometry.append(0, root).unwrap();
+    let required = cells.iter().copied().fold(0, |mask, cells| mask | cells);
+    let limits = ZddLimits::default();
+    let control = ExecutionControl::default();
+    let mut direct = GeometryCompatibilityFilter::new(
+        &geometry,
+        root,
+        cells.clone(),
+        required,
+        limits,
+        &control,
+    )
+    .unwrap();
+    assert_eq!(direct.guard_cutoffs[0], 2);
+    assert_eq!(direct.guard_cutoffs[1], 1);
+    assert!(direct.guard_cutoffs[2..].iter().all(|&cutoff| cutoff == 0));
+    let mut reference =
+        GeometryCompatibilityFilter::new(&geometry, root, cells, required, limits, &control)
+            .unwrap();
+    // This restores the former guard traversal through every row variable.
+    // Both paths retain the same source-only suffix base case.
+    reference.guard_cutoffs.fill(row_count);
+
+    let mut arena = ZddArena::new(limits);
+    let source_a = singleton(&mut arena, &[row_count]);
+    let source_b = singleton(&mut arena, &[row_count + 1]);
+    // The highest row selects its original source. Earlier tail rows are
+    // optional, including equal low/high branches required by ZDD semantics.
+    let mut tail = arena.mk(row_count - 1, source_a, source_b).unwrap();
+    for row in (2..row_count - 1).rev() {
+        tail = arena.mk(row, tail, tail).unwrap();
+    }
+    let with_conflict = arena.mk(1, tail, tail).unwrap();
+    let joint = arena.mk(0, with_conflict, with_conflict).unwrap();
+    let expected = arena.mk(0, tail, tail).unwrap();
+    let before_direct = direct.work_steps();
+    let actual = direct.filter_extendible(&mut arena, joint).unwrap();
+    let before_reference = reference.work_steps();
+    let previous = reference.filter_extendible(&mut arena, joint).unwrap();
+    assert_eq!(actual, expected);
+    assert_eq!(previous, expected);
+    assert_eq!(arena.count(joint), Ok(512));
+    assert_eq!(arena.count(actual), Ok(256));
+    assert!(arena.contains(actual, [row_count]).unwrap());
+    assert!(!arena.contains(actual, [row_count + 1]).unwrap());
+    assert!(arena
+        .contains(actual, [row_count - 1, row_count + 1])
+        .unwrap());
+    assert!(!arena.contains(actual, [row_count - 1, row_count]).unwrap());
+    assert!(direct.metrics().guard_suffix_elisions > 0);
+    assert_eq!(reference.metrics().guard_suffix_elisions, 0);
+    assert!(direct.metrics().guard_misses < reference.metrics().guard_misses);
+    assert!(direct.work_steps() - before_direct < reference.work_steps() - before_reference);
+}
+
+#[test]
 fn immutable_cover_filter_matches_down_and_explicit_correlated_members() {
     let (geometry, root, cells) = fixture();
     let limits = ZddLimits::default();

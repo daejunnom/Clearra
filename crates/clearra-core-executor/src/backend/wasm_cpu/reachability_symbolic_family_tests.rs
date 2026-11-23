@@ -676,6 +676,103 @@ fn symbolic_collision_only_transfers_keep_reached_inside_the_seed_domain() {
 }
 
 #[test]
+fn symbolic_domain_saturation_keeps_skipped_ordered_priors_and_other_slots() {
+    let control = ExecutionControl::default();
+    let mut arena = BooleanArena::new(3, BooleanLimits::default()).unwrap();
+    let a = arena.variable(0).unwrap();
+    let b = arena.variable(1).unwrap();
+    let mut domain = arena.variable(2).unwrap();
+    let mut occupied = [BooleanId::FALSE; 64];
+    occupied[0] = arena.and(domain, a).unwrap();
+    occupied[1] = arena.and(domain, b).unwrap();
+    let free_a = arena.not(occupied[0]).unwrap();
+    let free_b = arena.not(occupied[1]).unwrap();
+    let mut free = [
+        BooleanId::TRUE,
+        free_a,
+        BooleanId::TRUE,
+        BooleanId::TRUE,
+        free_b,
+    ];
+    // Pose 0 is saturated over domain, but its collision predicate also
+    // includes outside worlds. Pose 1 supplies the proper subset D AND !a.
+    assert_ne!(domain, free[0]);
+    let partial = arena.and(domain, free_a).unwrap();
+    assert_ne!(partial, domain);
+    // Slot 0 originally tries [4, 0, 2]. Pose 4 has no descriptor, and pose 0
+    // needs no further reachability work. Both remain first-success priors
+    // for pose 2. Slot 1 independently tries [4, 3].
+    let prior_targets = [4, 0, 2, 4, 3];
+    let edges = [
+        Edge {
+            target: 0,
+            guard: TransferGuard::Ordered {
+                slot: 0,
+                prior_offset: 0,
+                prior_count: 1,
+            },
+        },
+        Edge {
+            target: 2,
+            guard: TransferGuard::Ordered {
+                slot: 0,
+                prior_offset: 0,
+                prior_count: 2,
+            },
+        },
+        Edge {
+            target: 3,
+            guard: TransferGuard::Ordered {
+                slot: 1,
+                prior_offset: 3,
+                prior_count: 1,
+            },
+        },
+    ];
+    let mut work = SymbolicReachabilityWork::default();
+    let reached = propagate(
+        &mut arena,
+        &mut domain,
+        &[0, 0, 3, 3, 3, 3],
+        &edges,
+        &[0, 1],
+        &mut free,
+        &occupied,
+        &prior_targets,
+        None,
+        false,
+        &control,
+        &mut work,
+    )
+    .unwrap();
+    assert_eq!(reached[0], domain);
+    assert_eq!(reached[1], partial);
+    for assignment in 0..8 {
+        let in_domain = assignment & 4 != 0;
+        let a = assignment & 1 != 0;
+        let b = assignment & 2 != 0;
+        // The ordinary first-success choices are determined directly from
+        // the three input bits, independently of symbolic propagation.
+        let expected = [
+            in_domain,
+            in_domain && !a,
+            false,
+            in_domain && !a && b,
+            false,
+        ];
+        for (pose, &root) in reached.iter().enumerate() {
+            assert_eq!(
+                arena.evaluate(root, |variable| assignment & (1 << variable) != 0),
+                expected[pose],
+                "assignment={assignment} pose={pose}",
+            );
+        }
+    }
+    assert_eq!(work.early_reached_rejections, 1);
+    assert_eq!(work.rotation_ordered_prior_terms, 3);
+}
+
+#[test]
 fn symbolic_transfer_descriptors_keep_priority_slots_and_requeued_deltas_exact() {
     let control = ExecutionControl::default();
     let mut arena = BooleanArena::new(4, BooleanLimits::default()).unwrap();
