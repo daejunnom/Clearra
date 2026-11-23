@@ -1,4 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
+import { armDeadline, earliestDeadline, executionDeadline } from "../job-service/execution-deadline.mjs";
+import { PLATFORM_DEADLINE_CODE, PLATFORM_RESPONSE_RESERVE_MS, platformDeadlineError, platformResponseDeadline } from "../job-service/platform-deadline.mjs";
+import { jobResponseDispatcher } from "./job-http-dispatcher.mjs";
 
 import {
   normalizeRuntimeIdentity,
@@ -80,12 +83,12 @@ const STRUCTURE_SEARCH_COMMANDS = new Set([
   "spin-structure",
 ]);
 const SETUP_SEARCH_COMMANDS = new Set(["setup", "setup-finder"]);
-// The ingress supplies the remaining interaction deadline. Keep a minute for
-// delivery inside Discord's 15-minute token lifetime, without shorter PC caps.
-const DEFAULT_SEARCH_TIMEOUT_MS = 14 * 60_000;
+// Computation is unlimited unless its caller explicitly supplies a limit.
+// Discord token lifetime and Cloud Run request lifetime are separate concerns.
+const DEFAULT_SEARCH_TIMEOUT_MS = 0;
 const DEFAULT_PC_SEARCH_TIMEOUT_MS = DEFAULT_SEARCH_TIMEOUT_MS;
-const DEFAULT_LONG_SEARCH_TIMEOUT_MS = 15 * 60_000;
-const DEFAULT_UTILITY_SEARCH_TIMEOUT_MS = 15 * 60_000;
+const DEFAULT_LONG_SEARCH_TIMEOUT_MS = 0;
+const DEFAULT_UTILITY_SEARCH_TIMEOUT_MS = 0;
 const DISCORD_UTILITY_SUBCOMMANDS = new Set([
   "sequence",
   "sequence-dependencies",
@@ -218,7 +221,7 @@ export function searchTimeoutMsForArguments(
   policy = {},
   routedClass = undefined,
 ) {
-  const genericTimeoutMs = positiveSearchTimeout(
+  const genericTimeoutMs = nonNegativeSearchTimeout(
     policy.searchTimeoutMs ?? policy.timeoutMs,
     DEFAULT_SEARCH_TIMEOUT_MS,
   );
@@ -245,7 +248,7 @@ export function searchTimeoutMsForArguments(
     diagnostic: policy.diagnosticTimeoutMs,
     default: undefined,
   })[class_];
-  return positiveSearchTimeout(configured, classDefault);
+  return nonNegativeSearchTimeout(configured, classDefault);
 }
 
 function normalizedTimeoutClass(value) {
@@ -265,10 +268,10 @@ function normalizedSearchCommand(value) {
   return normalized.length > 0 ? normalized : null;
 }
 
-function positiveSearchTimeout(value, fallback) {
+function nonNegativeSearchTimeout(value, fallback) {
   if (value === undefined || value === null || value === "") return fallback;
   const parsed = Number(value);
-  if (!Number.isSafeInteger(parsed) || parsed < 1) {
+  if (!Number.isSafeInteger(parsed) || parsed < 0) {
     throw new Error("Clearrabot received an invalid search timeout policy.");
   }
   return parsed;
@@ -825,39 +828,39 @@ export class ClearraJobExecutor {
     }
     const legacyTimeoutMs = options.timeoutMs === undefined
       ? undefined
-      : positiveExecutorOption(options.timeoutMs, DEFAULT_SEARCH_TIMEOUT_MS);
-    this.searchTimeoutMs = positiveExecutorOption(
+      : nonNegativeExecutorOption(options.timeoutMs, DEFAULT_SEARCH_TIMEOUT_MS);
+    this.searchTimeoutMs = nonNegativeExecutorOption(
       options.searchTimeoutMs ?? legacyTimeoutMs,
       DEFAULT_SEARCH_TIMEOUT_MS,
     );
-    this.pcSearchTimeoutMs = positiveExecutorOption(
+    this.pcSearchTimeoutMs = nonNegativeExecutorOption(
       options.pcSearchTimeoutMs ?? options.reverseSearchTimeoutMs ?? legacyTimeoutMs,
       legacyTimeoutMs ?? DEFAULT_PC_SEARCH_TIMEOUT_MS,
     );
     // Retain the old property as a read-only compatibility projection for
     // callers that have not yet moved to the canonical PC family name.
     this.reverseSearchTimeoutMs = this.pcSearchTimeoutMs;
-    this.buildSearchTimeoutMs = positiveExecutorOption(
+    this.buildSearchTimeoutMs = nonNegativeExecutorOption(
       options.buildSearchTimeoutMs ?? options.forwardSearchTimeoutMs ?? legacyTimeoutMs,
       legacyTimeoutMs ?? DEFAULT_LONG_SEARCH_TIMEOUT_MS,
     );
-    this.setupSearchTimeoutMs = positiveExecutorOption(
+    this.setupSearchTimeoutMs = nonNegativeExecutorOption(
       options.setupSearchTimeoutMs ?? options.forwardSearchTimeoutMs ?? legacyTimeoutMs,
       legacyTimeoutMs ?? DEFAULT_LONG_SEARCH_TIMEOUT_MS,
     );
-    this.forwardSearchTimeoutMs = positiveExecutorOption(
+    this.forwardSearchTimeoutMs = nonNegativeExecutorOption(
       options.forwardSearchTimeoutMs ?? legacyTimeoutMs,
       legacyTimeoutMs ?? DEFAULT_LONG_SEARCH_TIMEOUT_MS,
     );
-    this.structureSearchTimeoutMs = positiveExecutorOption(
+    this.structureSearchTimeoutMs = nonNegativeExecutorOption(
       options.structureSearchTimeoutMs ?? options.forwardSearchTimeoutMs ?? legacyTimeoutMs,
       legacyTimeoutMs ?? DEFAULT_LONG_SEARCH_TIMEOUT_MS,
     );
-    this.utilitySearchTimeoutMs = positiveExecutorOption(
+    this.utilitySearchTimeoutMs = nonNegativeExecutorOption(
       options.utilitySearchTimeoutMs,
       DEFAULT_UTILITY_SEARCH_TIMEOUT_MS,
     );
-    this.diagnosticTimeoutMs = positiveExecutorOption(
+    this.diagnosticTimeoutMs = nonNegativeExecutorOption(
       options.diagnosticTimeoutMs ?? legacyTimeoutMs,
       legacyTimeoutMs ?? DEFAULT_SEARCH_TIMEOUT_MS,
     );
@@ -884,6 +887,16 @@ export class ClearraJobExecutor {
     this.fetch = options.fetch ?? globalThis.fetch?.bind(globalThis);
     this.createJobId = options.createJobId ?? randomUUID;
     this.now = options.now ?? Date.now;
+    this.setTimeout = options.setTimeout ?? setTimeout;
+    this.clearTimeout = options.clearTimeout ?? clearTimeout;
+    this.platformRequestTimeoutMs = nonNegativeExecutorOption(
+      options.platformRequestTimeoutMs, 0,
+    );
+    this.platformResponseReserveMs = positiveExecutorOption(
+      options.platformResponseReserveMs, PLATFORM_RESPONSE_RESERVE_MS,
+    );
+    platformResponseDeadline(0, this.platformRequestTimeoutMs, this.platformResponseReserveMs);
+    this.dispatcher = options.dispatcher ?? jobResponseDispatcher;
     if (typeof this.fetch !== "function") {
       throw new Error("Clearrabot requires an HTTP fetch implementation.");
     }
@@ -899,96 +912,91 @@ export class ClearraJobExecutor {
     const controller = new AbortController();
     const startedAt = this.now();
     const timeoutClass = searchTimeoutClass(arguments_, options.timeoutClass);
-    const commandTimeoutMs = searchTimeoutMsForArguments(
-      arguments_,
-      this,
-      timeoutClass,
+    const commandTimeoutMs = searchTimeoutMsForArguments(arguments_, this, timeoutClass);
+    const deadlineUnixMs = executionDeadline(
+      startedAt,
+      commandTimeoutMs,
+      options.deadlineUnixMs === undefined ? 0 : validAbsoluteDeadline(options.deadlineUnixMs),
     );
-    const requestedDeadlineUnixMs = options.deadlineUnixMs === undefined
-      ? startedAt + commandTimeoutMs
-      : validAbsoluteDeadline(options.deadlineUnixMs);
-    const deadlineUnixMs = Math.min(
-      requestedDeadlineUnixMs,
-      startedAt + commandTimeoutMs,
-    );
-    const remainingMs = deadlineUnixMs - startedAt;
-    if (remainingMs <= 0) {
-      throw new Error("Clearra interaction deadline expired before submission.");
+    if (deadlineUnixMs !== 0 && deadlineUnixMs <= startedAt) {
+      throw new Error("Clearra execution deadline expired before submission.");
     }
-    let timedOut = false;
+    const platformDeadlineUnixMs = platformResponseDeadline(
+      startedAt, this.platformRequestTimeoutMs, this.platformResponseReserveMs,
+    );
+    const deadline = earliestDeadline(deadlineUnixMs, platformDeadlineUnixMs);
+    let pendingFailure = null;
     let submitted = false;
-    const abort = () => controller.abort();
-    const timeout = setTimeout(() => {
-      timedOut = true;
+    let receivedTerminal = false;
+    let settled = false;
+    let rejectFailure;
+    const failure = new Promise((_, reject) => { rejectFailure = reject; });
+    const fail = (error) => {
+      if (settled || pendingFailure) return;
+      pendingFailure = error;
+      rejectFailure(error);
       controller.abort();
-    }, remainingMs);
+    };
+    const checkFailure = () => { if (pendingFailure) throw pendingFailure; };
+    const abort = () => fail(abortError("Clearra search was cancelled."));
+    const cancelDeadline = armDeadline(deadline, () => {
+      fail(platformDeadlineUnixMs !== 0 && platformDeadlineUnixMs === deadline
+        ? platformDeadlineError()
+        : new Error("Clearra search exceeded its explicit execution deadline."));
+    }, this);
     options.signal?.addEventListener("abort", abort, { once: true });
 
     try {
-      if (options.signal?.aborted) controller.abort();
-      submitted = true;
-      let response = await this.request(this.endpoint, {
-        method: "POST",
-        jobId,
-        signal: controller.signal,
-        body: JSON.stringify({
-          protocol: JOB_PROTOCOL,
-          id: jobId,
-          kind: "clearra.command",
-          arguments: [...arguments_],
-          timeoutClass,
-          deadlineUnixMs,
-          maxOutputBytes: this.maxOutputBytes,
-          maxArtifactBytes: this.maxArtifactBytes,
-          expectedRuntime: this.expectedRuntimeIdentity,
-        }),
-      });
-      let job = await readJobResponse(
-        response,
-        this.maxOutputBytes,
-        this.maxArtifactBytes,
-      );
-      validateRuntimeIdentity(job, this.expectedRuntimeIdentity);
-      validateJobIdentity(job, jobId);
-
-      while (!TERMINAL_JOB_STATES.has(job.state)) {
-        if (job.state !== "running" && job.state !== "accepted") {
-          throw new Error("Clearra job service returned an invalid pending state.");
-        }
-        await abortableDelay(this.pollIntervalMs, controller.signal);
-        response = await this.request(this.jobUrl(jobId), {
-          method: "GET",
-          jobId,
-          signal: controller.signal,
+      if (options.signal?.aborted) abort();
+      const operation = (async () => {
+        checkFailure();
+        submitted = true;
+        let response = await this.request(this.endpoint, {
+          method: "POST", jobId, signal: controller.signal,
+          body: JSON.stringify({
+            protocol: JOB_PROTOCOL, id: jobId, kind: "clearra.command",
+            arguments: [...arguments_], timeoutClass, deadlineUnixMs,
+            requestStartedUnixMs: startedAt,
+            maxOutputBytes: this.maxOutputBytes,
+            maxArtifactBytes: this.maxArtifactBytes,
+            expectedRuntime: this.expectedRuntimeIdentity,
+          }),
         });
-        job = await readJobResponse(
-          response,
-          this.maxOutputBytes,
-          this.maxArtifactBytes,
-        );
+        checkFailure();
+        let job = await readJobResponse(response, this.maxOutputBytes, this.maxArtifactBytes);
+        checkFailure();
         validateRuntimeIdentity(job, this.expectedRuntimeIdentity);
         validateJobIdentity(job, jobId);
-      }
-
-      return terminalJobResult(
-        job,
-        this.maxOutputBytes,
-        this.maxArtifactBytes,
-      );
-    } catch (error) {
-      if (submitted) await this.cancel(jobId);
-      if (controller.signal.aborted) {
-        if (timedOut) {
-          throw new Error(
-            `Clearrabot search exceeded the ${timeoutLabel(commandTimeoutMs)} time limit.`,
-          );
+        while (!TERMINAL_JOB_STATES.has(job.state)) {
+          if (job.state !== "running" && job.state !== "accepted") {
+            throw new Error("Clearra job service returned an invalid pending state.");
+          }
+          await abortableDelay(this.pollIntervalMs, controller.signal);
+          checkFailure();
+          response = await this.request(this.jobUrl(jobId), {
+            method: "GET", jobId, signal: controller.signal,
+          });
+          checkFailure();
+          job = await readJobResponse(response, this.maxOutputBytes, this.maxArtifactBytes);
+          checkFailure();
+          validateRuntimeIdentity(job, this.expectedRuntimeIdentity);
+          validateJobIdentity(job, jobId);
         }
-        throw abortError("Clearra search was cancelled.");
-      }
-      if (error instanceof Error) throw error;
+        receivedTerminal = true;
+        return terminalJobResult(job, this.maxOutputBytes, this.maxArtifactBytes);
+      })();
+      // Fetch implementations and asynchronous response decoding can finish
+      // after abort. The first accepted failure owns the public outcome.
+      return await Promise.race([operation, failure]);
+    } catch (error) {
+      settled = true;
+      const terminalError = pendingFailure ?? error;
+      if (submitted && !receivedTerminal) await this.cancel(jobId);
+      if (terminalError instanceof Error) throw terminalError;
       throw new Error("Clearra job service request failed.");
     } finally {
-      clearTimeout(timeout);
+      settled = true;
+      cancelDeadline();
       options.signal?.removeEventListener("abort", abort);
     }
   }
@@ -998,6 +1006,7 @@ export class ClearraJobExecutor {
     try {
       response = await this.fetch(url, {
         method: options.method,
+        dispatcher: this.dispatcher,
         headers: this.headers(options.jobId, options.body !== undefined),
         body: options.body,
         signal: options.signal,
@@ -1039,22 +1048,26 @@ export class ClearraJobExecutor {
 
   async cancel(jobId) {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), this.cancelTimeoutMs);
-    try {
-      const response = await this.fetch(this.jobUrl(jobId), {
-        method: "DELETE",
-        headers: this.headers(jobId, false),
-        signal: controller.signal,
-        cache: "no-store",
-        redirect: "error",
-      });
-      if (!response.ok && response.status !== 404 && response.status !== 409) {
-        throw new Error(`job cancellation returned ${response.status}`);
+    let timeout;
+    const expiration = new Promise((resolve) => {
+      timeout = this.setTimeout(() => { controller.abort(); resolve(); }, this.cancelTimeoutMs);
+    });
+    const request = (async () => {
+      try {
+        const response = await this.fetch(this.jobUrl(jobId), {
+          method: "DELETE", headers: this.headers(jobId, false),
+          signal: controller.signal, cache: "no-store", redirect: "error",
+        });
+        await response.body?.cancel();
+      } catch {
+        // The service's terminal state and process teardown are independently
+        // owned. A lost cancellation response cannot reopen this attempt.
       }
-    } catch {
-      // The submitted deadline remains the service-side fail-close boundary.
+    })();
+    try {
+      await Promise.race([request, expiration]);
     } finally {
-      clearTimeout(timeout);
+      this.clearTimeout(timeout);
     }
   }
 }
@@ -1087,6 +1100,14 @@ function isLoopbackHostname(hostname) {
     /^127(?:\.\d{1,3}){3}$/.test(normalized);
 }
 
+function nonNegativeExecutorOption(value, fallback) {
+  const parsed = value ?? fallback;
+  if (!Number.isSafeInteger(parsed) || parsed < 0) {
+    throw new Error("Clearrabot received an invalid job executor setting.");
+  }
+  return parsed;
+}
+
 function positiveExecutorOption(value, fallback) {
   const parsed = value ?? fallback;
   if (!Number.isSafeInteger(parsed) || parsed < 1) {
@@ -1097,8 +1118,8 @@ function positiveExecutorOption(value, fallback) {
 
 function validAbsoluteDeadline(value) {
   const parsed = Number(value);
-  if (!Number.isSafeInteger(parsed) || parsed < 1) {
-    throw new Error("Clearrabot received an invalid interaction deadline.");
+  if (!Number.isSafeInteger(parsed) || parsed < 0) {
+    throw new Error("Clearrabot received an invalid execution deadline.");
   }
   return parsed;
 }
@@ -1186,6 +1207,7 @@ function terminalJobResult(job, maxOutputBytes, maxArtifactBytes) {
   }
   if (job.state === "failed") {
     const message = typeof job.error === "string" ? job.error : "remote job failed";
+    if (job.errorCode === PLATFORM_DEADLINE_CODE) throw platformDeadlineError();
     throw new Error(`Clearra job service failed the search: ${message}`);
   }
   const result = job.result;
@@ -1312,12 +1334,6 @@ function abortableDelay(milliseconds, signal) {
     signal.addEventListener("abort", abort, { once: true });
     if (signal.aborted) abort();
   });
-}
-
-function timeoutLabel(milliseconds) {
-  if (milliseconds % 60_000 === 0) return `${milliseconds / 60_000}-minute`;
-  if (milliseconds % 1_000 === 0) return `${milliseconds / 1_000}-second`;
-  return `${milliseconds}-millisecond`;
 }
 
 function abortError(message) {

@@ -45,17 +45,17 @@ const TEST_REMOTE_RUNTIME_ENVIRONMENT = Object.freeze({
     TEST_RUNTIME_IDENTITY.artifactSchemaVersion,
 });
 
-test("Clearrabot applies direction-specific search and interaction limits", () => {
+test("Clearrabot defaults every calculation to unlimited and keeps its delivery window", () => {
   const config = loadDiscordBotConfig({ DISCORD_TOKEN: "test-token" });
   assert.equal(config.ingressMode, "gateway");
-  assert.equal(config.searchTimeoutMs, 840_000);
-  assert.equal(config.pcSearchTimeoutMs, 840_000);
-  assert.equal(config.reverseSearchTimeoutMs, 840_000);
-  assert.equal(config.buildSearchTimeoutMs, 900_000);
-  assert.equal(config.setupSearchTimeoutMs, 900_000);
-  assert.equal(config.forwardSearchTimeoutMs, 900_000);
-  assert.equal(config.structureSearchTimeoutMs, 900_000);
-  assert.equal(config.diagnosticTimeoutMs, 840_000);
+  assert.equal(config.searchTimeoutMs, 0);
+  assert.equal(config.pcSearchTimeoutMs, 0);
+  assert.equal(config.reverseSearchTimeoutMs, 0);
+  assert.equal(config.buildSearchTimeoutMs, 0);
+  assert.equal(config.setupSearchTimeoutMs, 0);
+  assert.equal(config.forwardSearchTimeoutMs, 0);
+  assert.equal(config.structureSearchTimeoutMs, 0);
+  assert.equal(config.diagnosticTimeoutMs, 0);
   assert.equal(config.setupProgressNoticeMs, 300_000);
   assert.equal(config.interactionDeadlineMs, 840_000);
   assert.equal(config.jobEndpoint, "http://127.0.0.1:8787/jobs");
@@ -93,14 +93,14 @@ test("search timeout policy classifies the native product argv", () => {
 });
 
 test("search timeout policy preserves independent canonical family defaults", () => {
-  assert.equal(searchTimeoutMsForArguments(["pc"]), 840_000);
-  assert.equal(searchTimeoutMsForArguments(["build-probability"]), 900_000);
-  assert.equal(searchTimeoutMsForArguments(["damage"]), 900_000);
-  assert.equal(searchTimeoutMsForArguments(["setup-finder"]), 900_000);
-  assert.equal(searchTimeoutMsForArguments(["spin-structure"]), 900_000);
-  assert.equal(searchTimeoutMsForArguments(["finesse", "search"]), 900_000);
-  assert.equal(searchTimeoutMsForArguments(["finesse", "score"]), 900_000);
-  assert.equal(searchTimeoutMsForArguments(["verify"]), 840_000);
+  assert.equal(searchTimeoutMsForArguments(["pc"]), 0);
+  assert.equal(searchTimeoutMsForArguments(["build-probability"]), 0);
+  assert.equal(searchTimeoutMsForArguments(["damage"]), 0);
+  assert.equal(searchTimeoutMsForArguments(["setup-finder"]), 0);
+  assert.equal(searchTimeoutMsForArguments(["spin-structure"]), 0);
+  assert.equal(searchTimeoutMsForArguments(["finesse", "search"]), 0);
+  assert.equal(searchTimeoutMsForArguments(["finesse", "score"]), 0);
+  assert.equal(searchTimeoutMsForArguments(["verify"]), 0);
 
   const policy = {
     searchTimeoutMs: 11,
@@ -131,13 +131,7 @@ test("the frozen public Discord contract matches every runtime timeout class", (
     assert.equal(searchTimeoutClass(arguments_), timeoutClass, id);
     assert.equal(
       searchTimeoutMsForArguments(arguments_),
-      timeoutClass === "pc_reverse"
-        ? 840_000
-        : timeoutClass === "utility_bounded"
-          ? 900_000
-        : timeoutClass.endsWith("_long")
-          ? 900_000
-          : 840_000,
+      0,
       id,
     );
   }
@@ -179,7 +173,7 @@ test("canonical search timeout settings remain independently configurable with l
     () =>
       loadDiscordBotConfig({
         DISCORD_TOKEN: "test-token",
-        CLEARRA_FORWARD_SEARCH_TIMEOUT_MS: "0",
+        CLEARRA_FORWARD_SEARCH_TIMEOUT_MS: "-1",
       }),
     /numeric setting is invalid/,
   );
@@ -1269,7 +1263,7 @@ test("Clearra executor cancels the remote job when the Clearrabot timeout expire
 
   await assert.rejects(
     executor.execute(["pc", "--lines", "4"]),
-    /Clearrabot search exceeded the 50-millisecond time limit/,
+    /explicit execution deadline/,
   );
   assert.deepEqual(requests.at(-1), [
     "https://jobs.example.test/jobs/job-timeout-1",

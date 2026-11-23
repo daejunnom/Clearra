@@ -20,7 +20,7 @@ const LAUNCHER = fileURLToPath(
 );
 const CLI = fileURLToPath(new URL("./candidate-settings-v080.mjs", import.meta.url));
 
-test("renders the canonical 13-line Oracle candidate settings fixture", async () => {
+test("renders the canonical 21-line Oracle candidate settings fixture", async () => {
   const expected = await readFile(FIXTURE);
   const actual = renderCandidateSettingsV080({
     sourceCommit: SOURCE_COMMIT,
@@ -28,14 +28,14 @@ test("renders the canonical 13-line Oracle candidate settings fixture", async ()
   });
   assert.deepEqual(actual, expected);
   assert.equal(actual.includes(13), false);
-  assert.equal(actual.toString("utf8").trimEnd().split("\n").length, 13);
+  assert.equal(actual.toString("utf8").trimEnd().split("\n").length, 21);
   assert.deepEqual(candidateSettingsAuthorityV080({
     sourceCommit: SOURCE_COMMIT,
     candidateUrl: CANDIDATE_URL,
   }), {
-    lineCount: 13,
-    size: 661,
-    sha256: "756ab15f1bb3554191833abf1cb362a126c9eacfae3b21e884949445df37ede1",
+    lineCount: 21,
+    size: 927,
+    sha256: "9c04d83173f78b8aa1f7fe7300dfcc7437149b20d67636de7a140f2c6ec0aa6f",
   });
 });
 

@@ -77,7 +77,7 @@ async function relativeEsmClosure(entries) {
   return closure;
 }
 
-test("job service and candidate smoke import only Node builtins and source, without document codecs", async () => {
+test("job service and candidate smoke close over the pinned HTTP transport without document codecs", async () => {
   const closure = await relativeEsmClosure([
     "scripts/run-cloud-candidate-smoke-job.mjs", "src/job-service/server.mjs",
   ]);
@@ -86,8 +86,8 @@ test("job service and candidate smoke import only Node builtins and source, with
   for (const modulePath of closure) {
     const source = await readFile(new URL(modulePath, sourceRootUrl), "utf8");
     for (const specifier of moduleSpecifiers(source)) {
-      assert.ok(specifier.startsWith(".") || specifier.startsWith("node:"),
-        `${modulePath} pulls a package into the dependency-free job runtime: ${specifier}`);
+      assert.ok(specifier.startsWith(".") || specifier.startsWith("node:") || specifier === "undici",
+        `${modulePath} pulls an unapproved package into the job runtime: ${specifier}`);
     }
   }
 });

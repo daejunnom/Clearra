@@ -289,14 +289,14 @@ test("job service uses every Cloud Run logical processor by default", () => {
   assert.equal(config.useAllLogicalProcessors, true);
   assert.equal(config.maxConcurrentJobs, 1);
   assert.equal(config.port, 8787);
-  assert.equal(config.searchTimeoutMs, 840_000);
-  assert.equal(config.diagnosticTimeoutMs, 840_000);
-  assert.equal(config.pcSearchTimeoutMs, 840_000);
-  assert.equal(config.reverseSearchTimeoutMs, 840_000);
-  assert.equal(config.buildSearchTimeoutMs, 900_000);
-  assert.equal(config.setupSearchTimeoutMs, 900_000);
-  assert.equal(config.forwardSearchTimeoutMs, 900_000);
-  assert.equal(config.structureSearchTimeoutMs, 900_000);
+  assert.equal(config.searchTimeoutMs, 0);
+  assert.equal(config.diagnosticTimeoutMs, 0);
+  assert.equal(config.pcSearchTimeoutMs, 0);
+  assert.equal(config.reverseSearchTimeoutMs, 0);
+  assert.equal(config.buildSearchTimeoutMs, 0);
+  assert.equal(config.setupSearchTimeoutMs, 0);
+  assert.equal(config.forwardSearchTimeoutMs, 0);
+  assert.equal(config.structureSearchTimeoutMs, 0);
 
   const timeoutOverrides = loadClearraJobServiceConfig(
     {
@@ -835,6 +835,8 @@ test("job runner transports one exact bounded render artifact and cleans its pri
 test("render runner cleans its private output on start failure, timeout, and cancellation", async () => {
   for (const mode of ["start-failure", "timeout", "cancel"]) {
     let outputPath;
+    let notifySpawn;
+    const spawned = new Promise((resolve) => { notifySpawn = resolve; });
     const controller = new AbortController();
     const runner = new ClearraCommandRunner(
       {
@@ -859,6 +861,7 @@ test("render runner cleans its private output on start failure, timeout, and can
         },
         spawn: (_executable, arguments_) => {
           outputPath = arguments_[arguments_.indexOf("--output") + 1];
+          notifySpawn();
           if (mode === "start-failure") throw new Error("fixture start failure");
           const child = new EventEmitter();
           child.stdout = new PassThrough();
@@ -892,7 +895,7 @@ test("render runner cleans its private output on start failure, timeout, and can
       },
       { signal: controller.signal },
     );
-    if (mode === "cancel") controller.abort();
+    if (mode === "cancel") { await spawned; controller.abort(); }
     await assert.rejects(pending, mode === "start-failure" ? /start/u : /cancelled|deadline/u);
     assert.equal(typeof outputPath, "string");
     assert.equal(existsSync(outputPath), false, `${mode} artifact residue`);
@@ -964,6 +967,8 @@ test("job runner clamps every canonical timeout family and preserves legacy infe
 });
 
 test("job runner retains its slot until a cancelled process closes", async () => {
+  let notifySpawn;
+  const spawned = new Promise((resolve) => { notifySpawn = resolve; });
   const child = new EventEmitter();
   child.stdout = new PassThrough();
   child.stderr = new PassThrough();
@@ -989,7 +994,7 @@ test("job runner retains its slot until a cancelled process closes", async () =>
       maxOutputBytes: 1024 * 1024,
       terminationGraceMs: 100,
     },
-    { spawn: () => child },
+    { spawn: () => { notifySpawn(); return child; } },
   );
   const controller = new AbortController();
   let outcome;
@@ -1005,6 +1010,7 @@ test("job runner retains its slot until a cancelled process closes", async () =>
     (error) => { outcome = { error }; },
   );
 
+  await spawned;
   controller.abort();
   await new Promise((resolve) => setTimeout(resolve, 5));
   assert.equal(outcome, undefined);

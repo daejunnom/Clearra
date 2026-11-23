@@ -25,12 +25,17 @@ output_root="$(cd "$output_root" && pwd -P)"
 accepted_ctk3_verifier="$repository_root/scripts/tools/accepted-ctk3-dist.mjs"
 [[ -f "$accepted_ctk3_verifier" && ! -L "$accepted_ctk3_verifier" ]] || usage
 script_directory="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
-dependency_root="$(node "$script_directory/resolve-runtime-dependency.mjs" "$repository_root")"
-[[ -d "$dependency_root" && ! -L "$dependency_root" ]] || {
-  printf '%s\n' 'the installed production tetris-fumen dependency is unavailable' >&2
-  exit 66
-}
-for input_root in "$accepted_ctk3_root" "$dependency_root"; do
+runtime_packages=(tetris-fumen undici)
+dependency_roots=()
+for package_name in "${runtime_packages[@]}"; do
+  dependency_root="$(node "$script_directory/resolve-runtime-dependency.mjs" "$repository_root" "$package_name")"
+  [[ -d "$dependency_root" && ! -L "$dependency_root" ]] || {
+    printf 'the production %s dependency is unavailable\n' "$package_name" >&2
+    exit 66
+  }
+  dependency_roots+=("$dependency_root")
+done
+for input_root in "$accepted_ctk3_root" "${dependency_roots[@]}"; do
   unsupported="$(find "$input_root" -xdev ! -type f ! -type d -print -quit)"
   [[ -z "$unsupported" ]] || {
     printf 'unsupported Actions layer entry: %s\n' "$unsupported" >&2
@@ -67,7 +72,9 @@ node "$accepted_ctk3_verifier" \
   --expected-source-commit "$source_commit" \
   --expected-run-id "$accepted_run_id" \
   --expected-run-attempt "$accepted_run_attempt" >/dev/null
-cp -a -- "$dependency_root" "$temporary_root/node_modules/tetris-fumen"
+for index in "${!runtime_packages[@]}"; do
+  cp -a -- "${dependency_roots[$index]}" "$temporary_root/node_modules/${runtime_packages[$index]}"
+done
 ln -s ../packages/ctk3 "$temporary_root/node_modules/ctk3"
 ln -s ../../apps/clearra-discord-bot "$temporary_root/node_modules/@clearra/discord-bot"
 

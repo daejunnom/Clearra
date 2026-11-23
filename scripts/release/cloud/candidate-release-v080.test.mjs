@@ -50,6 +50,14 @@ function secretEnvironment(name = "CLEARRA_JOB_TOKEN") {
   };
 }
 
+function runtimeEnvironment() {
+  return buildServiceDeployArguments(authority()).find((argument) => argument.startsWith("--set-env-vars="))
+    .slice("--set-env-vars=".length).split(",").map((pair) => {
+      const index = pair.indexOf("=");
+      return { name: pair.slice(0, index), value: pair.slice(index + 1) };
+    });
+}
+
 function serviceFixture(overrides = {}) {
   const expected = authority();
   return {
@@ -80,9 +88,10 @@ function serviceFixture(overrides = {}) {
         spec: {
           serviceAccountName: expected.runtimeServiceAccount,
           containerConcurrency: 1,
+          timeoutSeconds: 900,
           containers: [{
             image: imageDigest,
-            env: [secretEnvironment()],
+            env: [...runtimeEnvironment(), secretEnvironment()],
             resources: { limits: { cpu: "8", memory: "16Gi" } },
           }],
         },
@@ -110,9 +119,10 @@ function revisionFixture(overrides = {}) {
     spec: {
       serviceAccountName: expected.runtimeServiceAccount,
       containerConcurrency: 1,
+      timeoutSeconds: 900,
       containers: [{
         image: imageDigest,
-        env: [secretEnvironment()],
+        env: [...runtimeEnvironment(), secretEnvironment()],
         resources: { limits: { cpu: "8", memory: "16Gi" } },
       }],
     },
@@ -351,6 +361,25 @@ test("deploy and readback reject tag, traffic, image, and Secret-reference drift
     () => validateZeroTrafficReadback({ service: serviceFixture(), revision: resourceDrift }, expected),
     /resource readback drifted/u,
   );
+  for (const surface of ["service", "revision"]) {
+    const readback = { service: serviceFixture(), revision: revisionFixture() };
+    const spec = surface === "service" ? readback.service.spec.template.spec : readback.revision.spec;
+    spec.timeoutSeconds = 300;
+    assert.throws(() => validateZeroTrafficReadback(readback, expected), /resource readback drifted/u);
+    spec.timeoutSeconds = 900;
+    for (const [name, drift] of [
+      ["CLEARRA_SEARCH_TIMEOUT_MS", "840000"],
+      ["CLEARRA_UTILITY_SEARCH_TIMEOUT_MS", "900000"],
+      ["CLEARRA_JOB_REQUEST_TIMEOUT_MS", "0"],
+      ["CLEARRA_JOB_RESPONSE_RESERVE_MS", "1"],
+    ]) {
+      const variable = spec.containers[0].env.find((entry) => entry.name === name);
+      const saved = variable.value;
+      variable.value = drift;
+      assert.throws(() => validateZeroTrafficReadback(readback, expected), /runtime environment readback drifted/u);
+      variable.value = saved;
+    }
+  }
   assert.throws(
     () => candidateAuthority({
       projectId,

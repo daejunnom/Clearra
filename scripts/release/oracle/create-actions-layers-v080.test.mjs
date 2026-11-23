@@ -42,7 +42,16 @@ async function fixture(root, layout) {
     await mkdir(dirname(consumerLink), { recursive: true });
     await symlink(relative(dirname(consumerLink), packageRoot), consumerLink, "dir");
   }
-  return { repository, accepted, packageRoot, consumerLink };
+  const undiciRoot = layout === "pnpm"
+    ? join(repository, "node_modules/.pnpm/undici@6.28.0/node_modules/undici")
+    : join(repository, "node_modules/undici");
+  await put(join(undiciRoot, "package.json"), '{"name":"undici","version":"6.28.0","main":"index.js"}\n');
+  await put(join(undiciRoot, "index.js"), 'exports.getGlobalDispatcher = () => ({ dispatch: () => "runtime-undici" });\n');
+  const undiciLink = join(repository, "apps/clearra-discord-bot/node_modules/undici");
+  if (layout === "pnpm") {
+    await symlink(relative(dirname(undiciLink), undiciRoot), undiciLink, "dir");
+  }
+  return { repository, accepted, packageRoot, consumerLink, undiciRoot, undiciLink };
 }
 
 async function build(inputs, output) {
@@ -80,9 +89,20 @@ for (const layout of ["hoisted", "pnpm"]) {
       const leaves = tar(["-tf", dependencyArchive]).trim().split(/\r?\n/u);
       assert.ok(leaves.every((name) => [
         "node_modules/", "node_modules/@clearra/", "node_modules/@clearra/discord-bot", "node_modules/ctk3",
-      ].includes(name) || name.startsWith("node_modules/tetris-fumen/")));
+      ].includes(name) || name.startsWith("node_modules/tetris-fumen/") || name.startsWith("node_modules/undici/")));
       assert.equal(tar(["-xOf", dependencyArchive, "node_modules/tetris-fumen/index.js"]), "production-fumen\n");
       assert.equal(tar(["-xOf", join(first, "ctk3-dist.tar"), "packages/ctk3/dist/index.js"]), "accepted-index.js\n");
+      const relocated = join(root, "relocated");
+      await mkdir(relocated);
+      tar(["-xf", dependencyArchive, "-C", relocated]);
+      const dispatcherPath = join(relocated, "apps/clearra-discord-bot/src/clearra/job-http-dispatcher.mjs");
+      await mkdir(dirname(dispatcherPath), { recursive: true });
+      await copyFile(fileURLToPath(new URL("../../../apps/clearra-discord-bot/src/clearra/job-http-dispatcher.mjs", import.meta.url)), dispatcherPath);
+      const importCheck = spawnSync(process.execPath, ["--input-type=module", "--eval",
+        'const {jobResponseDispatcher} = await import(process.argv[1]); process.stdout.write(jobResponseDispatcher.dispatch({}, {}));', dispatcherPath],
+        { encoding: "utf8", timeout: 5_000 });
+      assert.equal(importCheck.status, 0, importCheck.stderr);
+      assert.equal(importCheck.stdout, "runtime-undici");
       const before = await readFile(dependencyArchive);
       const duplicate = invoke(inputs, first);
       assert.notEqual(duplicate.status, 0);
@@ -100,20 +120,25 @@ for (const layout of ["hoisted", "pnpm"]) {
 test("Actions runtime layers reject missing, escaping, and internally linked packages", linuxPackaging, async () => {
   const root = await mkdtemp(join(tmpdir(), "clearra-actions-layers-"));
   try {
-    const inputs = await fixture(root, "pnpm");
-    const output = join(root, "output");
-    await mkdir(output);
-    const unsafe = join(inputs.packageRoot, "linked-entry");
-    await symlink(join(root, "outside.txt"), unsafe);
-    assert.equal(invoke(inputs, output).status, 77);
-    await unlink(unsafe);
-    await unlink(inputs.consumerLink);
-    assert.equal(invoke(inputs, output).status, 66);
-    const outside = join(root, "outside-package");
-    await put(join(outside, "package.json"), '{"name":"tetris-fumen"}\n');
-    await symlink(outside, inputs.consumerLink, "dir");
-    assert.equal(invoke(inputs, output).status, 66);
-    await assert.rejects(readFile(join(output, "node_modules.tar")), { code: "ENOENT" });
+    for (const packageName of ["tetris-fumen", "undici"]) {
+      const caseRoot = join(root, packageName);
+      const inputs = await fixture(caseRoot, "pnpm");
+      const packageRoot = packageName === "undici" ? inputs.undiciRoot : inputs.packageRoot;
+      const consumerLink = packageName === "undici" ? inputs.undiciLink : inputs.consumerLink;
+      const output = join(caseRoot, "output");
+      await mkdir(output);
+      const unsafe = join(packageRoot, "linked-entry");
+      await symlink(join(root, "outside.txt"), unsafe);
+      assert.equal(invoke(inputs, output).status, 77);
+      await unlink(unsafe);
+      await unlink(consumerLink);
+      assert.equal(invoke(inputs, output).status, 66);
+      const outside = join(caseRoot, "outside-package");
+      await put(join(outside, "package.json"), JSON.stringify({ name: packageName }));
+      await symlink(outside, consumerLink, "dir");
+      assert.equal(invoke(inputs, output).status, 66);
+      await assert.rejects(readFile(join(output, "node_modules.tar")), { code: "ENOENT" });
+    }
   } finally {
     await rm(root, { recursive: true, force: true });
   }

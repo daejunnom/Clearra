@@ -1037,9 +1037,9 @@ function registrationOptions(input, capabilityId = null) {
         ),
         boundedIntegerOption(
           "timeout-seconds",
-          "Exact-analysis timeout in seconds; defaults to 900",
-          1,
-          900,
+          "Exact-analysis timeout in seconds; 0 (default) is unlimited",
+          0,
+          65535,
         ),
       ]);
     case "field-document-v1":
@@ -1828,7 +1828,7 @@ function syntax(entry, locale = "en") {
       case "finesse-score-v2":
         return `/${path} document:<operation 포함 CTK3|v115 Fumen> next:<큐|패턴> [kicktable:<내장 프로필>] [hold:<disabled|empty|IOTSZJL>] [knowledge:<both|oracle|visible-7>] [source-pieces:1..128]`;
       case "operation-document-v1":
-        return `/${path} [document:<operation 포함 CTK3|v115 Fumen>] [attachment:<CTK3 파일>] [rule-profile:<내장 프로필>] [kick-profile:<내장 프로필>] [timeout-seconds:1..900]`;
+        return `/${path} [document:<operation 포함 CTK3|v115 Fumen>] [attachment:<CTK3 파일>] [rule-profile:<내장 프로필>] [kick-profile:<내장 프로필>] [timeout-seconds:0..65535]`;
       case "field-document-v1":
         return `/${path} [document:<CTK3|v115 Fumen>] [attachment:<UTF-8 문서 파일>]`;
       case "fumen-transform-v1":
@@ -1911,7 +1911,7 @@ function syntax(entry, locale = "en") {
     case "finesse-score-v2":
       return `/${path} document:<CTK3|v115 Fumen with operations> next:<queue|pattern> [kicktable:<built-in>] [hold:<disabled|empty|IOTSZJL>] [knowledge:<both|oracle|visible-7>] [source-pieces:1..128]`;
     case "operation-document-v1":
-      return `/${path} [document:<CTK3|v115 Fumen with operations>] [attachment:<CTK3 file>] [rule-profile:<built-in>] [kick-profile:<built-in>] [timeout-seconds:1..900]`;
+      return `/${path} [document:<CTK3|v115 Fumen with operations>] [attachment:<CTK3 file>] [rule-profile:<built-in>] [kick-profile:<built-in>] [timeout-seconds:0..65535]`;
     case "field-document-v1":
       return `/${path} [document:<CTK3|v115 Fumen>] [attachment:<UTF-8 document file>]`;
     case "fumen-transform-v1":
@@ -2208,7 +2208,7 @@ function inputHelp(entry, locale = "en") {
     case "operation-document-v1":
       return [
         "Supply exactly one `document` string or one CTK3 `attachment`. Every page must retain one concrete locked operation; static fields, queues, hold, mirror, rise, quiz, and non-empty garbage rows are rejected.",
-        "`rule-profile` and `kick-profile` default independently to `srs-plus`. `timeout-seconds` defaults to and cannot exceed 900.",
+        "`rule-profile` and `kick-profile` default independently to `srs-plus`. `timeout-seconds` defaults to 0 (unlimited); explicit limits can be 1–65535 seconds.",
         entry.capabilityId === "utility.sequence"
           ? "The report losslessly normalizes the supplied operation trace and replay-checks every locked placement. Discord shows only the bounded canonical summary and trace preview."
           : "The report counts the exact accepted operation orders and returns universal precedence, its transitive reduction, independent pairs, and reachability/kick evidence. Discord shows only the canonical compact report.",
@@ -2518,7 +2518,7 @@ function koreanInputHelp(entry) {
     case "operation-document-v1":
       return [
         "`document` 문자열 또는 CTK3 `attachment` 중 정확히 하나를 입력합니다. 모든 페이지에는 잠금된 구체적 operation 하나가 있어야 하며 정적 필드, 큐, 홀드, 미러, rise, quiz, 비어 있지 않은 garbage는 거부됩니다.",
-        "`rule-profile`과 `kick-profile`의 기본값은 각각 `srs-plus`입니다. `timeout-seconds`의 기본값과 최댓값은 900초입니다.",
+        "`rule-profile`과 `kick-profile`의 기본값은 각각 `srs-plus`입니다. `timeout-seconds`는 기본값 0에서 무제한이며, 명시적 제한은 1–65535초입니다.",
         entry.capabilityId === "utility.sequence"
           ? "보고서는 입력한 operation trace를 손실 없이 정규화하고 모든 잠금 배치의 재생 일치를 확인합니다. Discord에서는 상한이 있는 canonical 요약과 trace 미리보기만 표시합니다."
           : "보고서는 허용되는 operation 순서의 정확한 개수, 보편 선행 관계와 전이 축약, 독립 쌍, 도달성·킥 증거를 계산합니다. Discord에서는 작은 canonical 보고서만 표시합니다.",
@@ -3566,7 +3566,7 @@ const KOREAN_OPTION_DESCRIPTIONS = Object.freeze({
   comments: "text-to-fumen에 사용할 Unicode 주석을 줄마다 하나씩 입력합니다",
   "rule-profile": "배치 도달성에 사용할 내장 이동 규칙 프로필이며 기본값은 SRS+입니다",
   "kick-profile": "회전 도달성에 사용할 내장 킥 프로필이며 기본값은 SRS+입니다",
-  "timeout-seconds": "정확 분석 제한시간은 1–900초이며 기본값은 900초입니다",
+  "timeout-seconds": "정확 분석은 기본값 0에서 무제한이며, 명시적 제한은 1–65535초입니다",
   "build.cover.source-pieces": "정확한 소스 미노 창이며 생략하면 목표와 초기 홀드에서 자동 계산합니다",
   "render-file.image": "현재 채널의 Clearra 미리보기 메시지 링크 또는 ID이며 생략하면 최근 파일을 찾습니다",
   "score-finder.next": "정확한 IOTSZJL 큐이며 생략하면 입력 창에서 작성합니다",

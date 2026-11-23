@@ -78,22 +78,21 @@ function runUnix(executable, args, options = {}) {
 }
 
 function inspectTar(path) {
-  const script = String.raw`
-import json, sys, tarfile
-entries = []
-with tarfile.open(sys.argv[1], "r:*") as archive:
-    for member in archive:
-        if member.isfile(): kind = "file"
-        elif member.isdir(): kind = "directory"
-        elif member.issym(): kind = "symlink"
-        else: kind = "unsupported"
-        entries.append({"name": member.name.rstrip("/"), "kind": kind,
-                        "link": member.linkname if member.issym() else None})
-print(json.dumps(entries, separators=(",", ":")))
-`;
-  const result = runUnix("python3", ["-c", script, toUnixPath(path)]);
+  const result = runUnix("tar", [
+    "--list", "--verbose", "--full-time", "--numeric-owner",
+    "--quoting-style=escape", "--file", toUnixPath(path),
+  ], { timeout: 5_000 });
   assert.equal(result.status, 0, result.stderr);
-  return JSON.parse(result.stdout);
+  return result.stdout.trim().split(/\r?\n/u).map((line) => {
+    const entry = /^(\S)\S*\s+\S+\s+\d+\s+\S+\s+\S+\s+(.+)$/u.exec(line);
+    assert.ok(entry, line);
+    const [name, link = null] = entry[2].split(" -> ");
+    return {
+      name: name.replace(/\/$/u, ""),
+      kind: ({ "-": "file", d: "directory", l: "symlink" })[entry[1]] ?? "unsupported",
+      link,
+    };
+  });
 }
 
 test("v0.8 Oracle local layer builder freezes only the closed runtime set", () => {
@@ -145,6 +144,8 @@ test("v0.8 Oracle local layer builder freezes only the closed runtime set", () =
     );
     writeFixtureFile(repository, "node_modules/tetris-fumen/package.json", "{}\n");
     writeFixtureFile(repository, "node_modules/tetris-fumen/index.js");
+    writeFixtureFile(repository, "node_modules/undici/package.json", "{}\n");
+    writeFixtureFile(repository, "node_modules/undici/index.js");
     for (const relative of overlayEntries) {
       if (
         relative.endsWith("/admin") ||
@@ -223,7 +224,8 @@ test("v0.8 Oracle local layer builder freezes only the closed runtime set", () =
           name === "node_modules/@clearra/discord-bot" ||
           name === "node_modules/ctk3" ||
           name === "node_modules/tetris-fumen" ||
-          name.startsWith("node_modules/tetris-fumen/"),
+          name.startsWith("node_modules/tetris-fumen/") ||
+          name === "node_modules/undici" || name.startsWith("node_modules/undici/"),
       ),
     );
 

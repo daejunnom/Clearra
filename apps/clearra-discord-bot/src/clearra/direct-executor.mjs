@@ -1,3 +1,4 @@
+import { executionDeadline } from "../job-service/execution-deadline.mjs";
 import { ClearraCommandRunner } from "../job-service/runner.mjs";
 import {
   assertDiscordCanonicalOnlyResult,
@@ -12,14 +13,14 @@ export class ClearraDirectExecutor {
   constructor(config, options = {}) {
     this.now = options.now ?? Date.now;
     this.timeoutPolicy = {
-      searchTimeoutMs: positiveInteger(
+      searchTimeoutMs: nonNegativeInteger(
         config.searchTimeoutMs,
         "search timeout",
       ),
       ...(config.reverseSearchTimeoutMs === undefined
         ? {}
         : {
-            reverseSearchTimeoutMs: positiveInteger(
+            reverseSearchTimeoutMs: nonNegativeInteger(
               config.reverseSearchTimeoutMs,
               "reverse-search timeout",
             ),
@@ -27,7 +28,7 @@ export class ClearraDirectExecutor {
       ...(config.pcSearchTimeoutMs === undefined
         ? {}
         : {
-            pcSearchTimeoutMs: positiveInteger(
+            pcSearchTimeoutMs: nonNegativeInteger(
               config.pcSearchTimeoutMs,
               "PC-search timeout",
             ),
@@ -35,7 +36,7 @@ export class ClearraDirectExecutor {
       ...(config.buildSearchTimeoutMs === undefined
         ? {}
         : {
-            buildSearchTimeoutMs: positiveInteger(
+            buildSearchTimeoutMs: nonNegativeInteger(
               config.buildSearchTimeoutMs,
               "build-search timeout",
             ),
@@ -43,7 +44,7 @@ export class ClearraDirectExecutor {
       ...(config.setupSearchTimeoutMs === undefined
         ? {}
         : {
-            setupSearchTimeoutMs: positiveInteger(
+            setupSearchTimeoutMs: nonNegativeInteger(
               config.setupSearchTimeoutMs,
               "setup-search timeout",
             ),
@@ -51,7 +52,7 @@ export class ClearraDirectExecutor {
       ...(config.forwardSearchTimeoutMs === undefined
         ? {}
         : {
-            forwardSearchTimeoutMs: positiveInteger(
+            forwardSearchTimeoutMs: nonNegativeInteger(
               config.forwardSearchTimeoutMs,
               "forward-search timeout",
             ),
@@ -59,7 +60,7 @@ export class ClearraDirectExecutor {
       ...(config.structureSearchTimeoutMs === undefined
         ? {}
         : {
-            structureSearchTimeoutMs: positiveInteger(
+            structureSearchTimeoutMs: nonNegativeInteger(
               config.structureSearchTimeoutMs,
               "structure-search timeout",
             ),
@@ -67,7 +68,7 @@ export class ClearraDirectExecutor {
       ...(config.utilitySearchTimeoutMs === undefined
         ? {}
         : {
-            utilitySearchTimeoutMs: positiveInteger(
+            utilitySearchTimeoutMs: nonNegativeInteger(
               config.utilitySearchTimeoutMs,
               "utility-search timeout",
             ),
@@ -75,28 +76,12 @@ export class ClearraDirectExecutor {
       ...(config.diagnosticTimeoutMs === undefined
         ? {}
         : {
-            diagnosticTimeoutMs: positiveInteger(
+            diagnosticTimeoutMs: nonNegativeInteger(
               config.diagnosticTimeoutMs,
               "diagnostic timeout",
             ),
           }),
     };
-    const maximumSearchTimeoutMs = Math.max(
-      searchTimeoutMsForArguments(["verify"], this.timeoutPolicy),
-      searchTimeoutMsForArguments(["pc"], this.timeoutPolicy),
-      searchTimeoutMsForArguments(["build-probability"], this.timeoutPolicy),
-      searchTimeoutMsForArguments(["setup-finder"], this.timeoutPolicy),
-      searchTimeoutMsForArguments(["damage"], this.timeoutPolicy),
-      searchTimeoutMsForArguments(["spin-structure"], this.timeoutPolicy),
-      searchTimeoutMsForArguments(
-        ["utility", "sequence"],
-        this.timeoutPolicy,
-      ),
-    );
-    this.totalTimeoutMs = positiveInteger(
-      config.interactionDeadlineMs ?? maximumSearchTimeoutMs,
-      "interaction deadline",
-    );
     this.maxOutputBytes = positiveInteger(
       config.maxOutputBytes,
       "output limit",
@@ -134,19 +119,17 @@ export class ClearraDirectExecutor {
       this.timeoutPolicy,
       timeoutClass,
     );
-    const latestDeadlineUnixMs = now + Math.min(
-      this.totalTimeoutMs,
+    const deadlineUnixMs = executionDeadline(
+      now,
       commandTimeoutMs,
+      options.deadlineUnixMs === undefined ? 0 : absoluteDeadline(options.deadlineUnixMs),
     );
-    const callerDeadlineUnixMs = options.deadlineUnixMs === undefined
-      ? latestDeadlineUnixMs
-      : absoluteDeadline(options.deadlineUnixMs);
 
     return this.#executeJob(
       {
         arguments: [...arguments_],
         timeoutClass,
-        deadlineUnixMs: Math.min(callerDeadlineUnixMs, latestDeadlineUnixMs),
+        deadlineUnixMs,
         maxOutputBytes: this.maxOutputBytes,
         maxArtifactBytes: this.maxArtifactBytes,
       },
@@ -166,6 +149,14 @@ function validateArguments(arguments_) {
   }
 }
 
+function nonNegativeInteger(value, label) {
+  const parsed = Number(value ?? 0);
+  if (!Number.isSafeInteger(parsed) || parsed < 0) {
+    throw new Error(`Clearrabot received an invalid direct ${label}.`);
+  }
+  return parsed;
+}
+
 function positiveInteger(value, label) {
   const parsed = Number(value);
   if (!Number.isSafeInteger(parsed) || parsed < 1) {
@@ -176,7 +167,7 @@ function positiveInteger(value, label) {
 
 function absoluteDeadline(value) {
   const parsed = Number(value);
-  if (!Number.isSafeInteger(parsed) || parsed < 1) {
+  if (!Number.isSafeInteger(parsed) || parsed < 0) {
     throw new Error("Clearrabot received an invalid interaction deadline.");
   }
   return parsed;

@@ -1699,7 +1699,7 @@ function operationDocumentArguments(command, values) {
       "kick-profile must be srs-plus, srs, srs-x, jstris-180, or no-kick.",
     );
   }
-  const timeoutSeconds = optionalInteger(values, "timeout-seconds", 1, 900) ?? 900;
+  const timeoutSeconds = optionalInteger(values, "timeout-seconds", 0, 65535) ?? 0;
   return [
     ...command.argvPrefix,
     "--document",

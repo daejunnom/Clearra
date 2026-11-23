@@ -48,7 +48,7 @@ test("operational logs retain only allow-listed terminal metadata", () => {
   assert.doesNotMatch(lines[0], /PRIVATE|user|guild|token|argument|content|error/i);
 });
 
-test("timeout telemetry requires one canonical class and one bounded millisecond value", () => {
+test("timeout telemetry retains unlimited zero and explicit canonical policies", () => {
   const lines = [];
   const logger = { info(value) { lines.push(value); } };
   for (const timeoutClass of [
@@ -88,7 +88,12 @@ test("timeout telemetry requires one canonical class and one bounded millisecond
     durationMs: 1,
     timeoutClass: "pc_reverse",
   }), false);
-  assert.equal(lines.length, 7);
+  assert.equal(writeOperationalLog(logger, {
+    scope: "job", kind: "search", command: "pc", status: "succeeded",
+    durationMs: 1, timeoutClass: "pc_reverse", timeoutMs: 0,
+  }), true);
+  assert.equal(JSON.parse(lines.at(-1)).timeoutMs, 0);
+  assert.equal(lines.length, 8);
   assert.ok(lines.every((line) => !line.includes("PRIVATE")));
 });
 

@@ -44,8 +44,12 @@ The v0.8 path has six boundaries:
    `/opt/clearra/releases/v0.8.0-<sha7>`, transactionally updates the canonical
    launcher and tree digester, and verifies that the active link, settings,
    service process, active tree, and active private config did not change.
-6. `candidate-settings-v080.mjs` renders the exact non-secret 13-line candidate
+6. `candidate-settings-v080.mjs` renders the exact non-secret 21-line candidate
    settings contract and exposes only its SHA-256 through the CLI.
+   Calculation timeouts are zero (unlimited); the Cloud HTTP budget is 900000 ms
+   with a 15000 ms terminal-response reserve. Both runtime-layer builders include
+   the closed `tetris-fumen` and `undici` dependency trees, resolved from the bot's
+   installation and materialized without installation-specific symlinks.
    `invoke-release-deploy-v080.ps1` is the typed local boundary for rollback
    capture, candidate activation/proof, and exact prior restoration/proof. It
    reuses the pinned host-key authority and only checks that the approved
@@ -408,7 +412,7 @@ the observation window, tagging, or immutable release publication.
 ## Typed activation and rollback boundary
 
 After Cloud Run has produced the exact tagged zero-traffic candidate URL, derive
-the Oracle candidate settings authority from the canonical 13-line renderer.
+the Oracle candidate settings authority from the canonical 21-line renderer.
 The CLI writes only one lowercase SHA-256 line; it never writes the settings:
 
 ```powershell

@@ -45,12 +45,20 @@ export function renderCandidateSettingsV080({ sourceCommit, candidateUrl }) {
     "CLEARRA_EXPECTED_ARTIFACT_SCHEMA_VERSION=clearra.solution-data.v1",
     "CLEARRA_WORKER_AUTHORITY=remote",
     "CLEARRA_MAX_CONCURRENT_REMOTE_JOBS=1",
-    "CLEARRA_SEARCH_TIMEOUT_MS=840000",
-    "CLEARRA_REVERSE_SEARCH_TIMEOUT_MS=840000",
-    "CLEARRA_FORWARD_SEARCH_TIMEOUT_MS=900000",
+    "CLEARRA_SEARCH_TIMEOUT_MS=0",
+    "CLEARRA_PC_SEARCH_TIMEOUT_MS=0",
+    "CLEARRA_REVERSE_SEARCH_TIMEOUT_MS=0",
+    "CLEARRA_BUILD_SEARCH_TIMEOUT_MS=0",
+    "CLEARRA_SETUP_SEARCH_TIMEOUT_MS=0",
+    "CLEARRA_FORWARD_SEARCH_TIMEOUT_MS=0",
+    "CLEARRA_STRUCTURE_SEARCH_TIMEOUT_MS=0",
+    "CLEARRA_UTILITY_SEARCH_TIMEOUT_MS=0",
+    "CLEARRA_DIAGNOSTIC_TIMEOUT_MS=0",
+    "CLEARRA_JOB_REQUEST_TIMEOUT_MS=900000",
+    "CLEARRA_JOB_RESPONSE_RESERVE_MS=15000",
     "CLEARRA_INTERACTION_DEADLINE_MS=840000",
   ];
-  if (lines.length !== 13) {
+  if (lines.length !== 21) {
     throw new Error("candidate settings line cardinality drifted");
   }
   return Buffer.from(`${lines.join("\n")}\n`, "utf8");
@@ -59,7 +67,7 @@ export function renderCandidateSettingsV080({ sourceCommit, candidateUrl }) {
 export function candidateSettingsAuthorityV080(options) {
   const bytes = renderCandidateSettingsV080(options);
   return Object.freeze({
-    lineCount: 13,
+    lineCount: 21,
     size: bytes.length,
     sha256: createHash("sha256").update(bytes).digest("hex"),
   });

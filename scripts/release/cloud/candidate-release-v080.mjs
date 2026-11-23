@@ -45,9 +45,17 @@ const DEFAULT_LOG_RETRY_DELAY_MS = 2_000;
 
 const SERVICE_ENVIRONMENT = Object.freeze({
   CLEARRA_EXECUTABLE: "/usr/local/bin/clearra",
-  CLEARRA_SEARCH_TIMEOUT_MS: "840000",
-  CLEARRA_REVERSE_SEARCH_TIMEOUT_MS: "840000",
-  CLEARRA_FORWARD_SEARCH_TIMEOUT_MS: "900000",
+  CLEARRA_SEARCH_TIMEOUT_MS: "0",
+  CLEARRA_PC_SEARCH_TIMEOUT_MS: "0",
+  CLEARRA_REVERSE_SEARCH_TIMEOUT_MS: "0",
+  CLEARRA_BUILD_SEARCH_TIMEOUT_MS: "0",
+  CLEARRA_SETUP_SEARCH_TIMEOUT_MS: "0",
+  CLEARRA_FORWARD_SEARCH_TIMEOUT_MS: "0",
+  CLEARRA_STRUCTURE_SEARCH_TIMEOUT_MS: "0",
+  CLEARRA_UTILITY_SEARCH_TIMEOUT_MS: "0",
+  CLEARRA_DIAGNOSTIC_TIMEOUT_MS: "0",
+  CLEARRA_JOB_REQUEST_TIMEOUT_MS: "900000",
+  CLEARRA_JOB_RESPONSE_RESERVE_MS: "15000",
   CLEARRA_EXPECTED_VCPUS: "8",
   CLEARRA_SEARCH_WORKERS_PER_SESSION: "8",
   CLEARRA_USE_ALL_LOGICAL_PROCESSORS: "1",
@@ -336,11 +344,18 @@ function validateCandidateResources(service, revision) {
     const containers = Array.isArray(spec?.containers) ? spec.containers : [];
     if (
       Number(spec?.containerConcurrency) !== 1 ||
+      Number(spec?.timeoutSeconds) !== 900 ||
       containers.length !== 1 ||
       String(containers[0]?.resources?.limits?.cpu ?? "") !== "8" ||
       String(containers[0]?.resources?.limits?.memory ?? "") !== "16Gi"
     ) {
       throw new Error(`${label} resource readback drifted`);
+    }
+    const environment = new Map((containers[0].env ?? []).map((entry) => [entry.name, entry.value]));
+    for (const [name, value] of Object.entries(SERVICE_ENVIRONMENT)) {
+      if (environment.get(name) !== value) {
+        throw new Error(`${label} runtime environment readback drifted: ${name}`);
+      }
     }
   }
   validateCloudScaleReadback(service, "candidate service");
@@ -351,8 +366,8 @@ function validateCandidateResources(service, revision) {
   ) {
     throw new Error("Cloud candidate startup CPU boost readback drifted");
   }
-  // The service returns 202 while the CLI continues in the background. Only
-  // explicit instance-based CPU allocation preserves that execution contract.
+  // A terminal failure may be returned before child-process cleanup finishes.
+  // Keep CPU allocated during that bounded teardown after the HTTP response.
   // Omission means request-based billing, not a default false value:
   // https://docs.cloud.google.com/run/docs/configuring/billing-settings
   if (

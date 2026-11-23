@@ -1,5 +1,7 @@
 import { availableParallelism as nodeAvailableParallelism } from "node:os";
 
+import { CLOUD_RUN_REQUEST_TIMEOUT_MS, PLATFORM_RESPONSE_RESERVE_MS, platformResponseDeadline } from "./platform-deadline.mjs";
+
 import { runtimeIdentityFromEnvironment } from "./runtime-identity.mjs";
 
 export function loadClearraJobServiceConfig(
@@ -62,8 +64,20 @@ export function loadClearraJobServiceConfig(
     );
   }
 
+  const platformRequestTimeoutMs = nonNegativeInteger(
+    environment.CLEARRA_JOB_REQUEST_TIMEOUT_MS,
+    environment.K_SERVICE ? CLOUD_RUN_REQUEST_TIMEOUT_MS : 0,
+  );
+  const platformResponseReserveMs = positiveInteger(
+    environment.CLEARRA_JOB_RESPONSE_RESERVE_MS,
+    PLATFORM_RESPONSE_RESERVE_MS,
+  );
+  platformResponseDeadline(0, platformRequestTimeoutMs, platformResponseReserveMs);
+
   return {
     host,
+    platformRequestTimeoutMs,
+    platformResponseReserveMs,
     port: positiveInteger(environment.PORT, 8787),
     executable: environment.CLEARRA_EXECUTABLE || "/usr/local/bin/clearra",
     authorizationToken,
@@ -80,48 +94,48 @@ export function loadClearraJobServiceConfig(
       environment.CLEARRA_MAX_GIF_BYTES,
       24 * 1024 * 1024,
     ),
-    searchTimeoutMs: positiveInteger(
+    searchTimeoutMs: nonNegativeInteger(
       environment.CLEARRA_SEARCH_TIMEOUT_MS,
-      14 * 60_000,
+      0,
     ),
-    diagnosticTimeoutMs: positiveInteger(
+    diagnosticTimeoutMs: nonNegativeInteger(
       environment.CLEARRA_DIAGNOSTIC_TIMEOUT_MS,
-      positiveInteger(environment.CLEARRA_SEARCH_TIMEOUT_MS, 14 * 60_000),
+      nonNegativeInteger(environment.CLEARRA_SEARCH_TIMEOUT_MS, 0),
     ),
-    pcSearchTimeoutMs: positiveInteger(
+    pcSearchTimeoutMs: nonNegativeInteger(
       environment.CLEARRA_PC_SEARCH_TIMEOUT_MS ??
         environment.CLEARRA_REVERSE_SEARCH_TIMEOUT_MS,
-      14 * 60_000,
+      0,
     ),
     // Kept for one compatibility window; runtime selection uses
     // pcSearchTimeoutMs and the pc_reverse class.
-    reverseSearchTimeoutMs: positiveInteger(
+    reverseSearchTimeoutMs: nonNegativeInteger(
       environment.CLEARRA_PC_SEARCH_TIMEOUT_MS ??
         environment.CLEARRA_REVERSE_SEARCH_TIMEOUT_MS,
-      14 * 60_000,
+      0,
     ),
-    buildSearchTimeoutMs: positiveInteger(
+    buildSearchTimeoutMs: nonNegativeInteger(
       environment.CLEARRA_BUILD_SEARCH_TIMEOUT_MS ??
         environment.CLEARRA_FORWARD_SEARCH_TIMEOUT_MS,
-      15 * 60_000,
+      0,
     ),
-    setupSearchTimeoutMs: positiveInteger(
+    setupSearchTimeoutMs: nonNegativeInteger(
       environment.CLEARRA_SETUP_SEARCH_TIMEOUT_MS ??
         environment.CLEARRA_FORWARD_SEARCH_TIMEOUT_MS,
-      15 * 60_000,
+      0,
     ),
-    forwardSearchTimeoutMs: positiveInteger(
+    forwardSearchTimeoutMs: nonNegativeInteger(
       environment.CLEARRA_FORWARD_SEARCH_TIMEOUT_MS,
-      15 * 60_000,
+      0,
     ),
-    structureSearchTimeoutMs: positiveInteger(
+    structureSearchTimeoutMs: nonNegativeInteger(
       environment.CLEARRA_STRUCTURE_SEARCH_TIMEOUT_MS ??
         environment.CLEARRA_FORWARD_SEARCH_TIMEOUT_MS,
-      15 * 60_000,
+      0,
     ),
-    utilitySearchTimeoutMs: positiveInteger(
+    utilitySearchTimeoutMs: nonNegativeInteger(
       environment.CLEARRA_UTILITY_SEARCH_TIMEOUT_MS,
-      15 * 60_000,
+      0,
     ),
     terminationGraceMs: positiveInteger(
       environment.CLEARRA_JOB_TERMINATION_GRACE_MS,
@@ -142,6 +156,15 @@ export function loadClearraJobServiceConfig(
     useAllLogicalProcessors,
     runtimeIdentity: runtimeIdentityFromEnvironment(environment),
   };
+}
+
+function nonNegativeInteger(value, fallback) {
+  if (value === undefined || value === "") return fallback;
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 0) {
+    throw new Error("A Clearra job-service numeric setting is invalid.");
+  }
+  return parsed;
 }
 
 function positiveInteger(value, fallback) {

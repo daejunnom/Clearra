@@ -1636,7 +1636,7 @@ test("sequence dependencies lowers one concrete document with exact defaults and
     "--document", source,
     "--rule-profile", "srs-plus",
     "--kick-profile", "srs-plus",
-    "--timeout-seconds", "900",
+    "--timeout-seconds", "0",
   ]);
   assert.deepEqual(buildSlashCommandArguments(command, [
     { name: "document", value: source },
@@ -1665,9 +1665,9 @@ test("sequence dependencies lowers one concrete document with exact defaults and
   assert.throws(
     () => buildSlashCommandArguments(command, [
       { name: "document", value: source },
-      { name: "timeout-seconds", value: 901 },
+      { name: "timeout-seconds", value: 65536 },
     ]),
-    /between 1 and 900|1.*900/,
+    /between 0 and 65535|0.*65535/,
   );
   const staticDocument = encodeCtk3({
     width: 10,
@@ -1706,7 +1706,7 @@ test("sequence lowers one authoritative operation trace with exact defaults and 
     "--document", source,
     "--rule-profile", "srs-plus",
     "--kick-profile", "srs-plus",
-    "--timeout-seconds", "900",
+    "--timeout-seconds", "0",
   ]);
   assert.deepEqual(buildSlashCommandArguments(command, [
     { name: "document", value: source },
@@ -1737,9 +1737,9 @@ test("sequence lowers one authoritative operation trace with exact defaults and 
   assert.throws(
     () => buildSlashCommandArguments(command, [
       { name: "document", value: source },
-      { name: "timeout-seconds", value: 901 },
+      { name: "timeout-seconds", value: 65536 },
     ]),
-    /between 1 and 900|1.*900/,
+    /between 0 and 65535|0.*65535/,
   );
   const staticDocument = encodeCtk3({
     width: 10,

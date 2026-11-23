@@ -1111,7 +1111,7 @@ function modalDescription(input, name, locale = "en") {
     if (name === "solution-queue") return "패턴 대신 사용할 정확한 IOTSZJL 후속 큐입니다.";
     if (name === "rule-profile") return "배치 도달성의 내장 이동 규칙이며 기본값은 SRS+입니다.";
     if (name === "kick-profile") return "회전 도달성의 내장 킥 프로필이며 기본값은 SRS+입니다.";
-    if (name === "timeout-seconds") return "정확 분석 제한시간은 1–900초이며 기본값은 900초입니다.";
+    if (name === "timeout-seconds") return "정확 분석은 기본값 0에서 무제한이며, 명시적 제한은 1–65535초입니다.";
     if (name === "lines") return input === "score-fixed-next"
       ? `1–${DISCORD_PC_FIELD_MAX_ROWS}줄 퍼펙트 클리어 목표 높이 중 하나를 선택합니다.`
       : input === "spin-structure"
@@ -1153,7 +1153,7 @@ function modalDescription(input, name, locale = "en") {
   if (name === "solution-queue") return "Exact IOTSZJL continuation queue; use direct slash input for patterns.";
   if (name === "rule-profile") return "Built-in movement rules for placement reachability; defaults to SRS+.";
   if (name === "kick-profile") return "Built-in rotation kicks for reachability; defaults to SRS+.";
-  if (name === "timeout-seconds") return "Exact-analysis timeout from 1 through 900 seconds; defaults to 900.";
+  if (name === "timeout-seconds") return "Exact-analysis timeout: 0 (default) is unlimited; explicit limits are 1–65535 seconds.";
   if (name === "lines") return input === "score-fixed-next"
     ? `Choose any perfect-clear target height from 1 through ${DISCORD_PC_FIELD_MAX_ROWS} rows.`
     : input === "spin-structure"
@@ -1182,7 +1182,7 @@ function modalPlaceholder(input, name) {
   if (name === "next") return isFixedQueueInput(input) ? "IOTSZJL" : "*! or [IOSZ]p2";
   if (name === "document") return "ctk3_… or v115@…";
   if (["setup-queue", "solution-queue"].includes(name)) return "IOTSZJL";
-  if (name === "timeout-seconds") return "900";
+  if (name === "timeout-seconds") return "0";
   if (name === "pieces") return "IOTSZJL";
   if (name === "remaining") return "IOTSZJL";
   return "";

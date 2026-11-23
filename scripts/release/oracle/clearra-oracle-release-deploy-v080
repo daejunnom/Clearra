@@ -252,7 +252,7 @@ wait_for_service_release() {
   fail 70
 }
 
-# Candidate settings are deliberately a closed 13-line runtime contract. Vault
+# Candidate settings are deliberately a closed 21-line runtime contract. Vault
 # references must therefore be persistent unit/drop-in Environment entries,
 # not entries in the settings file which activation replaces. Inspect only
 # effective systemd metadata; do not load any Vault secret or print its OCID.
@@ -431,9 +431,17 @@ CLEARRA_EXPECTED_SUPPLY_SEMANTICS_ID=clearra.supply.projected-terminal-lookahead
 CLEARRA_EXPECTED_ARTIFACT_SCHEMA_VERSION=clearra.solution-data.v1
 CLEARRA_WORKER_AUTHORITY=remote
 CLEARRA_MAX_CONCURRENT_REMOTE_JOBS=1
-CLEARRA_SEARCH_TIMEOUT_MS=840000
-CLEARRA_REVERSE_SEARCH_TIMEOUT_MS=840000
-CLEARRA_FORWARD_SEARCH_TIMEOUT_MS=900000
+CLEARRA_SEARCH_TIMEOUT_MS=0
+CLEARRA_PC_SEARCH_TIMEOUT_MS=0
+CLEARRA_REVERSE_SEARCH_TIMEOUT_MS=0
+CLEARRA_BUILD_SEARCH_TIMEOUT_MS=0
+CLEARRA_SETUP_SEARCH_TIMEOUT_MS=0
+CLEARRA_FORWARD_SEARCH_TIMEOUT_MS=0
+CLEARRA_STRUCTURE_SEARCH_TIMEOUT_MS=0
+CLEARRA_UTILITY_SEARCH_TIMEOUT_MS=0
+CLEARRA_DIAGNOSTIC_TIMEOUT_MS=0
+CLEARRA_JOB_REQUEST_TIMEOUT_MS=900000
+CLEARRA_JOB_RESPONSE_RESERVE_MS=15000
 CLEARRA_INTERACTION_DEADLINE_MS=840000
 CLEARRA_CANDIDATE_SETTINGS_V080
     # candidate-settings-v080: end

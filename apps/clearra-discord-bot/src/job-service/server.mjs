@@ -8,6 +8,13 @@ import {
   searchTimeoutMsForArguments,
 } from "../clearra/command.mjs";
 import { writeOperationalLog } from "../operational-log.mjs";
+import { armDeadline, executionDeadline } from "./execution-deadline.mjs";
+import {
+  PLATFORM_DEADLINE_CODE,
+  PLATFORM_RESPONSE_RESERVE_MS,
+  platformDeadlineError,
+  platformResponseDeadline,
+} from "./platform-deadline.mjs";
 import {
   normalizeRuntimeIdentity,
   runtimeIdentityMatches,
@@ -21,6 +28,11 @@ export class ClearraJobService {
     this.config = config;
     this.runner = runner;
     this.now = options.now ?? Date.now;
+    this.clock = {
+      now: this.now,
+      setTimeout: options.setTimeout ?? setTimeout,
+      clearTimeout: options.clearTimeout ?? clearTimeout,
+    };
     this.logger = options.logger ?? console;
     this.operationalScope = options.operationalScope ?? null;
     this.runtimeIdentity = config.runtimeIdentity
@@ -29,7 +41,8 @@ export class ClearraJobService {
     this.jobs = new Map();
     this.activeJobs = 0;
     this.server = createServer((request, response) => {
-      void this.handle(request, response).catch((error) => {
+      const receivedAt = this.now();
+      void this.handle(request, response, receivedAt).catch((error) => {
         if (!response.headersSent) {
           const status = error instanceof RequestError ? error.status : 500;
           sendJson(response, status, {
@@ -57,14 +70,17 @@ export class ClearraJobService {
 
   async close() {
     for (const entry of this.jobs.values()) {
-      if (entry.state === "running") entry.controller.abort();
+      if (entry.completedAt === null) entry.controller.abort();
     }
-    await new Promise((resolve, reject) => {
-      this.server.close((error) => (error ? reject(error) : resolve()));
-    });
+    await Promise.all([
+      ...[...this.jobs.values()].map((entry) => entry.execution),
+      new Promise((resolve, reject) => {
+        this.server.close((error) => (error ? reject(error) : resolve()));
+      }),
+    ]);
   }
 
-  async handle(request, response) {
+  async handle(request, response, receivedAt = this.now()) {
     this.pruneCompletedJobs();
     const url = new URL(request.url || "/", "http://localhost");
     if (
@@ -88,7 +104,7 @@ export class ClearraJobService {
       return;
     }
     if (request.method === "POST" && url.pathname === "/jobs") {
-      await this.handleCreate(request, response);
+      await this.handleCreate(request, response, receivedAt);
       return;
     }
     const jobId = jobIdFromPath(url.pathname);
@@ -107,9 +123,9 @@ export class ClearraJobService {
     });
   }
 
-  async handleCreate(request, response) {
+  async handleCreate(request, response, receivedAt = this.now()) {
     const body = await readJsonBody(request, this.config.maxRequestBodyBytes);
-    const job = validateJobRequest(body, this.config, this.now());
+    const job = validateJobRequest(body, this.config, this.now(), receivedAt);
     const idempotencyKey = request.headers["idempotency-key"];
     if (idempotencyKey !== job.id) {
       sendJson(response, 400, this.jobEnvelope(job.id, "failed", {
@@ -136,20 +152,37 @@ export class ClearraJobService {
       }));
       return;
     }
+    if (job.deadlineUnixMs !== 0 && job.deadlineUnixMs <= this.now()) {
+      throw new RequestError(400, "job deadline has expired");
+    }
 
     const controller = new AbortController();
+    let resolveTerminal;
     const entry = {
       digest,
       state: "running",
       createdAt: this.now(),
       completedAt: null,
       controller,
-      promise: null,
+      promise: new Promise((resolve) => { resolveTerminal = resolve; }),
+      resolveTerminal: (terminal) => resolveTerminal(terminal),
+      execution: null,
+      cancelPlatformDeadline: () => {},
       terminal: null,
     };
     this.jobs.set(job.id, entry);
     this.activeJobs += 1;
-    entry.promise = this.runJob(job, entry);
+    controller.signal.addEventListener("abort", () => {
+      this.settleEntry(job, entry, "cancelled");
+    }, { once: true });
+    entry.cancelPlatformDeadline = armDeadline(job.platformDeadlineUnixMs, () => {
+      const error = platformDeadlineError();
+      if (this.settleEntry(job, entry, "failed", {
+        error: error.message,
+        errorCode: PLATFORM_DEADLINE_CODE,
+      })) controller.abort();
+    }, this.clock);
+    entry.execution = this.runJob(job, entry);
 
     const abortOnDisconnect = () => {
       if (!response.writableEnded && entry.state === "running") {
@@ -168,22 +201,22 @@ export class ClearraJobService {
 
   async runJob(job, entry) {
     try {
+      if (entry.controller.signal.aborted) return;
       const result = await this.runner.execute(job, {
         signal: entry.controller.signal,
       });
-      entry.state = "completed";
-      entry.terminal = this.jobEnvelope(job.id, "completed", { result });
+      this.settleEntry(job, entry, "completed", { result });
     } catch (error) {
       if (error?.name === "AbortError") {
-        entry.state = "cancelled";
-        entry.terminal = this.jobEnvelope(job.id, "cancelled");
+        this.settleEntry(job, entry, "cancelled");
       } else {
-        entry.state = "failed";
-        entry.terminal = this.jobEnvelope(job.id, "failed", {
+        this.settleEntry(job, entry, "failed", {
           error: safeErrorMessage(error),
         });
       }
     } finally {
+      // A terminal reply does not release the execution slot. The runner owns
+      // its child until close (including TERM/KILL and artifact cleanup).
       entry.completedAt = this.now();
       this.activeJobs = Math.max(0, this.activeJobs - 1);
       if (this.operationalScope) {
@@ -204,6 +237,15 @@ export class ClearraJobService {
       }
     }
     return entry.terminal;
+  }
+
+  settleEntry(job, entry, state, additional = {}) {
+    if (entry.terminal !== null) return false;
+    entry.state = state;
+    entry.terminal = this.jobEnvelope(job.id, state, additional);
+    entry.cancelPlatformDeadline();
+    entry.resolveTerminal(entry.terminal);
+    return true;
   }
 
   handleRead(jobId, response) {
@@ -272,7 +314,7 @@ export class ClearraJobService {
   }
 }
 
-function validateJobRequest(value, config, now) {
+function validateJobRequest(value, config, now, receivedAt) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new RequestError(400, "job request must be a JSON object");
   }
@@ -315,8 +357,8 @@ function validateJobRequest(value, config, now) {
   } catch {
     throw new RequestError(400, "job timeout class does not match its Clearra arguments");
   }
-  if (!Number.isSafeInteger(value.deadlineUnixMs) || value.deadlineUnixMs <= now) {
-    throw new RequestError(400, "job deadline has expired or is invalid");
+  if (!Number.isSafeInteger(value.deadlineUnixMs) || value.deadlineUnixMs < 0) {
+    throw new RequestError(400, "job deadline is invalid");
   }
   if (!Number.isSafeInteger(value.maxOutputBytes) || value.maxOutputBytes < 1) {
     throw new RequestError(400, "invalid job output limit");
@@ -324,9 +366,23 @@ function validateJobRequest(value, config, now) {
   if (!Number.isSafeInteger(value.maxArtifactBytes) || value.maxArtifactBytes < 1) {
     throw new RequestError(400, "invalid job artifact limit");
   }
-  const timeoutLimitMs = Math.min(
+  const deadlineUnixMs = executionDeadline(
+    now,
     searchTimeoutMsForArguments(value.arguments, config, timeoutClass),
-    value.deadlineUnixMs - now,
+    value.deadlineUnixMs,
+  );
+  const timeoutLimitMs = deadlineUnixMs === 0 ? 0 : Math.max(0, deadlineUnixMs - now);
+  const platformTimeoutMs = config.platformRequestTimeoutMs ?? 0;
+  if (platformTimeoutMs !== 0 &&
+      (!Number.isSafeInteger(value.requestStartedUnixMs) || value.requestStartedUnixMs < 0)) {
+    throw new RequestError(400, "a platform request requires its submission timestamp");
+  }
+  // Submission precedes ingress and therefore includes network/startup/body
+  // time. A future client timestamp must never extend the server's own budget.
+  const platformDeadlineUnixMs = platformResponseDeadline(
+    Math.min(value.requestStartedUnixMs ?? receivedAt, receivedAt),
+    platformTimeoutMs,
+    config.platformResponseReserveMs ?? PLATFORM_RESPONSE_RESERVE_MS,
   );
   return {
     protocol: JOB_PROTOCOL,
@@ -335,7 +391,8 @@ function validateJobRequest(value, config, now) {
     arguments: [...value.arguments],
     timeoutClass,
     timeoutLimitMs,
-    deadlineUnixMs: value.deadlineUnixMs,
+    deadlineUnixMs,
+    platformDeadlineUnixMs,
     maxOutputBytes: Math.min(value.maxOutputBytes, config.maxOutputBytes),
     maxArtifactBytes: Math.min(
       value.maxArtifactBytes,
@@ -382,6 +439,7 @@ function jobDigest(job) {
   const {
     deadlineUnixMs: _deadlineUnixMs,
     timeoutLimitMs: _timeoutLimitMs,
+    platformDeadlineUnixMs: _platformDeadlineUnixMs,
     ...identity
   } = job;
   return createHash("sha256")

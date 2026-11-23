@@ -1,3 +1,4 @@
+import { PLATFORM_RESPONSE_RESERVE_MS, platformResponseDeadline } from "./job-service/platform-deadline.mjs";
 import { availableParallelism as nodeAvailableParallelism } from "node:os";
 
 import { normalizeDiscordLocale } from "./discord/i18n.mjs";
@@ -111,40 +112,49 @@ export function loadDiscordBotConfig(environment = process.env, runtime = {}) {
     environment.CLEARRA_USE_ALL_LOGICAL_PROCESSORS,
     true,
   );
-  const searchTimeoutMs = positiveInteger(
+  const searchTimeoutMs = nonNegativeInteger(
     environment.CLEARRA_SEARCH_TIMEOUT_MS,
-    14 * 60_000,
+    0,
   );
-  const pcSearchTimeoutMs = positiveInteger(
+  const pcSearchTimeoutMs = nonNegativeInteger(
     environment.CLEARRA_PC_SEARCH_TIMEOUT_MS ??
       environment.CLEARRA_REVERSE_SEARCH_TIMEOUT_MS,
-    14 * 60_000,
+    0,
   );
   const legacyLongSearchTimeout = environment.CLEARRA_FORWARD_SEARCH_TIMEOUT_MS;
-  const buildSearchTimeoutMs = positiveInteger(
+  const buildSearchTimeoutMs = nonNegativeInteger(
     environment.CLEARRA_BUILD_SEARCH_TIMEOUT_MS ?? legacyLongSearchTimeout,
-    15 * 60_000,
+    0,
   );
-  const setupSearchTimeoutMs = positiveInteger(
+  const setupSearchTimeoutMs = nonNegativeInteger(
     environment.CLEARRA_SETUP_SEARCH_TIMEOUT_MS ?? legacyLongSearchTimeout,
-    15 * 60_000,
+    0,
   );
-  const forwardSearchTimeoutMs = positiveInteger(
+  const forwardSearchTimeoutMs = nonNegativeInteger(
     legacyLongSearchTimeout,
-    15 * 60_000,
+    0,
   );
-  const structureSearchTimeoutMs = positiveInteger(
+  const structureSearchTimeoutMs = nonNegativeInteger(
     environment.CLEARRA_STRUCTURE_SEARCH_TIMEOUT_MS ?? legacyLongSearchTimeout,
-    15 * 60_000,
+    0,
   );
-  const utilitySearchTimeoutMs = positiveInteger(
+  const utilitySearchTimeoutMs = nonNegativeInteger(
     environment.CLEARRA_UTILITY_SEARCH_TIMEOUT_MS,
-    15 * 60_000,
+    0,
   );
-  const diagnosticTimeoutMs = positiveInteger(
+  const diagnosticTimeoutMs = nonNegativeInteger(
     environment.CLEARRA_DIAGNOSTIC_TIMEOUT_MS,
     searchTimeoutMs,
   );
+  const platformRequestTimeoutMs = nonNegativeInteger(
+    environment.CLEARRA_JOB_REQUEST_TIMEOUT_MS,
+    0,
+  );
+  const platformResponseReserveMs = positiveInteger(
+    environment.CLEARRA_JOB_RESPONSE_RESERVE_MS,
+    PLATFORM_RESPONSE_RESERVE_MS,
+  );
+  platformResponseDeadline(0, platformRequestTimeoutMs, platformResponseReserveMs);
   const interactionDeadlineMs = boundedPositiveInteger(
     environment.CLEARRA_INTERACTION_DEADLINE_MS,
     14 * 60_000,
@@ -206,6 +216,8 @@ export function loadDiscordBotConfig(environment = process.env, runtime = {}) {
     jobEndpoint,
     jobToken,
     expectedJobRuntimeIdentity,
+    platformRequestTimeoutMs,
+    platformResponseReserveMs,
     jobPollIntervalMs: positiveInteger(
       environment.CLEARRA_JOB_POLL_INTERVAL_MS,
       250,
@@ -349,6 +361,15 @@ function required(environment, name) {
   const value = environment[name];
   if (!value) throw new Error(`${name} is required.`);
   return value;
+}
+
+function nonNegativeInteger(value, fallback) {
+  if (value === undefined || value === "") return fallback;
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 0) {
+    throw new Error("A Clearra Discord numeric setting is invalid.");
+  }
+  return parsed;
 }
 
 function positiveInteger(value, fallback) {

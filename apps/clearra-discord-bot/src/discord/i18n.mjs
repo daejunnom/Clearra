@@ -1,3 +1,4 @@
+import { PLATFORM_DEADLINE_CODE } from "../job-service/platform-deadline.mjs";
 import { JAPANESE_DISCORD_MESSAGES } from "./japanese-i18n-draft.mjs";
 import { japaneseValidationErrorText } from "./japanese-validation-draft.mjs";
 import {
@@ -29,10 +30,11 @@ const CATALOGS = Object.freeze({
     "viewer.document_description": "CTK3 document for the Clearra renderer",
     "viewer.document_failed": "The document could not be rendered.",
     "search.stopped": "Clearra search stopped before producing a result.",
-    "search.setup_long_running": "The setup search is still running and is taking longer than expected. It will continue within Discord's response window.",
+    "search.setup_long_running": "The setup search is still running. If the interaction expires, its result will be sent to this channel.",
     "search.busy": "Clearra is busy. Please try again shortly.",
     "search.cancelled": "The search was cancelled.",
     "search.timeout": "The calculation exceeded its time limit. Please try again.",
+    "search.platform_deadline": "The Cloud Run request deadline is approaching, so cancellation was requested. This attempt has failed; any later result from it will not be sent.",
     "search.failed": "The request could not be completed. Please try again.",
     "search.no_text": "Clearra completed without text output.",
     "search.auto_target": "Automatic PC target: {lines}",
@@ -260,10 +262,11 @@ const CATALOGS = Object.freeze({
     "viewer.document_description": "Clearra 렌더러용 CTK3 문서",
     "viewer.document_failed": "문서를 렌더링할 수 없습니다.",
     "search.stopped": "결과를 만들기 전에 Clearra 탐색이 중단되었습니다.",
-    "search.setup_long_running": "셋업 탐색이 아직 진행 중이며 예상보다 오래 걸리고 있습니다. Discord 응답 제한 안에서 계속 탐색합니다.",
+    "search.setup_long_running": "셋업 탐색이 계속 진행 중입니다. 응답 토큰이 만료되면 이 채널로 결과를 전송합니다.",
     "search.busy": "요청이 많습니다. 잠시 후 다시 시도해 주세요.",
     "search.cancelled": "탐색이 취소되었습니다.",
     "search.timeout": "제한 시간 안에 연산을 마치지 못했습니다. 다시 시도해 주세요.",
+    "search.platform_deadline": "Cloud Run 요청 제한시간이 임박해 계산 중단을 요청했습니다. 이 요청은 실패로 종료되며, 이후 도착하는 해법은 전송하지 않습니다.",
     "search.failed": "요청을 완료할 수 없습니다. 다시 시도해 주세요.",
     "search.no_text": "Clearra가 텍스트 출력 없이 작업을 완료했습니다.",
     "search.auto_target": "자동 PC 목표: {lines}",
@@ -527,7 +530,9 @@ export function validationErrorText(error, locale) {
 export function operationErrorText(error, locale) {
   const message = error instanceof Error ? error.message : String(error ?? "");
   let key = "search.failed";
-  if (error?.name === "AbortError" || /cancel(?:led|ed)/i.test(message)) {
+  if (error?.code === PLATFORM_DEADLINE_CODE) {
+    key = "search.platform_deadline";
+  } else if (error?.name === "AbortError" || /cancel(?:led|ed)/i.test(message)) {
     key = "search.cancelled";
   } else if (/time(?:d)? out|time limit|deadline/i.test(message)) {
     key = "search.timeout";

@@ -21,6 +21,7 @@ import {
   searchTimeoutMsForArguments,
 } from "../clearra/command.mjs";
 import { productBuildIdentityMatchesRuntime } from "./runtime-identity.mjs";
+import { armDeadline, executionDeadline } from "./execution-deadline.mjs";
 
 export class ClearraCommandRunner {
   constructor(config, options = {}) {
@@ -65,18 +66,17 @@ export class ClearraCommandRunner {
   }
 
   async execute(job, options = {}) {
-    const deadlineRemainingMs = job.deadlineUnixMs - this.now();
-    if (deadlineRemainingMs <= 0) {
-      return Promise.reject(deadlineError());
-    }
-    const timeoutMs = Math.min(
+    if (options.signal?.aborted) throw abortError("Clearra job was cancelled.");
+    const deadlineUnixMs = executionDeadline(
+      this.now(),
       searchTimeoutMsForArguments(
         job.arguments,
         this.config,
         job.timeoutClass,
       ),
-      deadlineRemainingMs,
+      job.deadlineUnixMs,
     );
+    if (deadlineUnixMs !== 0 && deadlineUnixMs <= this.now()) throw deadlineError();
     const maxOutputBytes = Math.min(
       this.config.maxOutputBytes,
       job.maxOutputBytes,
@@ -110,9 +110,13 @@ export class ClearraCommandRunner {
         return null;
       }
     };
-    const oomKillCountBefore = await readOomEvidence();
-
     try {
+      if (options.signal?.aborted) throw abortError("Clearra job was cancelled.");
+      const oomKillCountBefore = await readOomEvidence();
+      // Preparation is asynchronous. A cancellation/deadline accepted while
+      // preparing output or diagnostics must not start a new solver process.
+      if (options.signal?.aborted) throw abortError("Clearra job was cancelled.");
+      if (deadlineUnixMs !== 0 && deadlineUnixMs <= this.now()) throw deadlineError();
       return await new Promise((resolveJob, rejectJob) => {
       let child;
       try {
@@ -135,7 +139,7 @@ export class ClearraCommandRunner {
       let settled = false;
       let pendingFailure = null;
       let forceKillTimer = null;
-      let timeout = null;
+      let cancelDeadline = () => {};
 
       const terminate = () => {
         if (child.exitCode !== null || child.signalCode !== null) return;
@@ -158,7 +162,7 @@ export class ClearraCommandRunner {
       const finish = (callback) => {
         if (settled) return;
         settled = true;
-        if (timeout) this.clearTimeout(timeout);
+        cancelDeadline();
         if (forceKillTimer) this.clearTimeout(forceKillTimer);
         options.signal?.removeEventListener("abort", abort);
         // The process can close before async diagnostics or artifact checks
@@ -170,7 +174,7 @@ export class ClearraCommandRunner {
       const fail = (error) => {
         if (settled || pendingFailure) return;
         pendingFailure = error;
-        if (timeout) this.clearTimeout(timeout);
+        cancelDeadline();
         options.signal?.removeEventListener("abort", abort);
         terminate();
       };
@@ -185,9 +189,6 @@ export class ClearraCommandRunner {
         chunks.push(bytes);
       };
       const abort = () => fail(abortError("Clearra job was cancelled."));
-      timeout = this.setTimeout(() => fail(deadlineError()), timeoutMs);
-      timeout.unref?.();
-
       options.signal?.addEventListener("abort", abort, { once: true });
       child.stdout?.on("data", (chunk) => {
         append(stdout, chunk);
@@ -239,6 +240,7 @@ export class ClearraCommandRunner {
           finish(() => rejectJob(error));
         });
       });
+      cancelDeadline = armDeadline(deadlineUnixMs, () => fail(deadlineError()), this);
       if (options.signal?.aborted) abort();
       });
     } finally {

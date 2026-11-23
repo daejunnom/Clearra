@@ -111,7 +111,7 @@ pretending a slash command can inherit reply context.
 
 The replay command evaluates one exact target when `lines` is set.
 With automatic target selection, Clearra runs each valid height in ascending
-order under one interaction deadline. A target must contain the occupied
+order under one optional calculation deadline. A target must contain the occupied
 field after completed input rows are cleared, and its empty cells must fit
 a whole number of tetrominoes from the supplied queue or pattern.
 
@@ -252,37 +252,48 @@ value selects Gateway delivery. Do not replace it with an Oracle HTTP URL or the
 
 ## Discord timing and lifecycle boundary
 
-Discord requires the initial interaction response within three seconds. The
-Oracle Gateway handler therefore returns response type `9` for an
-incomplete-command Modal or type `5` (deferred channel message) before starting
-a complete command or Modal submission. Opening a Modal starts no work. Clearra caps
-`CLEARRA_INTERACTION_DEADLINE_MS` at 14 minutes so completion and error edits
-retain one minute of safety inside Discord's 15-minute interaction-token
-window.
+Discord requires the initial interaction response within three seconds and keeps
+interaction tokens valid for fifteen minutes ([Discord interaction contract](https://docs.discord.com/developers/interactions/receiving-and-responding)).
+Oracle acknowledges before starting work. `CLEARRA_INTERACTION_DEADLINE_MS`
+(default/cap: 14 minutes) selects the delivery channel; it does not limit calculation.
+An admitted public search that finishes later sends its result or failure to the
+original channel using the bot credential. Private management, access-denial and
+validation replies never receive this channel-delivery capability. Ambiguous
+network errors do not trigger a duplicate channel send. When a preview's webhook
+expires, its original bytes are uploaded again; another message's attachment IDs
+are not reused.
 
-The generic compatibility limit remains three minutes. Reverse PC searches use
-five minutes; forward, build, spin, and setup-ranking searches use fifteen
-minutes. The caller's absolute deadline always wins when it is earlier, so a
-Discord interaction receives at most the 14-minute gateway budget. A complete
-slash request starts the remote job and, when a static field is available, one
-bounded worker-thread GIF concurrently. If rendering wins, Oracle posts the GIF
-then retains its attachment in the final edit. If searching wins, Oracle waits
-for bounded rendering and sends one combined response. A render failure never
-cancels or invalidates the authoritative search.
+All calculation families default to `0` (unlimited), including PC, build, setup,
+forward, spin structure, utility and diagnostics. An explicitly configured
+positive limit or caller deadline remains supported; the earliest nonzero
+calculation deadline includes time waiting in Oracle's queue. Zero installs no
+calculation or queue-expiration timer. Native exact sequence/dependency analysis
+also defaults to `--timeout-seconds 0`; positive explicit values may be 1–65535.
 
-The reverse class contains native PC/failed-queue/path/percent/replay work and
-the represented Sfinder PC solution and scoring commands. The forward class
-contains native build/coverage/damage/spin work plus represented Sfinder target,
-coverage, and spin commands. Native setup/setup-finder and Sfinder
-pc-setup/best-setup/dpc-finder are the setup-ranking subclass of forward work;
-this distinct label drives setup-only progress notices without changing the
-15-minute engine limit.
+The Cloud Run HTTP lifetime is a separate configured boundary. Production uses
+`CLEARRA_JOB_REQUEST_TIMEOUT_MS=900000` and
+`CLEARRA_JOB_RESPONSE_RESERVE_MS=15000` on both Oracle and the service. Each
+POST records its submission time before sending, covering transport, cold start
+and any platform wait within the request. At 885 seconds from that submission,
+an unfinished attempt becomes a terminal failure and the solver is cancelled.
+The service returns `E_CLEARRA_PLATFORM_REQUEST_DEADLINE` immediately while
+retaining its execution slot until the child closes and artifact cleanup finishes.
+The default two-second TERM-to-KILL grace and bounded DELETE cleanup remain.
+A late solution, error or cancellation cannot overwrite that failure; GET and
+same-instance duplicate POST return the same terminal result. Oracle applies
+the same boundary if the HTTP connection stalls or ignores abort. Delivery
+remains subject to Discord availability and channel permissions.
 
-For slash and text commands, `clearra-current-job` keeps `POST /jobs` open until
-Clearra finishes. Each instance accepts one request and has no durable
-distributed queue. The approved minimum of zero accepts cold-start latency;
-expired, cancelled, overflowed, or terminated work fails closed instead of
-starting after its useful Discord lifetime.
+Local/direct execution and non-Cloud job services default to no platform budget.
+Undici's synchronous response-header wait is disabled only for job POST/GET;
+existing proxy/pool configuration, body timeout, byte limits, cancellation and
+REST delivery bounds remain independent. No five-minute transport header timer
+may silently become a calculation limit.
+
+A slash search and its bounded GIF preview run concurrently. Setup-only progress
+notices do not change the search deadline. Each service instance executes one
+job at a time and retains a bounded in-memory idempotency table; this is not a
+durable distributed queue. Do not automatically resubmit a failed attempt.
 
 ## Global slash-command synchronization
 
@@ -480,9 +491,17 @@ The job-service contract is:
 
 ```text
 CLEARRA_EXECUTABLE=/usr/local/bin/clearra
-CLEARRA_SEARCH_TIMEOUT_MS=170000
-CLEARRA_REVERSE_SEARCH_TIMEOUT_MS=300000
-CLEARRA_FORWARD_SEARCH_TIMEOUT_MS=900000
+CLEARRA_SEARCH_TIMEOUT_MS=0
+CLEARRA_PC_SEARCH_TIMEOUT_MS=0
+CLEARRA_REVERSE_SEARCH_TIMEOUT_MS=0
+CLEARRA_BUILD_SEARCH_TIMEOUT_MS=0
+CLEARRA_SETUP_SEARCH_TIMEOUT_MS=0
+CLEARRA_FORWARD_SEARCH_TIMEOUT_MS=0
+CLEARRA_STRUCTURE_SEARCH_TIMEOUT_MS=0
+CLEARRA_UTILITY_SEARCH_TIMEOUT_MS=0
+CLEARRA_DIAGNOSTIC_TIMEOUT_MS=0
+CLEARRA_JOB_REQUEST_TIMEOUT_MS=900000
+CLEARRA_JOB_RESPONSE_RESERVE_MS=15000
 CLEARRA_EXPECTED_VCPUS=8
 CLEARRA_SEARCH_WORKERS_PER_SESSION=8
 CLEARRA_USE_ALL_LOGICAL_PROCESSORS=1
@@ -1094,9 +1113,17 @@ CLEARRA_EXPECTED_SUPPLY_SEMANTICS_ID=clearra.supply.projected-terminal-lookahead
 CLEARRA_EXPECTED_ARTIFACT_SCHEMA_VERSION=clearra.solution-data.v1
 CLEARRA_WORKER_AUTHORITY=remote
 CLEARRA_MAX_CONCURRENT_REMOTE_JOBS=1
-CLEARRA_SEARCH_TIMEOUT_MS=180000
-CLEARRA_REVERSE_SEARCH_TIMEOUT_MS=300000
-CLEARRA_FORWARD_SEARCH_TIMEOUT_MS=900000
+CLEARRA_SEARCH_TIMEOUT_MS=0
+CLEARRA_PC_SEARCH_TIMEOUT_MS=0
+CLEARRA_REVERSE_SEARCH_TIMEOUT_MS=0
+CLEARRA_BUILD_SEARCH_TIMEOUT_MS=0
+CLEARRA_SETUP_SEARCH_TIMEOUT_MS=0
+CLEARRA_FORWARD_SEARCH_TIMEOUT_MS=0
+CLEARRA_STRUCTURE_SEARCH_TIMEOUT_MS=0
+CLEARRA_UTILITY_SEARCH_TIMEOUT_MS=0
+CLEARRA_DIAGNOSTIC_TIMEOUT_MS=0
+CLEARRA_JOB_REQUEST_TIMEOUT_MS=900000
+CLEARRA_JOB_RESPONSE_RESERVE_MS=15000
 CLEARRA_INTERACTION_DEADLINE_MS=840000
 CLEARRA_SETUP_PROGRESS_NOTICE_MS=300000
 ```

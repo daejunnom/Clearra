@@ -19,7 +19,8 @@ Discord -> Oracle Gateway -> POST clearra-current-job /jobs -> Clearra CLI
 ```
 
 The job request contains curated Clearra arguments, an idempotency key, and an
-absolute deadline. It contains no Discord bot token, interaction token, channel
+optional absolute calculation deadline (0 means unlimited), plus the POST
+submission timestamp `requestStartedUnixMs`. It contains no Discord bot token, interaction token, channel
 credential, or Discord webhook URL. The job service never calls Discord.
 
 ## Artifact boundary
@@ -233,17 +234,43 @@ and use up to 32 Clearra workers in aggregate. This is per-instance serial
 execution, not a global FIFO or lock. Cloud Run does not offer a 16-vCPU
 instance; 8 vCPU is the per-instance ceiling for this service.
 
-The 900-second service timeout admits the 15-minute forward-search policy. The
-Discord Gateway still submits an absolute deadline capped at 840 seconds, which
-leaves one minute for the synchronous response and final Discord edit.
+The deployed 900-second timeout is an HTTP platform budget, independent of the
+unlimited calculation default. The service and Oracle reserve 15 seconds for a
+terminal failure response and delivery: `CLEARRA_JOB_REQUEST_TIMEOUT_MS=900000`
+and `CLEARRA_JOB_RESPONSE_RESERVE_MS=15000`. The earlier of the caller's POST
+submission timestamp and server ingress time owns this boundary, so startup,
+transport and request-body time cannot reset it. Cloud Run's timeout includes
+startup ([container contract](https://docs.cloud.google.com/run/docs/container-contract));
+a platform 504 closes the request but does not terminate the container
+([request timeout documentation](https://docs.cloud.google.com/run/docs/configuring/request-timeout)).
+
+Before that boundary, the service freezes a failed result with
+`E_CLEARRA_PLATFORM_REQUEST_DEADLINE`, responds, and cancels the runner. The
+runner escalates TERM to KILL after its configured two-second grace and holds
+the slot until close and output cleanup. A late result cannot become success.
+Duplicate POST/GET on the same instance observe the original terminal outcome
+and cannot renew its time budget. Oracle's matching HTTP guard covers a missing
+response; cancellation cleanup is bounded even if fetch ignores abort. The
+14-minute Discord setting controls whether public results use webhook edits
+or the original channel, and never cancels calculation. Non-Cloud execution
+defaults to platform budget 0. Control-plane readback verifies both the 900s
+platform timeout and these matching runtime settings before promotion.
 
 Set these non-secret runtime values:
 
 ```text
 CLEARRA_EXECUTABLE=/usr/local/bin/clearra
-CLEARRA_SEARCH_TIMEOUT_MS=170000
-CLEARRA_REVERSE_SEARCH_TIMEOUT_MS=300000
-CLEARRA_FORWARD_SEARCH_TIMEOUT_MS=900000
+CLEARRA_SEARCH_TIMEOUT_MS=0
+CLEARRA_PC_SEARCH_TIMEOUT_MS=0
+CLEARRA_REVERSE_SEARCH_TIMEOUT_MS=0
+CLEARRA_BUILD_SEARCH_TIMEOUT_MS=0
+CLEARRA_SETUP_SEARCH_TIMEOUT_MS=0
+CLEARRA_FORWARD_SEARCH_TIMEOUT_MS=0
+CLEARRA_STRUCTURE_SEARCH_TIMEOUT_MS=0
+CLEARRA_UTILITY_SEARCH_TIMEOUT_MS=0
+CLEARRA_DIAGNOSTIC_TIMEOUT_MS=0
+CLEARRA_JOB_REQUEST_TIMEOUT_MS=900000
+CLEARRA_JOB_RESPONSE_RESERVE_MS=15000
 CLEARRA_EXPECTED_VCPUS=8
 CLEARRA_SEARCH_WORKERS_PER_SESSION=8
 CLEARRA_USE_ALL_LOGICAL_PROCESSORS=1
@@ -695,9 +722,11 @@ Content-Type: application/json
 
 The service re-applies the Discord command policy, removes caller-controlled
 worker and output switches, injects its local worker ceiling, and starts Clearra
-with `shell: false`. It enforces the absolute deadline and a bounded combined
-stdout/stderr allowance. `POST /jobs` remains open until Clearra finishes and
-returns a terminal result. `GET /jobs/:id` and `DELETE /jobs/:id` are best-
+with `shell: false`. It enforces a nonzero caller calculation deadline when
+present and a bounded combined stdout/stderr allowance. Cloud-backed requests
+require the submission timestamp; 0 calculation deadline is valid. `POST /jobs`
+remains open until success, cancellation, failure, or the platform response
+boundary. The terminal result is immutable even while child cleanup is running. `GET /jobs/:id` and `DELETE /jobs/:id` are best-
 effort compatibility endpoints for requests routed to the same instance; they
 are not a durable distributed queue.
 
@@ -713,9 +742,17 @@ CLEARRA_EXPECTED_SUPPLY_SEMANTICS_ID=clearra.supply.projected-terminal-lookahead
 CLEARRA_EXPECTED_ARTIFACT_SCHEMA_VERSION=clearra.solution-data.v1
 CLEARRA_WORKER_AUTHORITY=remote
 CLEARRA_MAX_CONCURRENT_REMOTE_JOBS=1
-CLEARRA_SEARCH_TIMEOUT_MS=180000
-CLEARRA_REVERSE_SEARCH_TIMEOUT_MS=300000
-CLEARRA_FORWARD_SEARCH_TIMEOUT_MS=900000
+CLEARRA_SEARCH_TIMEOUT_MS=0
+CLEARRA_PC_SEARCH_TIMEOUT_MS=0
+CLEARRA_REVERSE_SEARCH_TIMEOUT_MS=0
+CLEARRA_BUILD_SEARCH_TIMEOUT_MS=0
+CLEARRA_SETUP_SEARCH_TIMEOUT_MS=0
+CLEARRA_FORWARD_SEARCH_TIMEOUT_MS=0
+CLEARRA_STRUCTURE_SEARCH_TIMEOUT_MS=0
+CLEARRA_UTILITY_SEARCH_TIMEOUT_MS=0
+CLEARRA_DIAGNOSTIC_TIMEOUT_MS=0
+CLEARRA_JOB_REQUEST_TIMEOUT_MS=900000
+CLEARRA_JOB_RESPONSE_RESERVE_MS=15000
 CLEARRA_INTERACTION_DEADLINE_MS=840000
 ```
 

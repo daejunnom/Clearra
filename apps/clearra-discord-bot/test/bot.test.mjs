@@ -3479,7 +3479,7 @@ test("slash search queue is bounded and drains in FIFO order", async () => {
   assert.equal(executions.every((options) => !Object.hasOwn(options, "jobId")), true);
 });
 
-test("queued slash work expires before the Discord interaction deadline", async () => {
+test("queued slash work honors an explicit computation deadline", async () => {
   let executionCount = 0;
   let releaseFirst;
   const firstExecution = new Promise((resolve) => {
@@ -3496,7 +3496,7 @@ test("queued slash work expires before the Discord interaction deadline", async 
     {
       maxConcurrentSearches: 1,
       maxPendingSearches: 2,
-      interactionDeadlineMs: 20,
+      searchTimeoutMs: 20,
     },
     {
       executor: {
@@ -3564,7 +3564,7 @@ test("long-running setup interaction publishes one localized progress update bef
   );
   await new Promise((resolve) => setTimeout(resolve, 20));
   assert.equal(edits.length, 1);
-  assert.match(edits[0], /셋업 탐색이 아직 진행 중/u);
+  assert.match(edits[0], /셋업 탐색이 계속 진행 중/u);
 
   finishSearch();
   await execution;
@@ -3663,7 +3663,7 @@ test("long-running setup text search replaces its English progress reply", async
   assert.match(edited[0].outgoing.payload.content, /joint setup search completed/iu);
 });
 
-test("gateway applies a five-minute reverse deadline and a fourteen-minute Discord delivery cap", async () => {
+test("gateway preserves explicit family limits independently of the Discord delivery window", async () => {
   const calls = [];
   const createdAt = Date.now();
   const bot = new Clearrabot(
@@ -3718,10 +3718,10 @@ test("gateway applies a five-minute reverse deadline and a fourteen-minute Disco
     calls.map(({ options }) => options.deadlineUnixMs),
     [
       createdAt + 5 * 60_000,
-      createdAt + 1 + 14 * 60_000,
-      createdAt + 2 + 14 * 60_000,
-      createdAt + 3 + 840_000,
-      createdAt + 4 + 840_000,
+      createdAt + 1 + 15 * 60_000,
+      createdAt + 2 + 15 * 60_000,
+      createdAt + 3 + 15 * 60_000,
+      createdAt + 4 + 15 * 60_000,
     ],
   );
 });

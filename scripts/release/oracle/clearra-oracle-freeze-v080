@@ -334,8 +334,8 @@ for label, archive_path in layers:
             if label == "dependencies" and not (
                     name in {"node_modules", "node_modules/@clearra",
                              "node_modules/ctk3", "node_modules/@clearra/discord-bot",
-                             "node_modules/tetris-fumen"} or
-                    name.startswith("node_modules/tetris-fumen/")):
+                             "node_modules/tetris-fumen", "node_modules/undici"} or
+                    name.startswith(("node_modules/tetris-fumen/", "node_modules/undici/"))):
                 raise SystemExit(2)
             if name in layer_entries or name in all_entries:
                 raise SystemExit(2)

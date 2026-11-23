@@ -75,10 +75,10 @@ export function writeOperationalLog(logger, value) {
   const timeoutClass = TIMEOUT_CLASSES.has(value.timeoutClass)
     ? value.timeoutClass
     : null;
-  const timeoutMs = Number.isSafeInteger(value.timeoutMs) && value.timeoutMs > 0
+  const timeoutMs = Number.isSafeInteger(value.timeoutMs) && value.timeoutMs >= 0
     ? value.timeoutMs
     : null;
-  if (hasTimeoutPolicy && (!timeoutClass || !timeoutMs)) return false;
+  if (hasTimeoutPolicy && (!timeoutClass || timeoutMs === null)) return false;
   const timestamp = new Date(value.at ?? Date.now());
   const record = {
     event: "clearra.operation",

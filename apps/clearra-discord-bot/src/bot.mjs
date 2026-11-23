@@ -1,3 +1,4 @@
+import { armDeadline, earliestDeadline, executionDeadline } from "./job-service/execution-deadline.mjs";
 import {
   ClearraJobExecutor,
   isSetupSearchArguments,
@@ -137,6 +138,8 @@ export class Clearrabot {
             maxArtifactBytes: config.maxGifBytes,
             pollIntervalMs: config.jobPollIntervalMs,
             cancelTimeoutMs: config.jobCancelTimeoutMs,
+            platformRequestTimeoutMs: config.platformRequestTimeoutMs,
+            platformResponseReserveMs: config.platformResponseReserveMs,
           })
         : new ClearraDirectExecutor(config));
     this.applicationId = options.applicationId ?? null;
@@ -161,7 +164,8 @@ export class Clearrabot {
     this.pendingSearches = [];
     this.controllers = new Set();
     this.interactionDeadlineMs =
-      config.interactionDeadlineMs ?? config.searchTimeoutMs ?? 3 * 60_000;
+      config.interactionDeadlineMs ?? 14 * 60_000;
+    this.searchDeliveries = new WeakMap();
     this.setupProgressNoticeMs =
       config.setupProgressNoticeMs ?? 5 * 60_000;
     this.maxPendingSearches = config.maxPendingSearches ?? 8;
@@ -736,10 +740,11 @@ export class Clearrabot {
     requestedResultKind = null,
     timeoutClass = undefined,
   ) {
+    this.beginSearchDelivery(interaction);
     const controller = new AbortController();
     const deadlineUnixMs = interactionDeadlineUnixMs(
       interaction,
-      Math.min(
+      earliestDeadline(
         ...argumentSets.map((arguments_) =>
           this.searchDeadlineDurationMs(arguments_, timeoutClass)
         ),
@@ -789,7 +794,7 @@ export class Clearrabot {
             firstResult.resolve(message);
             await firstDelivery;
           } else {
-            await this.followupInteraction(interaction, message);
+            await this.followupSearchInteraction(interaction, message);
             delivered += 1;
           }
         }
@@ -800,7 +805,7 @@ export class Clearrabot {
         firstResult.resolve(message);
         await firstDelivery;
       } else {
-        await this.followupInteraction(interaction, message);
+        await this.followupSearchInteraction(interaction, message);
       }
     } finally {
       firstResult.resolve(textMessage(t(locale, "search.stopped")));
@@ -816,6 +821,7 @@ export class Clearrabot {
     requestedResultKind = null,
     timeoutClass = undefined,
   ) {
+    this.beginSearchDelivery(interaction);
     const controller = new AbortController();
     const tilingOnly = tilingOnlyRequested(arguments_);
     const deadlineUnixMs = interactionDeadlineUnixMs(
@@ -866,7 +872,7 @@ export class Clearrabot {
 
   async deliverInteractionResult(interaction, resultPromise, previewPromise = null) {
     if (!previewPromise) {
-      await this.editInteraction(interaction, await resultPromise);
+      await this.editSearchInteraction(interaction, await resultPromise);
       return;
     }
     const taggedResult = Promise.resolve(resultPromise).then((message) => ({
@@ -879,16 +885,17 @@ export class Clearrabot {
     }));
     const first = await Promise.race([taggedResult, taggedPreview]);
     if (first.kind === "preview") {
-      const posted = await this.editInteraction(interaction, first.message);
+      const posted = await this.editSearchInteraction(interaction, first.message);
       const result = (await taggedResult).message;
-      await this.editInteraction(
+      await this.editSearchInteraction(
         interaction,
         combinePreviewAndResult(first.message, result, posted?.attachments),
+        combinePreviewAndResult(first.message, result),
       );
       return;
     }
     const preview = (await taggedPreview).message;
-    await this.editInteraction(
+    await this.editSearchInteraction(
       interaction,
       combinePreviewAndResult(preview, first.message),
     );
@@ -906,12 +913,12 @@ export class Clearrabot {
     const first = await Promise.race([result, progress.promise]);
     if (first.kind === "result") {
       progress.cancel();
-      await this.editInteraction(interaction, first.message);
+      await this.editSearchInteraction(interaction, first.message);
       return;
     }
 
     try {
-      await this.editInteraction(
+      await this.editSearchInteraction(
         interaction,
         textMessage(t(locale, "search.setup_long_running")),
       );
@@ -920,7 +927,7 @@ export class Clearrabot {
         `Clearra progress update failed: ${safeErrorDiagnostic(error)}`,
       );
     }
-    await this.editInteraction(interaction, (await result).message);
+    await this.editSearchInteraction(interaction, (await result).message);
   }
 
   async readAttachmentDocuments(attachments = []) {
@@ -1493,8 +1500,9 @@ export class Clearrabot {
   ) {
     const controller = new AbortController();
     const tilingOnly = tilingOnlyRequested(arguments_);
-    const deadlineUnixMs = Date.now() +
-      this.searchDeadlineDurationMs(arguments_, timeoutClass);
+    const deadlineUnixMs = executionDeadline(
+      Date.now(), this.searchDeadlineDurationMs(arguments_, timeoutClass),
+    );
     this.controllers.add(controller);
     try {
       const outcome = this.withSearchSlot(
@@ -1556,11 +1564,11 @@ export class Clearrabot {
     timeoutClass = undefined,
   ) {
     const controller = new AbortController();
-    const deadlineUnixMs = Date.now() + Math.min(
+    const deadlineUnixMs = executionDeadline(Date.now(), earliestDeadline(
       ...argumentSets.map((arguments_) =>
         this.searchDeadlineDurationMs(arguments_, timeoutClass)
       ),
-    );
+    ));
     let delivered = 0;
     const firstResult = promiseCapability();
     const preview = previewDocument
@@ -1733,10 +1741,7 @@ export class Clearrabot {
   }
 
   searchDeadlineDurationMs(arguments_, timeoutClass = undefined) {
-    return Math.min(
-      this.interactionDeadlineMs,
-      searchTimeoutMsForArguments(arguments_, this.config, timeoutClass),
-    );
+    return searchTimeoutMsForArguments(arguments_, this.config, timeoutClass);
   }
 
   async sendViewerReplies(send, documents, delayMs = 500, locale = "en") {
@@ -1787,10 +1792,12 @@ export class Clearrabot {
   }
 
   withSearchSlot(run, options = {}) {
-    const deadlineUnixMs = Number(options.deadlineUnixMs);
-    if (!Number.isSafeInteger(deadlineUnixMs) || deadlineUnixMs <= Date.now()) {
+    const deadlineUnixMs = Number(options.deadlineUnixMs ?? 0);
+    if (!Number.isSafeInteger(deadlineUnixMs) || deadlineUnixMs < 0 ||
+        (deadlineUnixMs !== 0 && deadlineUnixMs <= Date.now())) {
       return Promise.reject(interactionDeadlineError());
     }
+    if (options.signal?.aborted) return Promise.reject(abortError("Clearra search was cancelled."));
     if (this.activeSearches < this.config.maxConcurrentSearches) {
       return this.useSearchSlot(run);
     }
@@ -1806,7 +1813,7 @@ export class Clearrabot {
         reject,
         deadlineUnixMs,
         signal: options.signal,
-        timeout: null,
+        cancelDeadline: () => {},
         abort: null,
       };
       const removeAndReject = (error) => {
@@ -1817,11 +1824,9 @@ export class Clearrabot {
         reject(error);
       };
       pending.abort = () => removeAndReject(abortError("Clearra search was cancelled."));
-      pending.timeout = setTimeout(
-        () => removeAndReject(interactionDeadlineError()),
-        Math.max(1, deadlineUnixMs - Date.now()),
-      );
       this.pendingSearches.push(pending);
+      pending.cancelDeadline = armDeadline(deadlineUnixMs,
+        () => removeAndReject(interactionDeadlineError()));
       options.signal?.addEventListener("abort", pending.abort, { once: true });
       if (options.signal?.aborted) {
         pending.abort();
@@ -1857,7 +1862,7 @@ export class Clearrabot {
         next.reject(abortError("Clearra search was cancelled."));
         continue;
       }
-      if (next.deadlineUnixMs <= Date.now()) {
+      if (next.deadlineUnixMs !== 0 && next.deadlineUnixMs <= Date.now()) {
         next.reject(interactionDeadlineError());
         continue;
       }
@@ -1867,8 +1872,59 @@ export class Clearrabot {
   }
 
   cleanupPendingSearch(pending) {
-    if (pending.timeout) clearTimeout(pending.timeout);
+    pending.cancelDeadline();
     pending.signal?.removeEventListener("abort", pending.abort);
+  }
+
+  beginSearchDelivery(interaction) {
+    if (!this.searchDeliveries.has(interaction)) {
+      // Only the admitted public search path creates this capability. Private
+      // management, validation and access-denial replies never receive it.
+      this.searchDeliveries.set(interaction, {
+        expiresAt: interactionDeadlineUnixMs(interaction, this.interactionDeadlineMs),
+        channelMessageId: null,
+        channelDelivery: false,
+        public: (Number(interaction.message?.flags ?? 0) & 64) === 0,
+      });
+    }
+  }
+
+  async editSearchInteraction(interaction, message, freshMessage = message) {
+    const delivery = this.searchDeliveries.get(interaction);
+    const canUseChannel = delivery?.public && interaction.channel_id &&
+      (Number(freshMessage.payload?.flags ?? 0) & 64) === 0;
+    if (!canUseChannel) return this.editInteraction(interaction, message);
+    if (delivery.channelMessageId) {
+      return this.rest.editChannelMessage(interaction.channel_id,
+        delivery.channelMessageId, freshMessage);
+    }
+    if (!delivery.channelDelivery && Date.now() < delivery.expiresAt) {
+      try {
+        return await this.editInteraction(interaction, message);
+      } catch (error) {
+        if (!expiredInteractionToken(error)) throw error;
+      }
+    }
+    delivery.channelDelivery = true;
+    const posted = await this.rest.createChannelMessage(interaction.channel_id, freshMessage);
+    delivery.channelMessageId = posted?.id ?? null;
+    return posted;
+  }
+
+  async followupSearchInteraction(interaction, message) {
+    const delivery = this.searchDeliveries.get(interaction);
+    const canUseChannel = delivery?.public && interaction.channel_id &&
+      (Number(message.payload?.flags ?? 0) & 64) === 0;
+    if (!canUseChannel) return this.followupInteraction(interaction, message);
+    if (!delivery.channelDelivery && Date.now() < delivery.expiresAt) {
+      try {
+        return await this.followupInteraction(interaction, message);
+      } catch (error) {
+        if (!expiredInteractionToken(error)) throw error;
+      }
+    }
+    delivery.channelDelivery = true;
+    return this.rest.createChannelMessage(interaction.channel_id, message);
   }
 
   editInteraction(interaction, message) {
@@ -1915,7 +1971,13 @@ function interactionJobOptions(interaction, ordinal) {
   return { jobId: `discord-interaction:${interactionId}:${ordinal}` };
 }
 
+function expiredInteractionToken(error) {
+  return [10015, 10062, 50027].includes(error?.discordCode) &&
+    error?.discordAmbiguous !== true;
+}
+
 function interactionDeadlineUnixMs(interaction, durationMs) {
+  if (durationMs === 0) return 0;
   const interactionId = interaction?.id;
   if (!DISCORD_SNOWFLAKE_PATTERN.test(interactionId)) {
     return Date.now() + durationMs;

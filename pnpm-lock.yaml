@@ -58,6 +58,9 @@ importers:
       tetris-fumen:
         specifier: ^1.1.3
         version: 1.1.3
+      undici:
+        specifier: 6.28.0
+        version: 6.28.0
 
   apps/clearra-web:
     dependencies:
@@ -716,6 +719,10 @@ packages:
     engines: {node: '>=14.17'}
     hasBin: true
 
+  undici@6.28.0:
+    resolution: {integrity: sha512-LIY910g9TI13YS95lrMFrs8Rm/u/irgHeTWoKCoteeJ04CUJ92eEfj0rVn+7VKMPBpUPiUoBKfhNyLI23EE/KA==}
+    engines: {node: '>=18.17'}
+
   vite@6.4.3:
     resolution: {integrity: sha512-NTKlcQjlAK7MlQoyb6LgaqHc8sso/pVyUJYWMws3jg21uTJw/LddqIFPcPqP6PzpgbIcZyKI85sFE4HBrQDA8A==}
     engines: {node: ^18.0.0 || ^20.0.0 || >=22.0.0}
@@ -1214,6 +1221,8 @@ snapshots:
   totalist@3.0.1: {}
 
   typescript@5.9.3: {}
+
+  undici@6.28.0: {}
 
   vite@6.4.3:
     dependencies:
