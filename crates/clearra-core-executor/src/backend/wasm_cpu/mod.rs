@@ -11,7 +11,11 @@ pub use buildup::{
     CompactBuildUpEdge, CompactBuildUpNode, CompactBuildUpSnapshot, CompactBuildUpSnapshotError,
     CompactBuildUpTransitionMode, RustCompactBuildUpWorkspace,
 };
+#[cfg(all(feature = "wasm-stage-profiling", not(target_family = "wasm")))]
+mod candidate_feedback;
 mod catalog;
+#[cfg(all(feature = "wasm-stage-profiling", not(target_family = "wasm")))]
+pub use candidate_feedback::{ExecutorCandidateFeedbackError, ExecutorCandidateFeedbackSession};
 mod compact_exact_u64_map;
 mod compact_kick_authority;
 #[cfg(test)]
@@ -80,7 +84,6 @@ mod placement_conditions;
 mod placement_dependency;
 #[cfg(test)]
 mod placement_dependency_integration_tests;
-#[cfg(any(test, feature = "local-search-ab", feature = "placement-dependency-pc"))]
 mod placement_poset;
 mod queue_observation_policy;
 mod reachability;

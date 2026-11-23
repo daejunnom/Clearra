@@ -4383,7 +4383,7 @@ fn parse_operation_document_utility(
                     WebCommandError::new(
                         WebCommandErrorCode::InvalidValue,
                         format!(
-                            "utility {subcommand} timeout-seconds must be an integer in 1..=900"
+                            "utility {subcommand} timeout-seconds must be an integer in 0..=65535 (0 is unlimited)"
                         ),
                     )
                 })?);

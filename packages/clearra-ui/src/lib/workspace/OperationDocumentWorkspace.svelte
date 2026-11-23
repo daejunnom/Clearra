@@ -58,7 +58,7 @@
   let document = '';
   let ruleProfile = 'srs-plus';
   let kickProfile = 'srs-plus';
-  let timeoutSeconds = 900;
+  let timeoutSeconds = 0;
   let disposed = false;
 
   $: workerController.setWorkerFactory(workerFactory);
@@ -69,7 +69,7 @@
   $: label = (key: Parameters<typeof workspaceMessage>[1]) => workspaceMessage(language, key);
   $: normalizedDocument = document.trim();
   $: validDocument = /^(?:ctk3(?:b_|_|@)|(?:v115|[Ddm]115)@)[^\s]+$/u.test(normalizedDocument);
-  $: validTimeout = Number.isInteger(timeoutSeconds) && timeoutSeconds >= 1 && timeoutSeconds <= 900;
+  $: validTimeout = Number.isInteger(timeoutSeconds) && timeoutSeconds >= 0 && timeoutSeconds <= 65535;
   $: presentation = operationDocumentWorkspaceModes[mode];
   $: reportFields = publicOperationDocumentReportFields(
     mode,
@@ -192,7 +192,7 @@
       </label>
       <label>
         <span>{componentMessage(language, 'timeoutSeconds')}</span>
-        <input type="number" min="1" max="900" step="1" bind:value={timeoutSeconds} disabled={active} />
+        <input type="number" min="0" max="65535" step="1" bind:value={timeoutSeconds} disabled={active} />
       </label>
     </div>
   </div>

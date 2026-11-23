@@ -298,6 +298,12 @@ impl<'a> FrontierCertificate<'a> {
                         FrontierClause::Rotation(ReverseRotationSource {
                             source: source_id,
                             slot: slot as u8,
+                            free_endpoint_guard: super::compile_free_endpoint_guard(
+                                &template.state_masks,
+                                source_mask,
+                                destination_mask,
+                                &targets[..prior],
+                            ),
                             prior_target_count: u32::try_from(prior).ok()?,
                         }),
                         globally_impossible,

@@ -56,12 +56,7 @@ fn problem_from_document(
     let kick_profile = kick_profile
         .map_or(Some(KickTableProfileId::SrsPlus), KickTableProfileId::parse)
         .ok_or_else(|| invalid(format!("unsupported {command_name} kick profile")))?;
-    let timeout_seconds = timeout_seconds.unwrap_or(900);
-    if !(1..=900).contains(&timeout_seconds) {
-        return Err(invalid(format!(
-            "{command_name} timeout-seconds must be in 1..=900"
-        )));
-    }
+    let timeout_seconds = timeout_seconds.unwrap_or(0);
     let mut problem = if source.trim_start().starts_with("ctk3_")
         || source.trim_start().starts_with("ctk3@")
         || source.trim_start().starts_with("ctk3b_")

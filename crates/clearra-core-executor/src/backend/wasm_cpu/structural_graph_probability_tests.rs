@@ -774,7 +774,7 @@ fn symbolic_prefix_refuses_worker_and_partition_escape_before_execution() {
 }
 
 #[test]
-fn structural_certificates_match_every_reachable_subset_and_piece_word() {
+fn rigid_column_and_structural_certificates_match_every_reachable_subset_and_piece_word() {
     let o = 3_u64 | (3_u64 << 10);
     let fixtures = [
         fixture(1, &[(PieceKind::I, 15)]),
@@ -789,12 +789,28 @@ fn structural_certificates_match_every_reachable_subset_and_piece_word() {
                 (PieceKind::O, o << 22),
             ],
         ),
+        {
+            let catalog =
+                GeometryCatalog::compile_for_required_cells_on_dimensions(6, 2, 0, 0xfff).unwrap();
+            let rows = [
+                (PieceKind::O, 0xc3),
+                (PieceKind::I, 0x3c),
+                (PieceKind::I, 0xf00),
+            ]
+            .map(|(piece, cells)| catalog.skeleton_id(piece, cells).unwrap());
+            let candidate = GeometryCandidate::from_rows(&catalog, 0, &rows).unwrap();
+            (catalog, candidate)
+        },
     ];
     let mut checked_states = 0;
     let mut intermediate_clears = 0;
     for (catalog, candidate) in fixtures {
         let certificate =
             placement_poset::compile(&catalog, &candidate).expect("certifiable hard-drop fixture");
+        let rigid = placement_poset::compile_rigid_columns(&catalog, &candidate)
+            .expect("one original frame supplies the complete certificate");
+        assert_eq!(rigid.pieces(), certificate.pieces());
+        assert_eq!(rigid.predecessors(), certificate.predecessors());
         let mut language = PieceOrderLanguageCache::default();
         let compiled = language
             .compile_poset_language(certificate.pieces(), certificate.predecessors(), 4096)
@@ -877,6 +893,7 @@ fn disjunctive_grounding_is_unknown_and_never_an_infeasibility_prune() {
         placement_poset::compile(&catalog, &candidate).is_none(),
         "either O can support I, which cannot be encoded by one predecessor conjunction"
     );
+    assert!(placement_poset::compile_rigid_columns(&catalog, &candidate).is_none());
     let incomplete = GeometryCandidate::from_rows(&catalog, 0, &candidate.row_ids()[..2]).unwrap();
     assert!(placement_poset::compile(&catalog, &incomplete).is_none());
 
@@ -899,6 +916,79 @@ fn disjunctive_grounding_is_unknown_and_never_an_infeasibility_prune() {
     assert!(roof_words.contains(&vec![PieceKind::O, PieceKind::I]));
     assert!(roof_words.contains(&vec![PieceKind::I, PieceKind::O]));
     assert!(placement_poset::compile(&roof_catalog, &roof_candidate).is_none());
+    assert!(placement_poset::compile_rigid_columns(&roof_catalog, &roof_candidate).is_none());
+}
+
+#[test]
+fn rigid_column_certificate_tracks_deleted_support_and_rejects_floating_contacts() {
+    let o = 3 | (3 << 10);
+    let (catalog, candidate) = fixture(4, &[(PieceKind::O, o), (PieceKind::O, o << 20)]);
+    let certificate = placement_poset::compile_rigid_columns(&catalog, &candidate).unwrap();
+    let bottom = candidate
+        .row_ids()
+        .iter()
+        .position(|&row| catalog.skeleton(row).cells == o)
+        .unwrap();
+    let top = 1 - bottom;
+    assert_eq!(certificate.predecessors()[top], 1 << bottom);
+    let subset = 1 << bottom;
+    assert_eq!(subset_state(&catalog, &candidate, subset).1, 0b0011);
+    let physical = physical_transitions(&catalog, &candidate, KickTableProfileId::SrsX);
+    assert_eq!(physical[0], 1 << bottom);
+    assert_eq!(physical[subset], 1 << top);
+
+    // The unique I supporter can clear before the O is grounded: the column
+    // below the O still has holes belonging to the lower I. A single contact
+    // at D=0 is therefore insufficient; the solid-column check must fall back.
+    let upper_o = (6 << 20) | (6 << 30);
+    let middle_i = 0x1e << 10;
+    let (catalog, candidate) = fixture(
+        4,
+        &[
+            (PieceKind::I, 0xf),
+            (PieceKind::I, middle_i),
+            (PieceKind::O, upper_o),
+        ],
+    );
+    assert!(placement_poset::compile_rigid_columns(&catalog, &candidate).is_none());
+    let middle = candidate
+        .row_ids()
+        .iter()
+        .position(|&row| catalog.skeleton(row).cells == middle_i)
+        .unwrap();
+    let upper = candidate
+        .row_ids()
+        .iter()
+        .position(|&row| catalog.skeleton(row).cells == upper_o)
+        .unwrap();
+    let subset = 1 << middle;
+    assert_eq!(subset_state(&catalog, &candidate, subset).1, 0b0010);
+    let physical = physical_transitions(&catalog, &candidate, KickTableProfileId::SrsX);
+    assert_eq!(physical[subset] & (1 << upper), 0);
+}
+
+#[path = "geometry_first_clear_feedback_fixture.rs"]
+mod rigid_column_feedback_fixture;
+
+#[test]
+fn rigid_column_certificate_admission_on_recovered_finite_candidates() {
+    let catalog =
+        GeometryCatalog::compile_for_required_cells_on_dimensions(10, 6, 0, (1_u64 << 60) - 1)
+            .unwrap();
+    let mut admitted = [0; 2];
+    let mut fallback = [0; 2];
+    for &(was_accepted, placements) in rigid_column_feedback_fixture::SAMPLES {
+        let rows = placements.map(|(piece, cells)| catalog.skeleton_id(piece, cells).unwrap());
+        let candidate = GeometryCandidate::from_rows(&catalog, 0, &rows).unwrap();
+        if placement_poset::compile_rigid_columns(&catalog, &candidate).is_some() {
+            admitted[usize::from(was_accepted)] += 1;
+        } else {
+            fallback[usize::from(was_accepted)] += 1;
+        }
+    }
+    assert_eq!(admitted[0] + fallback[0], 16);
+    assert_eq!(admitted[1] + fallback[1], 16);
+    eprintln!("rigid_column_finite_admission admitted={admitted:?} fallback={fallback:?}");
 }
 
 #[test]

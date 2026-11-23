@@ -68,6 +68,8 @@ pub use backend::{
     WasmSetupSearchSession, WasmTilingRootAdvance, WasmTilingRootChunk, WasmTilingRootProducer,
     WasmTilingRootResultMerger, WasmTilingRootWorker,
 };
+#[cfg(all(feature = "wasm-stage-profiling", not(target_family = "wasm")))]
+pub use backend::{ExecutorCandidateFeedbackError, ExecutorCandidateFeedbackSession};
 pub use backend::{
     WasmCompactPcFailedQueueSession, WasmFullHeightPcProducer, WasmFullHeightPcResultMerger,
     WasmFullHeightPcVerifier, WasmFullHeightTilingProducer, WasmFullHeightTilingResultMerger,

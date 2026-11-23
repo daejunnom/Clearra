@@ -66,6 +66,8 @@ pub use wasm_cpu::{
     CompactBuildUpEdge, CompactBuildUpNode, CompactBuildUpSnapshot, CompactBuildUpSnapshotError,
     CompactBuildUpTransitionMode, RustCompactBuildUpWorkspace,
 };
+#[cfg(all(feature = "wasm-stage-profiling", not(target_family = "wasm")))]
+pub use wasm_cpu::{ExecutorCandidateFeedbackError, ExecutorCandidateFeedbackSession};
 pub use wasm_cpu::{
     WasmCompactPcFailedQueueSession, WasmPcFailedQueueAdvance, WasmPcFailedQueueSession,
 };

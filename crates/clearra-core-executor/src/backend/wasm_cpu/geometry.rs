@@ -70,6 +70,9 @@ mod family_preparation;
 mod prefix_pruning_tests;
 
 #[cfg(test)]
+#[path = "geometry_first_clear_tests.rs"]
+mod first_clear_tests;
+#[cfg(test)]
 #[path = "geometry_prefix_witness_tests.rs"]
 mod prefix_witness_tests;
 
@@ -80,6 +83,9 @@ const AVAILABLE_ROW_CACHE_MAX_ROWS: usize = 8 * 1024 * 1024;
 const TARGET_PATTERN_SCAN_WORK_BUDGET: usize = 8_192;
 const PHYSICAL_PREFIX_ENUMERATION_WORK_QUANTUM: usize = 1_024;
 const ROW_ORDER_PREPARATION_WORK_QUANTUM: usize = 4_096;
+// Selected-prefix evidence shares padding in the existing row-order word;
+// no per-task allocation or larger parallel traversal record is needed.
+const FIRST_CLEAR_PREFIX_VERIFIED: u32 = 1 << 31;
 
 #[cfg(any(feature = "local-search-ab", test))]
 fn incremental_domain_enabled() -> bool {
@@ -3025,7 +3031,8 @@ impl FamilyEnumerator {
                         if let Some(state) = self.row_order_table.as_ref().and_then(|table| {
                             table.prefix_state(&self.rows[..usize::from(task.depth)])
                         }) {
-                            task.prefix_row_order_state = state;
+                            task.prefix_row_order_state =
+                                state | (task.prefix_row_order_state & FIRST_CLEAR_PREFIX_VERIFIED);
                             task.prefix_verified = true;
                         } else {
                             self.row_order_table = None;
@@ -3066,6 +3073,16 @@ impl FamilyEnumerator {
                 }
                 if task.family == FAMILY_INVALID {
                     break;
+                }
+                if PHYSICAL && task.prefix_row_order_state & FIRST_CLEAR_PREFIX_VERIFIED == 0 {
+                    if self.prefix_profile.first_clear_stalls(
+                        catalog,
+                        &self.rows[..usize::from(task.depth)],
+                        self.row_order_table.as_deref(),
+                    ) {
+                        break;
+                    }
+                    task.prefix_row_order_state |= FIRST_CLEAR_PREFIX_VERIFIED;
                 }
                 if SOURCE && !task.source_prefix_verified {
                     // These are checkpoint depths, never a candidate or work
@@ -3111,6 +3128,7 @@ impl FamilyEnumerator {
                         self.rows[task.depth as usize] = node.row_id;
                         task.depth += 1;
                         task.family = node.left;
+                        task.prefix_row_order_state &= !FIRST_CLEAR_PREFIX_VERIFIED;
                         if SOURCE {
                             task.source_prefix_verified = false;
                         }
@@ -3227,6 +3245,41 @@ impl FamilyEnumerator {
 #[cfg(test)]
 mod family_enumerator_stack_tests {
     use super::*;
+
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn first_clear_evidence_keeps_the_existing_traversal_record_size() {
+        assert_eq!(core::mem::size_of::<TraversalTask>(), 72);
+    }
+
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn parallel_seed_append_invalidates_first_clear_evidence() {
+        let mut family = GeometrySolutionFamily::new();
+        let left = family.append(21, FAMILY_EMPTY).unwrap();
+        let right = family.append(22, FAMILY_EMPTY).unwrap();
+        let union = family.union(left, right).unwrap();
+        let root = family.append(7, union).unwrap();
+        let counts = family.path_count_table().unwrap();
+        let mut initial = enumerator().tasks[0];
+        initial.family = root;
+        initial.prefix_row_order_state |= FIRST_CLEAR_PREFIX_VERIFIED;
+        let seed = TraversalSeed {
+            task: initial,
+            rows: [NO_ROW; MAX_BOARD64_PIECES],
+            weight: 2,
+            splittable: true,
+        };
+        let (left, right) = split_traversal_seed(&family, &counts, seed).unwrap();
+        for branch in [left, right] {
+            assert_eq!(branch.task.depth, 1);
+            assert_eq!(branch.rows[0], 7);
+            assert_eq!(
+                branch.task.prefix_row_order_state & FIRST_CLEAR_PREFIX_VERIFIED,
+                0
+            );
+        }
+    }
 
     fn enumerator() -> FamilyEnumerator {
         FamilyEnumerator::from_completed_family(
@@ -3528,6 +3581,7 @@ fn split_traversal_seed(
                 // Splitting has no catalog and grants no closure evidence.
                 seed.task.prefix_verified = false;
                 seed.task.source_prefix_verified = false;
+                seed.task.prefix_row_order_state &= !FIRST_CLEAR_PREFIX_VERIFIED;
             }
             FamilyNodeKind::Union => {
                 let mut left = seed;
@@ -4450,6 +4504,15 @@ impl GeometrySearch {
 
     pub const fn physical_prefix_pruning_enabled(&self) -> bool {
         self.physical_prefix_pruning
+    }
+
+    #[cfg(test)]
+    pub(super) fn disable_physical_prefix_pruning_for_reference(&mut self) {
+        // Only fresh test sessions use the raw-domain oracle. Disabling a
+        // filter after enumeration would not restore already skipped work.
+        assert!(self.enumerator.is_none());
+        self.physical_prefix_pruning = false;
+        self.source_prefix_request = None;
     }
 
     pub fn enable_full_draw_source_prefix_pruning(

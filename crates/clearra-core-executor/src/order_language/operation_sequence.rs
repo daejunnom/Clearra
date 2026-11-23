@@ -13,7 +13,7 @@ use clearra_rules::{kicks::KickTableProfileId, profile::rule_profile::RuleProfil
 use crate::backend::DocumentReachabilityEngine;
 
 use super::{
-    build_order_language::{MAX_OPERATION_ORDER_OPERATIONS, MAX_OPERATION_ORDER_TIMEOUT_SECONDS},
+    build_order_language::MAX_OPERATION_ORDER_OPERATIONS,
     sequence_dependencies::OperationDocumentProblem,
 };
 
@@ -96,7 +96,8 @@ impl OperationSequenceAnalyzer {
     ) -> Result<OperationSequenceReport, OperationSequenceError> {
         validate_problem(problem)?;
         let started = Instant::now();
-        let deadline = Duration::from_secs(u64::from(problem.timeout_seconds));
+        let deadline = (problem.timeout_seconds != 0)
+            .then(|| Duration::from_secs(u64::from(problem.timeout_seconds)));
         let mut reachability =
             DocumentReachabilityEngine::new(problem.width, problem.height, problem.kick_profile)
                 .ok_or(OperationSequenceError::InvalidInput(
@@ -231,11 +232,6 @@ fn validate_problem(problem: &OperationDocumentProblem) -> Result<(), OperationS
             "operation sequence exceeds the 4096 operation limit",
         ));
     }
-    if !(1..=MAX_OPERATION_ORDER_TIMEOUT_SECONDS).contains(&problem.timeout_seconds) {
-        return Err(OperationSequenceError::InvalidInput(
-            "operation sequence timeout-seconds must be in 1..=900",
-        ));
-    }
     if cells < 64 && problem.initial_board >> cells != 0 {
         return Err(OperationSequenceError::InvalidInput(
             "initial board contains cells outside document dimensions",
@@ -288,13 +284,13 @@ fn row_mask(width: u8) -> u64 {
 fn poll(
     control: &ExecutionControl,
     started: Instant,
-    deadline: Duration,
+    deadline: Option<Duration>,
     timeout_seconds: u16,
 ) -> Result<(), OperationSequenceError> {
     if control.is_cancelled() {
         return Err(OperationSequenceError::Cancelled);
     }
-    if started.elapsed() >= deadline {
+    if deadline.is_some_and(|deadline| started.elapsed() >= deadline) {
         return Err(OperationSequenceError::TimedOut { timeout_seconds });
     }
     Ok(())
@@ -319,13 +315,17 @@ fn mix_step(hash: &mut u64, step: NormalizedOperationSequenceStep) {
 
 #[cfg(test)]
 mod tests {
+    use std::time::{Duration, Instant};
+
     use clearra_core_domain::{
+        execution_cancellation::ExecutionControl,
         operation::operation::OperationId,
         piece::{piece_kind::PieceKind, rotation::RotationState},
     };
 
-    use super::*;
+    use super::{poll, validate_problem, OperationSequenceAnalyzer, OperationSequenceError};
     use crate::order_language::sequence_dependencies::ConcreteDocumentOperation;
+    use crate::order_language::sequence_dependencies::OperationDocumentProblem;
 
     fn one_o_problem() -> OperationDocumentProblem {
         let operation = ConcreteDocumentOperation::from_centered(
@@ -339,6 +339,23 @@ mod tests {
         let mut problem = OperationDocumentProblem::canonical(10, 4, 0, vec![operation]);
         problem.document_boards = Some(vec![0]);
         problem
+    }
+
+    #[test]
+    fn unlimited_replay_has_no_elapsed_time_failure() {
+        let started = Instant::now() - Duration::from_secs(901);
+        let control = ExecutionControl::default();
+        assert!(poll(&control, started, None, 0).is_ok());
+        assert_eq!(
+            poll(&control, started, Some(Duration::from_secs(900)), 900),
+            Err(OperationSequenceError::TimedOut {
+                timeout_seconds: 900
+            }),
+        );
+        let mut problem = one_o_problem();
+        assert_eq!(problem.timeout_seconds, 0);
+        problem.timeout_seconds = u16::MAX;
+        assert!(validate_problem(&problem).is_ok());
     }
 
     #[test]

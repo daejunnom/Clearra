@@ -142,6 +142,22 @@ thread_local! {
     static CONDITIONAL_ORDERED_NEGATIVE_REUSE: Cell<bool> = const { Cell::new(false) };
 }
 
+/// Keep an explicitly selected diagnostic producer independent of automatic
+/// product certificates, including a scope selecting the reference arm.
+#[cfg(test)]
+pub(super) fn has_explicit_scope() -> bool {
+    MODE.get().is_some()
+        || TRANSLATION_MODE.get().is_some()
+        || MOVEMENT_CLEAR_MODE.get().is_some()
+        || FIRST_KICK_INTERVAL_MODE.get().is_some()
+        || ORDERED_KICK_INTERVAL_MODE.get().is_some()
+        || KICK_GUARD_REUSE_MODE.get().is_some()
+        || CONDITIONAL_ORDER_MODE.get().is_some()
+        || CONDITIONAL_ORDERED_NEGATIVE.get()
+        || CONDITIONAL_ORDERED_NEGATIVE_REUSE.get()
+        || CONDITIONAL_FALLBACK.get().is_some()
+}
+
 /// Isolated fallback probe; neither the normal 256-transition budget nor the
 /// local-feature comparator opts into carrying these negatives to BuildUp.
 #[cfg(test)]

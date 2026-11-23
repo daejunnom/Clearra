@@ -142,7 +142,7 @@ export const COMPONENT_MESSAGES = {
   theRecordedOperationOrderAndCoordinatesAre: { en: "The recorded operation order and coordinates are normalized and replay-validated as supplied. Queue and hold are never inferred.", ko: "문서에 기록된 operation 순서와 좌표를 그대로 정규화하고 재생 검증합니다. 큐나 홀드를 추론하지 않습니다.", ja: "記録された操作順と座標を指定どおりに正規化し、再生して検証します。ミノ順やホールドは推測しません。" },
   ruleProfile: { en: "Rule profile", ko: "규칙 프로필", ja: "ルールプロファイル" },
   kickProfile: { en: "Kick profile", ko: "킥 프로필", ja: "キックプロファイル" },
-  timeoutSeconds: { en: "Timeout (seconds)", ko: "제한시간 (초)", ja: "制限時間（秒）" },
+  timeoutSeconds: { en: "Timeout (seconds, 0 = unlimited)", ko: "제한시간 (초, 0 = 무제한)", ja: "制限時間（秒、0 = 無制限）" },
   normalizedReplayReport: { en: "Normalized replay report", ko: "정규화된 재생 보고서", ja: "正規化された再生レポート" },
   runValidationToSeeThePlacementCount: { en: "Run validation to see the placement count, line clears, and applied rule and kick profiles.", ko: "검증을 실행하면 배치 수, 줄 삭제와 적용한 규칙·킥 프로필이 여기에 표시됩니다.", ja: "検証を実行すると、設置数、ライン消去、適用されたルールとキックプロファイルが表示されます。" },
   result2: { en: "result", ko: "결과", ja: "結果" },

@@ -17,6 +17,8 @@ use super::{FamilyNodeKind, GeometryCatalog, GeometrySolutionFamily};
 
 pub(super) const ROW_ORDER_ALL: u32 = (1 << 24) - 1;
 const FIRST_LOCK_POSSIBLE: u32 = 1 << 24;
+// Row-only metadata: the selected/family combiners do not propagate this bit.
+const FRAME_ZERO_AVAILABLE: u32 = 1 << 25;
 const INTERNAL_ROWS: u16 = 0b01_1110;
 
 // Bits are the lexicographic permutations of [1, 2, 3, 4].
@@ -115,18 +117,12 @@ impl RowOrderCapability {
             // warming the catalog's optional lazy instantiation cache. For a
             // nonempty board this certificate stays unknown; a failed drop
             // must not rule out a lock reached through a rotation or slide.
-            let first_lock = if catalog.initial_board() != 0 || occupied & 1 == 0 {
-                false
-            } else if let Some(poses) = catalog.instantiated_realizations(row, 0) {
-                poses.iter().any(|pose| pose.lock_y == 0)
-            } else {
-                catalog.realizations(row).iter().any(|&realization| {
-                    catalog
-                        .instantiate_realization(catalog.skeleton(row).cells, realization, 0)
-                        .is_some_and(|pose| pose.lock_y == 0)
-                })
-            };
-            row_states.push(mask | if first_lock { FIRST_LOCK_POSSIBLE } else { 0 });
+            let frame_zero = catalog.has_frame_zero_realization(row);
+            let first_lock = catalog.initial_board() == 0 && occupied & 1 != 0 && frame_zero;
+            row_states.push(
+                mask | if first_lock { FIRST_LOCK_POSSIBLE } else { 0 }
+                    | if frame_zero { FRAME_ZERO_AVAILABLE } else { 0 },
+            );
         }
         Some(Self {
             binding: CatalogBinding::of(catalog),
@@ -372,6 +368,10 @@ impl FamilyRowOrderTable {
 
     pub(super) fn prefix_state(&self, rows: &[u32]) -> Option<u32> {
         self.capability.selected_state(rows)
+    }
+
+    pub(super) fn frame_zero_is_available(&self, row: u32) -> Option<bool> {
+        Some(self.capability.row_state(row)? & FRAME_ZERO_AVAILABLE != 0)
     }
 
     pub(super) fn extend_prefix(&self, prefix_state: u32, row: u32) -> Option<u32> {

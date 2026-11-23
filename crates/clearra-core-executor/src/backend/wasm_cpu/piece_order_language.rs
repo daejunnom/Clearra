@@ -1,6 +1,5 @@
 use std::{collections::HashMap, sync::Arc};
 
-#[cfg(any(test, feature = "local-search-ab", feature = "placement-dependency-pc"))]
 use clearra_core_domain::piece::piece_kind::PieceKind;
 
 use super::{buildup::BuildOrderGraph, mix_digest, WasmExactSearchError};
@@ -534,11 +533,12 @@ impl PieceLanguageSubsetImportMetrics {
 
 /// A language constructed from a separately certified placement poset.
 /// These are residual class-count states, not physical/subset build states.
-#[cfg(any(test, feature = "local-search-ab"))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct PosetLanguageResult {
     pub root: u32,
+    #[cfg(any(test, feature = "local-search-ab"))]
     pub residual_states: usize,
+    #[cfg(any(test, feature = "local-search-ab"))]
     pub operation_classes: usize,
 }
 
@@ -583,10 +583,8 @@ struct ConditionalResidual {
     allowed: u16,
 }
 
-#[cfg(any(test, feature = "local-search-ab"))]
 const MAX_POSET_OPERATIONS: usize = 15;
 
-#[cfg(any(test, feature = "local-search-ab"))]
 struct PosetOperationClass {
     members: u16,
     piece_code: u8,
@@ -1099,7 +1097,6 @@ impl PieceOrderLanguageCache {
     /// `None` means unsupported/invalid input or a refused state budget, never
     /// infeasibility. Budget admission finishes before mutating the language
     /// arena. The returned root has the usual owner/recycling lifetime.
-    #[cfg(any(test, feature = "local-search-ab"))]
     pub fn compile_poset_language(
         &mut self,
         pieces: &[PieceKind],
@@ -1163,7 +1160,9 @@ impl PieceOrderLanguageCache {
         }
         Ok(Some(PosetLanguageResult {
             root: *references.last().expect("admitted poset includes its root"),
+            #[cfg(any(test, feature = "local-search-ab"))]
             residual_states: states.len(),
+            #[cfg(any(test, feature = "local-search-ab"))]
             operation_classes: classes.len(),
         }))
     }
@@ -1827,7 +1826,10 @@ impl PieceOrderLanguageCache {
         Ok(())
     }
 
-    fn ensure_graph_class_storage(&mut self, node_count: usize) -> Result<(), WasmExactSearchError> {
+    fn ensure_graph_class_storage(
+        &mut self,
+        node_count: usize,
+    ) -> Result<(), WasmExactSearchError> {
         self.ensure_buckets();
         if self.graph_classes.len() < node_count {
             self.graph_classes
@@ -2157,7 +2159,6 @@ impl PieceOrderLanguageCache {
     }
 }
 
-#[cfg(any(test, feature = "local-search-ab"))]
 fn poset_predecessor_closure(predecessors: &[u16]) -> Option<Vec<u16>> {
     let count = predecessors.len();
     if count > MAX_POSET_OPERATIONS {
@@ -2192,7 +2193,6 @@ fn poset_predecessor_closure(predecessors: &[u16]) -> Option<Vec<u16>> {
     Some(closure)
 }
 
-#[cfg(any(test, feature = "local-search-ab"))]
 fn poset_successors(predecessors: &[u16]) -> [u16; MAX_POSET_OPERATIONS] {
     let mut successors = [0_u16; MAX_POSET_OPERATIONS];
     for (index, &predecessor_mask) in predecessors.iter().enumerate() {
@@ -2206,7 +2206,6 @@ fn poset_successors(predecessors: &[u16]) -> [u16; MAX_POSET_OPERATIONS] {
     successors
 }
 
-#[cfg(any(test, feature = "local-search-ab"))]
 fn poset_operation_classes(
     pieces: &[PieceKind],
     predecessors: &[u16],
@@ -2255,7 +2254,6 @@ fn poset_operation_classes(
     Some((classes, stride - 1))
 }
 
-#[cfg(any(test, feature = "local-search-ab"))]
 fn poset_residual_counts(
     classes: &[PosetOperationClass],
     state: u32,
@@ -2274,7 +2272,6 @@ fn poset_residual_counts(
     (remaining, unfinished, depth)
 }
 
-#[cfg(any(test, feature = "local-search-ab"))]
 fn admitted_poset_residual_states(
     classes: &[PosetOperationClass],
     initial: u32,

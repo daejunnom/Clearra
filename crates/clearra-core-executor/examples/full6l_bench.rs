@@ -3,9 +3,9 @@
 //! Build with `--release --features parallel,wasm-stage-profiling`
 //! and compile-time `CLEARRA_SOURCE_COMMIT`. Full runs require clearra-manage's
 //! benchmark-search profile. `--small` is a one-I executable-contract check.
-//! The legacy diagnostic deadline starts before source preparation. The optional
-//! post-preparation deadline starts only after the frozen family tables are ready.
-//! Cancellation never turns partial work into a complete product result.
+//! There is no default search deadline. Explicit diagnostic deadlines or a
+//! completed-candidate window can request cooperative cancellation. Partial
+//! observations never supply complete product authority.
 
 use clearra_core_domain::{
     execution_cancellation::{
@@ -17,7 +17,9 @@ use clearra_core_domain::{
 };
 use clearra_core_executor::{CoreExecutionResult, WasmCpuSearchBackend};
 #[cfg(all(feature = "wasm-stage-profiling", not(target_family = "wasm")))]
-use clearra_core_executor::{ExecutorSearchProfileSession, ExecutorSearchProfileStage};
+use clearra_core_executor::{
+    ExecutorCandidateFeedbackSession, ExecutorSearchProfileSession, ExecutorSearchProfileStage,
+};
 use clearra_objectives::policy::objective_policy::ObjectivePolicy;
 use clearra_pc_graph::request::{
     PcCountPolicy, PcExecutionPolicy, PcQueueInput, PcScenarioBoard, PcScenarioQuery,
@@ -127,6 +129,7 @@ struct Options {
     profile: bool,
     cancel_after_seconds: Option<u64>,
     post_prepare_seconds: Option<u64>,
+    completed_candidates: Option<u64>,
 }
 
 fn main() {
@@ -175,6 +178,7 @@ fn parse_options(mut args: impl Iterator<Item = String>) -> Result<Options, Stri
         profile: false,
         cancel_after_seconds: None,
         post_prepare_seconds: None,
+        completed_candidates: None,
     };
     let mut selected_objective = false;
     let mut selected_pattern = false;
@@ -202,7 +206,8 @@ fn parse_options(mut args: impl Iterator<Item = String>) -> Result<Options, Stri
             "--profile" if !options.profile => options.profile = true,
             "--cancel-after-seconds" | "--post-prepare-seconds"
                 if options.cancel_after_seconds.is_none()
-                    && options.post_prepare_seconds.is_none() =>
+                    && options.post_prepare_seconds.is_none()
+                    && options.completed_candidates.is_none() =>
             {
                 let seconds = args
                     .next()
@@ -218,15 +223,31 @@ fn parse_options(mut args: impl Iterator<Item = String>) -> Result<Options, Stri
                     options.cancel_after_seconds = Some(seconds);
                 }
             }
+            "--completed-candidates"
+                if options.completed_candidates.is_none()
+                    && options.cancel_after_seconds.is_none()
+                    && options.post_prepare_seconds.is_none() =>
+            {
+                let completed = args
+                    .next()
+                    .ok_or_else(usage)?
+                    .parse::<u64>()
+                    .map_err(|_| usage())?;
+                if completed == 0 {
+                    return Err(usage());
+                }
+                options.completed_candidates = Some(completed);
+            }
             _ => return Err(usage()),
         }
     }
     if !run
         && (options.profile
             || options.cancel_after_seconds.is_some()
-            || options.post_prepare_seconds.is_some())
+            || options.post_prepare_seconds.is_some()
+            || options.completed_candidates.is_some())
     {
-        return Err("profiling and the diagnostic deadline require run".into());
+        return Err("profiling and diagnostic observation windows require run".into());
     }
     if options.post_prepare_seconds.is_some() && !options.fixture.is_full6l() {
         return Err("the post-preparation deadline requires a Full6L source".into());
@@ -235,7 +256,7 @@ fn parse_options(mut args: impl Iterator<Item = String>) -> Result<Options, Stri
 }
 
 fn usage() -> String {
-    "usage: full6l_bench compile|run [--small | --pattern P1P7P7|OP7P7] [--objective unique|chance] [--profile] [--cancel-after-seconds N | --post-prepare-seconds N]".into()
+    "usage: full6l_bench compile|run [--small | --pattern P1P7P7|OP7P7] [--objective unique|chance] [--profile] [--completed-candidates N | --cancel-after-seconds N | --post-prepare-seconds N]".into()
 }
 
 fn run(options: &Options, report: &mut Value) -> Result<(), String> {
@@ -246,13 +267,17 @@ fn run(options: &Options, report: &mut Value) -> Result<(), String> {
         options.profile
             || options.cancel_after_seconds.is_some()
             || options.post_prepare_seconds.is_some()
+            || options.completed_candidates.is_some()
     );
     report["diagnostic_deadline_seconds"] = json!(options.cancel_after_seconds);
     report["post_prepare_seconds"] = json!(options.post_prepare_seconds);
+    report["candidate_feedback_requested"] = json!(options.completed_candidates);
     report["deadline_scope"] = json!(if options.post_prepare_seconds.is_some() {
         "after geometry-candidate-family: frozen family tables ready, before task split; cooperative cancellation, supervisor owns hard timeout"
-    } else {
+    } else if options.cancel_after_seconds.is_some() {
         "source preparation, compilation, execution and result recording; cooperative cancellation, supervisor owns hard timeout"
+    } else {
+        "no search deadline; explicit cancellation or requested completed-candidate window only"
     });
     report["supervision"] = json!({
         "supervised": std::env::var("CLEARRA_RUNTIME_SUPERVISED").ok(),
@@ -273,49 +298,57 @@ fn run(options: &Options, report: &mut Value) -> Result<(), String> {
         }
     }
     let cancellation = ExecutionCancellationToken::new();
-    let post_prepare = options
-        .post_prepare_seconds
-        .map(|seconds| Arc::new(PostPreparationWindow::new(seconds)));
-    let timer = options
-        .cancel_after_seconds
-        .or(options.post_prepare_seconds)
-        .map(|seconds| {
-            let (done, wait) = mpsc::channel::<DiagnosticTimerEvent>();
-            let handle = cancellation.handle();
-            let post_prepare = post_prepare.clone();
-            let timer = thread::spawn(move || {
-                if let Some(window) = post_prepare {
-                    let Ok(DiagnosticTimerEvent::FamilyPrepared(started)) = wait.recv() else {
+    let post_prepare =
+        (options.run && options.fixture.is_full6l() && options.cancel_after_seconds.is_none())
+            .then(|| Arc::new(PostPreparationWindow::new(options.post_prepare_seconds)));
+    let timer = (options.cancel_after_seconds.is_some() || post_prepare.is_some()).then(|| {
+        let (done, wait) = mpsc::channel::<DiagnosticTimerEvent>();
+        let handle = cancellation.handle();
+        let post_prepare = post_prepare.clone();
+        let total_deadline = options.cancel_after_seconds;
+        let timer = thread::spawn(move || {
+            if let Some(window) = post_prepare {
+                let Ok(DiagnosticTimerEvent::FamilyPrepared(started)) = wait.recv() else {
+                    return;
+                };
+                loop {
+                    window.sample_memory();
+                    let remaining = window.seconds.map(|seconds| {
+                        Duration::from_secs(seconds).saturating_sub(started.elapsed())
+                    });
+                    if remaining.is_some_and(|remaining| remaining.is_zero()) {
+                        window.record_cancellation_request();
+                        eprintln!(
+                            "full6l_bench diagnostic_post_prepare_seconds={:?}",
+                            window.seconds
+                        );
+                        handle.cancel();
                         return;
-                    };
-                    loop {
-                        window.sample_memory();
-                        let remaining =
-                            Duration::from_secs(seconds).saturating_sub(started.elapsed());
-                        if remaining.is_zero() {
-                            window.record_cancellation_request();
-                            eprintln!("full6l_bench diagnostic_post_prepare_seconds={seconds}");
-                            handle.cancel();
-                            return;
-                        }
-                        match wait.recv_timeout(remaining.min(Duration::from_secs(1))) {
-                            Ok(DiagnosticTimerEvent::Finished)
-                            | Err(mpsc::RecvTimeoutError::Disconnected) => return,
-                            Ok(DiagnosticTimerEvent::FamilyPrepared(_))
-                            | Err(mpsc::RecvTimeoutError::Timeout) => {}
-                        }
+                    }
+                    let poll_interval = remaining.map_or(Duration::from_secs(1), |remaining| {
+                        remaining.min(Duration::from_secs(1))
+                    });
+                    match wait.recv_timeout(poll_interval) {
+                        Ok(DiagnosticTimerEvent::Finished)
+                        | Err(mpsc::RecvTimeoutError::Disconnected) => return,
+                        Ok(DiagnosticTimerEvent::FamilyPrepared(_))
+                        | Err(mpsc::RecvTimeoutError::Timeout) => {}
                     }
                 }
-                if matches!(
-                    wait.recv_timeout(Duration::from_secs(seconds)),
-                    Err(mpsc::RecvTimeoutError::Timeout)
-                ) {
-                    eprintln!("full6l_bench diagnostic_cancel_after_seconds={seconds}");
-                    handle.cancel();
-                }
-            });
-            (done, timer)
+            }
+            let Some(seconds) = total_deadline else {
+                return;
+            };
+            if matches!(
+                wait.recv_timeout(Duration::from_secs(seconds)),
+                Err(mpsc::RecvTimeoutError::Timeout)
+            ) {
+                eprintln!("full6l_bench diagnostic_cancel_after_seconds={seconds}");
+                handle.cancel();
+            }
         });
+        (done, timer)
+    });
     let progress = DiagnosticProgress::new(
         post_prepare.clone(),
         timer.as_ref().map(|(done, _)| done.clone()),
@@ -326,7 +359,9 @@ fn run(options: &Options, report: &mut Value) -> Result<(), String> {
     let mut phases = PhaseClock::new();
     let outcome = (|| {
         let profile = start_profile(options.profile)?;
+        let feedback = start_feedback(options.completed_candidates, cancellation.handle())?;
         let result = execute(options, report, &control, &mut phases);
+        finish_feedback(feedback, post_prepare.as_deref(), report);
         report["profile"] = finish_profile(profile);
         result
     })();
@@ -750,12 +785,12 @@ struct PostPreparationState {
 }
 
 struct PostPreparationWindow {
-    seconds: u64,
+    seconds: Option<u64>,
     state: Mutex<PostPreparationState>,
 }
 
 impl PostPreparationWindow {
-    fn new(seconds: u64) -> Self {
+    fn new(seconds: Option<u64>) -> Self {
         Self {
             seconds,
             state: Mutex::new(PostPreparationState::default()),
@@ -792,10 +827,16 @@ impl PostPreparationWindow {
     }
 
     fn record_cancellation_request(&self) {
-        self.state
-            .lock()
-            .expect("diagnostic observation state")
-            .cancellation_requested = Some(Instant::now());
+        self.record_cancellation_at(Instant::now());
+    }
+
+    fn record_cancellation_at(&self, requested: Instant) {
+        let mut state = self.state.lock().expect("diagnostic observation state");
+        state.cancellation_requested = Some(
+            state
+                .cancellation_requested
+                .map_or(requested, |previous| previous.min(requested)),
+        );
     }
 
     fn record_timer_arm_failure(&self) {
@@ -823,7 +864,7 @@ impl PostPreparationWindow {
                 .map(|stop| finished.duration_since(stop).as_secs_f64()),
             "sampled_peak_rss_bytes": state.sampled_peak_rss_bytes,
             "rss_sampling_interval_seconds": 1,
-            "rss_contract": "process RSS sampled while the diagnostic timer is armed and once after joined return; VmHWM and the supervisor receipt still cover the whole process",
+            "rss_contract": "process RSS sampled after family preparation and once after joined return; sampling imposes no search deadline; VmHWM and the supervisor receipt still cover the whole process",
             "profile_delta": profile_delta(profile, &state.boundary["profile"]),
             "profile_delta_contract": "finished spans through joined cancellation; preparation spans crossing the boundary are excluded; sampled durations and reachability work are estimates, not exclusive wall time or exact totals",
             "complete": false,
@@ -908,6 +949,51 @@ impl ProgressSink for DiagnosticProgress {
 type Profile = Option<ExecutorSearchProfileSession>;
 #[cfg(not(all(feature = "wasm-stage-profiling", not(target_family = "wasm"))))]
 type Profile = ();
+
+#[cfg(all(feature = "wasm-stage-profiling", not(target_family = "wasm")))]
+type Feedback = Option<ExecutorCandidateFeedbackSession>;
+#[cfg(not(all(feature = "wasm-stage-profiling", not(target_family = "wasm"))))]
+type Feedback = ();
+
+fn start_feedback(
+    requested: Option<u64>,
+    cancellation: ExecutionCancellationHandle,
+) -> Result<Feedback, String> {
+    #[cfg(all(feature = "wasm-stage-profiling", not(target_family = "wasm")))]
+    {
+        requested
+            .map(|requested| ExecutorCandidateFeedbackSession::start(requested, cancellation))
+            .transpose()
+            .map_err(|error| format!("candidate feedback: {error:?}"))
+    }
+    #[cfg(not(all(feature = "wasm-stage-profiling", not(target_family = "wasm"))))]
+    {
+        let _ = cancellation;
+        if requested.is_some() {
+            Err("--completed-candidates requires native --features wasm-stage-profiling".into())
+        } else {
+            Ok(())
+        }
+    }
+}
+
+fn finish_feedback(feedback: Feedback, window: Option<&PostPreparationWindow>, report: &mut Value) {
+    #[cfg(all(feature = "wasm-stage-profiling", not(target_family = "wasm")))]
+    {
+        report["candidate_feedback"] = feedback.map_or(Value::Null, |feedback| {
+            if let (Some(window), Some(stopped)) = (window, feedback.cancellation_requested_at()) {
+                window.record_cancellation_at(stopped);
+            }
+            feedback.finish()
+        });
+    }
+    #[cfg(not(all(feature = "wasm-stage-profiling", not(target_family = "wasm"))))]
+    {
+        let () = feedback;
+        let _ = window;
+        report["candidate_feedback"] = Value::Null;
+    }
+}
 
 fn start_profile(enabled: bool) -> Result<Profile, String> {
     #[cfg(all(feature = "wasm-stage-profiling", not(target_family = "wasm")))]
@@ -1140,6 +1226,51 @@ mod tests {
             vec!["compile", "--post-prepare-seconds", "300"],
             vec!["run", "--small", "--post-prepare-seconds", "300"],
             vec!["run", "--post-prepare-seconds", "0"],
+        ] {
+            assert!(
+                parse(&args).is_err(),
+                "unexpected accepted arguments: {args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn completed_candidate_window_is_explicit_and_has_no_elapsed_time_deadline() {
+        let parse = |args: &[&str]| parse_options(args.iter().map(|arg| (*arg).to_owned()));
+        let unlimited = parse(&["run"]).unwrap();
+        assert_eq!(unlimited.cancel_after_seconds, None);
+        assert_eq!(unlimited.post_prepare_seconds, None);
+        assert_eq!(unlimited.completed_candidates, None);
+        let options = parse(&["run", "--completed-candidates", "100000"]).unwrap();
+        assert_eq!(options.completed_candidates, Some(100_000));
+        assert_eq!(options.cancel_after_seconds, None);
+        assert_eq!(options.post_prepare_seconds, None);
+        assert!(parse(&["run", "--small", "--completed-candidates", "1"]).is_ok());
+        for args in [
+            vec!["compile", "--completed-candidates", "1"],
+            vec!["run", "--completed-candidates", "0"],
+            vec!["run", "--completed-candidates", "-1"],
+            vec![
+                "run",
+                "--completed-candidates",
+                "1",
+                "--completed-candidates",
+                "2",
+            ],
+            vec![
+                "run",
+                "--completed-candidates",
+                "1",
+                "--post-prepare-seconds",
+                "60",
+            ],
+            vec![
+                "run",
+                "--cancel-after-seconds",
+                "60",
+                "--completed-candidates",
+                "1",
+            ],
         ] {
             assert!(
                 parse(&args).is_err(),

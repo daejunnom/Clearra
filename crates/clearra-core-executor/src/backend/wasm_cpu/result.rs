@@ -906,7 +906,7 @@ enum SearchProblemRetention {
     },
 }
 
-/// Ordinary native PC scope for the prefix impossibility proof. Opening and
+/// Ordinary board64 PC scope for the prefix impossibility proof. Opening and
 /// explicit Scenario inputs share the compiled board, source and goal contract.
 /// Trace's numeric retention limit does not request a physical execution family:
 /// this consumer retains one exact representative. Exact movement accelerators
@@ -914,37 +914,33 @@ enum SearchProblemRetention {
 /// Pure tiling, ordinal-row evidence, replay families and external producers
 /// keep their established unfiltered domain. A surviving candidate still needs
 /// exact physical and original-source verification.
-fn full6l_physical_prefix_pruning_eligible(
-    problem: &SearchProblem,
-    catalog: &GeometryCatalog,
-) -> bool {
+fn physical_pc_prefix_pruning_eligible(problem: &SearchProblem, catalog: &GeometryCatalog) -> bool {
     use clearra_objectives::policy::objective_policy::ObjectivePolicy;
     use clearra_pc_graph::request::PcCountPolicy;
     use clearra_problem::{goal::SearchGoal, SearchProblemKind, SearchProblemPreset};
-    use clearra_supply::QueueObservationPolicy;
-
     let backend = problem.backend_request();
-    if cfg!(target_family = "wasm")
-        || usize::BITS < 64
-        || !matches!(
-            (problem.preset(), problem.problem_kind()),
-            (SearchProblemPreset::OpeningPc, SearchProblemKind::OpeningPc)
-                | (
-                    SearchProblemPreset::ScenarioPc,
-                    SearchProblemKind::ScenarioPc
-                )
-        )
-        || !matches!(problem.search_goal(), SearchGoal::ClearToEmpty)
-        || catalog.width() != 10
-        || catalog.height() != 6
-        || catalog.initial_board() != 0
-        || catalog.required_cells() != (1_u64 << 60) - 1
-        || problem.exact_pieces() != Some(15)
-        || problem.supply().source_sequence_length() != 15
-        || problem.supply().projects_standard_bag_lookahead()
+    let cells = u32::from(catalog.width()) * u32::from(catalog.height());
+    if cells == 0 || cells > 64 || catalog.height() > 16 {
+        return false;
+    }
+    let full = u64::MAX >> (64 - cells);
+    let required = catalog.required_cells().count_ones() as usize;
+    if !matches!(
+        (problem.preset(), problem.problem_kind()),
+        (SearchProblemPreset::OpeningPc, SearchProblemKind::OpeningPc)
+            | (
+                SearchProblemPreset::ScenarioPc,
+                SearchProblemKind::ScenarioPc
+            )
+    ) || !matches!(problem.search_goal(), SearchGoal::ClearToEmpty)
+        || catalog.initial_board() | catalog.required_cells() != full
+        || catalog.initial_board() & catalog.required_cells() != 0
+        || required == 0
+        || required % 4 != 0
+        || required / 4 > super::MAX_BOARD64_PIECES
+        || problem.exact_pieces() != Some(required / 4)
         || problem.objective() != ObjectivePolicy::unique()
         || problem.count_policy() != PcCountPolicy::CountUnique
-        || problem.queue_observation_policy() != QueueObservationPolicy::FullQueueOracle
         || problem.pc_chance_evidence_policy() != PcChanceEvidencePolicy::Disabled
         || problem.output_policy() != SearchOutputPolicy::Trace
         || problem.solution_probability_policy().requested()
@@ -956,23 +952,14 @@ fn full6l_physical_prefix_pruning_eligible(
         || backend.max_candidates() != 0
         || backend.max_frontier_states() != 0
         || backend.max_memory_mib().is_some()
-        || !problem.initial_hold().hold_empty()
     {
         return false;
     }
-    // Positive-requirement infeasibility is independent of queue structure.
+    // Physical infeasibility is independent of queue structure and Hold.
     // Both serial and parallel filtered producers disable candidate digests
     // and report that evidence as not calculated, so digest support must not
     // restrict this negative-only physical proof to symbolic bag sources.
-    problem
-        .piece_source()
-        .materialized_universe()
-        .is_some_and(|universe| {
-            universe.complete()
-                && universe.truncation_reason().is_none()
-                && universe.pattern_count() != 0
-                && universe.total_possible_pattern_count() == universe.pattern_count() as u128
-        })
+    true
 }
 
 pub(crate) struct WasmExactSearchSession {
@@ -1866,7 +1853,7 @@ impl WasmExactSearchSession {
         };
         let physical_prefix_pruning_active = !external_geometry
             && !parent_authorized
-            && full6l_physical_prefix_pruning_eligible(problem.as_ref(), &catalog);
+            && physical_pc_prefix_pruning_eligible(problem.as_ref(), &catalog);
         if physical_prefix_pruning_active {
             geometry.enable_physical_prefix_pruning();
             geometry.enable_full_draw_source_prefix_pruning(problem.as_ref());
@@ -3827,6 +3814,14 @@ impl WasmExactSearchSession {
             }
             Err(error) => return Err(error),
         };
+        #[cfg(all(feature = "wasm-stage-profiling", not(target_family = "wasm")))]
+        super::candidate_feedback::observe_completed(
+            &self.problem,
+            &self.catalog,
+            &candidate,
+            &result,
+            control,
+        );
         if matches!(
             self.problem_retention,
             SearchProblemRetention::ParentAuthorizedSharedInput { .. }

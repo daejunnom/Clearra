@@ -292,15 +292,7 @@ impl PrecomputedOrderGuards {
 }
 
 #[cfg(any(test, feature = "local-search-ab"))]
-pub(super) fn vertical_entry_mask(lock: u64, width: u8, height: u8) -> u64 {
-    // Same collision corridor as the existing hard-drop fast path.
-    // Above-target bits cannot intersect a valid board.
-    let mut corridor = lock;
-    for _ in 1..height {
-        corridor |= corridor << width;
-    }
-    corridor
-}
+pub(super) use super::placement_poset::vertical_entry_mask;
 
 /// Immutable conditions for the owning geometry catalog. A row ID always means
 /// one canonical `(piece, cells)` placement, never just a piece kind.

@@ -76,6 +76,10 @@ fn physical_prefix_small_ilc_enumeration_matches_full_candidate_negative_filter(
             .filter(|candidate| {
                 !RealizationFeasibilityWorkspace::relaxed_ilc_order_is_impossible(
                     &catalog, candidate,
+                ) && !prefix_pruning::selected_first_clear_stalls(
+                    &catalog,
+                    candidate.row_ids(),
+                    None,
                 )
             })
             .map(candidate_record)
@@ -277,6 +281,10 @@ fn physical_prefix_product_prune_preserves_union_siblings_and_resumable_order() 
             resumed.prefix_profile.checks,
             unbounded.prefix_profile.checks
         );
+        assert_eq!(
+            resumed.prefix_profile.first_clear_checks, unbounded.prefix_profile.first_clear_checks,
+            "yield/resume must reuse evidence for the unchanged selected prefix",
+        );
         assert_eq!(resumed.prefix_profile.pruned_subtrees, 1);
     }
 }
@@ -303,7 +311,10 @@ fn physical_prefix_canonical_parallel_seeds_keep_domain_and_validate_frozen_pref
         let expected = collect_steps(&mut pure, &catalog, usize::MAX, true)
             .0
             .into_iter()
-            .filter(|(_, _, rows)| !prefix_pruning::selected_prefix_stalls(&catalog, rows))
+            .filter(|(_, _, rows)| {
+                !prefix_pruning::selected_prefix_stalls(&catalog, rows)
+                    && !prefix_pruning::selected_first_clear_stalls(&catalog, rows, None)
+            })
             .collect::<Sequence>();
         let actual = collect_steps(&mut pruned, &catalog, 1, true).0;
         assert_eq!(actual, expected);

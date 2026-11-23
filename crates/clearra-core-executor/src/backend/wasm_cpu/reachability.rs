@@ -50,6 +50,9 @@ mod global_kick_pruning_bench;
 #[cfg(test)]
 #[path = "reachability_peer_tests.rs"]
 mod peer_tests;
+#[cfg(test)]
+#[path = "reachability_transition_guard_tests.rs"]
+mod transition_guard_tests;
 
 #[cfg(test)]
 #[path = "reachability_board_family.rs"]
@@ -2452,6 +2455,9 @@ pub(super) struct ReachabilityTemplate {
 struct ReverseRotationSource {
     source: u16,
     slot: u8,
+    // Reuses the original alignment byte. Applies only after both endpoints
+    // have been proved collision-free; interval callers keep the full guard.
+    free_endpoint_guard: u8,
     prior_target_count: u32,
 }
 
@@ -2893,14 +2899,13 @@ fn search_reachable_locks_from_seed_iter(
         let rotation_count = if allow_180 { 3 } else { 2 };
         for slot in 0..rotation_count {
             if let Some(rotated) = first_successful_kick(template, board, state_index, slot) {
-                push_index_if_placeable(
-                    template,
-                    board,
-                    rotated,
-                    &mut scratch.visited_generations,
-                    generation,
-                    &mut scratch.queue,
-                );
+                // The ordered kick selector has already validated this exact
+                // target. Reusing that fact avoids a second collision test.
+                let index = usize::from(rotated);
+                if scratch.visited_generations[index] != generation {
+                    scratch.visited_generations[index] = generation;
+                    scratch.queue.push(rotated);
+                }
             }
         }
     }
@@ -3223,17 +3228,16 @@ fn reverse_lock_reachable_large_with_proven_exit_words<
         let reverse_start = template.reverse_rotation_offsets[current] as usize;
         let reverse_end = template.reverse_rotation_offsets[current + 1] as usize;
         for source in &template.reverse_rotation_sources[reverse_start..reverse_end] {
-            if !reverse_rotation_is_first_success(template, board, *source) {
+            let index = usize::from(source.source);
+            if scratch.visited_generations[index] == generation
+                || template.state_masks[index] == INVALID_STATE_MASK
+                || board & template.state_masks[index] != 0
+                || !reverse_rotation_is_first_success_on_free_endpoints(template, board, *source)
+            {
                 continue;
             }
-            push_index_if_placeable(
-                template,
-                board,
-                source.source,
-                &mut scratch.visited_generations,
-                generation,
-                &mut scratch.queue,
-            );
+            scratch.visited_generations[index] = generation;
+            scratch.queue.push(source.source);
         }
     }
 
@@ -3277,14 +3281,13 @@ fn preferred_scoring_lock_evidence<const LEGACY_T_SPIN: bool>(
 
     let start = template.reverse_rotation_offsets[target_index] as usize;
     let end = template.reverse_rotation_offsets[target_index + 1] as usize;
+    let vertical_shadow = downward_occupancy_shadow(board, template.width);
     let mut best = None::<((bool, bool, u32), ScoringLockEvidence)>;
     for source in &template.reverse_rotation_sources[start..end] {
-        if !reverse_rotation_is_first_success(template, board, *source) {
-            continue;
-        }
         let source_index = usize::from(source.source);
         if template.state_masks[source_index] == INVALID_STATE_MASK
             || board & template.state_masks[source_index] != 0
+            || !reverse_rotation_is_first_success_on_free_endpoints(template, board, *source)
         {
             continue;
         }
@@ -3309,7 +3312,8 @@ fn preferred_scoring_lock_evidence<const LEGACY_T_SPIN: bool>(
         // better rank can replace it; keeping iteration order preserves the
         // first reachable predecessor on a tie without another reverse BFS.
         if best.as_ref().is_some_and(|(current, _)| rank <= *current)
-            || !reverse_lock_reachable_large(template, board, source_index, scratch).reachable
+            || (template.state_masks[source_index] & vertical_shadow != 0
+                && !reverse_lock_reachable_large(template, board, source_index, scratch).reachable)
         {
             continue;
         }
@@ -3511,6 +3515,78 @@ fn reverse_rotation_is_first_success(
     reverse_rotation_prior_targets(template, source)
         .iter()
         .all(|target| board & template.state_masks[usize::from(*target)] != 0)
+}
+
+const ORDERED_GUARD: u8 = 0;
+const NO_PRIOR_GUARD: u8 = 1;
+const SINGLE_BIT_GUARD_BASE: u8 = 2;
+const SINGLE_MASK_GUARD_BASE: u8 = SINGLE_BIT_GUARD_BASE + u64::BITS as u8;
+
+/// A prior clause can replace the conjunction exactly when it is contained
+/// in every other clause after removing the already-free endpoints. A mere
+/// nonempty intersection is insufficient: {a,b} and {a,c} may be blocked by
+/// b and c while a stays free. Long imported tables retain their full order.
+fn compile_free_endpoint_guard(
+    state_masks: &[u64],
+    source_mask: u64,
+    target_mask: u64,
+    prior_targets: &[u16],
+) -> u8 {
+    if prior_targets.is_empty() {
+        return NO_PRIOR_GUARD;
+    }
+    let free = source_mask | target_mask;
+    let intersection = prior_targets.iter().fold(!free, |mask, &target| {
+        mask & state_masks[usize::from(target)]
+    });
+    let Some(index) = prior_targets
+        .iter()
+        .position(|&target| state_masks[usize::from(target)] & !free == intersection)
+    else {
+        return ORDERED_GUARD;
+    };
+    if intersection.count_ones() == 1 {
+        return SINGLE_BIT_GUARD_BASE + intersection.trailing_zeros() as u8;
+    }
+    u8::try_from(index)
+        .ok()
+        .and_then(|index| SINGLE_MASK_GUARD_BASE.checked_add(index))
+        .unwrap_or(ORDERED_GUARD)
+}
+
+fn reverse_rotation_is_first_success_on_free_endpoints(
+    template: &ReachabilityTemplate,
+    board: u64,
+    source: ReverseRotationSource,
+) -> bool {
+    match source.free_endpoint_guard {
+        ORDERED_GUARD => reverse_rotation_is_first_success(template, board, source),
+        NO_PRIOR_GUARD => true,
+        bit if bit < SINGLE_MASK_GUARD_BASE => {
+            board & (1_u64 << (bit - SINGLE_BIT_GUARD_BASE)) != 0
+        }
+        mask => {
+            let prior = reverse_rotation_prior_targets(template, source);
+            let target = prior[usize::from(mask - SINGLE_MASK_GUARD_BASE)];
+            board & template.state_masks[usize::from(target)] != 0
+        }
+    }
+}
+
+/// A positive vertical-entry certificate for this template's all-column,
+/// all-orientation sky seeds. A blocked shadow is Unknown, never a negative
+/// movement proof. Doubling shifts share one board transform across all
+/// predecessors of the same scoring query without retaining a heap table.
+fn downward_occupancy_shadow(mut board: u64, width: u8) -> u64 {
+    if width == 0 {
+        return u64::MAX;
+    }
+    let mut shift = u32::from(width);
+    while shift < u64::BITS {
+        board |= board >> shift;
+        shift *= 2;
+    }
+    board
 }
 
 fn reverse_rotation_prior_targets(
@@ -3785,6 +3861,7 @@ fn compile_reverse_rotation_sources(
         ReverseRotationSource {
             source: 0,
             slot: 0,
+            free_endpoint_guard: ORDERED_GUARD,
             prior_target_count: 0,
         };
         *cursors.last().expect("one count per pose and sentinel") as usize
@@ -3813,6 +3890,12 @@ fn compile_reverse_rotation_sources(
             sources[cursor] = ReverseRotationSource {
                 source,
                 slot,
+                free_endpoint_guard: compile_free_endpoint_guard(
+                    state_masks,
+                    state_masks[usize::from(source)],
+                    state_masks[target],
+                    &forward_targets[start..candidate],
+                ),
                 prior_target_count,
             };
             cursors[target] += 1;
@@ -5358,6 +5441,7 @@ mod tests {
         for profile in [
             KickTableProfileId::Srs90,
             KickTableProfileId::SrsPlus,
+            KickTableProfileId::SrsX,
             KickTableProfileId::Jstris180,
         ] {
             let template = ReachabilityTemplate::compile(5, 4, PieceKind::T, profile);

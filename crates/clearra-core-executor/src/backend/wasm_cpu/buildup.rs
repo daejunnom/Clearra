@@ -140,6 +140,11 @@ mod geometric_edge_reuse {
         ProductDefault,
     }
 
+    #[cfg(test)]
+    pub(super) fn has_explicit_scope() -> bool {
+        MODE.get().is_some()
+    }
+
     pub(super) fn enabled(product_default: bool) -> bool {
         #[cfg(test)]
         if let Some(mode) = MODE.with(std::cell::Cell::get) {
@@ -3079,6 +3084,28 @@ impl CandidateProjection {
         self.all_placed + 1
     }
 
+    /// New row clears for every child of one parent operation set.
+    ///
+    /// A completed target row clears on child `A | {i}` exactly when its
+    /// contributors outside `A` are `{i}`. Catalog instantiation has already
+    /// proved that the lock is this operation's projected original cells, so
+    /// those edges do not need to place, compact and compare the child board
+    /// again. The array belongs to this parent, not to a pose or kick profile.
+    fn catalog_child_clear_counts(&self, subset: usize) -> [u8; super::MAX_BOARD64_PIECES] {
+        debug_assert!(subset <= self.all_placed);
+        let mut counts = [0; super::MAX_BOARD64_PIECES];
+        let mut rows = self.completed_target_rows;
+        while rows != 0 {
+            let row = rows.trailing_zeros() as usize;
+            rows &= rows - 1;
+            let remaining = self.row_contributors[row] & !(subset as u16);
+            if remaining.is_power_of_two() {
+                counts[remaining.trailing_zeros() as usize] += 1;
+            }
+        }
+        counts
+    }
+
     pub fn state(&mut self, subset: usize) -> (u64, u16) {
         debug_assert!(subset <= self.all_placed);
         if self.state_generations[subset] != self.generation {
@@ -3136,6 +3163,74 @@ impl CandidateProjection {
 #[cfg(test)]
 mod candidate_projection_clear_fact_reuse_tests {
     use super::*;
+
+    #[test]
+    fn catalog_parent_clear_counts_match_scalar_edges_without_projecting_children() {
+        for (initial, cells) in [
+            (0x0033, &[0x3300_u64, 0x00cc, 0xcc00][..]),
+            (0, &[0x0033_u64][..]),
+            (0, &[0x0033_u64, 0x00cc, 0x3300, 0xcc00][..]),
+        ] {
+            let required = cells.iter().fold(0, |mask, &cells| mask | cells);
+            let catalog =
+                GeometryCatalog::compile_for_required_cells_on_dimensions(4, 4, initial, required)
+                    .unwrap();
+            let rows: Vec<_> = cells
+                .iter()
+                .map(|&cells| catalog.skeleton_id(PieceKind::O, cells).unwrap())
+                .collect();
+            let candidate = GeometryCandidate::from_rows(&catalog, 0, &rows).unwrap();
+            let mut workspace = BuildUpWorkspace::default();
+            let mut projection = CandidateProjection::compile(
+                &catalog,
+                &candidate,
+                &mut workspace,
+                BuildCompletion::ClearToEmpty,
+            )
+            .unwrap();
+            for subset in 0..projection.state_count() {
+                let (board, deleted) = projection.state(subset);
+                let clear_counts = projection.catalog_child_clear_counts(subset);
+                for (operation, &row) in candidate.row_ids().iter().enumerate() {
+                    if subset & (1 << operation) != 0 {
+                        assert_eq!(clear_counts[operation], 0);
+                        continue;
+                    }
+                    let child = subset | (1 << operation);
+                    let expected =
+                        (projection.expected_deleted_rows(child) & !deleted).count_ones() as u8;
+                    assert_eq!(clear_counts[operation], expected);
+                    for pose in catalog.instantiations(row, deleted) {
+                        let stamp = projection.state_generations[child];
+                        let actual = geometric_build_edge(
+                            &catalog,
+                            &mut projection,
+                            child,
+                            operation,
+                            PieceKind::O,
+                            board,
+                            deleted,
+                            pose,
+                            Some(clear_counts[operation]),
+                        );
+                        assert_eq!(projection.state_generations[child], stamp);
+                        let scalar = geometric_build_edge(
+                            &catalog,
+                            &mut projection,
+                            child,
+                            operation,
+                            PieceKind::O,
+                            board,
+                            deleted,
+                            pose,
+                            None,
+                        );
+                        assert_eq!(actual, scalar);
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn candidate_projection_clear_fact_reuse_matches_concrete_subsets_and_scalar_rows() {
@@ -3647,6 +3742,34 @@ fn verify_candidate_for_completion_mode(
     // zero arm is a requested reference, not an unscoped product default.
     // The worker already owns this request; no global experiment is read.
     let use_dependency = use_dependency && !workspace.operation_mask_experiment_active();
+    // This is a complete Boolean order certificate, not a movement sample.
+    // Retained paths and execution-sensitive outputs keep their producer.
+    // Local A/B builds preserve their explicitly selected producer on both
+    // arms; normal builds use the structural admission without an opt-in.
+    let use_rigid_certificate = !cfg!(feature = "local-search-ab")
+        && problem.count_policy() == PcCountPolicy::CountUnique
+        && completion == BuildCompletion::ClearToEmpty
+        && !retain_trace
+        && !finesse_requested
+        && !finesse_spin_coverage_requested
+        && !witness_mode.enabled()
+        && !problem.build_replay_evidence_requested()
+        && !problem.objective().score().requested()
+        && !problem.objective().execution_constraints().requested()
+        && problem.queue_observation_policy() == QueueObservationPolicy::FullQueueOracle;
+    #[cfg(test)]
+    let use_rigid_certificate = use_rigid_certificate
+        && !workspace.operation_mask_experiment_active()
+        && !super::structural_order::has_explicit_scope()
+        && !super::placement_dependency::has_explicit_scope()
+        && !geometric_edge_reuse::has_explicit_scope();
+    if use_rigid_certificate {
+        if let Some(result) = verify_rigid_column_poset(
+            problem, catalog, candidate, target, workspace, evaluator, control,
+        )? {
+            return Ok(result);
+        }
+    }
     if use_dependency {
         #[cfg(feature = "placement-dependency-pc")]
         {
@@ -3714,7 +3837,9 @@ fn verify_candidate_for_completion_mode(
                 problem,
                 catalog,
                 candidate,
+                target,
                 workspace,
+                evaluator,
                 &mut proofs,
                 control,
             )? {
@@ -4478,15 +4603,73 @@ fn prove_conditional_transition(
     }
 }
 
+/// Product certificate using one original frame and the existing source/Hold
+/// product. Unsupported geometry, source authority or language budget returns
+/// Unknown before allocating a candidate's physical subset projection.
+fn verify_rigid_column_poset(
+    problem: &SearchProblem,
+    catalog: &GeometryCatalog,
+    candidate: &GeometryCandidate,
+    target: &TargetGroup,
+    workspace: &mut BuildUpWorkspace,
+    evaluator: &mut CoverageProductEvaluator,
+    control: &ExecutionControl,
+) -> Result<Option<CandidateBuildResult>, WasmExactSearchError> {
+    if control.is_cancelled() {
+        return Err(WasmExactSearchError::Cancelled);
+    }
+    let Some(universe) = problem.piece_source().materialized_universe() else {
+        return Ok(None);
+    };
+    if target.pattern_index.is_none()
+        && !StandardBagCoverage::supports(universe, problem.initial_hold())
+    {
+        return Ok(None);
+    }
+    SearchStageSpan::record_exact_work(ExecutorSearchStage::WasmBuildOrderCertificateChecks, 1);
+    let Some(poset) = super::placement_poset::compile_rigid_columns(catalog, candidate) else {
+        return Ok(None);
+    };
+    // This is an allocation/work admission for a language representation,
+    // not a search cutoff. Exhaustion falls back to the complete verifier.
+    let Some(language) = workspace.piece_order_languages.compile_poset_language(
+        poset.pieces(),
+        poset.predecessors(),
+        4096,
+    )?
+    else {
+        return Ok(None);
+    };
+    if control.is_cancelled() {
+        return Err(WasmExactSearchError::Cancelled);
+    }
+    let result =
+        workspace.cover_piece_language(problem, target, language.root, evaluator, control)?;
+    SearchStageSpan::record_exact_work(ExecutorSearchStage::WasmBuildOrderCertificateElisions, 1);
+    #[cfg(any(test, feature = "local-search-ab"))]
+    super::structural_order::record_bypass(
+        language.residual_states,
+        poset
+            .pieces()
+            .len()
+            .saturating_sub(language.operation_classes),
+        0,
+    );
+    Ok(Some(result))
+}
+
 /// Exact, proof-gated language production before allocating a candidate's
 /// physical-board subset projection. Failed proofs retain the ordinary exact
 /// graph path. Only a complete poset language may reach the supply union.
 #[cfg(any(test, feature = "local-search-ab"))]
+#[allow(clippy::too_many_arguments)]
 fn verify_certified_poset(
     problem: &SearchProblem,
     catalog: &GeometryCatalog,
     candidate: &GeometryCandidate,
+    target: &TargetGroup,
     workspace: &mut BuildUpWorkspace,
+    evaluator: &mut CoverageProductEvaluator,
     movement_proofs: &mut CandidateMovementProofs,
     control: &ExecutionControl,
 ) -> Result<Option<CandidateBuildResult>, WasmExactSearchError> {
@@ -4498,7 +4681,11 @@ fn verify_certified_poset(
     let Some(universe) = problem.piece_source().materialized_universe() else {
         return Ok(None);
     };
-    if !StandardBagCoverage::supports(universe, problem.initial_hold()) {
+    if target.pattern_index.is_none()
+        && !StandardBagCoverage::supports(universe, problem.initial_hold())
+    {
+        // A physical certificate never supplies missing source authority.
+        // Unsupported domains retain the existing verifier unchanged.
         return Ok(None);
     }
     let mut algebraic_attempts = 0;
@@ -4630,10 +4817,8 @@ fn verify_certified_poset(
     if control.is_cancelled() {
         return Err(WasmExactSearchError::Cancelled);
     }
-    let Some(coverage) = workspace.cover_standard_bag_language(problem, language.root, control)?
-    else {
-        return Ok(None);
-    };
+    let result =
+        workspace.cover_piece_language(problem, target, language.root, evaluator, control)?;
     super::structural_order::record_bypass(
         language.residual_states,
         poset
@@ -4644,7 +4829,7 @@ fn verify_certified_poset(
             .interval_guard_count()
             .saturating_sub(algebraic_guards),
     );
-    Ok(Some(certified_language_result(Some(coverage))))
+    Ok(Some(result))
 }
 
 fn certified_language_result(coverage: Option<StandardBagCoverageResult>) -> CandidateBuildResult {
@@ -4680,12 +4865,163 @@ fn certified_language_result(coverage: Option<StandardBagCoverageResult>) -> Can
 #[cfg(test)]
 mod certified_language_tests {
     use super::*;
+    use clearra_pc_graph::request::{
+        PcExecutionPolicy, PcQueueInput, PcScenarioBoard, PcScenarioQuery, PieceWindow,
+        SupplyWindowSize,
+    };
+    use clearra_problem::{ProblemCompiler, SearchOutputPolicy};
     use clearra_supply::{
         bag::BagState,
         hold_automaton::{HoldAutomatonState, SupplyProvenanceId},
+        pattern_universe::PieceMultisetKey,
         piece_source::PieceSourceId,
+        queue::{fixed_sequence::FixedSequence, queue_pattern_expression::QueuePatternExpression},
         PatternUniverseMaterializer,
     };
+
+    #[test]
+    fn rigid_column_product_matches_fixed_pattern_hold_eof_and_symbolic_source_coverage() {
+        let placements = [
+            (PieceKind::O, 0xc03),
+            (PieceKind::I, 0x3c),
+            (PieceKind::I, 0xf000),
+        ];
+        let required = placements.iter().fold(0, |mask, (_, cells)| mask | cells);
+        let initial = ((1_u64 << 20) - 1) & !required;
+        let catalog =
+            GeometryCatalog::compile_for_required_cells_on_dimensions(10, 2, initial, required)
+                .unwrap();
+        let rows = placements.map(|(piece, cells)| catalog.skeleton_id(piece, cells).unwrap());
+        let candidate = GeometryCandidate::from_rows(&catalog, 0, &rows).unwrap();
+        let fixed = |pieces: &[PieceKind]| {
+            PcQueueInput::fixed_sequence(FixedSequence::new(pieces.to_vec()))
+        };
+        use PieceKind::{I, O, T};
+        for (queue, draws, hold, held) in [
+            (fixed(&[I, I, O]), 3, false, None),
+            (fixed(&[I, I, I]), 3, false, None),
+            (fixed(&[I, O]), 2, true, Some(I)),
+            (fixed(&[I, I, O, T]), 4, true, None),
+            (
+                PcQueueInput::pattern_expression(
+                    QueuePatternExpression::parse("[IO]1II", 0).unwrap(),
+                ),
+                3,
+                false,
+                None,
+            ),
+            (PcQueueInput::standard_7_bag(), 3, true, Some(PieceKind::I)),
+        ] {
+            let problem = ProblemCompiler::compile_scenario_pc(
+                &PcScenarioQuery::new(
+                    PcScenarioBoard::standard_10(2, initial),
+                    queue,
+                    PieceWindow::new(3),
+                )
+                .with_exact_pieces(Some(3))
+                .with_supply_window_size(SupplyWindowSize::new(draws))
+                .with_allow_hold(hold)
+                .with_hold_piece(held)
+                .with_count_policy(PcCountPolicy::CountUnique)
+                .with_execution_policy(
+                    PcExecutionPolicy::mvp_default()
+                        .with_exact_legal_board_enabled(false)
+                        .with_conditioned_reachability_enabled(false)
+                        .with_tablebase_requested(false),
+                ),
+            )
+            .unwrap()
+            .with_output_policy(SearchOutputPolicy::CoverageSummary);
+            let universe = problem.piece_source().materialized_universe().unwrap();
+            let pattern_count = universe.pattern_count();
+            let target = TargetGroup {
+                key: PieceMultisetKey::from_pieces(placements.map(|(piece, _)| piece)),
+                pattern_index_id: 0,
+                possible_patterns: Arc::new(PatternBitSet::all(pattern_count)),
+                pattern_index: Some(Arc::new(
+                    PatternPiecePositionIndex::compile(universe).unwrap(),
+                )),
+            };
+            let control = ExecutionControl::default();
+            let execute = |reference: bool| {
+                let mut workspace = BuildUpWorkspace::default();
+                let mut evaluator = CoverageProductEvaluator::default();
+                let result = if reference {
+                    super::super::structural_order::with_mode(false, || {
+                        verify_candidate(
+                            &problem,
+                            &catalog,
+                            &candidate,
+                            &target,
+                            &mut workspace,
+                            &mut evaluator,
+                            CandidateWitnessMode::Disabled,
+                            false,
+                            1,
+                            &control,
+                        )
+                        .unwrap()
+                    })
+                    .0
+                } else {
+                    let result = if cfg!(feature = "local-search-ab") {
+                        verify_rigid_column_poset(
+                            &problem,
+                            &catalog,
+                            &candidate,
+                            &target,
+                            &mut workspace,
+                            &mut evaluator,
+                            &control,
+                        )
+                        .unwrap()
+                        .expect("rigid certificate has complete source authority")
+                    } else {
+                        // Exercise the actual default dispatch, before the
+                        // dependency producer as well as the graph producer.
+                        verify_candidate(
+                            &problem,
+                            &catalog,
+                            &candidate,
+                            &target,
+                            &mut workspace,
+                            &mut evaluator,
+                            CandidateWitnessMode::Disabled,
+                            false,
+                            1,
+                            &control,
+                        )
+                        .unwrap()
+                    };
+                    assert_eq!((result.graph_nodes, result.reachability_states), (0, 0));
+                    assert!(workspace.projection_deleted_rows.is_empty());
+                    assert!(workspace.projection_physical_boards.is_empty());
+                    assert!(workspace.graph_subset_node_ids.is_empty());
+                    result
+                };
+                let coverage = if let Some(bits) = &result.covered_patterns {
+                    bits.to_owned_words()
+                } else if let Some(root) = result.symbolic_coverage_root {
+                    workspace
+                        .standard_bag_coverage
+                        .as_mut()
+                        .unwrap()
+                        .materialize_root(root)
+                        .unwrap()
+                        .to_owned_words()
+                } else {
+                    vec![0; pattern_count.div_ceil(64)]
+                };
+                (
+                    result.buildable,
+                    result.count_complete,
+                    result.witness_pattern_id,
+                    coverage,
+                )
+            };
+            assert_eq!(execute(false), execute(true));
+        }
+    }
 
     #[test]
     fn truncated_standard_bag_prefix_cannot_make_a_candidate_buildable() {
@@ -6692,6 +7028,7 @@ impl BuildOrderGraph {
             }
             edge_scratch.clear();
             let (board, deleted_rows) = projection.state(subset);
+            let child_clear_counts = projection.catalog_child_clear_counts(subset);
             let mut permitted_operations =
                 feasibility.map_or(all_operations & !(subset as u16), |proof| {
                     workspace
@@ -6753,6 +7090,7 @@ impl BuildOrderGraph {
                                 board,
                                 deleted_rows,
                                 realization,
+                                Some(child_clear_counts[operation_index]),
                                 needs_grounding,
                                 &mut prepared_footprint,
                                 #[cfg(any(test, feature = "local-search-ab"))]
@@ -6773,6 +7111,7 @@ impl BuildOrderGraph {
                             board,
                             deleted_rows,
                             realization,
+                            Some(child_clear_counts[operation_index]),
                         )
                     };
                 if reachability_mode != BuildReachabilityMode::Existing {
@@ -8041,13 +8380,17 @@ fn geometric_build_edge(
     board: u64,
     deleted_rows: u16,
     realization: super::catalog::InstantiatedRealization,
+    catalog_cleared_lines: Option<u8>,
 ) -> Option<BuildEdge> {
     let lock_mask = realization.lock_mask;
     if board & lock_mask != 0 {
         return None;
     }
-    let (cleared_lines, _) =
-        projected_line_clear(catalog, projection, child, board | lock_mask, deleted_rows);
+    // Only the catalog enumeration may supply the parent clear fact. Helpers
+    // receiving arbitrary poses retain the concrete child-identity check.
+    let cleared_lines = catalog_cleared_lines.or_else(|| {
+        projected_line_clear(catalog, projection, child, board | lock_mask, deleted_rows).0
+    });
     Some(instantiated_geometric_edge(
         child,
         operation_index,
@@ -8092,6 +8435,7 @@ fn geometric_build_edge_with_reuse(
     board: u64,
     deleted_rows: u16,
     realization: super::catalog::InstantiatedRealization,
+    catalog_cleared_lines: Option<u8>,
     needs_grounding: bool,
     prepared: &mut Option<PreparedGeometricFootprint>,
     #[cfg(any(test, feature = "local-search-ab"))] metrics: &mut GeometricEdgeReuseMetrics,
@@ -8116,22 +8460,24 @@ fn geometric_build_edge_with_reuse(
                 || placement_is_grounded(catalog.width(), board, lock_mask))
                 && board & lock_mask == 0
             {
-                #[cfg(any(test, feature = "local-search-ab"))]
-                {
-                    metrics.line_clear_computations += 1;
-                }
-                let (lines, _projection_checked) = projected_line_clear(
-                    catalog,
-                    projection,
-                    child,
-                    board | lock_mask,
-                    deleted_rows,
-                );
-                #[cfg(any(test, feature = "local-search-ab"))]
-                {
-                    metrics.projection_validations += u64::from(_projection_checked);
-                }
-                lines
+                catalog_cleared_lines.or_else(|| {
+                    #[cfg(any(test, feature = "local-search-ab"))]
+                    {
+                        metrics.line_clear_computations += 1;
+                    }
+                    let (lines, _projection_checked) = projected_line_clear(
+                        catalog,
+                        projection,
+                        child,
+                        board | lock_mask,
+                        deleted_rows,
+                    );
+                    #[cfg(any(test, feature = "local-search-ab"))]
+                    {
+                        metrics.projection_validations += u64::from(_projection_checked);
+                    }
+                    lines
+                })
             } else {
                 None
             };
@@ -9123,6 +9469,7 @@ mod v081_legal_child_admission_tests {
                                 board,
                                 deleted_rows,
                                 realization,
+                                None,
                                 needs_grounding,
                                 &mut prepared,
                                 &mut metrics,
@@ -9263,6 +9610,7 @@ mod v081_legal_child_admission_tests {
                     0,
                     0,
                     pose,
+                    None,
                     false,
                     &mut facts,
                     &mut metrics,
@@ -9422,6 +9770,7 @@ mod v081_legal_child_admission_tests {
                 board,
                 deleted_rows,
                 pose,
+                None,
             )
             .is_some());
             subset = child;
@@ -9858,6 +10207,7 @@ mod v081_legal_child_admission_tests {
                                     board,
                                     deleted_rows,
                                     realization,
+                                    None,
                                 ) {
                                     concrete.push((edge, realization));
                                 }

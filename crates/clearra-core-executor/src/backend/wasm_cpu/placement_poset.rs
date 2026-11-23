@@ -10,7 +10,8 @@
 //! never an infeasibility claim.
 //!
 //! The symbolic prefix compiler reuses the candidate frame projection below.
-//! The distinct poset and conditional-order prototypes remain local-only.
+//! The rigid-column certificate uses one original frame in the product path.
+//! The more general frame and conditional-order prototypes remain local-only.
 //! Their optional catalog guard table replaces repeated same-frame geometric
 //! tests, not movement proofs or the conditions on which they depend. Those
 //! prototypes keep CountAll, finesse and non-clear-to-empty completion on
@@ -23,23 +24,24 @@ use clearra_core_domain::piece::piece_kind::PieceKind;
 #[cfg(any(test, feature = "local-search-ab"))]
 use std::cell::OnceCell;
 
+#[cfg(any(test, feature = "local-search-ab", feature = "placement-dependency-pc"))]
 use super::{
     buildup::compact_target_board,
-    catalog::GeometryCatalog,
-    geometry::GeometryCandidate,
     placement_conditions::{AtomicRowProjection, GroupedClearConditions},
+};
+use super::{
+    buildup::placement_is_grounded, catalog::GeometryCatalog, geometry::GeometryCandidate,
     MAX_BOARD64_PIECES,
 };
 #[cfg(any(test, feature = "local-search-ab"))]
 use super::{
-    buildup::placement_is_grounded,
     catalog::InstantiatedRealization,
     placement_conditions::{
-        grounding_sources, vertical_entry_mask, GroundingSources, PlacementConditionCatalog,
-        PrecomputedOrderGuard,
+        grounding_sources, GroundingSources, PlacementConditionCatalog, PrecomputedOrderGuard,
     },
 };
 
+#[cfg(any(test, feature = "local-search-ab", feature = "placement-dependency-pc"))]
 const MAX_HEIGHT: usize = 6;
 #[cfg(any(test, feature = "local-search-ab"))]
 const MAX_CLEAR_FRAMES: usize = 1 << MAX_HEIGHT;
@@ -108,16 +110,15 @@ pub(super) fn with_joint_clear_admission<T>(enabled: bool, action: impl FnOnce()
     action()
 }
 
-#[cfg(any(test, feature = "local-search-ab"))]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct CertifiedPlacementPoset {
     operation_count: usize,
     pieces: [PieceKind; MAX_BOARD64_PIECES],
     predecessors: [u16; MAX_BOARD64_PIECES],
+    #[cfg(any(test, feature = "local-search-ab"))]
     interval_guard_count: usize,
 }
 
-#[cfg(any(test, feature = "local-search-ab"))]
 impl CertifiedPlacementPoset {
     pub(super) fn pieces(&self) -> &[PieceKind] {
         &self.pieces[..self.operation_count]
@@ -131,11 +132,148 @@ impl CertifiedPlacementPoset {
 
     /// Number of operation / deleted-row frames certified by an exact analytic
     /// or observed interval guard instead of the direct hard-drop corridor.
+    #[cfg(any(test, feature = "local-search-ab"))]
     pub(super) fn interval_guard_count(&self) -> usize {
         self.interval_guard_count
     }
 }
 
+/// Certify all orders from one original row frame, without enumerating frames
+/// or operation subsets. Failure is Unknown, including ambiguous support.
+///
+/// Every pending operation must be a rigid tetromino before any clear. Its
+/// occupied rows therefore form an interval, and none can clear before it is
+/// placed. Later row frames only translate the pending footprint vertically.
+///
+/// A noninitial support cell directly below that footprint has an operation
+/// owner. If the footprint becomes grounded after lower rows clear, either its
+/// original contact survives, or the original row just below that contact was
+/// cleared. In the latter case that row's contact owner was already executed.
+/// Thus a unique possible original owner is a necessary predecessor in every
+/// physical order, even when that predecessor's cells no longer survive.
+///
+/// Conversely, the complete predecessor board must supply a solid column from
+/// the floor to a contact, and the board containing all nonsuccessors must leave
+/// the vertical entry corridor empty. Deleting any complete rows preserves a
+/// solid column below the pending footprint and cannot add a corridor blocker.
+/// These two original-frame facts prove a hard drop at every ideal transition.
+/// Necessary orders and sufficient transitions give the exact poset language;
+/// no kick table, source order or named piece case is involved in the proof.
+pub(super) fn compile_rigid_columns(
+    catalog: &GeometryCatalog,
+    candidate: &GeometryCandidate,
+) -> Option<CertifiedPlacementPoset> {
+    let count = candidate.row_ids().len();
+    let width = catalog.width();
+    let height = catalog.height();
+    let bit_count = u32::from(width) * u32::from(height);
+    if count == 0
+        || count > MAX_BOARD64_PIECES
+        || !(1..=10).contains(&width)
+        || !(1..=16).contains(&height)
+        || bit_count > u64::BITS
+    {
+        return None;
+    }
+    // This uses the owning catalog's existing exact instantiation authority.
+    // A gap-bearing skeleton fails before any candidate proof preparation.
+    if candidate
+        .row_ids()
+        .iter()
+        .any(|&row| !catalog.has_frame_zero_realization(row))
+    {
+        return None;
+    }
+    let board_mask = u64::MAX >> (u64::BITS - bit_count);
+    let initial = catalog.initial_board();
+    let required = catalog.required_cells();
+    if (initial | required) & !board_mask != 0 || initial & required != 0 {
+        return None;
+    }
+    let mut cells = [0; MAX_BOARD64_PIECES];
+    let mut pieces = [PieceKind::I; MAX_BOARD64_PIECES];
+    let mut selected = 0;
+    for (operation, &row_id) in candidate.row_ids().iter().enumerate() {
+        let row = catalog.try_skeleton(row_id)?;
+        if row.cells.count_ones() != 4
+            || row.cells & !required != 0
+            || row.cells & selected != 0
+            || !PieceKind::STANDARD_TETROMINOES.contains(&row.piece)
+        {
+            return None;
+        }
+        cells[operation] = row.cells;
+        pieces[operation] = row.piece;
+        selected |= row.cells;
+    }
+    if selected != required {
+        return None;
+    }
+    let row_mask = (1_u64 << width) - 1;
+    for row in 0..height {
+        let shift = u32::from(row) * u32::from(width);
+        let final_row = ((initial | selected) >> shift) & row_mask;
+        if (initial >> shift) & row_mask == row_mask || (final_row != 0 && final_row != row_mask) {
+            // The product certificate currently promises clear-to-empty and
+            // preserves the ordinary preclear-normalization requirement.
+            return None;
+        }
+    }
+
+    let mut predecessors = [0; MAX_BOARD64_PIECES];
+    for operation in 0..count {
+        if placement_is_grounded(width, initial, cells[operation]) {
+            continue;
+        }
+        let below = (cells[operation] >> width) & !cells[operation];
+        let mut supporters = 0_u16;
+        for (other, &footprint) in cells[..count].iter().enumerate() {
+            if below & footprint != 0 {
+                supporters |= 1_u16 << other;
+            }
+        }
+        if !supporters.is_power_of_two() {
+            // An OR of different possible supporters cannot become an AND
+            // predecessor merely by selecting one of them.
+            return None;
+        }
+        predecessors[operation] = supporters;
+    }
+    if !close_predecessors(&mut predecessors, count) {
+        return None;
+    }
+    let all = (1_u16 << count) - 1;
+    for operation in 0..count {
+        let bit = 1_u16 << operation;
+        let minimum = board_for_operations(initial, &cells, predecessors[operation]);
+        // A cell belongs to the floor-connected part iff no empty cell lies
+        // below it in its column. The same bit corridor operation finds all
+        // cells at or above a gap; no per-column allocations are needed.
+        let floor_connected = minimum & !vertical_entry_mask(!minimum & board_mask, width, height);
+        if !placement_is_grounded(width, floor_connected, cells[operation]) {
+            return None;
+        }
+        let mut maximum_operations = all & !bit;
+        for (other, &requirements) in predecessors[..count].iter().enumerate() {
+            if requirements & bit != 0 {
+                maximum_operations &= !(1_u16 << other);
+            }
+        }
+        let maximum = board_for_operations(initial, &cells, maximum_operations);
+        if maximum & vertical_entry_mask(cells[operation], width, height) != 0 {
+            return None;
+        }
+    }
+    Some(CertifiedPlacementPoset {
+        operation_count: count,
+        pieces,
+        predecessors,
+        #[cfg(any(test, feature = "local-search-ab"))]
+        interval_guard_count: 0,
+    })
+}
+
+#[cfg(any(test, feature = "local-search-ab", feature = "placement-dependency-pc"))]
 pub(super) struct CandidateGeometry {
     width: u8,
     height: u8,
@@ -576,6 +714,7 @@ pub(super) fn compile_with_movement_guard(
     })
 }
 
+#[cfg(any(test, feature = "local-search-ab", feature = "placement-dependency-pc"))]
 impl CandidateGeometry {
     #[cfg(test)]
     pub(super) fn for_symbolic_prefix(
@@ -1042,7 +1181,17 @@ impl CandidateGeometry {
     }
 }
 
-#[cfg(any(test, feature = "local-search-ab"))]
+/// Vertical closure of a footprint in a Board64 frame. Bits above the frame
+/// cannot intersect a valid board. This also closes empty cells upward when
+/// finding the floor-connected part of a minimum board.
+pub(super) fn vertical_entry_mask(lock: u64, width: u8, height: u8) -> u64 {
+    let mut corridor = lock;
+    for _ in 1..height {
+        corridor |= corridor << width;
+    }
+    corridor
+}
+
 fn close_predecessors(predecessors: &mut [u16; MAX_BOARD64_PIECES], count: usize) -> bool {
     for intermediate in 0..count {
         let intermediate_bit = 1_u16 << intermediate;
@@ -1071,7 +1220,6 @@ fn predecessor_closure(mut operations: u16, predecessors: &[u16; MAX_BOARD64_PIE
     operations
 }
 
-#[cfg(any(test, feature = "local-search-ab", feature = "placement-dependency-pc"))]
 fn board_for_operations(
     mut board: u64,
     physical_cells: &[u64; MAX_BOARD64_PIECES],

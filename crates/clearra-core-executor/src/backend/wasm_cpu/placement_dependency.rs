@@ -45,6 +45,11 @@ thread_local! {
     static METRICS: Cell<PlacementDependencyMetrics> = Cell::new(PlacementDependencyMetrics::default());
 }
 
+#[cfg(test)]
+pub(super) fn has_explicit_scope() -> bool {
+    MODE.get().is_some()
+}
+
 pub(super) fn enabled() -> bool {
     if let Some(value) = MODE.with(Cell::get) {
         return value;

@@ -7,8 +7,9 @@ use std::{
 use clearra_core_domain::operation::operation::OperationId;
 
 pub const MAX_OPERATION_ORDER_OPERATIONS: usize = 4_096;
-pub const DEFAULT_OPERATION_ORDER_TIMEOUT_SECONDS: u16 = 900;
-pub const MAX_OPERATION_ORDER_TIMEOUT_SECONDS: u16 = 900;
+/// Zero leaves computation unlimited; cancellation remains available.
+pub const DEFAULT_OPERATION_ORDER_TIMEOUT_SECONDS: u16 = 0;
+pub const MAX_OPERATION_ORDER_TIMEOUT_SECONDS: u16 = u16::MAX;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct CandidateId(pub u64);

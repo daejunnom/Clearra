@@ -745,6 +745,22 @@ impl GeometryCatalog {
             .any(|realization| realization.required_deleted_rows & !deleted_rows == 0)
     }
 
+    /// Authenticate a complete original-frame lock without populating the
+    /// optional lazy instantiation cache. Positive ILC requirements alone
+    /// are insufficient to certify that its four cells form an actual pose.
+    pub(super) fn has_frame_zero_realization(&self, row_id: u32) -> bool {
+        let Some(row) = self.try_skeleton(row_id) else {
+            return false;
+        };
+        if let Some(poses) = self.instantiated_realizations(row_id, 0) {
+            return poses.iter().any(|pose| pose.lock_mask == row.cells);
+        }
+        self.realizations(row_id).iter().any(|&realization| {
+            self.instantiate_realization(row.cells, realization, 0)
+                .is_some_and(|pose| pose.lock_mask == row.cells)
+        })
+    }
+
     pub fn instantiated_realizations(
         &self,
         row_id: u32,

@@ -1,3 +1,4 @@
+use super::row_order::FamilyRowOrderTable;
 use super::{GeometryCatalog, MAX_BOARD64_PIECES};
 use crate::performance::{profile_sample_scale, ExecutorSearchStage, SearchStageSpan};
 
@@ -44,6 +45,123 @@ pub(super) fn selected_prefix_stalls(catalog: &GeometryCatalog, rows: &[u32]) ->
         completed_target_rows,
         |operation, deleted| catalog.realization_requirement_is_satisfied(rows[operation], deleted),
     )
+}
+
+/// Before the first clear all pending locks have the original row frame.
+/// Give every unselected cell to the initial board and close selected locks
+/// under their possible supporters. This contains every physical prefix.
+/// If no completed target row can be filled even under that relaxation, the
+/// selected prefix has no physical completion. A pass remains Unknown.
+pub(super) fn selected_first_clear_stalls(
+    catalog: &GeometryCatalog,
+    rows: &[u32],
+    table: Option<&FamilyRowOrderTable>,
+) -> bool {
+    let width = usize::from(catalog.width());
+    let height = usize::from(catalog.height());
+    if rows.is_empty()
+        || rows.len() > MAX_BOARD64_PIECES
+        || width == 0
+        || height == 0
+        || height > 16
+        || width * height > 64
+    {
+        return false;
+    }
+    let full = u64::MAX >> (64 - width * height);
+    let target = catalog.initial_board() | catalog.required_cells();
+    if target & !full != 0 {
+        return false;
+    }
+    let floor = u64::MAX >> (64 - width);
+    let mut completed_rows = 0_u16;
+    for row in 0..height {
+        if (target >> (row * width)) & floor == floor {
+            completed_rows |= 1 << row;
+        }
+    }
+    if completed_rows == 0 {
+        return false;
+    }
+
+    let mut cells = [0_u64; MAX_BOARD64_PIECES];
+    let mut contributors = [0_u16; 16];
+    let mut owners = [u8::MAX; 64];
+    let mut selected = 0_u64;
+    for (operation, &row_id) in rows.iter().enumerate() {
+        let Some(skeleton) = catalog.try_skeleton(row_id) else {
+            return false;
+        };
+        if skeleton.cells.count_ones() != 4
+            || skeleton.cells & !catalog.required_cells() != 0
+            || skeleton.cells & (selected | catalog.initial_board()) != 0
+        {
+            return false;
+        }
+        cells[operation] = skeleton.cells;
+        selected |= skeleton.cells;
+        let mut occupied = catalog.skeleton_occupied_rows(row_id);
+        while occupied != 0 {
+            let row = occupied.trailing_zeros() as usize;
+            occupied &= occupied - 1;
+            contributors[row] |= 1 << operation;
+        }
+        let mut occupied = skeleton.cells;
+        while occupied != 0 {
+            let cell = occupied.trailing_zeros() as usize;
+            occupied &= occupied - 1;
+            owners[cell] = operation as u8;
+        }
+    }
+    let mut pending_rows = completed_rows;
+    while pending_rows != 0 {
+        let row = pending_rows.trailing_zeros() as usize;
+        pending_rows &= pending_rows - 1;
+        if contributors[row] == 0 {
+            // Future-only contributors, including an initially full row,
+            // are optimistic first-clear witnesses rather than negatives.
+            return false;
+        }
+    }
+
+    let optimistic_board = catalog.initial_board() | (target & !selected);
+    let mut dependents = [0_u16; MAX_BOARD64_PIECES];
+    let mut active = 0_u16;
+    for (operation, &row_id) in rows.iter().enumerate() {
+        let ready = table
+            .and_then(|table| table.frame_zero_is_available(row_id))
+            .unwrap_or_else(|| catalog.has_frame_zero_realization(row_id));
+        if !ready {
+            continue;
+        }
+        let mask = cells[operation];
+        let bottom = mask.checked_shr(width as u32).unwrap_or(0) & !mask;
+        if mask & floor != 0 || bottom & optimistic_board != 0 {
+            active |= 1 << operation;
+        }
+        let mut supporters = bottom & selected;
+        while supporters != 0 {
+            let cell = supporters.trailing_zeros() as usize;
+            supporters &= supporters - 1;
+            dependents[usize::from(owners[cell])] |= 1 << operation;
+        }
+    }
+    let mut pending = active;
+    while pending != 0 {
+        let supporter = pending.trailing_zeros() as usize;
+        pending &= pending - 1;
+        let added = dependents[supporter] & !active;
+        active |= added;
+        pending |= added;
+    }
+    while completed_rows != 0 {
+        let row = completed_rows.trailing_zeros() as usize;
+        completed_rows &= completed_rows - 1;
+        if contributors[row] & !active == 0 {
+            return false;
+        }
+    }
+    true
 }
 
 fn optimistic_dependency_stalls(
@@ -109,9 +227,59 @@ pub(super) struct PhysicalPrefixProfile {
         test
     ))]
     pub(super) emitted_candidates: u64,
+    #[cfg(any(
+        feature = "search-stage-profiling",
+        feature = "wasm-stage-profiling",
+        test
+    ))]
+    pub(super) first_clear_checks: u64,
+    #[cfg(any(
+        feature = "search-stage-profiling",
+        feature = "wasm-stage-profiling",
+        test
+    ))]
+    pub(super) first_clear_pruned_subtrees: u64,
 }
 
 impl PhysicalPrefixProfile {
+    pub(super) fn first_clear_stalls(
+        &mut self,
+        catalog: &GeometryCatalog,
+        rows: &[u32],
+        table: Option<&FamilyRowOrderTable>,
+    ) -> bool {
+        #[cfg(any(
+            feature = "search-stage-profiling",
+            feature = "wasm-stage-profiling",
+            test
+        ))]
+        let ordinal = {
+            self.first_clear_checks = self.first_clear_checks.saturating_add(1);
+            self.first_clear_checks as usize
+        };
+        #[cfg(not(any(
+            feature = "search-stage-profiling",
+            feature = "wasm-stage-profiling",
+            test
+        )))]
+        let ordinal = 0;
+        let span = SearchStageSpan::begin_scaled(
+            ExecutorSearchStage::WasmGeometryFirstClearClosure,
+            profile_sample_scale(ordinal),
+        );
+        let stalled = selected_first_clear_stalls(catalog, rows, table);
+        span.finish(0);
+        #[cfg(any(
+            feature = "search-stage-profiling",
+            feature = "wasm-stage-profiling",
+            test
+        ))]
+        if stalled {
+            self.first_clear_pruned_subtrees = self.first_clear_pruned_subtrees.saturating_add(1);
+        }
+        stalled
+    }
+
     #[inline]
     pub(super) fn record_row_order_prune(&mut self) {
         #[cfg(any(
@@ -173,6 +341,14 @@ impl PhysicalPrefixProfile {
 #[cfg(any(feature = "search-stage-profiling", feature = "wasm-stage-profiling"))]
 impl Drop for PhysicalPrefixProfile {
     fn drop(&mut self) {
+        SearchStageSpan::record_exact_work(
+            ExecutorSearchStage::WasmGeometryFirstClearClosure,
+            self.first_clear_checks,
+        );
+        SearchStageSpan::record_exact_work(
+            ExecutorSearchStage::WasmGeometryFirstClearPrunedSubtrees,
+            self.first_clear_pruned_subtrees,
+        );
         SearchStageSpan::record_exact_work(
             ExecutorSearchStage::WasmGeometryPrefixClosure,
             self.checks as u64,

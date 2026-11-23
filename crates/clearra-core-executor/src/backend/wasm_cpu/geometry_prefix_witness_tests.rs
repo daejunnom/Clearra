@@ -4,7 +4,10 @@
 
 use clearra_core_domain::piece::piece_kind::PieceKind;
 
-use super::{prefix_pruning::selected_prefix_stalls, GeometryCatalog};
+use super::{
+    prefix_pruning::{selected_first_clear_stalls, selected_prefix_stalls},
+    GeometryCatalog,
+};
 
 fn fixture(
     width: u8,
@@ -113,12 +116,20 @@ fn assert_all_selected_subsets_survive(catalog: &GeometryCatalog, rows: &[u32]) 
             !selected_prefix_stalls(catalog, &selected),
             "a physical completion exists: selected subset={subset:#x}"
         );
+        assert!(
+            !selected_first_clear_stalls(catalog, &selected, None),
+            "first-clear relaxation must preserve the physical witness: subset={subset:#x}",
+        );
         // Selection order is not physical lock order. Reindexing the same
         // selected operations must preserve the contributor conjunctions.
         selected.reverse();
         assert!(
             !selected_prefix_stalls(catalog, &selected),
             "reversed selected subset={subset:#x}"
+        );
+        assert!(
+            !selected_first_clear_stalls(catalog, &selected, None),
+            "first-clear closure must not depend on selection order: subset={subset:#x}",
         );
     }
 }

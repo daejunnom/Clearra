@@ -118,6 +118,8 @@ pub(crate) enum ExecutorSearchStage {
     WasmGeometrySupportRows,
     WasmGeometryPrefixClosure,
     WasmGeometryPrefixPrunedSubtrees,
+    WasmGeometryFirstClearClosure,
+    WasmGeometryFirstClearPrunedSubtrees,
     WasmGeometryRowOrderPrepare,
     WasmGeometryRowOrderPrunedSubtrees,
     WasmGeometrySourcePrefix,
@@ -129,6 +131,8 @@ pub(crate) enum ExecutorSearchStage {
     WasmCandidateProjection,
     WasmCandidateFeasibility,
     WasmBuildOrderReachability,
+    WasmBuildOrderCertificateChecks,
+    WasmBuildOrderCertificateElisions,
     WasmCoverageLanguageProduct,
     #[cfg(any(feature = "search-stage-profiling", feature = "wasm-stage-profiling"))]
     WasmReachabilityLockQueries,
@@ -276,6 +280,8 @@ impl ExecutorSearchStage {
         Self::WasmGeometrySupportRows,
         Self::WasmGeometryPrefixClosure,
         Self::WasmGeometryPrefixPrunedSubtrees,
+        Self::WasmGeometryFirstClearClosure,
+        Self::WasmGeometryFirstClearPrunedSubtrees,
         Self::WasmGeometryRowOrderPrepare,
         Self::WasmGeometryRowOrderPrunedSubtrees,
         Self::WasmGeometrySourcePrefix,
@@ -287,6 +293,8 @@ impl ExecutorSearchStage {
         Self::WasmCandidateProjection,
         Self::WasmCandidateFeasibility,
         Self::WasmBuildOrderReachability,
+        Self::WasmBuildOrderCertificateChecks,
+        Self::WasmBuildOrderCertificateElisions,
         Self::WasmCoverageLanguageProduct,
         Self::WasmReachabilityLockQueries,
         Self::WasmReachabilityHarddropQueries,
@@ -420,6 +428,10 @@ impl ExecutorSearchStage {
             Self::WasmGeometrySupportRows => "wasm.geometry.support_rows",
             Self::WasmGeometryPrefixClosure => "wasm.geometry.prefix_closure",
             Self::WasmGeometryPrefixPrunedSubtrees => "wasm.geometry.prefix_pruned_subtrees",
+            Self::WasmGeometryFirstClearClosure => "wasm.geometry.first_clear_closure",
+            Self::WasmGeometryFirstClearPrunedSubtrees => {
+                "wasm.geometry.first_clear_pruned_subtrees"
+            }
             Self::WasmGeometryRowOrderPrepare => "wasm.geometry.row_order_prepare",
             Self::WasmGeometryRowOrderPrunedSubtrees => "wasm.geometry.row_order_pruned_subtrees",
             Self::WasmGeometrySourcePrefix => "wasm.geometry.source_prefix",
@@ -435,6 +447,12 @@ impl ExecutorSearchStage {
             Self::WasmCandidateProjection => "wasm.candidate.projection",
             Self::WasmCandidateFeasibility => "wasm.candidate.feasibility",
             Self::WasmBuildOrderReachability => "wasm.candidate.build_order_reachability",
+            Self::WasmBuildOrderCertificateChecks => {
+                "wasm.candidate.build_order_certificate_checks"
+            }
+            Self::WasmBuildOrderCertificateElisions => {
+                "wasm.candidate.build_order_certificate_elisions"
+            }
             Self::WasmCoverageLanguageProduct => "wasm.candidate.coverage_language_product",
             Self::WasmReachabilityLockQueries => "wasm.reachability.lock_queries",
             Self::WasmReachabilityHarddropQueries => "wasm.reachability.harddrop_queries",

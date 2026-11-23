@@ -112,7 +112,7 @@ fn factorized_partial_coverage_preserves_exhaustive_serial_and_parallel_results(
 
 #[cfg(all(not(target_family = "wasm"), target_pointer_width = "64"))]
 #[test]
-fn full6l_physical_prefix_pruning_matches_harness_and_rejects_other_contracts() {
+fn physical_pc_prefix_pruning_matches_sources_and_rejects_other_contracts() {
     let full6l_query = |queue| {
         PcScenarioQuery::new(
             PcScenarioBoard::standard_10(6, 0),
@@ -396,7 +396,7 @@ fn full6l_physical_prefix_pruning_matches_harness_and_rejects_other_contracts() 
         ),
     ] {
         assert!(
-            !super::full6l_physical_prefix_pruning_eligible(&other, &catalog),
+            !super::physical_pc_prefix_pruning_eligible(&other, &catalog),
             "{contract}",
         );
     }
@@ -421,15 +421,15 @@ fn physical_row_order_preserves_exhaustive_six_o_serial_and_parallel_results() {
 fn assert_square_piece_prefix_parity(height: u16) {
     fn execute(problem: &SearchProblem, workers: usize, filtered: bool) -> CoreExecutionResult {
         let mut session = WasmExactSearchSession::new(problem).unwrap();
-        assert!(!session.physical_prefix_pruning_active);
+        assert!(session.physical_prefix_pruning_active);
         #[cfg(any(feature = "search-stage-profiling", feature = "wasm-stage-profiling"))]
         let profile = (filtered && session.catalog.height() == 6)
             .then(|| crate::ExecutorSearchProfileSession::start().expect("row-order profile"));
-        if filtered {
-            // This tiny fixture deliberately lies outside the Full6L product
-            // gate, but exercises the same enumerator and result integration.
-            session.geometry.enable_physical_prefix_pruning();
-            session.physical_prefix_pruning_active = true;
+        if !filtered {
+            session
+                .geometry
+                .disable_physical_prefix_pruning_for_reference();
+            session.physical_prefix_pruning_active = false;
         }
         let control = ExecutionControl::default();
         let result = if workers > 1 {

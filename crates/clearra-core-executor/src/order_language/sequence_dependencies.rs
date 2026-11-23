@@ -19,7 +19,7 @@ use super::build_order_language::{
     OperationDependencyEdge, OperationDependencyEvidenceKind, OperationDependencyGraph,
     OperationOrderAutomatonState, OperationOrderAutomatonTransition, OperationOrderLanguage,
     OperationOrderLanguageError, OperationSetKey, DEFAULT_OPERATION_ORDER_TIMEOUT_SECONDS,
-    MAX_OPERATION_ORDER_OPERATIONS, MAX_OPERATION_ORDER_TIMEOUT_SECONDS,
+    MAX_OPERATION_ORDER_OPERATIONS,
 };
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -186,7 +186,8 @@ impl SequenceDependenciesAnalyzer {
     ) -> Result<SequenceDependencyReport, SequenceDependenciesError> {
         validate_problem(problem)?;
         let started = Instant::now();
-        let deadline = Duration::from_secs(u64::from(problem.timeout_seconds));
+        let deadline = (problem.timeout_seconds != 0)
+            .then(|| Duration::from_secs(u64::from(problem.timeout_seconds)));
         let mut reachability =
             DocumentReachabilityEngine::new(problem.width, problem.height, problem.kick_profile)
                 .ok_or(SequenceDependenciesError::InvalidInput(
@@ -458,13 +459,6 @@ fn validate_problem(problem: &OperationDocumentProblem) -> Result<(), SequenceDe
         }
         .into());
     }
-    if !(1..=MAX_OPERATION_ORDER_TIMEOUT_SECONDS).contains(&problem.timeout_seconds) {
-        return Err(OperationOrderLanguageError::InvalidTimeoutSeconds {
-            requested: problem.timeout_seconds,
-            maximum: MAX_OPERATION_ORDER_TIMEOUT_SECONDS,
-        }
-        .into());
-    }
     let mut ids: Vec<_> = problem
         .operations
         .iter()
@@ -719,13 +713,13 @@ fn row_mask(width: u8) -> u64 {
 fn poll(
     control: &ExecutionControl,
     started: Instant,
-    deadline: Duration,
+    deadline: Option<Duration>,
     timeout_seconds: u16,
 ) -> Result<(), SequenceDependenciesError> {
     if control.is_cancelled() {
         return Err(SequenceDependenciesError::Cancelled);
     }
-    if started.elapsed() >= deadline {
+    if deadline.is_some_and(|deadline| started.elapsed() >= deadline) {
         return Err(SequenceDependenciesError::TimedOut { timeout_seconds });
     }
     Ok(())
@@ -761,7 +755,18 @@ fn centered_spawn_offsets(piece: PieceKind) -> [(i32, i32); 4] {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::time::{Duration, Instant};
+
+    use clearra_core_domain::{
+        execution_cancellation::ExecutionControl,
+        operation::operation::OperationId,
+        piece::{piece_kind::PieceKind, rotation::RotationState},
+    };
+
+    use super::{
+        poll, validate_problem, ConcreteDocumentOperation, OperationDocumentProblem,
+        SequenceDependenciesAnalyzer, SequenceDependenciesError,
+    };
 
     fn op(id: u16, piece: PieceKind, x: i8) -> ConcreteDocumentOperation {
         ConcreteDocumentOperation {
@@ -771,6 +776,24 @@ mod tests {
             x,
             y: 0,
         }
+    }
+
+    #[test]
+    fn unlimited_dependencies_preserve_explicit_finite_timeouts() {
+        let started = Instant::now() - Duration::from_secs(901);
+        let control = ExecutionControl::default();
+        assert!(poll(&control, started, None, 0).is_ok());
+        assert_eq!(
+            poll(&control, started, Some(Duration::from_secs(900)), 900),
+            Err(SequenceDependenciesError::TimedOut {
+                timeout_seconds: 900
+            }),
+        );
+        let mut problem =
+            OperationDocumentProblem::canonical(10, 4, 0, vec![op(0, PieceKind::O, 0)]);
+        assert_eq!(problem.timeout_seconds, 0);
+        problem.timeout_seconds = u16::MAX;
+        assert!(validate_problem(&problem).is_ok());
     }
 
     #[test]
