@@ -55,6 +55,7 @@ pub(in super::super) struct SymbolicReachabilityWork {
 /// One piece and one current board domain, shared by every matching catalog row.
 pub(in super::super) struct SymbolicPieceRelation<'board, 'catalog> {
     board: &'board SymbolicBoard<'catalog>,
+    arena_owner: u64,
     piece: PieceKind,
     template: Arc<ReachabilityTemplate>,
     locks: Vec<BooleanId>,
@@ -217,6 +218,13 @@ impl<'catalog> SymbolicBoard<'catalog> {
         &self.deleted[..usize::from(self.catalog.height())]
     }
 
+    pub(in super::super) fn row_ids(&self, piece: PieceKind) -> impl Iterator<Item = u32> + '_ {
+        (0..self.catalog.skeleton_count()).filter_map(move |row_id| {
+            let row_id = row_id as u32;
+            (self.catalog.skeleton(row_id).piece == piece).then_some(row_id)
+        })
+    }
+
     pub(in super::super) fn compile_piece<'board>(
         &'board self,
         arena: &mut BooleanArena,
@@ -334,6 +342,7 @@ impl<'catalog> SymbolicBoard<'catalog> {
         }
         Ok(SymbolicPieceRelation {
             board: self,
+            arena_owner: arena.owner_id(),
             piece,
             template,
             locks,
@@ -342,7 +351,7 @@ impl<'catalog> SymbolicBoard<'catalog> {
     }
 
     fn check_owner(&self, arena: &BooleanArena) -> Result<(), BooleanError> {
-        if self.arena_owner != arena.owner_id() {
+        if !arena.can_read_owner(self.arena_owner) {
             return Err(BooleanError::InvalidInput("symbolic_arena_owner"));
         }
         Ok(())
@@ -358,6 +367,9 @@ impl SymbolicPieceRelation<'_, '_> {
         row_id: u32,
         control: &ExecutionControl,
     ) -> Result<BooleanId, BooleanError> {
+        if self.arena_owner != arena.owner_id() {
+            return Err(BooleanError::InvalidInput("symbolic_relation_arena_owner"));
+        }
         self.board.check_owner(arena)?;
         check_cancelled(control)?;
         let catalog = self.board.catalog;

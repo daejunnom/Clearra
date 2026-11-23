@@ -238,3 +238,65 @@ fn symbolic_family_empty_refusal_and_cancellation_are_different_outcomes() {
         Err(SymbolicFamilyError::Unsupported(_))
     ));
 }
+
+#[cfg(all(feature = "parallel", not(target_family = "wasm")))]
+#[test]
+fn symbolic_family_parallel_layers_preserve_complete_identity_source_relation() {
+    use PieceKind::{I, O};
+    let request = query(2, 0, 5, fixed(vec![I, I, O, O, O]))
+        .with_allow_hold(true)
+        .with_rule(jstris_180());
+    let policy = request
+        .execution_policy()
+        .clone()
+        .with_use_all_logical_processors(true)
+        .with_workers(9);
+    let request = request.with_execution_policy(policy);
+    let mut reference = compare(&request);
+    let problem = ProblemCompiler::compile_scenario_pc(&request).unwrap();
+    let mut parallel = solve_symbolic_family(
+        &problem,
+        SymbolicFamilyLimits::default(),
+        &ExecutionControl::default(),
+    )
+    .unwrap();
+    let expected: BTreeSet<_> = reference
+        .identity_page(0, 10_000)
+        .unwrap()
+        .into_iter()
+        .collect();
+    let actual: BTreeSet<_> = parallel
+        .identity_page(0, 10_000)
+        .unwrap()
+        .into_iter()
+        .collect();
+    assert_eq!(actual, expected);
+    assert_eq!(
+        parallel.report.unique_solution_count,
+        reference.report.unique_solution_count
+    );
+    assert_eq!(
+        parallel.report.covered_source_count,
+        reference.report.covered_source_count
+    );
+    assert_eq!(
+        parallel.report.solution_source_pairs,
+        reference.report.solution_source_pairs
+    );
+    for identity in expected {
+        assert_eq!(
+            parallel.source_count_for_identity(&identity).unwrap(),
+            reference.source_count_for_identity(&identity).unwrap(),
+        );
+    }
+    if problem.backend_policy().workers() > 1 {
+        assert!(parallel
+            .report
+            .ranks
+            .iter()
+            .any(|rank| rank.movement_parallel.spawned_workers > 1));
+        assert!(reference.report.ranks.iter().all(|rank| {
+            rank.movement_parallel.fallback_reason == Some("explicit-predicate-work-or-memo-bounds")
+        }));
+    }
+}

@@ -6,6 +6,7 @@
 //! the repository's managed runtime, just like other search diagnostics.
 
 use std::io;
+use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -31,6 +32,9 @@ use clearra_supply::queue::queue_pattern_expression::QueuePatternExpression;
 use clearra_supply::QueueObservationPolicy;
 use serde_json::{json, Value};
 
+#[path = "support/symbolic_archive.rs"]
+mod symbolic_archive;
+
 const USAGE: &str = "usage: symbolic_family compile|run --height 1..6 --queue PATTERN [options]\n\
   --board HEX                  initial 10-column board; default 0\n\
   --rule NAME                  srs, srs-plus, srs-x, jstris-180, no-kick\n\
@@ -46,6 +50,7 @@ const USAGE: &str = "usage: symbolic_family compile|run --height 1..6 --queue PA
   --max-memo-entries N          explicit memo bound; 0 means unlimited\n\
   --page-size N                 extract this many identities after run; default 0\n\
   --page-offset N               skip counted identity branches; default 0\n\
+  --archive PATH                save shared CTK4 before requested pages\n\
   --help                       show this text without compiling or running\n\
 \n\
 All representation bounds default to 0. There is no time-limit option.\n\
@@ -67,6 +72,7 @@ struct Options {
     limits: SymbolicFamilyLimits,
     page_size: usize,
     page_offset: u128,
+    archive: Option<PathBuf>,
 }
 
 fn main() {
@@ -134,6 +140,7 @@ fn parse_options(mut args: impl Iterator<Item = String>) -> Result<Options, Stri
         limits: SymbolicFamilyLimits::default(),
         page_size: 0,
         page_offset: 0,
+        archive: None,
     };
     let mut hold_selection = None;
     while let Some(option) = args.next() {
@@ -180,6 +187,11 @@ fn parse_options(mut args: impl Iterator<Item = String>) -> Result<Options, Stri
             }
             "--page-size" => options.page_size = number(args.next(), &option)?,
             "--page-offset" => options.page_offset = number(args.next(), &option)?,
+            "--archive" if options.archive.is_none() => {
+                options.archive = Some(symbolic_archive::checked_output(&PathBuf::from(
+                    argument(args.next(), &option)?,
+                ))?);
+            }
             _ => return Err(format!("unknown option {option}\n{USAGE}")),
         }
     }
@@ -187,6 +199,9 @@ fn parse_options(mut args: impl Iterator<Item = String>) -> Result<Options, Stri
         return Err("--height 1..6 and a nonempty --queue are required".into());
     }
     rule(&options.rule)?;
+    if options.archive.is_some() && !options.run {
+        return Err("--archive requires run mode".into());
+    }
     if options.initial_hold.is_some() && hold_selection == Some(false) {
         return Err("--initial-hold conflicts with --no-hold".into());
     }
@@ -337,6 +352,15 @@ fn execute(options: &Options, output: &mut Value) -> Result<(), String> {
     let mut result = outcome.map_err(|error| error.to_string())?;
     output["search_complete"] = json!(true);
     output["result"] = describe_result(result.report());
+    if let Some(path) = &options.archive {
+        output["phase"] = json!("ctk4-archive");
+        output["archive"] = symbolic_archive::persist(
+            &mut result,
+            path,
+            &json!({"request": output["request"], "compiled": output["compiled"]}),
+            &control,
+        )?;
+    }
     if options.page_size != 0 {
         output["phase"] = json!("identity-page");
         let started = Instant::now();
@@ -441,6 +465,27 @@ fn describe_problem(problem: &SearchProblem) -> Result<Value, String> {
 }
 
 fn describe_result(report: &SymbolicFamilyReport) -> Value {
+    let ranks = report.ranks.iter().map(|rank| json!({
+        "placed_pieces": rank.placed_pieces,
+        "supply_states": rank.supply_states.to_string(),
+        "joint_members": rank.joint_members.to_string(),
+        "set_nodes_before_compaction": rank.set_nodes_before_compaction.to_string(),
+        "set_nodes_after_compaction": rank.set_nodes_after_compaction.to_string(),
+        "set_compaction_peak_bytes_estimate": rank.set_compaction_peak_bytes_estimate.to_string(),
+        "predicate_nodes": rank.predicate_nodes.to_string(),
+        "derivative_nodes": rank.derivative_nodes.to_string(),
+        "movement_poses": rank.movement_poses.to_string(),
+        "guarded_movement_edges": rank.guarded_movement_edges.to_string(),
+        "movement_propagations": rank.movement_propagations.to_string(),
+        "legal_row_queries": rank.legal_row_queries.to_string(),
+        "geometry_filters": rank.geometry_filters.to_string(),
+        "compatibility_cache_bytes_estimate": rank.compatibility_cache_bytes_estimate.to_string(),
+        "compatibility_cache_peak_bytes_estimate": rank.compatibility_cache_peak_bytes_estimate.to_string(),
+        "compatibility_cache_releases": rank.compatibility_cache_releases,
+        "compatibility_filter_misses": rank.compatibility_filter_misses.to_string(),
+        "compatibility_guard_misses": rank.compatibility_guard_misses.to_string(),
+        "movement_parallel": symbolic_archive::movement_parallel(&rank.movement_parallel),
+    })).collect::<Vec<_>>();
     json!({
         "unique_solution_count": report.unique_solution_count.to_string(),
         "covered_source_count": report.covered_source_count.to_string(),
@@ -462,26 +507,20 @@ fn describe_result(report: &SymbolicFamilyReport) -> Value {
         "bridge_work_steps": report.bridge_work_steps.to_string(),
         "derivative_work_steps": report.derivative_work_steps.to_string(),
         "derivative_cache_misses": report.derivative_cache_misses.to_string(),
+        "compatibility_work_steps": report.compatibility_work_steps.to_string(),
+        "compatibility_filter_misses": report.compatibility_filter_misses.to_string(),
+        "compatibility_guard_misses": report.compatibility_guard_misses.to_string(),
+        "compatibility_saturated_unions": report.compatibility_saturated_unions.to_string(),
+        "compatibility_union_remainder_calls": report.compatibility_union_remainder_calls.to_string(),
+        "compatibility_union_remainder_created_nodes": report.compatibility_union_remainder_created_nodes.to_string(),
+        "compatibility_union_remainder_work_steps": report.compatibility_union_remainder_work_steps.to_string(),
+        "retained_compatibility_bytes_estimate": report.retained_compatibility_bytes_estimate.to_string(),
         "retained_set_bytes_estimate": report.retained_set_bytes_estimate.to_string(),
         "retained_predicate_bytes_estimate": report.retained_predicate_bytes_estimate.to_string(),
         "retained_derivative_bytes_estimate": report.retained_derivative_bytes_estimate.to_string(),
         "result_compaction_peak_bytes_estimate": report.result_compaction_peak_bytes_estimate.to_string(),
         "estimate_scope": "retained capacities exclude operation scratch and allocator metadata; not peak RSS",
-        "ranks": report.ranks.iter().map(|rank| json!({
-            "placed_pieces": rank.placed_pieces,
-            "supply_states": rank.supply_states.to_string(),
-            "joint_members": rank.joint_members.to_string(),
-            "set_nodes_before_compaction": rank.set_nodes_before_compaction.to_string(),
-            "set_nodes_after_compaction": rank.set_nodes_after_compaction.to_string(),
-            "set_compaction_peak_bytes_estimate": rank.set_compaction_peak_bytes_estimate.to_string(),
-            "predicate_nodes": rank.predicate_nodes.to_string(),
-            "derivative_nodes": rank.derivative_nodes.to_string(),
-            "movement_poses": rank.movement_poses.to_string(),
-            "guarded_movement_edges": rank.guarded_movement_edges.to_string(),
-            "movement_propagations": rank.movement_propagations.to_string(),
-            "legal_row_queries": rank.legal_row_queries.to_string(),
-            "geometry_filters": rank.geometry_filters.to_string(),
-        })).collect::<Vec<_>>(),
+        "ranks": ranks,
     })
 }
 
@@ -498,6 +537,7 @@ impl ProgressSink for DiagnosticProgress {
         if progress.stage.starts_with("symbolic_phase_")
             || progress.stage.starts_with("symbolic_context_")
             || progress.stage.starts_with("symbolic_work_")
+            || progress.stage.starts_with("symbolic_storage_")
         {
             return;
         }

@@ -44,6 +44,8 @@ mod finesse_score;
 pub mod generic_geometry;
 mod geometry;
 mod geometry_apdp;
+#[cfg(feature = "symbolic-family")]
+mod geometry_compatibility_filter;
 mod geometry_component;
 mod geometry_domain;
 mod geometry_family;
@@ -111,12 +113,20 @@ mod symbolic_boolean;
 mod symbolic_family;
 #[cfg(feature = "symbolic-family")]
 mod symbolic_family_bridge;
+#[cfg(all(
+    feature = "symbolic-family",
+    feature = "parallel",
+    not(target_family = "wasm")
+))]
+mod symbolic_family_parallel;
 #[cfg(feature = "symbolic-family")]
 mod symbolic_family_supply;
 #[cfg(feature = "symbolic-family")]
 pub use symbolic_family::{
-    solve_symbolic_family, SymbolicFamilyError, SymbolicFamilyLimits, SymbolicFamilyRankReport,
-    SymbolicFamilyReport, SymbolicFamilyResult,
+    solve_symbolic_family, SymbolicFamilyArchive, SymbolicFamilyArchiveError,
+    SymbolicFamilyArchiveScope, SymbolicFamilyError, SymbolicFamilyLimits,
+    SymbolicFamilyParallelReport, SymbolicFamilyRankReport, SymbolicFamilyReport,
+    SymbolicFamilyResult,
 };
 #[cfg(test)]
 mod static_influence_integration_tests;

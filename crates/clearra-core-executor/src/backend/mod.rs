@@ -50,8 +50,10 @@ pub use wasm_cpu::{
 };
 #[cfg(feature = "symbolic-family")]
 pub use wasm_cpu::{
-    solve_symbolic_family, SymbolicFamilyError, SymbolicFamilyLimits, SymbolicFamilyRankReport,
-    SymbolicFamilyReport, SymbolicFamilyResult,
+    solve_symbolic_family, SymbolicFamilyArchive, SymbolicFamilyArchiveError,
+    SymbolicFamilyArchiveScope, SymbolicFamilyError, SymbolicFamilyLimits,
+    SymbolicFamilyParallelReport, SymbolicFamilyRankReport, SymbolicFamilyReport,
+    SymbolicFamilyResult,
 };
 #[cfg(all(
     feature = "local-search-ab",

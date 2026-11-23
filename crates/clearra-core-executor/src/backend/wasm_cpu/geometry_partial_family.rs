@@ -14,9 +14,11 @@ use clearra_core_domain::execution_cancellation::{
     CancellationToken, ExecutionProgress, ProgressSink,
 };
 
-use super::{
-    exact_collections::ExactHashMap,
-    geometry_family::{FamilyNodeKind, GeometrySolutionFamily, FAMILY_EMPTY, FAMILY_INVALID},
+use super::exact_collections::ExactHashMap;
+
+#[cfg(test)]
+use super::geometry_family::{
+    FamilyNodeKind, GeometrySolutionFamily, FAMILY_EMPTY, FAMILY_INVALID,
 };
 
 #[cfg(test)]
@@ -31,6 +33,11 @@ pub(super) struct ZddId(u32);
 impl ZddId {
     pub(super) const EMPTY: Self = Self(0);
     pub(super) const UNIT: Self = Self(1);
+
+    /// Stable only while this arena epoch remains frozen for archive writing.
+    pub(super) const fn archive_id(self) -> u64 {
+        self.0 as u64
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -83,7 +90,7 @@ pub(super) struct ZddCompaction {
     pub(super) peak_retained_bytes: usize,
 }
 
-struct WorkBudget {
+pub(super) struct WorkBudget {
     limits: ZddLimits,
     steps: u64,
     cancellation: Option<CancellationToken>,
@@ -92,7 +99,7 @@ struct WorkBudget {
 }
 
 impl WorkBudget {
-    fn new(limits: ZddLimits, progress_stage: &'static str) -> Self {
+    pub(super) fn new(limits: ZddLimits, progress_stage: &'static str) -> Self {
         Self {
             limits,
             steps: 0,
@@ -102,7 +109,34 @@ impl WorkBudget {
         }
     }
 
-    fn check_cancelled(&self) -> Result<(), ZddError> {
+    pub(super) fn with_control(
+        mut self,
+        control: &clearra_core_domain::execution_cancellation::ExecutionControl,
+    ) -> Self {
+        self.cancellation = Some(control.cancellation.clone());
+        self.progress_sink = control.progress_sink.clone();
+        self
+    }
+
+    pub(super) const fn work_steps(&self) -> u64 {
+        self.steps
+    }
+
+    pub(super) fn storage_pulse_due(&self) -> bool {
+        self.progress_sink.is_some() && self.steps & WORK_PROGRESS_MASK == 0
+    }
+
+    pub(super) fn report_storage(&self, stage: &'static str, value: usize) {
+        if let Some(sink) = &self.progress_sink {
+            sink.report(ExecutionProgress::new(
+                stage,
+                u64::try_from(value).unwrap_or(u64::MAX),
+                None,
+            ));
+        }
+    }
+
+    pub(super) fn check_cancelled(&self) -> Result<(), ZddError> {
         if self
             .cancellation
             .as_ref()
@@ -114,7 +148,7 @@ impl WorkBudget {
         }
     }
 
-    fn step(&mut self) -> Result<(), ZddError> {
+    pub(super) fn step(&mut self) -> Result<(), ZddError> {
         if self.steps & 1023 == 0 {
             self.check_cancelled()?;
         }
@@ -142,7 +176,7 @@ impl WorkBudget {
         }
     }
 
-    fn reserve_memo(&self, current: usize) -> Result<(), ZddError> {
+    pub(super) fn reserve_memo(&self, current: usize) -> Result<(), ZddError> {
         if self.limits.max_memo_entries != 0 && current >= self.limits.max_memo_entries {
             Err(ZddError::MemoLimit)
         } else {
@@ -194,6 +228,7 @@ enum UnaryOperation {
     Present,
     Absent,
     Remove,
+    ProjectPrefix,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -213,7 +248,24 @@ enum NodeFrame {
     Finish(ZddId, ZddNode),
 }
 
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct PrefixKey {
+    joint: ZddId,
+    allowed: ZddId,
+}
+
+enum PrefixFrame {
+    Visit(PrefixKey),
+    Finish {
+        key: PrefixKey,
+        variable: u32,
+        low: PrefixKey,
+        high: PrefixKey,
+    },
+}
+
 pub(super) struct ZddArena {
+    owner: Arc<()>,
     nodes: Vec<ZddNode>,
     unique: ExactHashMap<ZddNode, ZddId>,
     applied: ExactHashMap<ApplyKey, ZddId>,
@@ -228,6 +280,7 @@ pub(super) struct ZddArena {
 impl ZddArena {
     pub(super) fn new(limits: ZddLimits) -> Self {
         Self {
+            owner: Arc::new(()),
             nodes: Vec::new(),
             unique: ExactHashMap::default(),
             applied: ExactHashMap::default(),
@@ -260,8 +313,46 @@ impl ZddArena {
         self.epoch
     }
 
+    /// Retained tokens prevent an unrelated arena from reusing this identity.
+    pub(super) fn owner_token(&self) -> &Arc<()> {
+        &self.owner
+    }
+
     pub(super) fn metrics(&self) -> ZddMetrics {
         self.metrics
+    }
+
+    /// Prepare one compact count table for a frozen archive snapshot. Child
+    /// IDs precede parents, so this is a checked linear pass over nodes, not
+    /// a traversal of members. The caller drops it after streaming the file.
+    pub(super) fn prepare_archive_counts(&mut self) -> Result<Vec<u128>, ZddError> {
+        self.budget.check_cancelled()?;
+        let entries = self
+            .nodes
+            .len()
+            .checked_add(2)
+            .ok_or(ZddError::NodeIdExhausted)?;
+        let mut counts = Vec::new();
+        counts
+            .try_reserve_exact(entries)
+            .map_err(|_| ZddError::Allocation)?;
+        counts.extend([0_u128, 1]);
+        for node in &self.nodes {
+            self.budget.step()?;
+            let low = *counts
+                .get(node.low.0 as usize)
+                .ok_or(ZddError::InvalidFamily)?;
+            let high = *counts
+                .get(node.high.0 as usize)
+                .ok_or(ZddError::InvalidFamily)?;
+            counts.push(low.checked_add(high).ok_or(ZddError::CountOverflow)?);
+        }
+        Ok(counts)
+    }
+
+    pub(super) fn archive_node(&self, id: u64) -> Result<ZddNode, ZddError> {
+        let id = u32::try_from(id).map_err(|_| ZddError::InvalidFamily)?;
+        self.node(ZddId(id))?.ok_or(ZddError::InvalidFamily)
     }
 
     /// Capacity-based payload accounting, excluding allocator metadata.
@@ -277,7 +368,21 @@ impl ZddArena {
     /// Lets a fused caller charge its own iterative relation work and poll
     /// cancellation without inventing a second implicit work deadline.
     pub(super) fn checkpoint(&mut self) -> Result<(), ZddError> {
-        self.budget.step()
+        self.budget.step()?;
+        if self.budget.storage_pulse_due() {
+            self.report_storage();
+        }
+        Ok(())
+    }
+
+    fn report_storage(&self) {
+        if self.budget.progress_sink.is_none() {
+            return;
+        }
+        self.budget
+            .report_storage("symbolic_storage_zdd_nodes", self.nodes.len());
+        self.budget
+            .report_storage("symbolic_storage_zdd_retained_bytes", self.retained_bytes());
     }
 
     pub(super) fn node(&self, root: ZddId) -> Result<Option<ZddNode>, ZddError> {
@@ -338,7 +443,7 @@ impl ZddArena {
     /// remain distinct: one branch contains `variable`, the other does not.
     pub(super) fn mk(&mut self, variable: u32, low: ZddId, high: ZddId) -> Result<ZddId, ZddError> {
         self.budget.check_cancelled()?;
-        self.budget.step()?;
+        self.checkpoint()?;
         let low_node = self.node(low)?;
         let high_node = self.node(high)?;
         if high == ZddId::EMPTY {
@@ -364,6 +469,11 @@ impl ZddArena {
             .checked_add(2)
             .and_then(|value| u32::try_from(value).ok())
             .ok_or(ZddError::NodeIdExhausted)?;
+        // Observe before a potentially large backing growth. No clocks,
+        // formatting or I/O occur here; the diagnostic owner samples later.
+        if self.nodes.len() as u64 & WORK_PROGRESS_MASK == 0 {
+            self.report_storage();
+        }
         self.nodes
             .try_reserve(1)
             .map_err(|_| ZddError::Allocation)?;
@@ -511,6 +621,13 @@ impl ZddArena {
         self.apply_unary(root, variable, UnaryOperation::Remove)
     }
 
+    /// Keep only variables below `end`. Every nonempty suffix denotes at
+    /// least one witness, so it becomes UNIT without walking its members or
+    /// nodes. Canonical prefixes can be reused across distinct source tails.
+    pub(super) fn project_prefix(&mut self, root: ZddId, end: u32) -> Result<ZddId, ZddError> {
+        self.apply_unary(root, end, UnaryOperation::ProjectPrefix)
+    }
+
     fn apply_unary(
         &mut self,
         root: ZddId,
@@ -567,11 +684,13 @@ impl ZddArena {
                         UnaryOperation::Present => self.mk(variable, ZddId::EMPTY, node.high)?,
                         UnaryOperation::Absent => node.low,
                         UnaryOperation::Remove => self.union(node.low, node.high)?,
+                        UnaryOperation::ProjectPrefix => ZddId::UNIT,
                     },
                     _ => match operation {
                         UnaryOperation::Add => self.mk(variable, ZddId::EMPTY, current)?,
                         UnaryOperation::Present => ZddId::EMPTY,
                         UnaryOperation::Absent | UnaryOperation::Remove => current,
+                        UnaryOperation::ProjectPrefix => ZddId::UNIT,
                     },
                 }
             };
@@ -592,9 +711,135 @@ impl ZddArena {
     fn unary_value(&self, key: UnaryKey) -> Option<ZddId> {
         if key.root == ZddId::EMPTY {
             Some(ZddId::EMPTY)
+        } else if key.operation == UnaryOperation::ProjectPrefix
+            && (key.root == ZddId::UNIT
+                || key
+                    .root
+                    .0
+                    .checked_sub(2)
+                    .and_then(|index| self.nodes.get(index as usize))
+                    .is_some_and(|node| node.variable >= key.variable))
+        {
+            // A suffix is an existential witness. Its internal node identity
+            // need not occupy a memo slot merely to return the same terminal.
+            Some(ZddId::UNIT)
         } else {
             self.unary.get(&key).copied()
         }
+    }
+
+    /// Exact semijoin with a family of prefixes whose variables are below
+    /// `end`. The original suffix remains attached to its own prefix; no
+    /// independent source projection is multiplied back into the result.
+    /// UNIT accepts only the empty prefix, including when joint still has
+    /// row variables that must follow their absent branches first.
+    pub(super) fn filter_prefix(
+        &mut self,
+        joint: ZddId,
+        allowed: ZddId,
+        end: u32,
+    ) -> Result<ZddId, ZddError> {
+        self.budget.check_cancelled()?;
+        self.node(joint)?;
+        self.node(allowed)?;
+        let previous_scratch = self.scratch_memo_entries;
+        let result = self.filter_prefix_inner(joint, allowed, end);
+        self.scratch_memo_entries = previous_scratch;
+        result
+    }
+
+    fn filter_prefix_inner(
+        &mut self,
+        joint: ZddId,
+        allowed: ZddId,
+        end: u32,
+    ) -> Result<ZddId, ZddError> {
+        let initial = PrefixKey { joint, allowed };
+        let mut results = ExactHashMap::default();
+        let mut stack = Vec::new();
+        push(&mut stack, PrefixFrame::Visit(initial))?;
+        while let Some(frame) = stack.pop() {
+            self.budget.step()?;
+            match frame {
+                PrefixFrame::Visit(key) => {
+                    if self.prefix_value(&results, key, end)?.is_some() {
+                        continue;
+                    }
+                    let joint_node = self.node(key.joint)?;
+                    let allowed_node = self.node(key.allowed)?;
+                    let variable =
+                        match (joint_node.filter(|node| node.variable < end), allowed_node) {
+                            (Some(left), Some(right)) => left.variable.min(right.variable),
+                            (Some(node), None) | (None, Some(node)) => node.variable,
+                            (None, None) => return Err(ZddError::InvalidFamily),
+                        };
+                    let (joint_low, joint_high) = split_at(key.joint, joint_node, variable);
+                    let (allowed_low, allowed_high) = split_at(key.allowed, allowed_node, variable);
+                    let low = PrefixKey {
+                        joint: joint_low,
+                        allowed: allowed_low,
+                    };
+                    let high = PrefixKey {
+                        joint: joint_high,
+                        allowed: allowed_high,
+                    };
+                    stack.try_reserve(3).map_err(|_| ZddError::Allocation)?;
+                    stack.push(PrefixFrame::Finish {
+                        key,
+                        variable,
+                        low,
+                        high,
+                    });
+                    stack.push(PrefixFrame::Visit(high));
+                    stack.push(PrefixFrame::Visit(low));
+                }
+                PrefixFrame::Finish {
+                    key,
+                    variable,
+                    low,
+                    high,
+                } => {
+                    let low = self
+                        .prefix_value(&results, low, end)?
+                        .ok_or(ZddError::InvalidFamily)?;
+                    let high = self
+                        .prefix_value(&results, high, end)?
+                        .ok_or(ZddError::InvalidFamily)?;
+                    let value = self.mk(variable, low, high)?;
+                    self.reserve_memo()?;
+                    results.try_reserve(1).map_err(|_| ZddError::Allocation)?;
+                    results.insert(key, value);
+                    self.scratch_memo_entries += 1;
+                }
+            }
+        }
+        self.prefix_value(&results, initial, end)?
+            .ok_or(ZddError::InvalidFamily)
+    }
+
+    fn prefix_value(
+        &self,
+        results: &ExactHashMap<PrefixKey, ZddId>,
+        key: PrefixKey,
+        end: u32,
+    ) -> Result<Option<ZddId>, ZddError> {
+        if key.joint == ZddId::EMPTY || key.allowed == ZddId::EMPTY {
+            return Ok(Some(ZddId::EMPTY));
+        }
+        if self
+            .node(key.allowed)?
+            .is_some_and(|node| node.variable >= end)
+        {
+            return Err(ZddError::InvalidVariableOrder);
+        }
+        if key.allowed == ZddId::UNIT
+            && self
+                .node(key.joint)?
+                .is_none_or(|node| node.variable >= end)
+        {
+            return Ok(Some(key.joint));
+        }
+        Ok(results.get(&key).copied())
     }
 
     /// Removes sorted, distinct variables in one DAG walk. Source-variable
@@ -879,6 +1124,7 @@ fn map_bytes<K, V>(map: &ExactHashMap<K, V>) -> usize {
         .saturating_add(32)
 }
 
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 enum DownNodeKind {
     Append,
@@ -886,6 +1132,7 @@ enum DownNodeKind {
     Product,
 }
 
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 struct DownNode {
     kind: DownNodeKind,
@@ -894,17 +1141,20 @@ struct DownNode {
     right: u32,
 }
 
+#[cfg(test)]
 enum DerivativeFrame {
     Visit(u32),
     Finish(u32, DownNode),
 }
 
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 struct DownFilterKey {
     selected: ZddId,
     geometry: u32,
 }
 
+#[cfg(test)]
 enum DownFilterFrame {
     Visit(DownFilterKey),
     Finish {
@@ -915,6 +1165,7 @@ enum DownFilterFrame {
     },
 }
 
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(super) struct GeometryDownMetrics {
     pub(super) derivative_misses: u64,
@@ -935,6 +1186,7 @@ pub(super) struct GeometryDownMetrics {
 /// Original node IDs belong to the borrowed family. Only newly needed
 /// derivative expressions allocate here. Limits apply to this owned storage
 /// and work, separately from the borrowed input and the caller's ZDD arena.
+#[cfg(test)]
 pub(super) struct GeometryDownView<'a> {
     original: &'a GeometrySolutionFamily,
     root: u32,
@@ -949,6 +1201,7 @@ pub(super) struct GeometryDownView<'a> {
     metrics: GeometryDownMetrics,
 }
 
+#[cfg(test)]
 impl<'a> GeometryDownView<'a> {
     pub(super) fn new(
         original: &'a GeometrySolutionFamily,

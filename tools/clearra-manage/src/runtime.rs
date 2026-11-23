@@ -10,7 +10,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -97,6 +97,8 @@ pub struct RunOutcome {
     pub error_code: Option<String>,
     pub child_termination: ChildTermination,
     pub supervisor_termination_reason: Option<String>,
+    pub termination_audit: TerminationAuditSummary,
+    pub linux_process_diagnostics: Option<LinuxProcessDiagnostics>,
     pub duration_ms: u128,
     pub timeout_seconds: u64,
     pub cancel_on_stdin_eof: bool,
@@ -124,6 +126,271 @@ pub struct RunOutcome {
     pub last_memory_pressure_status: Option<MemoryPressureStatus>,
     pub automatic_retry: bool,
     pub receipt: PathBuf,
+}
+
+/// Requests made by this supervisor, not an attribution of external signals.
+/// The receipt snapshot precedes Containment::drop; later cleanup attempts are
+/// emitted on supervisor stderr with the same run ID and continuing sequence.
+#[derive(Debug, Clone, Serialize)]
+pub struct TerminationAuditSummary {
+    snapshot_phase: &'static str,
+    attempts: Vec<TerminationAttempt>,
+    unretained_attempts: u64,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+enum TerminationTarget {
+    Process {
+        pid: u32,
+    },
+    #[cfg(unix)]
+    ProcessGroup {
+        pgid: u32,
+    },
+    #[cfg(windows)]
+    OwnedJob {
+        root_pid: u32,
+    },
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct TerminationAttempt {
+    sequence: u64,
+    reason: &'static str,
+    phase: &'static str,
+    operation: &'static str,
+    target: TerminationTarget,
+    /// Requested Unix signal. A std Child::kill success does not prove that
+    /// a syscall ran: the standard library may already know the child exited.
+    signal: Option<i32>,
+    started_elapsed_ns: u128,
+    completed_elapsed_ns: u128,
+    child_wait_status_observed: bool,
+    succeeded: bool,
+    /// Present only when the platform API exposes its raw return value.
+    return_value: Option<i32>,
+    /// errno on Unix, Win32 error code on Windows; unavailable errors stay null.
+    os_error_code: Option<i32>,
+}
+
+struct TerminationAudit {
+    run_id: String,
+    started: Instant,
+    child_wait_status_observed: AtomicBool,
+    next_sequence: AtomicU64,
+    attempts: Mutex<Vec<TerminationAttempt>>,
+    unretained_attempts: AtomicU64,
+}
+
+impl TerminationAudit {
+    fn new(run_id: &str, started: Instant) -> Self {
+        Self {
+            run_id: run_id.to_owned(),
+            started,
+            child_wait_status_observed: AtomicBool::new(false),
+            next_sequence: AtomicU64::new(1),
+            attempts: Mutex::new(Vec::new()),
+            unretained_attempts: AtomicU64::new(0),
+        }
+    }
+
+    fn observe_child_wait_status(&self) {
+        self.child_wait_status_observed
+            .store(true, Ordering::Relaxed);
+    }
+
+    fn begin(
+        &self,
+        reason: &'static str,
+        phase: &'static str,
+        operation: &'static str,
+        target: TerminationTarget,
+        signal: Option<i32>,
+    ) -> TerminationAttempt {
+        TerminationAttempt {
+            sequence: self.next_sequence.fetch_add(1, Ordering::Relaxed),
+            reason,
+            phase,
+            operation,
+            target,
+            signal,
+            started_elapsed_ns: self.started.elapsed().as_nanos(),
+            completed_elapsed_ns: 0,
+            child_wait_status_observed: self.child_wait_status_observed.load(Ordering::Relaxed),
+            succeeded: false,
+            return_value: None,
+            os_error_code: None,
+        }
+    }
+
+    fn finish(
+        &self,
+        mut attempt: TerminationAttempt,
+        succeeded: bool,
+        return_value: Option<i32>,
+        os_error_code: Option<i32>,
+    ) {
+        attempt.completed_elapsed_ns = self.started.elapsed().as_nanos();
+        attempt.succeeded = succeeded;
+        attempt.return_value = return_value;
+        attempt.os_error_code = os_error_code;
+        // A failed diagnostic write must not change termination or its result.
+        let _ = self.write_event(&mut std::io::stderr().lock(), &attempt);
+        let mut attempts = self
+            .attempts
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if attempts.try_reserve(1).is_ok() {
+            attempts.push(attempt);
+        } else {
+            self.unretained_attempts.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    fn write_event(
+        &self,
+        output: &mut impl Write,
+        attempt: &TerminationAttempt,
+    ) -> std::io::Result<()> {
+        #[derive(Serialize)]
+        struct Event<'a> {
+            schema_id: &'static str,
+            event: &'static str,
+            run_id: &'a str,
+            supervisor_pid: u32,
+            attempt: &'a TerminationAttempt,
+        }
+        serde_json::to_writer(
+            &mut *output,
+            &Event {
+                schema_id: "clearra.runtime-termination-attempt.v1",
+                event: "termination-attempt",
+                run_id: &self.run_id,
+                supervisor_pid: std::process::id(),
+                attempt,
+            },
+        )
+        .map_err(std::io::Error::other)?;
+        output.write_all(b"\n")?;
+        output.flush()
+    }
+
+    fn kill_child(&self, child: &mut Child, reason: &'static str, phase: &'static str) {
+        let attempt = self.begin(
+            reason,
+            phase,
+            "std-child-kill",
+            TerminationTarget::Process { pid: child.id() },
+            #[cfg(unix)]
+            Some(libc::SIGKILL),
+            #[cfg(not(unix))]
+            None,
+        );
+        let result = child.kill();
+        let os_error_code = result.as_ref().err().and_then(std::io::Error::raw_os_error);
+        self.finish(attempt, result.is_ok(), None, os_error_code);
+    }
+
+    fn take_receipt_snapshot(&self) -> TerminationAuditSummary {
+        let mut attempts = self
+            .attempts
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        TerminationAuditSummary {
+            snapshot_phase: "before-containment-drop",
+            attempts: std::mem::take(&mut *attempts),
+            unretained_attempts: self.unretained_attempts.load(Ordering::Relaxed),
+        }
+    }
+}
+
+/// Startup observations in the supervisor's proc/PID namespace. These are
+/// visible limits and permission metadata at read time, not a claim about host
+/// limits or settings the concurrently running child may install later.
+#[derive(Debug, Clone, Serialize)]
+pub struct LinuxProcessDiagnostics {
+    observation_phase: &'static str,
+    observation_started_elapsed_ns: u128,
+    supervisor: LinuxProcessMetadata,
+    direct_child: LinuxProcessMetadata,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct LinuxProcessMetadata {
+    pid_in_supervisor_namespace: u32,
+    permission_status: ProcMetadataRead,
+    cgroup_membership: ProcMetadataRead,
+    resource_limits: ProcMetadataRead,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ProcMetadataRead {
+    value: Option<String>,
+    read_error: Option<String>,
+    os_error_code: Option<i32>,
+}
+
+#[cfg(target_os = "linux")]
+impl LinuxProcessMetadata {
+    fn observe(pid: u32) -> Self {
+        let root = PathBuf::from(format!("/proc/{pid}"));
+        Self {
+            pid_in_supervisor_namespace: pid,
+            permission_status: ProcMetadataRead::read(&root.join("status"), true),
+            cgroup_membership: ProcMetadataRead::read(&root.join("cgroup"), false),
+            resource_limits: ProcMetadataRead::read(&root.join("limits"), false),
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl ProcMetadataRead {
+    fn read(path: &Path, filter_permissions: bool) -> Self {
+        match fs::read_to_string(path) {
+            Ok(value) => Self {
+                value: Some(if filter_permissions {
+                    filter_permission_status(&value)
+                } else {
+                    value
+                }),
+                read_error: None,
+                os_error_code: None,
+            },
+            Err(error) => Self {
+                value: None,
+                read_error: Some(error.to_string()),
+                os_error_code: error.raw_os_error(),
+            },
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn filter_permission_status(status: &str) -> String {
+    status
+        .lines()
+        .filter(|line| {
+            line.split_once(':').is_some_and(|(key, _)| {
+                matches!(
+                    key,
+                    "PPid"
+                        | "Uid"
+                        | "Gid"
+                        | "NSpid"
+                        | "CapInh"
+                        | "CapPrm"
+                        | "CapEff"
+                        | "CapBnd"
+                        | "CapAmb"
+                        | "NoNewPrivs"
+                        | "Seccomp"
+                        | "Seccomp_filters"
+                )
+            })
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// What the operating system reported for the direct child, independently of
@@ -540,6 +807,7 @@ pub fn run(repository: &Path, policy: &Policy, options: RunOptions) -> Result<Ru
     #[cfg(target_os = "linux")]
     let cgroup_memory_start = LinuxCgroupMemoryStart::observe();
     let started = Instant::now();
+    let termination_audit = Arc::new(TerminationAudit::new(&run_id, started));
     let mut child = command
         .spawn()
         .map_err(|error| Error::io("start supervised command", error))?;
@@ -552,11 +820,18 @@ pub fn run(repository: &Path, policy: &Policy, options: RunOptions) -> Result<Ru
         &child,
         admission.hard_limit_bytes,
         profile.maximum_descendant_processes,
+        Arc::clone(&termination_audit),
     ) {
         Ok(value) => value,
         Err(error) => {
-            let _ = child.kill();
-            let _ = child.wait();
+            termination_audit.kill_child(
+                &mut child,
+                "containment-attach-failed",
+                "attach-failure-cleanup",
+            );
+            if child.wait().is_ok() {
+                termination_audit.observe_child_wait_status();
+            }
             return Err(error);
         }
     };
@@ -587,6 +862,15 @@ pub fn run(repository: &Path, policy: &Policy, options: RunOptions) -> Result<Ru
         Arc::clone(&total_output),
         Arc::clone(&output_exceeded),
     );
+    #[cfg(target_os = "linux")]
+    let linux_process_diagnostics = Some(LinuxProcessDiagnostics {
+        observation_phase: "after-containment-before-supervision",
+        observation_started_elapsed_ns: started.elapsed().as_nanos(),
+        supervisor: LinuxProcessMetadata::observe(std::process::id()),
+        direct_child: LinuxProcessMetadata::observe(child.id()),
+    });
+    #[cfg(not(target_os = "linux"))]
+    let linux_process_diagnostics = None;
 
     let timeout_at = (timeout != 0).then(|| started + Duration::from_secs(timeout));
     // The launcher owns this pipe. Its exit or cancellation closes stdin even
@@ -637,7 +921,12 @@ pub fn run(repository: &Path, policy: &Policy, options: RunOptions) -> Result<Ru
         }
         if output_exceeded.load(Ordering::Relaxed) {
             forced_reason = Some(("output-limit", "E_CLEARRA_PROCESS_OUTPUT_LIMIT"));
-            terminate_tree(&mut child, &containment, profile.termination_grace_seconds);
+            terminate_tree(
+                &mut child,
+                &containment,
+                profile.termination_grace_seconds,
+                forced_reason,
+            );
             status = child
                 .wait()
                 .map_err(|error| Error::io("wait after output limit", error))?;
@@ -648,7 +937,12 @@ pub fn run(repository: &Path, policy: &Policy, options: RunOptions) -> Result<Ru
             .is_some_and(|ended| ended.load(Ordering::Acquire))
         {
             forced_reason = Some(("owner-lease-ended", "E_CLEARRA_OWNER_LEASE_ENDED"));
-            terminate_tree(&mut child, &containment, profile.termination_grace_seconds);
+            terminate_tree(
+                &mut child,
+                &containment,
+                profile.termination_grace_seconds,
+                forced_reason,
+            );
             status = child
                 .wait()
                 .map_err(|error| Error::io("wait after owner lease ended", error))?;
@@ -656,7 +950,12 @@ pub fn run(repository: &Path, policy: &Policy, options: RunOptions) -> Result<Ru
         }
         if timeout_at.is_some_and(|deadline| Instant::now() >= deadline) {
             forced_reason = Some(("timeout", "E_CLEARRA_PROCESS_TIMEOUT"));
-            terminate_tree(&mut child, &containment, profile.termination_grace_seconds);
+            terminate_tree(
+                &mut child,
+                &containment,
+                profile.termination_grace_seconds,
+                forced_reason,
+            );
             status = child
                 .wait()
                 .map_err(|error| Error::io("wait after timeout", error))?;
@@ -672,7 +971,12 @@ pub fn run(repository: &Path, policy: &Policy, options: RunOptions) -> Result<Ru
                 observed_peak = observed_peak.max(current);
                 if current > admission.hard_limit_bytes {
                     forced_reason = Some(("memory-limit", "E_CLEARRA_PROCESS_MEMORY_LIMIT"));
-                    terminate_tree(&mut child, &containment, profile.termination_grace_seconds);
+                    terminate_tree(
+                        &mut child,
+                        &containment,
+                        profile.termination_grace_seconds,
+                        forced_reason,
+                    );
                     status = child
                         .wait()
                         .map_err(|error| Error::io("wait after memory limit", error))?;
@@ -684,7 +988,12 @@ pub fn run(repository: &Path, policy: &Policy, options: RunOptions) -> Result<Ru
                 .is_some_and(|count| count > profile.maximum_descendant_processes)
             {
                 forced_reason = Some(("process-limit", "E_CLEARRA_PROCESS_COUNT_LIMIT"));
-                terminate_tree(&mut child, &containment, profile.termination_grace_seconds);
+                terminate_tree(
+                    &mut child,
+                    &containment,
+                    profile.termination_grace_seconds,
+                    forced_reason,
+                );
                 status = child
                     .wait()
                     .map_err(|error| Error::io("wait after process limit", error))?;
@@ -697,7 +1006,12 @@ pub fn run(repository: &Path, policy: &Policy, options: RunOptions) -> Result<Ru
                         "memory-pressure-observer",
                         "E_CLEARRA_MEMORY_PRESSURE_OBSERVER_FAILED",
                     ));
-                    terminate_tree(&mut child, &containment, profile.termination_grace_seconds);
+                    terminate_tree(
+                        &mut child,
+                        &containment,
+                        profile.termination_grace_seconds,
+                        forced_reason,
+                    );
                     status = child.wait().map_err(|error| {
                         Error::io("wait after memory-pressure observer failure", error)
                     })?;
@@ -758,7 +1072,12 @@ pub fn run(repository: &Path, policy: &Policy, options: RunOptions) -> Result<Ru
                             "gc-request-failed",
                             "E_CLEARRA_MEMORY_PRESSURE_GC_REQUEST_FAILED",
                         ));
-                        terminate_tree(&mut child, &containment, profile.termination_grace_seconds);
+                        terminate_tree(
+                            &mut child,
+                            &containment,
+                            profile.termination_grace_seconds,
+                            forced_reason,
+                        );
                         status = child.wait().map_err(|error| {
                             Error::io("wait after cooperative GC request failure", error)
                         })?;
@@ -781,7 +1100,12 @@ pub fn run(repository: &Path, policy: &Policy, options: RunOptions) -> Result<Ru
                     } else {
                         ("memory-pressure", "E_CLEARRA_MEMORY_PRESSURE_FAIL_CLOSE")
                     });
-                    terminate_tree(&mut child, &containment, profile.termination_grace_seconds);
+                    terminate_tree(
+                        &mut child,
+                        &containment,
+                        profile.termination_grace_seconds,
+                        forced_reason,
+                    );
                     status = child
                         .wait()
                         .map_err(|error| Error::io("wait after memory pressure", error))?;
@@ -796,13 +1120,17 @@ pub fn run(repository: &Path, policy: &Policy, options: RunOptions) -> Result<Ru
         }
         thread::sleep(Duration::from_millis(50));
     }
+    termination_audit.observe_child_wait_status();
     drop(stdin_lease.take());
     // Descendants can retain the direct child's output pipes. Drain the owned
     // process group before waiting for those pipe readers to see EOF.
     let mut active = containment.active_processes();
     let mut tree_stopped = active == Some(0);
     if !tree_stopped {
-        containment.force_terminate();
+        containment.force_terminate(
+            forced_reason.map_or("remaining-descendants", |(reason, _)| reason),
+            "post-wait-cleanup",
+        );
         let cleanup_until =
             Instant::now() + Duration::from_secs(profile.termination_grace_seconds.max(1));
         while Instant::now() < cleanup_until {
@@ -854,6 +1182,8 @@ pub fn run(repository: &Path, policy: &Policy, options: RunOptions) -> Result<Ru
         error_code: error_code.map(str::to_owned),
         child_termination,
         supervisor_termination_reason: forced_reason.map(|(reason, _)| reason.to_owned()),
+        termination_audit: termination_audit.take_receipt_snapshot(),
+        linux_process_diagnostics,
         duration_ms: started.elapsed().as_millis(),
         timeout_seconds: timeout,
         cancel_on_stdin_eof: options.cancel_on_stdin_eof,
@@ -947,17 +1277,29 @@ fn observe_owner_lease(mut reader: impl Read, ended: &AtomicBool) {
     ended.store(true, Ordering::Release);
 }
 
-fn terminate_tree(child: &mut Child, containment: &Containment, grace_seconds: u64) {
-    containment.request_termination(child);
+fn terminate_tree(
+    child: &mut Child,
+    containment: &Containment,
+    grace_seconds: u64,
+    forced_reason: Option<(&'static str, &'static str)>,
+) {
+    let reason = forced_reason.map_or("unspecified", |(reason, _)| reason);
+    containment.request_termination(child, reason, "termination-request");
     let deadline = Instant::now() + Duration::from_secs(grace_seconds);
     while Instant::now() < deadline {
-        if child.try_wait().ok().flatten().is_some() && containment.active_processes() == Some(0) {
+        let child_exited = child.try_wait().ok().flatten().is_some();
+        if child_exited {
+            containment.audit.observe_child_wait_status();
+        }
+        if child_exited && containment.active_processes() == Some(0) {
             return;
         }
         thread::sleep(Duration::from_millis(50));
     }
-    containment.force_terminate();
-    let _ = child.kill();
+    containment.force_terminate(reason, "termination-escalation");
+    containment
+        .audit
+        .kill_child(child, reason, "termination-direct-child");
 }
 
 fn redact_command(command: &[OsString]) -> Vec<String> {
@@ -1309,12 +1651,19 @@ fn sampled_memory_peak(_: u64) -> Option<MemoryPeak> {
 #[cfg(windows)]
 struct Containment {
     job: windows_sys::Win32::Foundation::HANDLE,
+    root_pid: u32,
     maximum_processes: u32,
+    audit: Arc<TerminationAudit>,
 }
 
 #[cfg(windows)]
 impl Containment {
-    fn attach(child: &Child, hard_limit: u64, maximum_processes: u32) -> Result<Self> {
+    fn attach(
+        child: &Child,
+        hard_limit: u64,
+        maximum_processes: u32,
+        audit: Arc<TerminationAudit>,
+    ) -> Result<Self> {
         use std::mem::{size_of, zeroed};
         use std::os::windows::io::AsRawHandle;
         use windows_sys::Win32::System::JobObjects::{
@@ -1352,16 +1701,33 @@ impl Containment {
         }
         Ok(Self {
             job,
+            root_pid: child.id(),
             maximum_processes,
+            audit,
         })
     }
 
-    fn request_termination(&self, child: &mut Child) {
-        let _ = child.kill();
+    fn request_termination(&self, child: &mut Child, reason: &'static str, phase: &'static str) {
+        self.audit.kill_child(child, reason, phase);
     }
 
-    fn force_terminate(&self) {
-        unsafe { windows_sys::Win32::System::JobObjects::TerminateJobObject(self.job, 125) };
+    fn force_terminate(&self, reason: &'static str, phase: &'static str) {
+        let attempt = self.audit.begin(
+            reason,
+            phase,
+            "terminate-job-object",
+            TerminationTarget::OwnedJob {
+                root_pid: self.root_pid,
+            },
+            None,
+        );
+        let result =
+            unsafe { windows_sys::Win32::System::JobObjects::TerminateJobObject(self.job, 125) };
+        let os_error_code = (result == 0)
+            .then(std::io::Error::last_os_error)
+            .and_then(|error| error.raw_os_error());
+        self.audit
+            .finish(attempt, result != 0, Some(result), os_error_code);
     }
 
     fn kernel_memory_peak(&self) -> Option<MemoryPeak> {
@@ -1473,14 +1839,28 @@ impl Containment {
 #[cfg(unix)]
 impl Drop for Containment {
     fn drop(&mut self) {
-        self.force_terminate();
+        self.force_terminate("containment-drop", "drop-cleanup");
     }
 }
 
 #[cfg(windows)]
 impl Drop for Containment {
     fn drop(&mut self) {
-        unsafe { windows_sys::Win32::Foundation::CloseHandle(self.job) };
+        let attempt = self.audit.begin(
+            "containment-drop",
+            "drop-cleanup",
+            "close-kill-on-close-job",
+            TerminationTarget::OwnedJob {
+                root_pid: self.root_pid,
+            },
+            None,
+        );
+        let result = unsafe { windows_sys::Win32::Foundation::CloseHandle(self.job) };
+        let os_error_code = (result == 0)
+            .then(std::io::Error::last_os_error)
+            .and_then(|error| error.raw_os_error());
+        self.audit
+            .finish(attempt, result != 0, Some(result), os_error_code);
     }
 }
 
@@ -1488,23 +1868,58 @@ impl Drop for Containment {
 struct Containment {
     process_group: i32,
     maximum_processes: u32,
+    audit: Arc<TerminationAudit>,
 }
 
 #[cfg(unix)]
 impl Containment {
-    fn attach(child: &Child, _: u64, maximum_processes: u32) -> Result<Self> {
+    fn attach(
+        child: &Child,
+        _: u64,
+        maximum_processes: u32,
+        audit: Arc<TerminationAudit>,
+    ) -> Result<Self> {
         Ok(Self {
             process_group: child.id() as i32,
             maximum_processes,
+            audit,
         })
     }
 
-    fn request_termination(&self, _: &mut Child) {
-        unsafe { libc::kill(-self.process_group, libc::SIGTERM) };
+    fn request_termination(&self, _: &mut Child, reason: &'static str, phase: &'static str) {
+        let attempt = self.audit.begin(
+            reason,
+            phase,
+            "unix-kill-process-group",
+            TerminationTarget::ProcessGroup {
+                pgid: self.process_group as u32,
+            },
+            Some(libc::SIGTERM),
+        );
+        let result = unsafe { libc::kill(-self.process_group, libc::SIGTERM) };
+        let os_error_code = (result != 0)
+            .then(std::io::Error::last_os_error)
+            .and_then(|error| error.raw_os_error());
+        self.audit
+            .finish(attempt, result == 0, Some(result), os_error_code);
     }
 
-    fn force_terminate(&self) {
-        unsafe { libc::kill(-self.process_group, libc::SIGKILL) };
+    fn force_terminate(&self, reason: &'static str, phase: &'static str) {
+        let attempt = self.audit.begin(
+            reason,
+            phase,
+            "unix-kill-process-group",
+            TerminationTarget::ProcessGroup {
+                pgid: self.process_group as u32,
+            },
+            Some(libc::SIGKILL),
+        );
+        let result = unsafe { libc::kill(-self.process_group, libc::SIGKILL) };
+        let os_error_code = (result != 0)
+            .then(std::io::Error::last_os_error)
+            .and_then(|error| error.raw_os_error());
+        self.audit
+            .finish(attempt, result == 0, Some(result), os_error_code);
     }
 
     fn kernel_memory_peak(&self) -> Option<MemoryPeak> {
@@ -1523,17 +1938,19 @@ impl Containment {
 }
 
 #[cfg(not(any(windows, unix)))]
-struct Containment;
+struct Containment {
+    audit: Arc<TerminationAudit>,
+}
 
 #[cfg(not(any(windows, unix)))]
 impl Containment {
-    fn attach(_: &Child, _: u64, _: u32) -> Result<Self> {
+    fn attach(_: &Child, _: u64, _: u32, _: Arc<TerminationAudit>) -> Result<Self> {
         Err(Error::runtime("process containment is unsupported"))
     }
-    fn request_termination(&self, child: &mut Child) {
-        let _ = child.kill();
+    fn request_termination(&self, child: &mut Child, reason: &'static str, phase: &'static str) {
+        self.audit.kill_child(child, reason, phase);
     }
-    fn force_terminate(&self) {}
+    fn force_terminate(&self, _: &'static str, _: &'static str) {}
     fn kernel_memory_peak(&self) -> Option<MemoryPeak> {
         None
     }
@@ -1614,6 +2031,74 @@ pub(crate) fn pid_alive(_: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn termination_audit_preserves_wait_boundary_and_post_receipt_cleanup() {
+        let audit = TerminationAudit::new("termination-audit-fixture", Instant::now());
+        let before_wait = audit.begin(
+            "timeout",
+            "termination-request",
+            "unix-kill-process-group",
+            TerminationTarget::ProcessGroup { pgid: 42 },
+            Some(libc::SIGTERM),
+        );
+        // Completion must retain whether wait was observed when the request
+        // started, even if the observation changes before its record is stored.
+        audit.observe_child_wait_status();
+        audit.finish(before_wait, false, Some(-1), Some(libc::ESRCH));
+        let receipt = serde_json::to_value(audit.take_receipt_snapshot()).unwrap();
+        assert_eq!(receipt["snapshot_phase"], "before-containment-drop");
+        assert_eq!(receipt["attempts"].as_array().unwrap().len(), 1);
+        let first = &receipt["attempts"][0];
+        assert_eq!(first["sequence"], 1);
+        assert_eq!(first["child_wait_status_observed"], false);
+        assert_eq!(
+            first["target"],
+            json!({"kind": "process-group", "pgid": 42})
+        );
+        assert_eq!(first["signal"], libc::SIGTERM);
+        assert_eq!(first["succeeded"], false);
+        assert_eq!(first["return_value"], -1);
+        assert_eq!(first["os_error_code"], libc::ESRCH);
+
+        let after_receipt = audit.begin(
+            "containment-drop",
+            "drop-cleanup",
+            "unix-kill-process-group",
+            TerminationTarget::ProcessGroup { pgid: 42 },
+            Some(libc::SIGKILL),
+        );
+        audit.finish(after_receipt, false, Some(-1), Some(libc::ESRCH));
+        let later = audit.take_receipt_snapshot();
+        assert_eq!(later.attempts.len(), 1);
+        let cleanup = &later.attempts[0];
+        assert_eq!(cleanup.sequence, 2);
+        assert!(cleanup.child_wait_status_observed);
+        assert!(cleanup.completed_elapsed_ns >= cleanup.started_elapsed_ns);
+        let mut event = Vec::new();
+        audit.write_event(&mut event, cleanup).unwrap();
+        assert_eq!(event.last(), Some(&b'\n'));
+        let event: serde_json::Value = serde_json::from_slice(&event).unwrap();
+        assert_eq!(event["schema_id"], "clearra.runtime-termination-attempt.v1");
+        assert_eq!(event["run_id"], "termination-audit-fixture");
+        assert_eq!(event["attempt"]["phase"], "drop-cleanup");
+        assert_eq!(event["attempt"]["signal"], libc::SIGKILL);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn process_diagnostics_retain_only_allowlisted_status_metadata() {
+        assert_eq!(
+            filter_permission_status(
+                "Name:\tignored\nUid:\t1000 1000 1000 1000\nVmRSS:\t42 kB\n\
+                 CapEff:\t0000000000000000\nNoNewPrivs:\t1\nSeccomp:\t2\n\
+                 Seccomp_filters:\t1\nUnknown:\tignored\n"
+            ),
+            "Uid:\t1000 1000 1000 1000\nCapEff:\t0000000000000000\n\
+             NoNewPrivs:\t1\nSeccomp:\t2\nSeccomp_filters:\t1"
+        );
+    }
 
     #[test]
     fn owner_lease_waits_for_eof_after_nonempty_input() {

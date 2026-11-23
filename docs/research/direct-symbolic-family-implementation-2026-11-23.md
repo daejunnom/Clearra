@@ -14,6 +14,13 @@
 두 SIGKILL 미완료 결과, geometry 생성자 차이와 rank 2 Down 병목을 정리했다.
 아래 초기 구현 검증과 후속 대형 실행의 확인 범위를 구분해 읽어야 한다.
 
+그 뒤 진행한 범용 호환성 필터·row-prefix 재사용·병렬 이동·CTK4 구현은
+[후속 구현 및 계측](symbolic-compatibility-ctk4-2026-11-23.md)에 정리했다.
+최종 후속 후보는 Full4 rank 2를 통과했지만 rank 3 이동 단계에서 SIGKILL로
+종료됐으며, Full4 완주와 Full6 실행은 아직 확인하지 못했다.
+빌드 중복·실제 Cargo timings·종료 발신자 조사 범위는
+[빌드와 SIGKILL 진단](build-and-signal-diagnostics-2026-11-23.md)을 따른다.
+
 설계 근거와 반례 검토는
 [Full 6L: 완성 후보 전개를 제거하는 family 집합 전이](full6l-direct-family-evaluation-2026-11-23.md)에
 있다. 그 문서는 구현 전 설계 기록이고, 여기서는 실제 구현과 남아 있는 경계를 구분한다.

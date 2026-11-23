@@ -213,6 +213,7 @@ dependencies = [
  "clearra-core-domain",
  "clearra-core-ffi",
  "clearra-coverage",
+ "clearra-ctk4",
  "clearra-finesse",
  "clearra-fumen",
  "clearra-geometry",
@@ -256,6 +257,13 @@ dependencies = [
 [[package]]
 name = "clearra-ctk3"
 version = "0.9.1"
+
+[[package]]
+name = "clearra-ctk4"
+version = "0.9.1"
+dependencies = [
+ "sha2",
+]
 
 [[package]]
 name = "clearra-exact-cover"
@@ -593,6 +601,23 @@ version = "0.9.1"
 dependencies = [
  "clearra-core-domain",
  "clearra-coverage",
+]
+
+[[package]]
+name = "clearra-symbolic-bench"
+version = "0.9.1"
+dependencies = [
+ "clearra-core-domain",
+ "clearra-core-executor",
+ "clearra-ctk3",
+ "clearra-ctk4",
+ "clearra-objectives",
+ "clearra-pc-graph",
+ "clearra-problem",
+ "clearra-rules",
+ "clearra-supply",
+ "serde_json",
+ "sha2",
 ]
 
 [[package]]

@@ -39,13 +39,16 @@ use clearra_supply::QueueObservationPolicy;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
+#[path = "support/symbolic_archive.rs"]
+mod symbolic_archive;
+
 const SOURCE_COUNT: usize = 4_233_600;
 const SOURCE_LENGTH: usize = 11;
 const PLACEMENTS: usize = 10;
 const PAGE_SIZE: usize = 2_048;
 const ABSENT: u64 = u64::MAX;
 const SCHEMA: &str = "clearra.symbolic-family-comparison-run.v1";
-const USAGE: &str = "usage:\n  symbolic_family_compare --backend legacy|symbolic --output-prefix PATH\n  symbolic_family_compare --compare LEGACY_PREFIX SYMBOLIC_PREFIX [--output-prefix PATH]\n\nThe fixed request is empty 4L, Jstris180, 10 locks, actual Standard7Bag 11 draws,\nenabled empty Hold, FullQueueOracle, CountUnique, Omit, Summary. No time limit\nor candidate fallback is installed. Runs require managed benchmark-search.\nPrefixes must be new and below _local/artifacts; parent directories must exist.\nThe comparison covers complete identity and global source sets, not their joint relation.";
+const USAGE: &str = "usage:\n  symbolic_family_compare --backend legacy|symbolic --output-prefix PATH [--archive-only]\n  symbolic_family_compare --compare LEGACY_PREFIX SYMBOLIC_PREFIX [--output-prefix PATH]\n\nThe fixed request is empty 4L, Jstris180, 10 locks, actual Standard7Bag 11 draws,\nenabled empty Hold, FullQueueOracle, CountUnique, Omit, Summary. No time limit\nor candidate fallback is installed. Runs require managed benchmark-search.\nPrefixes must be new and below _local/artifacts; parent directories must exist.\nSymbolic runs save CTK4 before any identity export. --archive-only skips\nidentity/source enumeration and is valid only with --backend symbolic.\nThe comparison requires complete identity and global source sets, not their joint relation.";
 
 #[derive(Clone, Copy)]
 enum Backend {
@@ -66,6 +69,7 @@ enum Command {
     Run {
         backend: Backend,
         prefix: PathBuf,
+        archive_only: bool,
     },
     Compare {
         left: PathBuf,
@@ -92,7 +96,11 @@ fn main_on_product_stack() -> i32 {
         return 0;
     }
     let outcome = parse(args.into_iter()).and_then(|command| match command {
-        Command::Run { backend, prefix } => run(backend, &prefix),
+        Command::Run {
+            backend,
+            prefix,
+            archive_only,
+        } => run(backend, &prefix, archive_only),
         Command::Compare {
             left,
             right,
@@ -113,8 +121,10 @@ fn parse(mut args: impl Iterator<Item = String>) -> Result<Command, String> {
     let mut backend = None;
     let mut prefix = None;
     let mut comparison = None;
+    let mut archive_only = false;
     while let Some(flag) = args.next() {
         match flag.as_str() {
+            "--archive-only" if !archive_only => archive_only = true,
             "--backend" if backend.is_none() => {
                 backend = Some(match args.next().as_deref() {
                     Some("legacy") => Backend::Legacy,
@@ -135,8 +145,16 @@ fn parse(mut args: impl Iterator<Item = String>) -> Result<Command, String> {
         }
     }
     match (backend, comparison, prefix) {
-        (Some(backend), None, Some(prefix)) => Ok(Command::Run { backend, prefix }),
-        (None, Some((left, right)), prefix) => Ok(Command::Compare {
+        (Some(backend), None, Some(prefix))
+            if !archive_only || matches!(backend, Backend::Symbolic) =>
+        {
+            Ok(Command::Run {
+                backend,
+                prefix,
+                archive_only,
+            })
+        }
+        (None, Some((left, right)), prefix) if !archive_only => Ok(Command::Compare {
             left,
             right,
             prefix,
@@ -145,7 +163,7 @@ fn parse(mut args: impl Iterator<Item = String>) -> Result<Command, String> {
     }
 }
 
-fn run(backend: Backend, prefix: &Path) -> Result<(), String> {
+fn run(backend: Backend, prefix: &Path, archive_only: bool) -> Result<(), String> {
     let started = Instant::now();
     let progress = Arc::new(ProgressState::new(started));
     let mut artifacts = Artifacts::create(prefix)?;
@@ -155,6 +173,9 @@ fn run(backend: Backend, prefix: &Path) -> Result<(), String> {
         "comparison_scope": "complete identity set and global original-source set only",
         "implicit_deadline_seconds": null, "coverage_capture": false,
         "candidate_fallback": false,
+        "archive_only": archive_only,
+        "identity_export_complete": false,
+        "global_coverage_export_complete": false,
         "build": {
             "compiled_source_commit": option_env!("CLEARRA_SOURCE_COMMIT"),
             "compiled_source_tree": option_env!("CLEARRA_SOURCE_TREE"),
@@ -172,7 +193,13 @@ fn run(backend: Backend, prefix: &Path) -> Result<(), String> {
     artifacts.checkpoint(&report)?;
     eprintln!("{}", json!({"event": "initial", "report": report}));
     let sampler = Sampler::start(backend.name(), Arc::clone(&progress))?;
-    let outcome = execute(backend, &mut artifacts, &mut report, &progress);
+    let outcome = execute(
+        backend,
+        archive_only,
+        &mut artifacts,
+        &mut report,
+        &progress,
+    );
     let sampler_outcome = sampler.stop();
     let outcome = outcome.and(sampler_outcome);
     report["total_seconds"] = json!(started.elapsed().as_secs_f64());
@@ -181,7 +208,11 @@ fn run(backend: Backend, prefix: &Path) -> Result<(), String> {
     match &outcome {
         Ok(()) => {
             report["complete"] = json!(true);
-            report["status"] = json!("completed-identity-and-global-coverage-export");
+            report["status"] = json!(if archive_only {
+                "completed-shared-dag-archive"
+            } else {
+                "completed-identity-and-global-coverage-export"
+            });
         }
         Err(error) => {
             report["complete"] = json!(false);
@@ -196,6 +227,7 @@ fn run(backend: Backend, prefix: &Path) -> Result<(), String> {
 
 fn execute(
     backend: Backend,
+    archive_only: bool,
     artifacts: &mut Artifacts,
     report: &mut Value,
     progress: &Arc<ProgressState>,
@@ -271,6 +303,13 @@ fn execute(
             report["search_seconds"] = json!(search_started.elapsed().as_secs_f64());
             let mut result = outcome.map_err(|error| error.to_string())?;
             report["symbolic_report"] = symbolic_report(result.report());
+            report["cpu"]["symbolic_parallel_claim"] = json!(result
+                .report()
+                .ranks
+                .iter()
+                .any(|rank| rank.movement_parallel.peak_concurrent_movement_tasks > 1));
+            report["cpu"]["parallel_scope"] =
+                json!("piece movement; joint ZDD filtering has one owner");
             if result.report().source_count != SOURCE_COUNT as u128
                 || result.source_length() != SOURCE_LENGTH
             {
@@ -282,6 +321,25 @@ fn execute(
                 json!(result.report().covered_source_count.to_string());
             search_checkpoint(artifacts, report, progress)?;
             let evidence_started = Instant::now();
+            progress
+                .phase
+                .store((PHASES.len() - 1) as u32, Ordering::Relaxed);
+            report["archive"] = symbolic_archive::persist(
+                &mut result,
+                &artifacts.archive,
+                &json!({
+                    "source_fingerprint_sha256": report["source_fingerprint_sha256"],
+                    "request_fingerprint_sha256": report["request_fingerprint_sha256"],
+                    "build": report["build"],
+                }),
+                &control,
+            )?;
+            artifacts.checkpoint(report)?;
+            if archive_only {
+                report["evidence_seconds"] = json!(evidence_started.elapsed().as_secs_f64());
+                progress.phase.store(7, Ordering::Relaxed);
+                return Ok(());
+            }
             progress.phase.store(3, Ordering::Relaxed);
             let started = Instant::now();
             let count = usize::try_from(result.report().unique_solution_count)
@@ -585,6 +643,23 @@ fn popcount(words: &[u64]) -> u64 {
 }
 
 fn symbolic_report(report: &SymbolicFamilyReport) -> Value {
+    let ranks = report.ranks.iter().map(|rank| json!({
+        "placed_pieces": rank.placed_pieces, "supply_states": rank.supply_states,
+        "joint_members": rank.joint_members.to_string(),
+        "set_nodes_before_compaction": rank.set_nodes_before_compaction,
+        "set_nodes_after_compaction": rank.set_nodes_after_compaction,
+        "set_compaction_peak_bytes_estimate": rank.set_compaction_peak_bytes_estimate,
+        "predicate_nodes": rank.predicate_nodes, "derivative_nodes": rank.derivative_nodes,
+        "movement_poses": rank.movement_poses, "guarded_movement_edges": rank.guarded_movement_edges,
+        "movement_propagations": rank.movement_propagations.to_string(),
+        "legal_row_queries": rank.legal_row_queries.to_string(), "geometry_filters": rank.geometry_filters.to_string(),
+        "compatibility_cache_bytes_estimate": rank.compatibility_cache_bytes_estimate,
+        "compatibility_cache_peak_bytes_estimate": rank.compatibility_cache_peak_bytes_estimate,
+        "compatibility_cache_releases": rank.compatibility_cache_releases,
+        "compatibility_filter_misses": rank.compatibility_filter_misses.to_string(),
+        "compatibility_guard_misses": rank.compatibility_guard_misses.to_string(),
+        "movement_parallel": symbolic_archive::movement_parallel(&rank.movement_parallel),
+    })).collect::<Vec<_>>();
     json!({
         "unique_solution_count": report.unique_solution_count.to_string(),
         "covered_source_count": report.covered_source_count.to_string(),
@@ -600,21 +675,19 @@ fn symbolic_report(report: &SymbolicFamilyReport) -> Value {
         "predicate_peak_nodes": report.predicate_peak_nodes, "predicate_work_steps": report.predicate_work_steps.to_string(),
         "bridge_work_steps": report.bridge_work_steps.to_string(), "derivative_work_steps": report.derivative_work_steps.to_string(),
         "derivative_cache_misses": report.derivative_cache_misses.to_string(),
+        "compatibility_work_steps": report.compatibility_work_steps.to_string(),
+        "compatibility_filter_misses": report.compatibility_filter_misses.to_string(),
+        "compatibility_guard_misses": report.compatibility_guard_misses.to_string(),
+        "compatibility_saturated_unions": report.compatibility_saturated_unions.to_string(),
+        "compatibility_union_remainder_calls": report.compatibility_union_remainder_calls.to_string(),
+        "compatibility_union_remainder_created_nodes": report.compatibility_union_remainder_created_nodes.to_string(),
+        "compatibility_union_remainder_work_steps": report.compatibility_union_remainder_work_steps.to_string(),
+        "retained_compatibility_bytes_estimate": report.retained_compatibility_bytes_estimate,
         "retained_set_bytes_estimate": report.retained_set_bytes_estimate,
         "retained_predicate_bytes_estimate": report.retained_predicate_bytes_estimate,
         "retained_derivative_bytes_estimate": report.retained_derivative_bytes_estimate,
         "result_compaction_peak_bytes_estimate": report.result_compaction_peak_bytes_estimate,
-        "ranks": report.ranks.iter().map(|rank| json!({
-            "placed_pieces": rank.placed_pieces, "supply_states": rank.supply_states,
-            "joint_members": rank.joint_members.to_string(),
-            "set_nodes_before_compaction": rank.set_nodes_before_compaction,
-            "set_nodes_after_compaction": rank.set_nodes_after_compaction,
-            "set_compaction_peak_bytes_estimate": rank.set_compaction_peak_bytes_estimate,
-            "predicate_nodes": rank.predicate_nodes, "derivative_nodes": rank.derivative_nodes,
-            "movement_poses": rank.movement_poses, "guarded_movement_edges": rank.guarded_movement_edges,
-            "movement_propagations": rank.movement_propagations.to_string(),
-            "legal_row_queries": rank.legal_row_queries.to_string(), "geometry_filters": rank.geometry_filters.to_string(),
-        })).collect::<Vec<_>>(),
+        "ranks": ranks,
     })
 }
 
@@ -622,6 +695,7 @@ struct Artifacts {
     summary: File,
     identities: PathBuf,
     coverage: PathBuf,
+    archive: PathBuf,
 }
 
 impl Artifacts {
@@ -629,7 +703,8 @@ impl Artifacts {
         let prefix = checked_prefix(prefix)?;
         let identities = append(&prefix, ".identities.ctk1");
         let coverage = append(&prefix, ".coverage.u64le");
-        for path in [&identities, &coverage] {
+        let archive = append(&prefix, ".ctk4");
+        for path in [&identities, &coverage, &archive] {
             if path.try_exists().map_err(|error| error.to_string())? {
                 return Err(format!("output already exists: {}", path.display()));
             }
@@ -638,6 +713,7 @@ impl Artifacts {
             summary: new_file(&append(&prefix, ".summary.json"))?,
             identities,
             coverage,
+            archive,
         })
     }
 
@@ -865,6 +941,7 @@ const PHASES: &[&str] = &[
     "source",
     "targets",
     "geometry",
+    "compatibility_certificate",
     "occupancy",
     "templates",
     "initial_down",
@@ -887,6 +964,7 @@ const PHASES: &[&str] = &[
     "final_count",
     "final_compact",
     "result_release",
+    "archive",
 ];
 
 struct ProgressState {
@@ -901,11 +979,18 @@ struct ProgressState {
     work_boolean: AtomicU64,
     work_down: AtomicU64,
     work_bridge: AtomicU64,
+    storage_zdd_nodes: AtomicU64,
+    storage_zdd_retained_bytes: AtomicU64,
+    storage_compatibility_memo_entries: AtomicU64,
+    storage_compatibility_retained_bytes: AtomicU64,
+    storage_generated_geometry_nodes: AtomicU64,
     event_count: AtomicU64,
     export_completed: AtomicU64,
     search_started_ns: AtomicU64,
     geometry_seen: AtomicBool,
     geometry_finished_ns: AtomicU64,
+    geometry_compiler_seen: AtomicBool,
+    geometry_compiler_finished_ns: AtomicU64,
     other: Mutex<Option<ExecutionProgress>>,
 }
 
@@ -923,11 +1008,18 @@ impl ProgressState {
             work_boolean: AtomicU64::new(0),
             work_down: AtomicU64::new(0),
             work_bridge: AtomicU64::new(0),
+            storage_zdd_nodes: AtomicU64::new(ABSENT),
+            storage_zdd_retained_bytes: AtomicU64::new(ABSENT),
+            storage_compatibility_memo_entries: AtomicU64::new(ABSENT),
+            storage_compatibility_retained_bytes: AtomicU64::new(ABSENT),
+            storage_generated_geometry_nodes: AtomicU64::new(ABSENT),
             event_count: AtomicU64::new(0),
             export_completed: AtomicU64::new(0),
             search_started_ns: AtomicU64::new(0),
             geometry_seen: AtomicBool::new(false),
             geometry_finished_ns: AtomicU64::new(0),
+            geometry_compiler_seen: AtomicBool::new(false),
+            geometry_compiler_finished_ns: AtomicU64::new(0),
             other: Mutex::new(None),
         }
     }
@@ -942,6 +1034,7 @@ impl ProgressState {
             (value != ABSENT).then_some(value)
         };
         let geometry = self.geometry_finished_ns.load(Ordering::Relaxed);
+        let compiler = self.geometry_compiler_finished_ns.load(Ordering::Relaxed);
         let search = self.search_started_ns.load(Ordering::Relaxed);
         let other = *self.other.lock().expect("progress event state");
         json!({
@@ -955,10 +1048,20 @@ impl ProgressState {
                 "down": self.work_down.load(Ordering::Relaxed).to_string(),
                 "bridge": self.work_bridge.load(Ordering::Relaxed).to_string(),
             },
+            "latest_symbolic_storage": {
+                "joint_zdd_nodes": optional(&self.storage_zdd_nodes).map(|value| value.to_string()),
+                "joint_zdd_retained_bytes_estimate": optional(&self.storage_zdd_retained_bytes).map(|value| value.to_string()),
+                "compatibility_memo_entries": optional(&self.storage_compatibility_memo_entries).map(|value| value.to_string()),
+                "compatibility_retained_bytes_estimate": optional(&self.storage_compatibility_retained_bytes).map(|value| value.to_string()),
+                "generated_geometry_nodes": optional(&self.storage_generated_geometry_nodes).map(|value| value.to_string()),
+            },
             "event_count": self.event_count.load(Ordering::Relaxed).to_string(),
             "coverage_export_completed": self.export_completed.load(Ordering::Relaxed).to_string(),
             "geometry_completed_seconds_since_start": (geometry != 0).then_some(geometry as f64 / 1e9),
             "geometry_completed_seconds_since_search": (geometry != 0 && geometry >= search).then_some(geometry.saturating_sub(search) as f64 / 1e9),
+            "geometry_compiler_finished_seconds_since_start": (compiler != 0).then_some(compiler as f64 / 1e9),
+            "geometry_compiler_finished_seconds_since_search": (compiler != 0 && compiler >= search).then_some(compiler.saturating_sub(search) as f64 / 1e9),
+            "compatibility_certificate_seconds_observed": (compiler != 0 && geometry >= compiler).then_some(geometry.saturating_sub(compiler) as f64 / 1e9),
             "last_other_event": other.map(|event| json!({"stage": event.stage, "completed": event.completed.to_string(), "total": event.total.map(|total| total.to_string())})),
             "snapshot_scope": "independent relaxed diagnostic fields; not an execution-completeness authority",
         })
@@ -968,8 +1071,14 @@ impl ProgressState {
 impl ProgressSink for ProgressState {
     fn report(&self, event: ExecutionProgress) {
         self.event_count.fetch_add(1, Ordering::Relaxed);
-        // The one geometry boundary is the only clock read in this callback.
+        // Only the two preparation boundaries read a clock in this callback.
         // Work pulses and row/context markers never format, sample RSS or do I/O.
+        if event.stage == "symbolic_phase_compatibility_certificate"
+            && !self.geometry_compiler_seen.swap(true, Ordering::Relaxed)
+        {
+            self.geometry_compiler_finished_ns
+                .store(self.elapsed_ns(), Ordering::Relaxed);
+        }
         if matches!(
             event.stage,
             "symbolic_phase_occupancy" | "geometry-candidate-family"
@@ -983,6 +1092,21 @@ impl ProgressSink for ProgressState {
             "symbolic_work_boolean" => self.work_boolean.store(event.completed, Ordering::Relaxed),
             "symbolic_work_down" => self.work_down.store(event.completed, Ordering::Relaxed),
             "symbolic_work_bridge" => self.work_bridge.store(event.completed, Ordering::Relaxed),
+            "symbolic_storage_zdd_nodes" => self
+                .storage_zdd_nodes
+                .store(event.completed, Ordering::Relaxed),
+            "symbolic_storage_zdd_retained_bytes" => self
+                .storage_zdd_retained_bytes
+                .store(event.completed, Ordering::Relaxed),
+            "symbolic_storage_compatibility_memo_entries" => self
+                .storage_compatibility_memo_entries
+                .store(event.completed, Ordering::Relaxed),
+            "symbolic_storage_compatibility_retained_bytes" => self
+                .storage_compatibility_retained_bytes
+                .store(event.completed, Ordering::Relaxed),
+            "symbolic_storage_generated_geometry_nodes" => self
+                .storage_generated_geometry_nodes
+                .store(event.completed, Ordering::Relaxed),
             "symbolic_context_rank" => {
                 self.rank.store(event.completed, Ordering::Relaxed);
                 self.rank_total

@@ -26,7 +26,7 @@ placement-dependency-pc = []
 qualification-reference = []
 # Explicit research API for processing the geometry family without enumerating
 # complete candidates. It does not change the default product dispatch.
-symbolic-family = []
+symbolic-family = ["dep:clearra-ctk4"]
 
 [[example]]
 name = "native_rust_cpu_abba"
@@ -45,6 +45,7 @@ clearra-accelerator-activation = { path = "../clearra-accelerator-activation" }
 clearra-build-coverage = { path = "../clearra-build-coverage" }
 clearra-core-domain = { path = "../clearra-core-domain" }
 clearra-core-ffi = { path = "../clearra-core-ffi" }
+clearra-ctk4 = { path = "../clearra-ctk4", optional = true }
 clearra-coverage = { path = "../clearra-coverage" }
 clearra-finesse = { path = "../clearra-finesse" }
 clearra-geometry = { path = "../clearra-geometry" }

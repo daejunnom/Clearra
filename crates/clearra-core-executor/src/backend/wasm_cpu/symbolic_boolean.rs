@@ -82,13 +82,37 @@ pub(super) struct BooleanArena {
     variable_count: u32,
     limits: BooleanLimits,
     cancellation: Option<CancellationToken>,
+    secondary_cancellation: Option<CancellationToken>,
     progress_sink: Option<Arc<dyn ProgressSink>>,
+    prefix: Option<Arc<FrozenBooleanPrefix>>,
     nodes: Vec<BooleanNode>,
     unique: HashMap<UniqueKey, BooleanId>,
     applied: HashMap<ApplyKey, BooleanId>,
     work: u64,
     apply_hits: u64,
     peak_nodes: usize,
+}
+
+/// One rank's immutable storage, moved rather than copied from its owner.
+/// Fork IDs share this prefix but their local suffix IDs remain owner-scoped.
+pub(super) struct FrozenBooleanPrefix {
+    owner: u64,
+    variable_count: u32,
+    nodes: Vec<BooleanNode>,
+    unique: HashMap<UniqueKey, BooleanId>,
+    applied: HashMap<ApplyKey, BooleanId>,
+}
+
+impl FrozenBooleanPrefix {
+    pub fn node_count(&self) -> usize {
+        self.nodes.len()
+    }
+
+    pub fn retained_bytes(&self) -> usize {
+        self.nodes.capacity() * core::mem::size_of::<BooleanNode>()
+            + self.unique.capacity() * (core::mem::size_of::<(UniqueKey, BooleanId)>() + 1)
+            + self.applied.capacity() * (core::mem::size_of::<(ApplyKey, BooleanId)>() + 1)
+    }
 }
 
 impl BooleanArena {
@@ -117,7 +141,9 @@ impl BooleanArena {
             variable_count,
             limits,
             cancellation: None,
+            secondary_cancellation: None,
             progress_sink: None,
+            prefix: None,
             nodes,
             unique: HashMap::new(),
             applied: HashMap::new(),
@@ -131,6 +157,10 @@ impl BooleanArena {
         self.cancellation = Some(token);
     }
 
+    pub fn set_secondary_cancellation(&mut self, token: CancellationToken) {
+        self.secondary_cancellation = Some(token);
+    }
+
     pub fn set_progress_sink(&mut self, progress_sink: Option<Arc<dyn ProgressSink>>) {
         self.progress_sink = progress_sink;
     }
@@ -139,14 +169,137 @@ impl BooleanArena {
         self.owner
     }
 
+    /// Accept only this owner or the exact immutable prefix shared by a fork.
+    /// This is for board inputs; a relation's local roots still need an exact
+    /// owner match and must never be interpreted by a sibling fork.
+    pub fn can_read_owner(&self, owner: u64) -> bool {
+        self.owner == owner
+            || self
+                .prefix
+                .as_ref()
+                .is_some_and(|prefix| prefix.owner == owner)
+    }
+
+    pub fn has_unlimited_representation_bounds(&self) -> bool {
+        self.limits.max_nodes == 0 && self.limits.max_work == 0 && self.limits.max_memo_entries == 0
+    }
+
+    /// Move the backing allocations into one shared prefix. No node, interner
+    /// or apply-table cloning occurs. The caller must thaw before rewinding
+    /// below this boundary, after every fork and borrowed result is finished.
+    pub fn freeze_prefix(&mut self) -> Result<Arc<FrozenBooleanPrefix>, BooleanError> {
+        self.check_cancelled()?;
+        if !self.has_unlimited_representation_bounds() {
+            return Err(BooleanError::Unsupported(
+                "boolean_parallel_explicit_bounds",
+            ));
+        }
+        if self.prefix.is_some() {
+            return Err(BooleanError::InvalidInput("boolean_prefix_already_frozen"));
+        }
+        let prefix = Arc::new(FrozenBooleanPrefix {
+            owner: self.owner,
+            variable_count: self.variable_count,
+            nodes: core::mem::take(&mut self.nodes),
+            unique: core::mem::take(&mut self.unique),
+            applied: core::mem::take(&mut self.applied),
+        });
+        self.prefix = Some(Arc::clone(&prefix));
+        Ok(prefix)
+    }
+
+    pub fn fork_prefix(prefix: Arc<FrozenBooleanPrefix>) -> Result<Self, BooleanError> {
+        let owner = NEXT_OWNER
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+                value.checked_add(1)
+            })
+            .map_err(|_| BooleanError::CountOverflow)?;
+        Ok(Self {
+            owner,
+            variable_count: prefix.variable_count,
+            limits: BooleanLimits::default(),
+            cancellation: None,
+            secondary_cancellation: None,
+            progress_sink: None,
+            peak_nodes: prefix.nodes.len(),
+            prefix: Some(prefix),
+            nodes: Vec::new(),
+            unique: HashMap::new(),
+            applied: HashMap::new(),
+            work: 0,
+            apply_hits: 0,
+        })
+    }
+
+    pub fn thaw_prefix(&mut self) -> Result<(), BooleanError> {
+        if !self.nodes.is_empty() || !self.unique.is_empty() || !self.applied.is_empty() {
+            return Err(BooleanError::InvalidInput("boolean_frozen_owner_modified"));
+        }
+        let prefix = self
+            .prefix
+            .take()
+            .ok_or(BooleanError::InvalidInput("boolean_prefix_not_frozen"))?;
+        if prefix.owner != self.owner {
+            self.prefix = Some(prefix);
+            return Err(BooleanError::InvalidInput("boolean_prefix_thaw_owner"));
+        }
+        let prefix = match Arc::try_unwrap(prefix) {
+            Ok(prefix) => prefix,
+            Err(prefix) => {
+                self.prefix = Some(prefix);
+                return Err(BooleanError::InvalidInput("boolean_prefix_still_borrowed"));
+            }
+        };
+        self.nodes = prefix.nodes;
+        self.unique = prefix.unique;
+        self.applied = prefix.applied;
+        Ok(())
+    }
+
+    /// Fold actual fork work into this logical Boolean owner, without claiming
+    /// that disjoint private node peaks occurred simultaneously.
+    pub fn record_fork_work(&mut self, work: u64, hits: u64) -> Result<(), BooleanError> {
+        if !self.has_unlimited_representation_bounds() {
+            return Err(BooleanError::Unsupported(
+                "boolean_parallel_explicit_bounds",
+            ));
+        }
+        self.work = self
+            .work
+            .checked_add(work)
+            .ok_or(BooleanError::CountOverflow)?;
+        self.apply_hits = self.apply_hits.saturating_add(hits);
+        Ok(())
+    }
+
+    fn prefix_node_count(&self) -> usize {
+        self.prefix.as_ref().map_or(0, |prefix| prefix.nodes.len())
+    }
+
+    fn stored_node(&self, root: BooleanId) -> Option<BooleanNode> {
+        let index = root.0 as usize;
+        let prefix_count = self.prefix_node_count();
+        if index < prefix_count {
+            self.prefix.as_ref()?.nodes.get(index).copied()
+        } else {
+            self.nodes.get(index - prefix_count).copied()
+        }
+    }
+
+    fn cached_apply(&self, key: &ApplyKey) -> Option<BooleanId> {
+        self.applied.get(key).copied().or_else(|| {
+            self.prefix
+                .as_ref()
+                .and_then(|prefix| prefix.applied.get(key).copied())
+        })
+    }
+
     pub fn node(&self, root: BooleanId) -> Option<BooleanNode> {
-        (root.0 >= 2)
-            .then(|| self.nodes.get(root.0 as usize).copied())
-            .flatten()
+        (root.0 >= 2).then(|| self.stored_node(root)).flatten()
     }
 
     pub fn validate(&self, root: BooleanId) -> Result<(), BooleanError> {
-        if (root.0 as usize) < self.nodes.len() {
+        if (root.0 as usize) < self.node_count() {
             Ok(())
         } else {
             Err(BooleanError::InvalidInput("boolean_root_outside_arena"))
@@ -154,7 +307,7 @@ impl BooleanArena {
     }
 
     pub fn node_count(&self) -> usize {
-        self.nodes.len()
+        self.prefix_node_count() + self.nodes.len()
     }
 
     pub const fn peak_node_count(&self) -> usize {
@@ -173,6 +326,16 @@ impl BooleanArena {
     /// HashMap capacity omits spare buckets, controls and alignment. Temporary
     /// apply/cofactor stacks and the cofactor memo also contribute to peak use.
     pub fn retained_bytes(&self) -> usize {
+        self.private_retained_bytes()
+            + self
+                .prefix
+                .as_ref()
+                .map_or(0, |prefix| prefix.retained_bytes())
+    }
+
+    /// Estimated owned suffix payload only. Count a shared prefix once when
+    /// aggregating workers; this excludes transient apply stacks and RSS.
+    pub fn private_retained_bytes(&self) -> usize {
         self.nodes.capacity() * core::mem::size_of::<BooleanNode>()
             + self.unique.capacity() * (core::mem::size_of::<(UniqueKey, BooleanId)>() + 1)
             + self.applied.capacity() * (core::mem::size_of::<(ApplyKey, BooleanId)>() + 1)
@@ -181,7 +344,7 @@ impl BooleanArena {
     pub fn checkpoint(&self) -> BooleanCheckpoint {
         BooleanCheckpoint {
             owner: self.owner,
-            node_count: self.nodes.len(),
+            node_count: self.node_count(),
         }
     }
 
@@ -189,10 +352,13 @@ impl BooleanArena {
     /// Persistent occupancy roots keep their IDs; intermediate memo IDs do not.
     /// Backing capacities remain allocated for reuse; this is logical reclamation.
     pub fn rewind(&mut self, checkpoint: BooleanCheckpoint) -> Result<(), BooleanError> {
-        if checkpoint.owner != self.owner || checkpoint.node_count > self.nodes.len() {
+        if checkpoint.owner != self.owner
+            || checkpoint.node_count > self.node_count()
+            || checkpoint.node_count < self.prefix_node_count()
+        {
             return Err(BooleanError::InvalidInput("boolean_checkpoint_owner"));
         }
-        while self.nodes.len() > checkpoint.node_count {
+        while self.node_count() > checkpoint.node_count {
             let node = self.nodes.pop().expect("checkpoint length checked");
             self.unique.remove(&(node.variable, node.low, node.high));
         }
@@ -220,8 +386,12 @@ impl BooleanArena {
         if low == high {
             return Ok(low);
         }
-        if self.nodes[low.0 as usize].variable <= variable
-            || self.nodes[high.0 as usize].variable <= variable
+        if self.stored_node(low).expect("validated low root").variable <= variable
+            || self
+                .stored_node(high)
+                .expect("validated high root")
+                .variable
+                <= variable
         {
             return Err(BooleanError::InvalidInput("boolean_variable_order"));
         }
@@ -229,8 +399,15 @@ impl BooleanArena {
         if let Some(&root) = self.unique.get(&key) {
             return Ok(root);
         }
-        if self.nodes.len() >= u32::MAX as usize
-            || (self.limits.max_nodes != 0 && self.nodes.len() >= self.limits.max_nodes)
+        if let Some(root) = self
+            .prefix
+            .as_ref()
+            .and_then(|prefix| prefix.unique.get(&key))
+        {
+            return Ok(*root);
+        }
+        if self.node_count() >= u32::MAX as usize
+            || (self.limits.max_nodes != 0 && self.node_count() >= self.limits.max_nodes)
         {
             return Err(BooleanError::NodeLimit);
         }
@@ -240,14 +417,14 @@ impl BooleanArena {
         self.unique
             .try_reserve(1)
             .map_err(|_| BooleanError::Allocation)?;
-        let root = BooleanId(self.nodes.len() as u32);
+        let root = BooleanId(self.node_count() as u32);
         self.nodes.push(BooleanNode {
             variable,
             low,
             high,
         });
         self.unique.insert(key, root);
-        self.peak_nodes = self.peak_nodes.max(self.nodes.len());
+        self.peak_nodes = self.peak_nodes.max(self.node_count());
         Ok(root)
     }
 
@@ -298,7 +475,7 @@ impl BooleanArena {
         if variable >= self.variable_count {
             return Err(BooleanError::InvalidInput("boolean_cofactor_variable"));
         }
-        let node = self.nodes[root.0 as usize];
+        let node = self.stored_node(root).expect("validated cofactor root");
         if node.variable > variable {
             return Ok(root);
         }
@@ -314,7 +491,7 @@ impl BooleanArena {
             self.tick()?;
             match task {
                 RestrictTask::Visit(id) => {
-                    let node = self.nodes[id.0 as usize];
+                    let node = self.stored_node(id).expect("cofactor child in arena");
                     let known = if node.variable > variable {
                         Some(id)
                     } else if node.variable == variable {
@@ -369,6 +546,10 @@ impl BooleanArena {
             .cancellation
             .as_ref()
             .is_some_and(CancellationToken::is_cancelled)
+            || self
+                .secondary_cancellation
+                .as_ref()
+                .is_some_and(CancellationToken::is_cancelled)
         {
             return Err(BooleanError::Cancelled);
         }
@@ -383,13 +564,8 @@ impl BooleanArena {
     }
 
     fn tick(&mut self) -> Result<(), BooleanError> {
-        if self.work & 255 == 0
-            && self
-                .cancellation
-                .as_ref()
-                .is_some_and(CancellationToken::is_cancelled)
-        {
-            return Err(BooleanError::Cancelled);
+        if self.work & 255 == 0 {
+            self.check_cancelled()?;
         }
         if self.limits.max_work != 0 && self.work >= self.limits.max_work {
             return Err(BooleanError::WorkLimit);
@@ -446,7 +622,7 @@ impl BooleanArena {
         if let Some(root) = Self::trivial(initial) {
             return Ok(root);
         }
-        if let Some(&root) = self.applied.get(&initial) {
+        if let Some(root) = self.cached_apply(&initial) {
             self.apply_hits = self.apply_hits.saturating_add(1);
             return Ok(root);
         }
@@ -466,7 +642,7 @@ impl BooleanArena {
                         values.push(root);
                         continue;
                     }
-                    if let Some(&root) = self.applied.get(&key) {
+                    if let Some(root) = self.cached_apply(&key) {
                         values
                             .try_reserve(1)
                             .map_err(|_| BooleanError::Allocation)?;
@@ -476,8 +652,8 @@ impl BooleanArena {
                     }
                     self.check_memo_room(self.applied.len())?;
                     let (operation, left, right) = key;
-                    let left_node = self.nodes[left.0 as usize];
-                    let right_node = self.nodes[right.0 as usize];
+                    let left_node = self.stored_node(left).expect("apply left in arena");
+                    let right_node = self.stored_node(right).expect("apply right in arena");
                     let variable = left_node.variable.min(right_node.variable);
                     let (left_low, left_high) = if left_node.variable == variable {
                         (left_node.low, left_node.high)
@@ -522,6 +698,81 @@ impl BooleanArena {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn symbolic_boolean_frozen_prefix_moves_storage_and_keeps_fork_ids_scoped() {
+        let mut owner = BooleanArena::new(8, BooleanLimits::default()).unwrap();
+        let a = owner.variable(2).unwrap();
+        let b = owner.variable(6).unwrap();
+        let shared = owner.and(a, b).unwrap();
+        let checkpoint = owner.checkpoint();
+        let allocation = owner.nodes.as_ptr();
+        let original_count = owner.node_count();
+        let prefix = owner.freeze_prefix().unwrap();
+        assert_eq!(prefix.nodes.as_ptr(), allocation);
+        assert_eq!(owner.node_count(), original_count);
+        let mut left = BooleanArena::fork_prefix(Arc::clone(&prefix)).unwrap();
+        let mut right = BooleanArena::fork_prefix(Arc::clone(&prefix)).unwrap();
+        assert!(left.can_read_owner(owner.owner_id()));
+        assert!(!left.can_read_owner(right.owner_id()));
+        assert_eq!(left.and(a, b).unwrap(), shared);
+        assert_eq!(right.variable(2).unwrap(), a);
+        let left_only = left.variable(1).unwrap();
+        let right_only = right.variable(3).unwrap();
+        // Equal numeric IDs in different suffix owners have different meaning.
+        assert_eq!(left_only, right_only);
+        assert_eq!(left.node(left_only).unwrap().variable, 1);
+        assert_eq!(right.node(right_only).unwrap().variable, 3);
+        assert!(owner.thaw_prefix().is_err());
+        let work = left.work_steps() + right.work_steps();
+        let before = owner.work_steps();
+        owner.record_fork_work(work, 0).unwrap();
+        drop(left);
+        drop(right);
+        drop(prefix);
+        owner.thaw_prefix().unwrap();
+        owner.rewind(checkpoint).unwrap();
+        assert_eq!(owner.nodes.as_ptr(), allocation);
+        assert_eq!(owner.work_steps(), before + work);
+        assert!(owner.evaluate(shared, |variable| variable == 2 || variable == 6));
+    }
+
+    #[test]
+    fn symbolic_boolean_forking_preserves_explicit_bounds_and_secondary_cancel() {
+        for limits in [
+            BooleanLimits {
+                max_nodes: 8,
+                ..BooleanLimits::default()
+            },
+            BooleanLimits {
+                max_work: 8,
+                ..BooleanLimits::default()
+            },
+            BooleanLimits {
+                max_memo_entries: 8,
+                ..BooleanLimits::default()
+            },
+        ] {
+            let mut owner = BooleanArena::new(8, limits).unwrap();
+            let original = owner.variable(2).unwrap();
+            assert!(matches!(
+                owner.freeze_prefix(),
+                Err(BooleanError::Unsupported(_))
+            ));
+            assert_eq!(owner.variable(2).unwrap(), original);
+        }
+        let mut owner = BooleanArena::new(8, BooleanLimits::default()).unwrap();
+        let prefix = owner.freeze_prefix().unwrap();
+        let mut fork = BooleanArena::fork_prefix(Arc::clone(&prefix)).unwrap();
+        let stop = CancellationToken::new();
+        fork.set_secondary_cancellation(stop.clone());
+        stop.handle().cancel();
+        assert_eq!(fork.variable(1), Err(BooleanError::Cancelled));
+        drop(fork);
+        drop(prefix);
+        owner.thaw_prefix().unwrap();
+        assert!(owner.variable(1).is_ok());
+    }
 
     #[test]
     fn symbolic_boolean_preserves_wide_variables_and_boolean_meaning() {

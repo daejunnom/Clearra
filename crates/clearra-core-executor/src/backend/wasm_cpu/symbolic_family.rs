@@ -21,7 +21,8 @@ use clearra_supply::pattern_universe::PieceMultisetKey;
 use super::{
     catalog::GeometryCatalog,
     geometry::compile_symbolic_geometry,
-    geometry_partial_family::{GeometryDownView, ZddArena, ZddError, ZddId, ZddLimits},
+    geometry_compatibility_filter::GeometryCompatibilityFilter,
+    geometry_partial_family::{ZddArena, ZddError, ZddId, ZddLimits},
     reachability::{symbolic_family::SymbolicOccupancy, SharedReachabilityTemplates},
     symbolic_boolean::{BooleanArena, BooleanError, BooleanId, BooleanLimits},
     symbolic_family_bridge::FamilyBridge,
@@ -32,6 +33,10 @@ use super::{
 #[cfg(test)]
 #[path = "symbolic_family_tests.rs"]
 mod tests;
+
+#[path = "symbolic_family_archive.rs"]
+mod archive;
+pub use archive::{SymbolicFamilyArchive, SymbolicFamilyArchiveError, SymbolicFamilyArchiveScope};
 
 /// Explicit research representation bounds. Every zero means unlimited.
 /// These are logical allocation/work bounds, not timeouts or a process RSS
@@ -125,6 +130,32 @@ pub struct SymbolicFamilyRankReport {
     pub movement_propagations: u64,
     pub legal_row_queries: u64,
     pub geometry_filters: u64,
+    /// Retained capacity after completed-piece memo releases in this rank.
+    pub compatibility_cache_bytes_estimate: usize,
+    /// Largest retained capacity at a completed-piece boundary, before release.
+    /// Excludes allocator and transient rehash storage; this is not peak RSS.
+    pub compatibility_cache_peak_bytes_estimate: usize,
+    pub compatibility_cache_releases: usize,
+    pub compatibility_filter_misses: u64,
+    pub compatibility_guard_misses: u64,
+    pub movement_parallel: SymbolicFamilyParallelReport,
+}
+
+/// Movement worker accounting. This does not claim parallel joint-ZDD updates.
+/// Private storage sums are conservative accounting, not simultaneous RSS.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct SymbolicFamilyParallelReport {
+    pub requested_workers: usize,
+    pub eligible_pieces: usize,
+    pub spawned_workers: usize,
+    pub active_workers: usize,
+    pub peak_concurrent_movement_tasks: usize,
+    pub fallback_reason: Option<&'static str>,
+    pub shared_prefix_nodes: usize,
+    pub shared_prefix_retained_bytes_estimate: usize,
+    pub private_node_peak_sum_upper_bound: usize,
+    pub private_retained_bytes_sum_estimate: usize,
+    pub predicate_work_steps: u64,
 }
 
 /// Counts refer to unique normalized placement identities and original source
@@ -149,11 +180,20 @@ pub struct SymbolicFamilyReport {
     pub set_apply_misses: u64,
     pub set_work_steps: u64,
     pub set_compactions: u64,
+    /// Coordinator arena only; worker suffix peaks are reported per rank.
     pub predicate_peak_nodes: usize,
     pub predicate_work_steps: u64,
     pub bridge_work_steps: u64,
     pub derivative_work_steps: u64,
     pub derivative_cache_misses: u64,
+    pub compatibility_work_steps: u64,
+    pub compatibility_filter_misses: u64,
+    pub compatibility_guard_misses: u64,
+    pub compatibility_saturated_unions: u64,
+    pub compatibility_union_remainder_calls: u64,
+    pub compatibility_union_remainder_created_nodes: u64,
+    pub compatibility_union_remainder_work_steps: u64,
+    pub retained_compatibility_bytes_estimate: usize,
     pub retained_set_bytes_estimate: usize,
     pub retained_predicate_bytes_estimate: usize,
     pub retained_derivative_bytes_estimate: usize,
@@ -329,16 +369,20 @@ pub fn solve_symbolic_family(
         .ranks
         .try_reserve_exact(target_depth)
         .map_err(|_| SymbolicFamilyError::Resource("symbolic_rank_report_allocation"))?;
-    let mut down = GeometryDownView::new(&geometry.family, geometry.root, row_count, set_limits)?;
-    down.set_cancellation(control.cancellation.clone());
-    down.set_progress_sink(control.progress_sink.clone());
     let mut row_cells = Vec::new();
     row_cells
         .try_reserve_exact(row_count as usize)
         .map_err(|_| SymbolicFamilyError::Resource("symbolic_catalog_mask_allocation"))?;
     row_cells.extend((0..row_count).map(|row| catalog.skeleton(row).cells));
-    down.set_row_cells(&row_cells)?;
-    drop(row_cells);
+    phase("symbolic_phase_compatibility_certificate");
+    let mut down = GeometryCompatibilityFilter::new(
+        &geometry.family,
+        geometry.root,
+        row_cells,
+        catalog.required_cells(),
+        set_limits,
+        control,
+    )?;
     phase("symbolic_phase_occupancy");
     let mut predicates = BooleanArena::new(
         row_count,
@@ -396,14 +440,22 @@ pub fn solve_symbolic_family(
         phase("symbolic_phase_board");
         let board = occupancy.for_domain(&mut predicates, domain, control)?;
         let mut next = BTreeMap::new();
+        let compatibility_start = down.metrics();
         let mut rank_report = SymbolicFamilyRankReport {
             placed_pieces: rank + 1,
+            compatibility_cache_peak_bytes_estimate: down.retained_bytes(),
             ..SymbolicFamilyRankReport::default()
         };
+        // Supply transitions depend on kind and state, not on physical rows.
+        // Prepare them once so movement workers share one immutable board.
+        let mut ready_by_piece = BTreeMap::new();
+        let mut pieces = Vec::new();
+        pieces
+            .try_reserve_exact(PieceKind::STANDARD_TETROMINOES.len())
+            .map_err(|_| SymbolicFamilyError::Resource("symbolic_piece_task_allocation"))?;
         for piece in PieceKind::STANDARD_TETROMINOES {
             control.report_progress("symbolic_context_piece", piece.as_ascii() as u64, None);
             phase("symbolic_phase_supply");
-            // Compile the small supply product once per kind, not per row.
             let mut ready = BTreeMap::new();
             for (&state, &root) in &current {
                 for transition in
@@ -415,45 +467,166 @@ pub fn solve_symbolic_family(
             if ready.is_empty() {
                 continue;
             }
-            phase("symbolic_phase_movement");
-            let relation = board.compile_piece(&mut predicates, &templates, piece, control)?;
-            let work = relation.work();
-            rank_report.movement_poses += work.poses;
-            rank_report.guarded_movement_edges += work.guarded_edges;
-            rank_report.movement_propagations += work.propagation_edges;
-            phase("symbolic_phase_rows");
-            for row_id in 0..row_count {
-                if catalog.skeleton(row_id).piece != piece {
-                    continue;
-                }
-                check_cancelled(control)?;
-                control.report_progress(
-                    "symbolic_context_row",
-                    u64::from(row_id),
-                    Some(u64::from(row_count)),
-                );
-                rank_report.legal_row_queries += 1;
-                phase("symbolic_phase_row_legal");
-                let legal = relation.legal_row(&mut predicates, row_id, control)?;
-                if legal == BooleanId::FALSE {
-                    continue;
-                }
-                for (&state, &root) in &ready {
-                    phase("symbolic_phase_row_bridge");
-                    let selected = bridge.filter(&mut sets, &predicates, root, legal, control)?;
-                    if selected == ZddId::EMPTY {
-                        continue;
+            ready_by_piece.insert(piece, ready);
+            pieces.push(piece);
+        }
+        let requested_workers = problem.backend_policy().workers();
+        #[cfg(all(feature = "parallel", not(target_family = "wasm")))]
+        let parallel_reason = super::symbolic_family_parallel::parallel_movement_fallback_reason(
+            &predicates,
+            requested_workers,
+            pieces.len(),
+        );
+        #[cfg(not(all(feature = "parallel", not(target_family = "wasm"))))]
+        let parallel_reason = Some("native-parallel-feature-unavailable");
+        let mut parallel_report = SymbolicFamilyParallelReport {
+            requested_workers,
+            eligible_pieces: pieces.len(),
+            fallback_reason: parallel_reason,
+            ..SymbolicFamilyParallelReport::default()
+        };
+        {
+            let mut consume_piece =
+                |piece: PieceKind,
+                 predicate_owner: &BooleanArena,
+                 legal_rows: &[(u32, BooleanId)],
+                 work: super::reachability::symbolic_family::SymbolicReachabilityWork|
+                 -> Result<(), SymbolicFamilyError> {
+                    control.report_progress(
+                        "symbolic_context_piece",
+                        piece.as_ascii() as u64,
+                        None,
+                    );
+                    rank_report.movement_poses += work.poses;
+                    rank_report.guarded_movement_edges += work.guarded_edges;
+                    rank_report.movement_propagations += work.propagation_edges;
+                    phase("symbolic_phase_rows");
+                    let ready = &ready_by_piece[&piece];
+                    for &(row_id, legal) in legal_rows {
+                        check_cancelled(control)?;
+                        control.report_progress(
+                            "symbolic_context_row",
+                            u64::from(row_id),
+                            Some(u64::from(row_count)),
+                        );
+                        rank_report.legal_row_queries += 1;
+                        if legal == BooleanId::FALSE {
+                            continue;
+                        }
+                        for (&state, &root) in ready {
+                            phase("symbolic_phase_row_bridge");
+                            let selected =
+                                bridge.filter(&mut sets, predicate_owner, root, legal, control)?;
+                            if selected == ZddId::EMPTY {
+                                continue;
+                            }
+                            phase("symbolic_phase_row_add");
+                            let extended = sets.add(selected, row_id)?;
+                            rank_report.geometry_filters += 1;
+                            phase("symbolic_phase_row_down");
+                            // Geometry depends only on placement rows. Give
+                            // its memo canonical row prefixes, independent
+                            // of queue/Hold suffix identity, then restrict the
+                            // original relation without changing correlations.
+                            let rows = sets.project_prefix(extended, row_count)?;
+                            let allowed = down.filter_extendible(&mut sets, rows)?;
+                            let extendible = if allowed == rows {
+                                extended
+                            } else {
+                                sets.filter_prefix(extended, allowed, row_count)?
+                            };
+                            phase("symbolic_phase_row_merge");
+                            merge_root(&mut next, state, extendible, &mut sets)?;
+                        }
                     }
-                    phase("symbolic_phase_row_add");
-                    let extended = sets.add(selected, row_id)?;
-                    rank_report.geometry_filters += 1;
-                    phase("symbolic_phase_row_down");
-                    let extendible = down.filter_extendible(&mut sets, extended)?;
-                    phase("symbolic_phase_row_merge");
-                    merge_root(&mut next, state, extendible, &mut sets)?;
+                    // Every query for this piece has been consumed. The next
+                    // piece can recompute derived geometry answers exactly;
+                    // the accepted joint roots remain owned by the ZDD arena.
+                    // Release both memo maps without resetting work or metrics.
+                    rank_report.compatibility_cache_peak_bytes_estimate = rank_report
+                        .compatibility_cache_peak_bytes_estimate
+                        .max(down.retained_bytes());
+                    down.clear_memo();
+                    rank_report.compatibility_cache_releases += 1;
+                    control.report_progress("symbolic_storage_compatibility_memo_entries", 0, None);
+                    control.report_progress(
+                        "symbolic_storage_compatibility_retained_bytes",
+                        down.retained_bytes() as u64,
+                        None,
+                    );
+                    Ok(())
+                };
+            #[cfg(all(feature = "parallel", not(target_family = "wasm")))]
+            if parallel_reason.is_none() {
+                control.report_progress(
+                    "symbolic_context_rank",
+                    (rank + 1) as u64,
+                    Some(target_depth as u64),
+                );
+                phase("symbolic_phase_movement");
+                let parallel = super::symbolic_family_parallel::run_piece_movements(
+                    &board,
+                    &mut predicates,
+                    &templates,
+                    &pieces,
+                    requested_workers,
+                    control,
+                    |movement| {
+                        consume_piece(
+                            movement.piece,
+                            &movement.predicates,
+                            &movement.legal_rows,
+                            movement.work,
+                        )
+                    },
+                )?;
+                parallel_report.spawned_workers = parallel.spawned_workers;
+                parallel_report.active_workers = parallel.active_workers;
+                parallel_report.peak_concurrent_movement_tasks =
+                    parallel.peak_concurrent_movement_tasks;
+                parallel_report.shared_prefix_nodes = parallel.shared_prefix_nodes;
+                parallel_report.shared_prefix_retained_bytes_estimate =
+                    parallel.shared_prefix_retained_bytes_estimate;
+                parallel_report.private_node_peak_sum_upper_bound =
+                    parallel.private_node_peak_sum_upper_bound;
+                parallel_report.private_retained_bytes_sum_estimate =
+                    parallel.private_retained_bytes_sum_estimate;
+                parallel_report.predicate_work_steps = parallel.predicate_work_steps;
+            }
+            if parallel_reason.is_some() {
+                for piece in pieces {
+                    control.report_progress(
+                        "symbolic_context_piece",
+                        piece.as_ascii() as u64,
+                        None,
+                    );
+                    phase("symbolic_phase_movement");
+                    let relation =
+                        board.compile_piece(&mut predicates, &templates, piece, control)?;
+                    let work = relation.work();
+                    let mut legal_rows = Vec::new();
+                    for row_id in 0..row_count {
+                        if catalog.skeleton(row_id).piece != piece {
+                            continue;
+                        }
+                        check_cancelled(control)?;
+                        control.report_progress(
+                            "symbolic_context_row",
+                            u64::from(row_id),
+                            Some(u64::from(row_count)),
+                        );
+                        phase("symbolic_phase_row_legal");
+                        let legal = relation.legal_row(&mut predicates, row_id, control)?;
+                        legal_rows.try_reserve(1).map_err(|_| {
+                            SymbolicFamilyError::Resource("symbolic_legal_rows_allocation")
+                        })?;
+                        legal_rows.push((row_id, legal));
+                    }
+                    consume_piece(piece, &predicates, &legal_rows, work)?;
                 }
             }
         }
+        rank_report.movement_parallel = parallel_report;
         // Reassert the rank to clear stale piece/row context for shared work.
         control.report_progress(
             "symbolic_context_rank",
@@ -468,9 +641,17 @@ pub fn solve_symbolic_family(
         rank_report.joint_members = sets.count(joint_next)?;
         rank_report.supply_states = next.len();
         rank_report.predicate_nodes = predicates.node_count();
-        rank_report.derivative_nodes = down.generated_node_count();
+        rank_report.compatibility_cache_bytes_estimate = down.retained_bytes();
+        let compatibility_end = down.metrics();
+        rank_report.compatibility_filter_misses = compatibility_end
+            .filter_misses
+            .saturating_sub(compatibility_start.filter_misses);
+        rank_report.compatibility_guard_misses = compatibility_end
+            .guard_misses
+            .saturating_sub(compatibility_start.guard_misses);
         rank_report.set_nodes_before_compaction = sets.node_count();
         phase("symbolic_phase_rank_compact");
+        down.clear_memo();
         rank_report.set_compaction_peak_bytes_estimate =
             compact_layer(&mut sets, &mut supply, &mut next)?;
         rank_report.set_nodes_after_compaction = sets.node_count();
@@ -521,10 +702,23 @@ pub fn solve_symbolic_family(
     report.predicate_peak_nodes = predicates.peak_node_count();
     report.predicate_work_steps = predicates.work_steps();
     report.bridge_work_steps = bridge.work_steps();
-    report.derivative_work_steps = down.work_steps();
-    report.derivative_cache_misses = down.metrics().derivative_misses;
+    report.compatibility_work_steps = down.work_steps();
+    report.compatibility_filter_misses = down.metrics().filter_misses;
+    report.compatibility_guard_misses = down.metrics().guard_misses;
+    report.compatibility_saturated_unions = down.metrics().saturated_unions;
+    report.compatibility_union_remainder_calls = down.metrics().union_remainder_calls;
+    report.compatibility_union_remainder_created_nodes =
+        down.metrics().union_remainder_created_nodes;
+    report.compatibility_union_remainder_work_steps = down.metrics().union_remainder_work_steps;
     report.retained_predicate_bytes_estimate = predicates.retained_bytes();
-    report.retained_derivative_bytes_estimate = down.retained_bytes();
+    report.retained_compatibility_bytes_estimate = down.retained_bytes();
+    // All these owners are dead before the final arena copies its live roots.
+    // Retaining them until result construction inflated the compaction peak.
+    drop(down);
+    drop(geometry);
+    drop(occupancy);
+    drop(predicates);
+    drop(bridge);
     let mut roots = [accepted, identities, covered_sources];
     phase("symbolic_phase_final_compact");
     report.result_compaction_peak_bytes_estimate = sets.compact(&mut roots)?.peak_retained_bytes;
@@ -533,12 +727,8 @@ pub fn solve_symbolic_family(
     report.set_compactions = sets.metrics().compactions;
     report.set_work_steps = sets.work_steps();
     report.retained_set_bytes_estimate = sets.retained_bytes();
-    // The result owns neither the original geometry DAG, its derivative memo,
-    // nor movement predicates. Only accepted sets and the catalog survive.
+    // Only accepted sets and the catalog survive in the result.
     phase("symbolic_phase_result_release");
-    drop(down);
-    drop(geometry);
-    drop(occupancy);
     Ok(SymbolicFamilyResult {
         catalog,
         sets,

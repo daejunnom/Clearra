@@ -2042,6 +2042,16 @@ pub(super) fn compile_symbolic_geometry(
         });
     }
     let mut compiler = FamilyCompiler::try_new(catalog.required_cells(), targets.into())?;
+    // These bounds constrain logical nodes/work, not retained bytes. Preserve
+    // the ordinary exact compiler's residual and component sharing; the
+    // resource-authoritative constructor otherwise disables both, even when
+    // this research caller requests no representation limit. Its checked
+    // prefix/stack allocation remains useful at this fallible API boundary.
+    compiler.inventory =
+        TwoBagPlusOneInventory::compile(&compiler.targets, &compiler.admissible_prefixes);
+    compiler.residual_memo = ResidualMemo::new(compiler.target_depth);
+    compiler.residual_memo.inventory_alias_space = compiler.inventory.is_some();
+    compiler.resource_authoritative = false;
     let mut work = 0_u64;
     loop {
         if control.is_cancelled() {

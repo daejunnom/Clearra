@@ -1,5 +1,12 @@
 # Full 4L / P7P4 기존 경로와 직접 symbolic family 비교
 
+이 문서는 최초 비교 snapshot의 기록이다. 이후 geometry 재사용 복원,
+source와 독립적인 row-prefix 필터, 병렬 이동과 CTK4 저장을 구현하고 계측했다.
+현재 결과는 [후속 구현·관측](symbolic-compatibility-ctk4-2026-11-23.md)과
+[빌드·종료 진단](build-and-signal-diagnostics-2026-11-23.md)에 있다.
+최종 후속 후보도 Full4 전체 완료에는 이르지 못했으므로 아래 최초 실행의
+해법 집합 비교 미완료 상태를 성공으로 소급해서 변경하지 않는다.
+
 ## 1. 이번 실행의 결론
 
 2026-11-23에 빈 4L / P7P4를 같은 요청과 같은 최적화 바이너리로 순차 실행했다.

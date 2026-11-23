@@ -8,6 +8,7 @@ members = [
     "crates/clearra-replay",
     "crates/clearra-fumen",
     "crates/clearra-ctk3",
+    "crates/clearra-ctk4",
     "crates/clearra-render",
     "crates/clearra-profiles",
     "crates/clearra-piece-registry",
@@ -48,6 +49,7 @@ members = [
     "tools/clearra-manage",
     "tools/clearra-pc-artifact",
     "tools/clearra-pc4-qualifier",
+    "tools/clearra-symbolic-bench",
 ]
 exclude = ["apps/clearra-desktop/src-tauri"]
 

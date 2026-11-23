@@ -1,0 +1,51 @@
+[package]
+name = "clearra-symbolic-bench"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[features]
+default = [
+    "clearra-core-executor/default",
+    "placement-dependency-pc",
+    "parallel",
+    "symbolic-family",
+]
+# Keep the executable's cfg-based reports aligned with its executor dependency.
+placement-dependency-pc = ["clearra-core-executor/placement-dependency-pc"]
+parallel = ["clearra-core-executor/parallel"]
+symbolic-family = ["clearra-core-executor/symbolic-family"]
+
+# Reuse the existing command sources without pulling the executor package's
+# dev-dependencies, including the FFI test-support feature, into this build.
+[[bin]]
+name = "symbolic_family"
+path = "../../crates/clearra-core-executor/examples/symbolic_family.rs"
+required-features = ["symbolic-family"]
+
+[[bin]]
+name = "symbolic_family_compare"
+path = "../../crates/clearra-core-executor/examples/symbolic_family_compare.rs"
+required-features = ["symbolic-family", "parallel"]
+
+[[bin]]
+name = "symbolic_ctk4"
+path = "src/bin/symbolic_ctk4.rs"
+required-features = ["symbolic-family"]
+
+[dependencies]
+clearra-core-domain = { path = "../../crates/clearra-core-domain" }
+clearra-core-executor = { path = "../../crates/clearra-core-executor", default-features = false }
+clearra-ctk4 = { path = "../../crates/clearra-ctk4" }
+clearra-ctk3 = { path = "../../crates/clearra-ctk3" }
+clearra-objectives = { path = "../../crates/clearra-objectives" }
+clearra-pc-graph = { path = "../../crates/clearra-pc-graph" }
+clearra-problem = { path = "../../crates/clearra-problem" }
+clearra-rules = { path = "../../crates/clearra-rules" }
+clearra-supply = { path = "../../crates/clearra-supply" }
+serde_json.workspace = true
+sha2 = "0.10.9"
+
+[lints]
+workspace = true

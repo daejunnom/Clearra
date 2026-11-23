@@ -196,6 +196,102 @@ fn global_variables_include_the_entire_u32_domain() {
 }
 
 #[test]
+fn prefix_projection_and_semijoin_preserve_correlated_suffixes() {
+    let mut arena = arena();
+    let original: BTreeSet<Vec<u32>> = (0..128_u32)
+        .filter(|bits| bits.count_ones() % 3 != 1)
+        .map(|bits| (0..7).filter(|bit| bits & (1 << bit) != 0).collect())
+        .collect();
+    let references: Vec<_> = original.iter().map(Vec::as_slice).collect();
+    let joint = family(&mut arena, &references);
+    for end in 0..=7 {
+        let projected = arena.project_prefix(joint, end).expect("row projection");
+        let prefixes: BTreeSet<Vec<u32>> = original
+            .iter()
+            .map(|member| member.iter().copied().filter(|&v| v < end).collect())
+            .collect();
+        assert_eq!(members(&mut arena, projected), prefixes);
+        let allowed: BTreeSet<_> = prefixes
+            .iter()
+            .filter(|prefix| prefix.len() % 2 == 0)
+            .cloned()
+            .collect();
+        let references: Vec<_> = allowed.iter().map(Vec::as_slice).collect();
+        let allowed_root = family(&mut arena, &references);
+        let retained = arena
+            .filter_prefix(joint, allowed_root, end)
+            .expect("exact semijoin");
+        let wanted: BTreeSet<_> = original
+            .iter()
+            .filter(|member| {
+                let prefix: Vec<_> = member.iter().copied().filter(|&v| v < end).collect();
+                allowed.contains(&prefix)
+            })
+            .cloned()
+            .collect();
+        assert_eq!(members(&mut arena, retained), wanted);
+        assert_eq!(arena.filter_prefix(joint, projected, end), Ok(joint));
+    }
+
+    let joint = family(&mut arena, &[&[0, 10], &[1, 11], &[10], &[]]);
+    let allowed = family(&mut arena, &[&[], &[0]]);
+    let filtered = arena.filter_prefix(joint, allowed, 10).unwrap();
+    assert_eq!(
+        members(&mut arena, filtered),
+        expected(&[&[0, 10], &[10], &[]])
+    );
+    let empty_prefix = arena.filter_prefix(joint, ZddId::UNIT, 10).unwrap();
+    assert_eq!(members(&mut arena, empty_prefix), expected(&[&[10], &[]]));
+    let missing_prefix = singleton(&mut arena, &[2]);
+    assert_eq!(
+        arena.filter_prefix(joint, missing_prefix, 10),
+        Ok(ZddId::EMPTY)
+    );
+}
+
+#[test]
+fn prefix_operations_skip_source_graph_and_report_refusal() {
+    let mut arena = arena();
+    // A large suffix is kept as one existing root. No exact count or member
+    // expansion is needed, even though it represents more than u128 outcomes.
+    let suffix = power_set(&mut arena, &(100..5100).collect::<Vec<_>>());
+    let joint = arena.mk(1, suffix, suffix).unwrap();
+    let before = arena.work_steps();
+    let rows = arena.project_prefix(joint, 100).unwrap();
+    let only_selected = singleton(&mut arena, &[1]);
+    let expected_root = arena.mk(1, ZddId::EMPTY, suffix).unwrap();
+    assert_eq!(
+        arena.filter_prefix(joint, only_selected, 100),
+        Ok(expected_root)
+    );
+    assert_eq!(arena.filter_prefix(joint, ZddId::UNIT, 100), Ok(suffix));
+    assert!(
+        arena.work_steps() - before < 100,
+        "source nodes were traversed"
+    );
+    assert_eq!(members(&mut arena, rows), expected(&[&[], &[1]]));
+
+    assert_eq!(
+        arena.filter_prefix(joint, suffix, 100),
+        Err(ZddError::InvalidVariableOrder),
+    );
+    assert_eq!(
+        arena.project_prefix(ZddId(u32::MAX), 100),
+        Err(ZddError::InvalidFamily),
+    );
+    arena.budget.limits.max_work = arena.work_steps() + 1;
+    assert_eq!(
+        arena.filter_prefix(joint, only_selected, 100),
+        Err(ZddError::WorkLimit),
+    );
+    assert_eq!(arena.scratch_memo_entries, 0);
+    let cancellation = CancellationToken::new();
+    cancellation.handle().cancel();
+    arena.set_cancellation(cancellation);
+    assert_eq!(arena.project_prefix(joint, 100), Err(ZddError::Cancelled));
+}
+
+#[test]
 fn exact_count_reports_overflow_and_rank_page_skips_large_subtrees() {
     let mut arena = arena();
     let variables = (0..41).collect::<Vec<_>>();
