@@ -416,6 +416,53 @@ fn symbolic_prefix_matches_all_concrete_edges_and_words_without_buildup() {
         (O, o << 40),
     ];
     let (catalog, candidate) = fixture(6, &eleven_os);
+    assert_eq!(
+        eleven_os.len(),
+        super::symbolic_prefix_domain::MAX_OPERATIONS
+    );
+    let oracle = physical_transitions(&catalog, &candidate, KickTableProfileId::Srs90);
+    for reverse in [false, true] {
+        let mut work = SymbolicPrefixWork::default();
+        let control = ExecutionControl::default();
+        let compile = || {
+            SymbolicPrefixOrders::compile(
+                &catalog,
+                &candidate,
+                KickTableProfileId::Srs90,
+                &control,
+                &mut work,
+            )
+            .unwrap()
+        };
+        let relation = if reverse {
+            with_target_reverse(compile)
+        } else {
+            let mut compile = compile;
+            compile()
+        };
+        for (prefix, &allowed) in oracle.iter().enumerate() {
+            for operation in 0..eleven_os.len() {
+                assert_eq!(
+                    relation.local_edge_permission(prefix, operation),
+                    Some(allowed & (1 << operation) != 0),
+                    "maximum operations reverse={reverse} prefix={prefix:#x} op={operation}",
+                );
+            }
+        }
+        let mut cache = PieceOrderLanguageCache::default();
+        let words = relation
+            .compile_language(&mut cache, &mut work)
+            .unwrap()
+            .map_or_else(BTreeSet::new, |root| language_words(&cache, root));
+        // Filling each lower pair of rows, then the last O-shaped hole,
+        // supplies a legal complete order. All operations have the same kind,
+        // so its exact piece language is this single word.
+        assert_eq!(words, BTreeSet::from([vec![O; eleven_os.len()]]));
+        assert_eq!(work.represented_prefixes, (1 << eleven_os.len()) - 1);
+    }
+    let mut twelve_os = eleven_os.to_vec();
+    twelve_os.push((O, o << 42));
+    let (catalog, candidate) = fixture(6, &twelve_os);
     let mut work = SymbolicPrefixWork::default();
     assert!(matches!(
         SymbolicPrefixOrders::compile(

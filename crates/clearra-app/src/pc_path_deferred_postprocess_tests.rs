@@ -31,6 +31,16 @@ fn service() -> AppCoreExecutorService {
         .with_product_retention_budget(crate::ProductRetentionBudget::new(64 * 1024 * 1024))
 }
 
+fn eager_reference_service() -> AppCoreExecutorService {
+    // This oracle deliberately keeps every replay alive. The IIOOO fixture
+    // retains about 44 MiB before the eager product's existing 16x projection
+    // reserve, so it cannot share the lazy product's 64 MiB host contract.
+    // Keep a finite oracle budget; the deferred source and pages use service().
+    AppCoreExecutorService::wasm_cpu().with_product_retention_budget(
+        crate::ProductRetentionBudget::new(crate::ProductRetentionBudget::MAXIMUM_BYTES),
+    )
+}
+
 fn source(
     height: u16,
     board: u64,
@@ -75,7 +85,15 @@ fn source(
 }
 
 fn page_source(problem: &SearchProblem, result: &CoreExecutionResult) -> Arc<PcReplayPageSource> {
-    let mut session = service()
+    page_source_with_service(&service(), problem, result)
+}
+
+fn page_source_with_service(
+    executor: &AppCoreExecutorService,
+    problem: &SearchProblem,
+    result: &CoreExecutionResult,
+) -> Arc<PcReplayPageSource> {
+    let mut session = executor
         .prepare_pc_replay_page_source(problem, result, 0)
         .unwrap();
     for _ in 0..10_000 {
@@ -125,10 +143,44 @@ fn b2b_path_deferred_replays_match_eager_authority_and_every_ordered_witness() {
             let raw_complete = raw.postprocess_execution_complete();
             // Recreate the old eager-before-filter boundary without a product
             // toggle. Its pre-filter traces remain live through postprocess.
-            let eager_input = service()
+            let eager_input = eager_reference_service()
                 .materialize_terminal_replay_partition(raw.clone(), &control)
                 .unwrap();
-            let eager = service()
+            let eager_output_minimum = super::checked_materialized_replay_bytes(
+                eager_input.postprocess_executions(),
+                eager_input.postprocess_executions().len(),
+            )
+            .unwrap();
+            let eager_reference_allowance =
+                super::CompleteReplayWholeLiveBudget::from_result_with_host(
+                    &raw,
+                    eager_reference_service().product_retention_budget,
+                )
+                .unwrap()
+                .checked_output_allowance()
+                .unwrap();
+            // Full Core retention is an upper bound on its replay output;
+            // len-based slots below are a lower bound even after deduplication.
+            assert!(
+                eager_input.checked_resource_retained_bytes().unwrap() <= eager_reference_allowance
+            );
+            if pattern == "IIOOO" {
+                let product_allowance =
+                    super::CompleteReplayWholeLiveBudget::from_result_with_host(
+                        &raw,
+                        service().product_retention_budget,
+                    )
+                    .unwrap()
+                    .checked_output_allowance()
+                    .unwrap();
+                assert!(eager_output_minimum > product_allowance);
+                assert!(matches!(
+                    service().materialize_terminal_replay_partition(raw.clone(), &control),
+                    Err(CoreExecutionError::Pc(message))
+                        if message.starts_with("complete_replay_memory_limit_exceeded:")
+                ));
+            }
+            let eager = eager_reference_service()
                 .postprocess_search_result(eager_input, &control)
                 .unwrap();
             let deferred = service().postprocess_search_result(raw, &control).unwrap();
@@ -155,7 +207,7 @@ fn b2b_path_deferred_replays_match_eager_authority_and_every_ordered_witness() {
                 );
             }
 
-            let old_source = page_source(&problem, &eager);
+            let old_source = page_source_with_service(&eager_reference_service(), &problem, &eager);
             let new_source = page_source(&problem, &deferred);
             assert_eq!(new_source.identity_sha256(), old_source.identity_sha256());
             assert_eq!(new_source.geometry_count(), old_source.geometry_count());
@@ -167,7 +219,7 @@ fn b2b_path_deferred_replays_match_eager_authority_and_every_ordered_witness() {
 
             // An independent complete expansion AFTER filtering is the exact
             // witness/order oracle, including every step and supply state.
-            let expanded = service()
+            let expanded = eager_reference_service()
                 .materialize_terminal_replay_partition(deferred.clone(), &control)
                 .unwrap();
             assert!(expanded.postprocess_execution_complete());
