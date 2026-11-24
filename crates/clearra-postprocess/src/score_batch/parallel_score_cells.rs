@@ -7,7 +7,9 @@ use std::sync::{
     Mutex,
 };
 
-const CELLS_PER_CHUNK: usize = 16;
+// Each cell can contain a very different number of legal physical paths.
+// Claim them individually so a worker cannot retain a sixteen-cell tail.
+const CELLS_PER_CHUNK: usize = 1;
 
 pub(super) fn workspace_count(cells: usize, parallelism: usize) -> usize {
     #[cfg(target_family = "wasm")]
@@ -26,6 +28,7 @@ pub(super) fn materialize(
     policy: ScoreObjectivePolicy,
     profile: &ScoreProfile,
     projection: ExactScoreCellMemoryProjection,
+    source_start: usize,
     control: &ExecutionControl,
     already_retained_bytes: u128,
     max_memory_bytes: u128,
@@ -57,7 +60,8 @@ pub(super) fn materialize(
         },
         |(path, holds), range| {
             let count = range.len();
-            for ordinal in range {
+            for local_ordinal in range {
+                let ordinal = source_start + local_ordinal;
                 let graph = &batch.graphs()[ordinal / projection.pattern_count];
                 let pattern_id = ordinal % projection.pattern_count;
                 let sequence = &batch.patterns()[pattern_id];

@@ -19,6 +19,10 @@ use std::fmt::Write;
 #[path = "parallel_full_height_score_cells.rs"]
 mod parallel_cells;
 
+#[path = "prepared_full_height_score_cells.rs"]
+mod prepared_cells;
+pub use prepared_cells::PreparedFullHeightScoreCells;
+
 use super::{
     exact_scoring_execution_materializer::{
         compact_score_cell_trace_identity, COMPACT_SCORE_CELL_TRACE_ID_BYTES,
@@ -151,19 +155,7 @@ impl FullHeightScoreCellMaterializer {
         let cell_storage_bytes = (cell_capacity as u128).checked_mul(
             (core::mem::size_of::<ScoreCell>() + COMPACT_SCORE_CELL_TRACE_ID_BYTES) as u128,
         )?;
-        let scratch_bytes = (max_path_len as u128)
-            .checked_mul(
-                (core::mem::size_of::<ScoringExecutionEdge>()
-                    + core::mem::size_of::<HoldDecision>()
-                    + core::mem::size_of::<(ScoringExecutionEdge, HoldDecision)>())
-                    as u128,
-            )?
-            .checked_add(FullHeightReplayTrace::checked_step_buffer_bytes(
-                max_path_len,
-            )?)?
-            // Current best and the next exact-score tie key coexist. These
-            // keys are scratch only; output cells use the existing fixed ID.
-            .checked_add(2 * canonical_key_capacity(max_path_len)? as u128)?;
+        let scratch_bytes = checked_scratch_bytes(max_path_len)?;
         Some(FullHeightScoreCellMemoryProjection {
             candidate_count,
             pattern_count,
@@ -294,6 +286,8 @@ impl FullHeightScoreCellMaterializer {
                 policy,
                 profile,
                 projection,
+                0,
+                None,
                 control,
                 already_retained_bytes,
                 max_memory_bytes,
@@ -411,6 +405,20 @@ impl FullHeightScoreCellMaterializer {
             admitted_peak_bytes: peak,
         })
     }
+}
+
+fn checked_scratch_bytes(max_path_len: usize) -> Option<u128> {
+    (max_path_len as u128)
+        .checked_mul(
+            (core::mem::size_of::<ScoringExecutionEdge>()
+                + core::mem::size_of::<HoldDecision>()
+                + core::mem::size_of::<(ScoringExecutionEdge, HoldDecision)>()) as u128,
+        )?
+        .checked_add(FullHeightReplayTrace::checked_step_buffer_bytes(
+            max_path_len,
+        )?)?
+        // Current best and the next score-tie key coexist in scratch only.
+        .checked_add(2 * canonical_key_capacity(max_path_len)? as u128)
 }
 
 #[allow(clippy::too_many_arguments)]

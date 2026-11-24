@@ -6,7 +6,8 @@ use std::sync::{
     Mutex,
 };
 
-const CELLS_PER_CHUNK: usize = 16;
+// Physical path counts vary independently of pattern/candidate ordinals.
+const CELLS_PER_CHUNK: usize = 1;
 
 struct Workspace {
     path: Vec<ScoringExecutionEdge>,
@@ -73,6 +74,8 @@ pub(super) fn materialize(
     policy: ScoreObjectivePolicy,
     profile: &clearra_scoring::profile::ScoreProfile,
     projection: FullHeightScoreCellMemoryProjection,
+    source_start: usize,
+    prepared_ranges: Option<&[(usize, usize, u64)]>,
     control: &ExecutionControl,
     already_retained: u128,
     maximum: u128,
@@ -82,35 +85,36 @@ pub(super) fn materialize(
         .ok_or(FullHeightScoreCellError::ProjectionOverflow)?;
     ensure_limit(peak, maximum)?;
     let ledger = Mutex::new(peak);
-    let serial = FullHeightScoreCellMaterializer::checked_memory_projection_with_profile_bytes(
-        batch,
-        projection.profile_storage_bytes,
-    )
-    .ok_or(FullHeightScoreCellError::ProjectionOverflow)?;
+    let serial_scratch = checked_scratch_bytes(projection.max_path_len)
+        .ok_or(FullHeightScoreCellError::ProjectionOverflow)?;
     let mut ranges = Vec::new();
-    ranges
-        .try_reserve_exact(projection.candidate_count)
-        .map_err(|_| FullHeightScoreCellError::AllocationFailed)?;
-    charge(
-        &ledger,
-        (ranges.capacity().saturating_sub(projection.candidate_count) as u128)
-            .checked_mul(core::mem::size_of::<(usize, usize, u64)>() as u128)
-            .ok_or(FullHeightScoreCellError::ProjectionOverflow)?,
-        maximum,
-    )?;
     let graphs = batch.execution().graphs();
-    let mut first = 0;
-    while first < graphs.len() {
-        let end = first
-            + graphs[first..]
-                .iter()
-                .take_while(|g| g.candidate_id() == graphs[first].candidate_id())
-                .count();
-        let identity = ExtendedTilingSolutionKey::parse_canonical(graphs[first].candidate_key())
-            .map_err(|_| FullHeightScoreCellError::InvalidEvidence)?;
-        ranges.push((first, end, (1_u64 << identity.placement_count()) - 1));
-        first = end;
+    if prepared_ranges.is_none() {
+        ranges
+            .try_reserve_exact(projection.candidate_count)
+            .map_err(|_| FullHeightScoreCellError::AllocationFailed)?;
+        charge(
+            &ledger,
+            (ranges.capacity().saturating_sub(projection.candidate_count) as u128)
+                .checked_mul(core::mem::size_of::<(usize, usize, u64)>() as u128)
+                .ok_or(FullHeightScoreCellError::ProjectionOverflow)?,
+            maximum,
+        )?;
+        let mut first = 0;
+        while first < graphs.len() {
+            let end = first
+                + graphs[first..]
+                    .iter()
+                    .take_while(|g| g.candidate_id() == graphs[first].candidate_id())
+                    .count();
+            let identity =
+                ExtendedTilingSolutionKey::parse_canonical(graphs[first].candidate_key())
+                    .map_err(|_| FullHeightScoreCellError::InvalidEvidence)?;
+            ranges.push((first, end, (1_u64 << identity.placement_count()) - 1));
+            first = end;
+        }
     }
+    let ranges = prepared_ranges.unwrap_or(&ranges);
     let mut cells = Vec::new();
     cells
         .try_reserve_exact(projection.cell_capacity)
@@ -134,8 +138,8 @@ pub(super) fn materialize(
                 path: Vec::new(),
                 holds: Vec::new(),
                 selected: Vec::new(),
-                peak: serial.scratch_bytes,
-                charged_peak: serial.scratch_bytes,
+                peak: serial_scratch,
+                charged_peak: serial_scratch,
                 slack_peak: 0,
             };
             reserve_scratch(
@@ -166,7 +170,8 @@ pub(super) fn materialize(
         },
         |workspace, tasks| {
             let count = tasks.len();
-            for ordinal in tasks {
+            for local_ordinal in tasks {
+                let ordinal = source_start + local_ordinal;
                 let candidate = ordinal / projection.pattern_count;
                 let pattern = ordinal % projection.pattern_count;
                 let (first, end, required_operations) = ranges[candidate];

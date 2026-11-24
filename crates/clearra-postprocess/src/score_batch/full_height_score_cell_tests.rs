@@ -225,6 +225,95 @@ fn full_height_score_reuses_one_candidate_shape_for_each_original_pattern() {
 }
 
 #[test]
+fn prepared_full_height_ranges_keep_candidate_groups_and_empty_complete_cells() {
+    let batch = std::sync::Arc::new(batch_with_patterns(
+        &[1, 1],
+        false,
+        true,
+        (0..133)
+            .map(|index| {
+                vec![
+                    if index % 3 == 1 {
+                        PieceKind::O
+                    } else {
+                        PieceKind::I
+                    };
+                    2
+                ]
+            })
+            .collect(),
+    ));
+    let source =
+        PreparedFullHeightScoreCells::new_with_memory_limit(batch.clone(), 4096, u128::MAX)
+            .unwrap();
+    assert_eq!(
+        (
+            source.candidate_count(),
+            source.pattern_count(),
+            source.cell_count()
+        ),
+        (1, 133, 133)
+    );
+    let metadata = source.checked_metadata_retained_bytes().unwrap();
+    assert!(matches!(
+        PreparedFullHeightScoreCells::new_with_memory_limit(
+            batch.clone(),
+            4096,
+            4096 + metadata - 1
+        ),
+        Err(FullHeightScoreCellError::MemoryLimitExceeded { .. })
+    ));
+    let whole = materialize(&batch).unwrap();
+    let policy = ScoreObjectivePolicy::summary();
+    let (profile, report) = crate::score_profile_with_memory_guard(policy, 0, 1024 * 1024).unwrap();
+    for workers in [1, 2, 4, 8] {
+        let control = ExecutionControl::default().with_parallelism(workers);
+        for range in [0..0, 0..1, 1..2, 13..97, 97..133, 133..133] {
+            let projection = source
+                .checked_range_memory_projection(range.clone(), report.retained_bytes, workers)
+                .unwrap();
+            assert_eq!(projection.cell_capacity, range.len());
+            let maximum = 4096 + projection.required_peak_bytes;
+            let actual = source
+                .materialize_range_with_profile_and_memory_limit(
+                    range.clone(),
+                    policy,
+                    &profile,
+                    report.retained_bytes,
+                    &control,
+                    4096,
+                    maximum,
+                )
+                .unwrap();
+            let expected: Vec<_> = whole
+                .cells()
+                .iter()
+                .filter(|cell| range.contains(&cell.pattern_id()))
+                .cloned()
+                .collect();
+            assert!(actual.complete());
+            assert_eq!(actual.cells(), expected);
+            assert!(actual.admitted_peak_bytes() <= maximum);
+            assert!(matches!(
+                source.materialize_range_with_profile_and_memory_limit(
+                    range,
+                    policy,
+                    &profile,
+                    report.retained_bytes,
+                    &control,
+                    4096,
+                    maximum - 1,
+                ),
+                Err(FullHeightScoreCellError::MemoryLimitExceeded { .. })
+            ));
+        }
+    }
+    assert!(source
+        .checked_range_memory_projection(133..134, report.retained_bytes, 1)
+        .is_none());
+}
+
+#[test]
 fn borrowed_profile_full_height_cells_match_the_existing_materialization() {
     let batch = batch(&[1, 1], false, true);
     let policy = ScoreObjectivePolicy::summary();

@@ -31,7 +31,7 @@ pub use exact_scoring_execution_materializer::{
 pub use full_height_replay_language_domain::FullHeightCandidateExecution;
 pub use full_height_score_cell_materializer::{
     FullHeightScoreCellError, FullHeightScoreCellMaterialization, FullHeightScoreCellMaterializer,
-    FullHeightScoreCellMemoryProjection,
+    FullHeightScoreCellMemoryProjection, PreparedFullHeightScoreCells,
 };
 pub use score_matrix::{
     ScoreCell, ScoreMatrix, ScoreMatrixMemoryGuardError, ScoreMatrixMemoryProjection,

@@ -487,6 +487,11 @@ pub struct ExactScoredExecution {
 }
 
 impl ExactScoredExecution {
+    /// Original graph × pattern position, including sparse cells which did
+    /// not produce a score. Distributed tasks never renumber this domain.
+    pub const fn source_ordinal(&self) -> usize {
+        self.source_ordinal
+    }
     pub const fn candidate_identity(&self) -> StandardBoard64TilingIdentity {
         self.candidate_identity
     }
@@ -891,6 +896,98 @@ impl ExactScoringExecutionMaterializer {
         Some(projection)
     }
 
+    /// Projection for an original graph × pattern ordinal range. Only the
+    /// selected cell outputs and active scratch are admitted; the immutable
+    /// source universe is borrowed without cloning or changing its indices.
+    pub fn checked_score_cell_range_memory_projection(
+        batch: &ExactScoringExecutionBatch,
+        range: std::ops::Range<usize>,
+        profile_storage_bytes: u128,
+        parallelism: usize,
+    ) -> Option<ExactScoreCellMemoryProjection> {
+        let patterns = batch.patterns().len();
+        let total = batch.graphs().len().checked_mul(patterns)?;
+        if range.start > range.end || range.end > total {
+            return None;
+        }
+        let max_path_len = if range.is_empty() {
+            0
+        } else {
+            batch.graphs()[range.start / patterns..range.end.div_ceil(patterns)]
+                .iter()
+                .map(ExactScoringExecutionGraph::node_count)
+                .max()
+                .unwrap_or(0)
+        };
+        let mut projection = checked_score_cell_memory_projection_for_shape(
+            1,
+            range.len(),
+            max_path_len,
+            profile_storage_bytes,
+        )?;
+        projection.graph_count = batch.graphs().len();
+        projection.pattern_count = patterns;
+        let workers = parallel_score_cells::workspace_count(range.len(), parallelism);
+        let extra = projection
+            .path_scratch_bytes
+            .checked_add(projection.hold_scratch_bytes)?
+            .checked_mul(workers.saturating_sub(1) as u128)?;
+        projection.path_scratch_bytes =
+            projection.path_scratch_bytes.checked_mul(workers as u128)?;
+        projection.hold_scratch_bytes =
+            projection.hold_scratch_bytes.checked_mul(workers as u128)?;
+        projection.required_peak_bytes = projection.required_peak_bytes.checked_add(extra)?;
+        Some(projection)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn materialize_score_cell_range_with_profile_and_memory_limit(
+        batch: &ExactScoringExecutionBatch,
+        range: std::ops::Range<usize>,
+        score_policy: ScoreObjectivePolicy,
+        profile: &ScoreProfile,
+        profile_storage_bytes: u128,
+        control: &ExecutionControl,
+        already_retained_bytes: u128,
+        max_memory_bytes: u128,
+    ) -> Result<
+        (ExactScoreCellMaterialization, ExactScoreCellMemoryReport),
+        ExactScoreCellMaterializationError,
+    > {
+        if control.is_cancelled() {
+            return Err(ExactScoreCellMaterializationError::Cancelled);
+        }
+        if !crate::score_profile_selection::score_profile_matches_policy(profile, score_policy) {
+            return Err(ExactScoreCellMaterializationError::ProfileMismatch);
+        }
+        let projection = Self::checked_score_cell_range_memory_projection(
+            batch,
+            range.clone(),
+            profile_storage_bytes,
+            control.parallelism(),
+        )
+        .ok_or(ExactScoreCellMaterializationError::ProjectionOverflow)?;
+        let required_memory_bytes = already_retained_bytes
+            .checked_add(projection.required_peak_bytes)
+            .ok_or(ExactScoreCellMaterializationError::ProjectionOverflow)?;
+        if required_memory_bytes > max_memory_bytes {
+            return Err(ExactScoreCellMaterializationError::LimitExceeded {
+                required_memory_bytes,
+                max_memory_bytes,
+            });
+        }
+        parallel_score_cells::materialize(
+            batch,
+            score_policy,
+            profile,
+            projection,
+            range.start,
+            control,
+            already_retained_bytes,
+            max_memory_bytes,
+        )
+    }
+
     pub fn materialize_score_cells_with_memory_limit(
         batch: &ExactScoringExecutionBatch,
         score_policy: ScoreObjectivePolicy,
@@ -1016,6 +1113,7 @@ impl ExactScoringExecutionMaterializer {
                 score_policy,
                 profile,
                 projection,
+                0,
                 control,
                 already_retained_bytes,
                 max_memory_bytes,
@@ -2172,6 +2270,77 @@ mod score_cell_memory_tests {
                 Err(ExactScoreCellMaterializationError::LimitExceeded { .. })
             ));
         }
+    }
+
+    #[test]
+    fn score_cell_ranges_preserve_original_sparse_ordinals_and_exact_admission() {
+        let original = batch();
+        let source = ExactScoringExecutionBatch::new(
+            original.layout(),
+            original.initial_occupied(),
+            (0..133)
+                .map(|index| {
+                    vec![if index % 3 == 1 {
+                        PieceKind::O
+                    } else {
+                        PieceKind::I
+                    }]
+                })
+                .collect(),
+            original.initial_cursor(),
+            original.initial_hold(),
+            original.hold_enabled(),
+            original.projects_unplaced_lookahead(),
+            original.projects_standard_bag_lookahead(),
+            original.kick_table_id(),
+            original.rule_profile_id(),
+            original.graphs().to_vec(),
+            true,
+        );
+        let policy = ScoreObjectivePolicy::summary();
+        let (profile, memory) =
+            crate::score_profile_with_memory_guard(policy, 0, 1024 * 1024).unwrap();
+        let (whole, _) = ExactScoringExecutionMaterializer::materialize_score_cells_with_profile_and_memory_limit(
+            &source, policy, &profile, memory.retained_bytes, &ExecutionControl::default(), 0, u128::MAX,
+        ).unwrap();
+        for workers in [1, 2, 4, 8] {
+            let control = ExecutionControl::default().with_parallelism(workers);
+            for range in [0..0, 0..1, 1..2, 13..97, 97..133, 133..133] {
+                let projection =
+                    ExactScoringExecutionMaterializer::checked_score_cell_range_memory_projection(
+                        &source,
+                        range.clone(),
+                        memory.retained_bytes,
+                        workers,
+                    )
+                    .unwrap();
+                assert_eq!(projection.cell_capacity, range.len());
+                let required = 73 + projection.required_peak_bytes;
+                let (actual, _) = ExactScoringExecutionMaterializer::materialize_score_cell_range_with_profile_and_memory_limit(
+                    &source, range.clone(), policy, &profile, memory.retained_bytes, &control, 73, required,
+                ).unwrap();
+                let expected: Vec<_> = whole
+                    .scored_executions()
+                    .iter()
+                    .filter(|cell| range.contains(&cell.source_ordinal()))
+                    .cloned()
+                    .collect();
+                assert!(actual.complete());
+                assert_eq!(actual.scored_executions(), expected);
+                assert!(matches!(ExactScoringExecutionMaterializer::materialize_score_cell_range_with_profile_and_memory_limit(
+                    &source, range.clone(), policy, &profile, memory.retained_bytes, &control, 73, required - 1,
+                ), Err(ExactScoreCellMaterializationError::LimitExceeded { .. })));
+            }
+        }
+        assert!(
+            ExactScoringExecutionMaterializer::checked_score_cell_range_memory_projection(
+                &source,
+                133..134,
+                memory.retained_bytes,
+                1,
+            )
+            .is_none()
+        );
     }
 
     #[test]
