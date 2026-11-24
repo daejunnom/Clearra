@@ -1,6 +1,6 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 
 use crate::{GuiJob, GuiJobCancelHandle, GuiJobEvent, GuiJobId, GuiJobProgress, GuiJobResult};
@@ -16,7 +16,7 @@ pub struct GuiJobRunner;
 
 impl GuiJobRunner {
     pub fn spawn(job: GuiJob, app_context: AppContext) -> GuiJobHandle {
-        let (sender, receiver) = mpsc::channel();
+        let (sender, receiver) = gui_event_channel();
         let job_id = job.job_id();
         let cancel_token = job.cancel_token();
         let cancel_handle = job.cancel_handle();
@@ -83,16 +83,142 @@ impl GuiJobRunner {
     }
 }
 
+// Progress is a sampled display value. Keeping every sample in an unbounded
+// channel lets a slow or suspended UI retain an arbitrarily large history.
+// One shared slot owns the latest undelivered sample between control events.
+// Started/diagnostic/terminal events seal that slot and retain their ordering.
+#[derive(Debug)]
+#[allow(clippy::large_enum_variant)]
+enum QueuedGuiEvent {
+    Direct(GuiJobEvent),
+    Progress {
+        job_id: GuiJobId,
+        value: Arc<Mutex<Option<GuiJobProgress>>>,
+    },
+}
+
+#[derive(Debug)]
+struct PendingGuiProgress {
+    job_id: GuiJobId,
+    value: Arc<Mutex<Option<GuiJobProgress>>>,
+}
+
+#[derive(Debug, Default)]
+struct GuiEventSendState {
+    pending_progress: Option<PendingGuiProgress>,
+    terminal_sent: bool,
+}
+
+#[derive(Clone, Debug)]
+struct GuiEventSender {
+    sender: Sender<QueuedGuiEvent>,
+    state: Arc<Mutex<GuiEventSendState>>,
+}
+
+#[derive(Debug)]
+struct GuiEventReceiver {
+    receiver: Receiver<QueuedGuiEvent>,
+}
+
+fn gui_event_channel() -> (GuiEventSender, GuiEventReceiver) {
+    let (sender, receiver) = mpsc::channel();
+    (
+        GuiEventSender {
+            sender,
+            state: Arc::new(Mutex::new(GuiEventSendState::default())),
+        },
+        GuiEventReceiver { receiver },
+    )
+}
+
+impl GuiEventSender {
+    fn send(&self, event: GuiJobEvent) -> Result<(), ()> {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        if state.terminal_sent {
+            // A late worker sample must not reopen a completed/cancelled job.
+            return Err(());
+        }
+        if let GuiJobEvent::Progress { job_id, progress } = event {
+            if let Some(pending) = state
+                .pending_progress
+                .as_ref()
+                .filter(|pending| pending.job_id == job_id)
+            {
+                let mut latest = pending
+                    .value
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner());
+                let needs_notification = latest.is_none();
+                *latest = Some(progress);
+                if needs_notification {
+                    self.sender
+                        .send(QueuedGuiEvent::Progress {
+                            job_id,
+                            value: Arc::clone(&pending.value),
+                        })
+                        .map_err(|_| ())?;
+                }
+                return Ok(());
+            }
+            let value = Arc::new(Mutex::new(Some(progress)));
+            self.sender
+                .send(QueuedGuiEvent::Progress {
+                    job_id,
+                    value: Arc::clone(&value),
+                })
+                .map_err(|_| ())?;
+            state.pending_progress = Some(PendingGuiProgress { job_id, value });
+        } else {
+            // No progress slot remains writable across this ordering barrier.
+            // This queue never blocks completion on the UI consuming samples,
+            // so join_with_events can still join before draining the channel.
+            state.pending_progress = None;
+            state.terminal_sent = event.is_terminal();
+            self.sender
+                .send(QueuedGuiEvent::Direct(event))
+                .map_err(|_| ())?;
+        }
+        Ok(())
+    }
+}
+
+impl GuiEventReceiver {
+    fn try_recv(&self) -> Result<GuiJobEvent, TryRecvError> {
+        loop {
+            match self.receiver.try_recv()? {
+                QueuedGuiEvent::Direct(event) => return Ok(event),
+                QueuedGuiEvent::Progress { job_id, value } => {
+                    let progress = value
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .take();
+                    if let Some(progress) = progress {
+                        return Ok(GuiJobEvent::Progress { job_id, progress });
+                    }
+                }
+            }
+        }
+    }
+
+    fn drain(&self) -> Vec<GuiJobEvent> {
+        let mut events = Vec::new();
+        while let Ok(event) = self.try_recv() {
+            events.push(event);
+        }
+        events
+    }
+}
+
 struct GuiProgressSink {
     job_id: GuiJobId,
-    sender: Sender<GuiJobEvent>,
+    sender: GuiEventSender,
     // This hint neither orders concurrent samples nor signals a phase boundary.
     // Racing reporters may emit a duplicate rather than blocking a search worker.
     previous_counter: AtomicU64,
 }
 
 impl GuiProgressSink {
-    fn new(job_id: GuiJobId, sender: Sender<GuiJobEvent>) -> Self {
+    fn new(job_id: GuiJobId, sender: GuiEventSender) -> Self {
         Self {
             job_id,
             sender,
@@ -167,7 +293,7 @@ fn saturating_u32(value: u64) -> u32 {
 
 #[derive(Debug)]
 pub struct GuiJobHandle {
-    receiver: Receiver<GuiJobEvent>,
+    receiver: GuiEventReceiver,
     join_handle: JoinHandle<GuiJobResult>,
     cancel_handle: GuiJobCancelHandle,
 }
@@ -188,11 +314,7 @@ impl GuiJobHandle {
 }
 impl GuiJobHandle {
     pub fn drain_events(&self) -> Vec<GuiJobEvent> {
-        let mut events = Vec::new();
-        while let Ok(event) = self.receiver.try_recv() {
-            events.push(event);
-        }
-        events
+        self.receiver.drain()
     }
 }
 impl GuiJobHandle {
@@ -208,7 +330,7 @@ impl GuiJobHandle {
             cancel_handle: _,
         } = self;
         let result = join_handle.join()?;
-        let events = receiver.try_iter().collect();
+        let events = receiver.drain();
         Ok((result, events))
     }
 }

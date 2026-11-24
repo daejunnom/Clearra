@@ -13,11 +13,12 @@ pub use buildup::{
 };
 mod catalog;
 mod compact_exact_u64_map;
-#[cfg(not(target_family = "wasm"))]
 mod compact_kick_authority;
 #[cfg(test)]
 mod compact_pc2_completion_ledger;
 mod coverage_product;
+#[cfg(all(test, feature = "placement-dependency-pc"))]
+mod dependency_product_tests;
 mod distributed;
 #[cfg(test)]
 mod distributed_pc2_replay_proof;
@@ -64,13 +65,13 @@ mod pc4_graph_materializer;
 mod piece_order_language;
 #[cfg(feature = "local-search-ab")]
 pub use piece_order_language::{count_distinct_no_hold_one_bag_poset, DistinctNoHoldOneBagCount};
-#[cfg(any(test, feature = "local-search-ab"))]
+#[cfg(any(test, feature = "local-search-ab", feature = "placement-dependency-pc"))]
 mod placement_conditions;
 #[cfg(any(test, feature = "local-search-ab"))]
 mod placement_dependency;
 #[cfg(test)]
 mod placement_dependency_integration_tests;
-#[cfg(any(test, feature = "local-search-ab"))]
+#[cfg(any(test, feature = "local-search-ab", feature = "placement-dependency-pc"))]
 mod placement_poset;
 mod queue_observation_policy;
 mod reachability;
@@ -97,6 +98,7 @@ mod structural_graph_probability_tests;
 mod structural_order;
 #[cfg(any(
     test,
+    feature = "placement-dependency-pc",
     all(
         feature = "local-search-ab",
         feature = "parallel",
@@ -106,6 +108,7 @@ mod structural_order;
 mod symbolic_prefix_domain;
 #[cfg(any(
     test,
+    feature = "placement-dependency-pc",
     all(
         feature = "local-search-ab",
         feature = "parallel",
@@ -115,6 +118,7 @@ mod symbolic_prefix_domain;
 mod symbolic_prefix_lanes;
 #[cfg(any(
     test,
+    feature = "placement-dependency-pc",
     all(
         feature = "local-search-ab",
         feature = "parallel",
@@ -130,6 +134,7 @@ mod symbolic_prefix_orders;
 mod symbolic_prefix_parallel;
 #[cfg(any(
     test,
+    feature = "placement-dependency-pc",
     all(
         feature = "local-search-ab",
         feature = "parallel",
@@ -244,6 +249,85 @@ pub(super) enum WasmExactSearchError {
     Cancelled,
 }
 
+#[cfg(test)]
+thread_local! {
+    static PC_PLACEMENT_DEPENDENCY_REFERENCE: std::cell::Cell<bool> = const {
+        std::cell::Cell::new(false)
+    };
+}
+
+#[cfg(test)]
+pub(super) fn with_pc_placement_dependency_reference<T>(run: impl FnOnce() -> T) -> T {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            PC_PLACEMENT_DEPENDENCY_REFERENCE.set(self.0);
+        }
+    }
+    let _restore = Restore(PC_PLACEMENT_DEPENDENCY_REFERENCE.replace(true));
+    run()
+}
+
+fn pc_placement_dependency_reference_requested() -> bool {
+    #[cfg(test)]
+    if PC_PLACEMENT_DEPENDENCY_REFERENCE.get() {
+        return true;
+    }
+    #[cfg(all(feature = "local-search-ab", not(target_family = "wasm")))]
+    {
+        // The diagnostic entrypoint validates this existing 0/1 axis. An
+        // absent experiment selects the product; explicit zero is reference.
+        static REFERENCE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *REFERENCE.get_or_init(|| std::env::var("CLEARRA_STRICT_PREFIX").as_deref() == Ok("0"))
+    }
+    #[cfg(not(all(feature = "local-search-ab", not(target_family = "wasm"))))]
+    false
+}
+
+fn uses_pc_placement_dependency(problem: &clearra_problem::SearchProblem) -> bool {
+    cfg!(feature = "placement-dependency-pc")
+        && problem.pc_placement_dependency_eligible()
+        && !pc_placement_dependency_reference_requested()
+}
+
+/// Exact imported-table ownership is limited to the existing compact
+/// admission proof. Unsupported imports keep their prior canonical/fixed-
+/// source validation; a profile tag alone never authorizes changed kicks.
+fn dependency_kick_authority(
+    problem: &clearra_problem::SearchProblem,
+) -> Result<Option<compact_kick_authority::CompactKickAuthority>, WasmExactSearchError> {
+    use compact_kick_authority::{CompactKickAdmission, CompactKickAuthority};
+
+    if !cfg!(feature = "placement-dependency-pc") || !problem.pc_placement_dependency_eligible() {
+        return Ok(None);
+    }
+    let rule = problem.rule_profile();
+    let Some(verified) = rule.verified_kick_profile() else {
+        return Ok(None);
+    };
+    if kick_profiles::builtin_kick_profile(problem.kick_profile().profile_id())
+        .is_some_and(|builtin| matches_builtin_order(rule.rule().id(), verified, builtin))
+    {
+        return Ok(None);
+    }
+    let height = u8::try_from(problem.compact_pc_geometry_height()).map_err(|_| {
+        WasmExactSearchError::InvalidProblem("wasm_ordered_kick_height_out_of_range")
+    })?;
+    let width = u8::try_from(problem.initial_board().width()).map_err(|_| {
+        WasmExactSearchError::InvalidProblem("wasm_ordered_kick_width_out_of_range")
+    })?;
+    match CompactKickAuthority::admit_local_order_variant(width, height, verified) {
+        Ok(authority) => Ok(Some(authority)),
+        Err(CompactKickAdmission::Unsupported) => Ok(None),
+        Err(CompactKickAdmission::IndexOrCoordinateOverflow) => Err(
+            WasmExactSearchError::InvalidProblem("wasm_ordered_kick_index_overflow"),
+        ),
+        Err(CompactKickAdmission::BudgetExceeded) => Err(WasmExactSearchError::InvalidProblem(
+            "wasm_ordered_kick_compile_budget_exceeded",
+        )),
+    }
+}
+
 impl WasmExactSearchError {
     pub(super) fn resource_admission(
         report: clearra_core_domain::resource::ResourceReport,
@@ -300,6 +384,9 @@ fn packing_hold_projection(
 fn ensure_connected_kick_profile(
     problem: &clearra_problem::SearchProblem,
 ) -> Result<(), WasmExactSearchError> {
+    if dependency_kick_authority(problem)?.is_some() {
+        return Ok(());
+    }
     let Some(builtin) = kick_profiles::builtin_kick_profile(problem.kick_profile().profile_id())
     else {
         return Err(WasmExactSearchError::InvalidProblem(

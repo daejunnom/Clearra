@@ -21,6 +21,11 @@ export type ScoreMode =
   | 'score-finder'
   | 'score-minimals'
   | 'failed-queue';
+
+export function isWorkspaceScoreProduct(scoreMode: ScoreMode): boolean {
+  return scoreMode === 'summary' || scoreMode === 'score-finder' || scoreMode === 'score-minimals';
+}
+
 export type ScoreProfile = 'guideline' | 'jstris-ultra' | 'tetrio';
 export type RuleProfile = 'srs-plus' | 'srs' | 'srs-x' | 'jstris-180' | 'no-kick';
 export type SpinProfile =
@@ -53,11 +58,13 @@ export type SolverWorkspaceRequest = {
   preserveB2B: boolean;
   initialB2B: number;
   solutionProbabilities: boolean;
+  /** Legacy draft fields; every GUI execution uses CPU with no GPU warmup. */
   backend: SearchBackend;
   gpuDevice: string;
   workers: number;
   useAllLogicalProcessors: boolean;
   tablebaseEnabled: boolean;
+  /** Saved-draft compatibility; the retired beta prepass is always disabled. */
   precomputeBuildDependencies: boolean;
   legalBoardEnabled: boolean;
   conditionedReachabilityEnabled: boolean;
@@ -78,8 +85,7 @@ export type WorkspaceValidationCode =
   | 'scenario_supply_mismatch'
   | 'scenario_full'
   | 'worker_count_invalid'
-  | 'initial_b2b_invalid'
-  | 'gpu_device_invalid';
+  | 'initial_b2b_invalid';
 
 export function createDefaultWorkspaceRequest(): SolverWorkspaceRequest {
   return {
@@ -121,7 +127,9 @@ export function normalizeWorkspaceRequest(
   assertGuiScoreMode(request.scoreMode);
   // PC products use the exact CPU path. Retain GPU engines and transport
   // options for explicit non-GUI callers, but never select them implicitly.
-  request = { ...request, backend: 'cpu', gpuDevice: 'auto' };
+  // The retired beta control selected an optional feasibility prepass, not the
+  // automatic candidate dependency optimizations. Ignore its saved draft value.
+  request = { ...request, backend: 'cpu', gpuDevice: 'auto', precomputeBuildDependencies: false };
   if (request.scoreMode === 'tiling') {
     return {
       ...request,
@@ -133,7 +141,6 @@ export function normalizeWorkspaceRequest(
       initialB2B: 0,
       solutionProbabilities: false,
       tablebaseEnabled: false,
-      precomputeBuildDependencies: false,
       legalBoardEnabled: false,
       conditionedReachabilityEnabled: false
     };
@@ -146,15 +153,10 @@ export function normalizeWorkspaceRequest(
       spinProfile: 't-spins',
       preserveB2B: false,
       initialB2B: 0,
-      solutionProbabilities: false,
-      precomputeBuildDependencies: false
+      solutionProbabilities: false
     };
   }
-  if (
-    request.scoreMode === 'summary' ||
-    request.scoreMode === 'score-finder' ||
-    request.scoreMode === 'score-minimals'
-  ) {
+  if (isWorkspaceScoreProduct(request.scoreMode)) {
     return {
       ...request,
       queueKnowledge: 'oracle',
@@ -163,10 +165,7 @@ export function normalizeWorkspaceRequest(
       initialB2B: request.scoreMode === 'score-finder' ? Math.min(1, Math.max(0, Math.trunc(request.initialB2B))) : request.initialB2B,
       preserveB2B: false,
       solutionProbabilities: false,
-      backend: 'cpu',
-      gpuDevice: 'auto',
       tablebaseEnabled: request.scoreMode === 'score-finder' ? false : request.tablebaseEnabled,
-      precomputeBuildDependencies: false,
       maxPatterns: undefined
     };
   }
@@ -176,8 +175,7 @@ export function normalizeWorkspaceRequest(
       queueKnowledge: 'oracle',
       scoreProfile: 'tetrio',
       spinProfile: request.preserveB2B ? request.spinProfile : 't-spins',
-      initialB2B: 0,
-      precomputeBuildDependencies: false
+      initialB2B: 0
     };
   }
   if (request.scoreMode === 'failed-queue') {
@@ -494,8 +492,7 @@ export function workspaceValidationCodes(
     // Full-height CPU producer/verifier/merger capabilities preserve requested
     // workers on both surfaces. Only ordinary all/unique enumeration has an
     // observation-policy owner; typed reducers still require the supplied queue.
-    if (!['cpu', 'auto'].includes(execution.backend) || execution.tablebaseEnabled ||
-        execution.precomputeBuildDependencies ||
+    if (execution.tablebaseEnabled ||
         (execution.queueKnowledge !== 'oracle' && execution.scoreMode !== 'off')) {
       errors.push('pc_extended_options_unavailable');
     }
@@ -534,11 +531,9 @@ export function workspaceValidationCodes(
   if (!Number.isInteger(request.workers) || request.workers < 1) {
     errors.push('worker_count_invalid');
   }
-  if (!Number.isInteger(request.initialB2B) || request.initialB2B < 0 || request.initialB2B > 0xffff) {
+  if (isWorkspaceScoreProduct(request.scoreMode) &&
+      (!Number.isInteger(request.initialB2B) || request.initialB2B < 0 || request.initialB2B > 0xffff)) {
     errors.push('initial_b2b_invalid');
-  }
-  if (request.gpuDevice !== 'auto' && !/^\d+$/.test(request.gpuDevice)) {
-    errors.push('gpu_device_invalid');
   }
   return [...new Set(errors)];
 }
@@ -634,11 +629,7 @@ export function buildWorkspaceCommandArguments(request: SolverWorkspaceRequest):
     tokens.push('--count', request.scoreMode === 'off' ? 'unique' : 'all');
     tokens.push('--rule', request.rule);
     tokens.push(request.tablebaseEnabled ? '--tablebase' : '--no-tablebase');
-    tokens.push(
-      request.precomputeBuildDependencies
-        ? '--build-dependency-dag'
-        : '--no-build-dependency-dag'
-    );
+    tokens.push('--no-build-dependency-dag');
     if (request.solutionProbabilities) tokens.push('--solution-probabilities');
     tokens.push('--queue-knowledge', request.queueKnowledge);
     if (request.preserveB2B) {
@@ -690,16 +681,16 @@ export function workspaceUsesOpeningPcPreset(request: SolverWorkspaceRequest): b
 
 function workspaceSearchExecution(request: SolverWorkspaceRequest): SearchExecutionRequest {
   return {
-    backend: request.backend,
-    gpuDevice: request.gpuDevice,
+    backend: 'cpu',
+    gpuDevice: 'auto',
     workers: request.workers,
     useAllLogicalProcessors: request.useAllLogicalProcessors,
-    allowBackendFallback: request.backend === 'auto',
+    allowBackendFallback: false,
     // The workspace prewarms browser workers asynchronously. Do not inject
     // the native CLI warmup flag: it joins every CPU worker at a barrier and
     // prevents a ready worker from taking the first Geometry/proof task.
     cpuWarmup: false,
-    gpuWarmup: true
+    gpuWarmup: false
   };
 }
 

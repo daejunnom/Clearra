@@ -1,6 +1,6 @@
 use std::{collections::HashMap, sync::Arc};
 
-#[cfg(any(test, feature = "local-search-ab"))]
+#[cfg(any(test, feature = "local-search-ab", feature = "placement-dependency-pc"))]
 use clearra_core_domain::piece::piece_kind::PieceKind;
 
 use super::{buildup::BuildOrderGraph, mix_digest, WasmExactSearchError};
@@ -77,6 +77,10 @@ struct CoverageCacheKey {
 /// hashes never authorize merging.
 #[derive(Default)]
 pub(super) struct PieceOrderLanguageCache {
+    // Numeric node IDs are reusable after recycling. The token brands one
+    // live arena without a counter wrap or a per-query allocation.
+    #[cfg(feature = "placement-dependency-pc")]
+    arena_identity: Arc<()>,
     nodes: Vec<CanonicalPieceNode>,
     edges: Vec<CanonicalPieceEdge>,
     piece_range_ends: Vec<[u8; 7]>,
@@ -188,6 +192,11 @@ pub struct DistinctNoHoldOneBagCount {
 }
 
 impl PieceOrderLanguageCache {
+    #[cfg(feature = "placement-dependency-pc")]
+    pub fn arena_identity(&self) -> &Arc<()> {
+        &self.arena_identity
+    }
+
     pub fn node_count(&self) -> usize {
         self.nodes.len()
     }
@@ -224,15 +233,11 @@ impl PieceOrderLanguageCache {
         })
     }
 
-    /// Imports worker-local roots by exact node/edge equality. A numeric root
-    /// is scoped to its source owner and must never be copied into another
-    /// cache without rebinding all child references first.
-    #[cfg(any(test, all(feature = "parallel", not(target_family = "wasm"))))]
-    pub fn import_roots(
-        &mut self,
-        source: &Self,
-        roots: &[u32],
-    ) -> Result<Vec<u32>, WasmExactSearchError> {
+    /// Imports one complete worker arena by exact node/edge equality and
+    /// returns its source-ID to destination-ID map. Factored policy shards
+    /// rebind all retained suffixes through this one shared import.
+    #[cfg(any(test, feature = "parallel"))]
+    pub fn import_node_map(&mut self, source: &Self) -> Result<Vec<u32>, WasmExactSearchError> {
         self.ensure_buckets();
         let mut rebound = Vec::new();
         rebound.try_reserve_exact(source.nodes.len()).map_err(|_| {
@@ -276,6 +281,18 @@ impl PieceOrderLanguageCache {
             }
             rebound.push(self.intern_node(node.accepting, depth)?);
         }
+        Ok(rebound)
+    }
+
+    /// A numeric root is scoped to its source owner and must never be copied
+    /// into another cache without rebinding all child references first.
+    #[cfg(any(test, all(feature = "parallel", not(target_family = "wasm"))))]
+    pub fn import_roots(
+        &mut self,
+        source: &Self,
+        roots: &[u32],
+    ) -> Result<Vec<u32>, WasmExactSearchError> {
+        let rebound = self.import_node_map(source)?;
         let mut imported = Vec::new();
         imported.try_reserve_exact(roots.len()).map_err(|_| {
             WasmExactSearchError::InvalidProblem("wasm_piece_language_import_storage_unavailable")
@@ -584,6 +601,27 @@ impl PieceOrderLanguageCache {
             active,
             inspected_edges,
             None,
+            None,
+        )
+    }
+
+    #[cfg(feature = "placement-dependency-pc")]
+    pub(super) fn compile_product_closed_prefix_language(
+        &mut self,
+        pieces: &[PieceKind],
+        permitted_parents: &[[u64; super::symbolic_prefix_domain::MAX_PREFIX_WORDS]],
+        active: &[u64; super::symbolic_prefix_domain::MAX_PREFIX_WORDS],
+        inspected_edges: &mut usize,
+    ) -> Result<Option<u32>, WasmExactSearchError> {
+        // Product uses the existing exact bottom-up subset language, irrespective
+        // of whether a local experiment mode is also compiled into this binary.
+        self.compile_closed_prefix_language_with_mode(
+            pieces,
+            permitted_parents,
+            active,
+            inspected_edges,
+            Some(0),
+            None,
         )
     }
 
@@ -601,6 +639,7 @@ impl PieceOrderLanguageCache {
 
     #[cfg(any(
         test,
+        feature = "placement-dependency-pc",
         all(
             feature = "local-search-ab",
             feature = "parallel",
@@ -615,13 +654,17 @@ impl PieceOrderLanguageCache {
         inspected_edges: &mut usize,
         // None selects the process experiment mode; Some(0) forces the
         // reference, while a small positive bound tests exact fallback.
-        explicit_frontier_budget: Option<usize>,
+        _explicit_frontier_budget: Option<usize>,
+        mut residuals: Option<&mut Vec<u32>>,
     ) -> Result<Option<u32>, WasmExactSearchError> {
         use super::symbolic_prefix_domain::{PrefixDomain, MAX_PREFIX_WORDS};
 
         let invalid = || {
             WasmExactSearchError::InvalidProblem("wasm_symbolic_prefix_language_bound_inconsistent")
         };
+        if let Some(residuals) = residuals.as_mut() {
+            residuals.clear();
+        }
         let domain = PrefixDomain::new(pieces.len()).ok_or_else(invalid)?;
         if pieces.len() != permitted_parents.len() {
             return Err(invalid());
@@ -640,29 +683,39 @@ impl PieceOrderLanguageCache {
         {
             return Err(invalid());
         }
-        let frontier_budget = if let Some(budget) = explicit_frontier_budget {
-            budget
-        } else if closed_prefix_frontier::experiment_enabled()? {
-            closed_prefix_frontier::MAX_FRONTIER_STATES
-        } else {
-            0
-        };
-        if frontier_budget != 0 {
-            let mut frontier = std::mem::take(&mut self.prefix_frontier);
-            let root = frontier.compile(
-                self,
-                pieces,
-                permitted_parents,
-                active,
-                full,
-                frontier_budget,
-                inspected_edges,
-            );
-            self.prefix_frontier = frontier;
-            if let Some(root) = root? {
-                self.prefix_frontier_compilations =
-                    self.prefix_frontier_compilations.saturating_add(1);
-                return Ok(Some(root));
+        #[cfg(any(
+            test,
+            all(
+                feature = "local-search-ab",
+                feature = "parallel",
+                not(target_family = "wasm")
+            )
+        ))]
+        {
+            let frontier_budget = if let Some(budget) = _explicit_frontier_budget {
+                budget
+            } else if closed_prefix_frontier::experiment_enabled()? {
+                closed_prefix_frontier::MAX_FRONTIER_STATES
+            } else {
+                0
+            };
+            if frontier_budget != 0 {
+                let mut frontier = std::mem::take(&mut self.prefix_frontier);
+                let root = frontier.compile(
+                    self,
+                    pieces,
+                    permitted_parents,
+                    active,
+                    full,
+                    frontier_budget,
+                    inspected_edges,
+                );
+                self.prefix_frontier = frontier;
+                if let Some(root) = root? {
+                    self.prefix_frontier_compilations =
+                        self.prefix_frontier_compilations.saturating_add(1);
+                    return Ok(Some(root));
+                }
             }
         }
         self.ensure_buckets();
@@ -709,6 +762,14 @@ impl PieceOrderLanguageCache {
                 let depth = self.remaining_depth(accepting)?;
                 classes[subset] = self.intern_node(accepting, depth)?;
             }
+        }
+        if let Some(residuals) = residuals {
+            residuals.try_reserve_exact(full + 1).map_err(|_| {
+                WasmExactSearchError::InvalidProblem(
+                    "wasm_observation_dependency_storage_unavailable",
+                )
+            })?;
+            residuals.extend_from_slice(&classes[..=full]);
         }
         Ok(Some(classes[0]))
     }
@@ -989,11 +1050,18 @@ impl PieceOrderLanguageCache {
             .get(edge_start + relative_start..edge_start + relative_end)
     }
 
-    #[cfg(test)]
     pub fn node_edge_count(&self, reference: u32) -> Option<usize> {
         self.nodes
             .get(reference as usize)
             .map(|node| usize::from(node.edge_count))
+    }
+
+    /// Direct immutable access for a known-source membership consumer. This
+    /// reads the existing exact suffix graph without constructing a union
+    /// automaton or allocating another edge representation.
+    pub fn edge_at(&self, reference: u32, index: usize) -> Option<CanonicalPieceEdge> {
+        let node = self.nodes.get(reference as usize).copied()?;
+        self.node_edges(node).get(index).copied()
     }
 
     pub fn clear_coverage_caches(&mut self) {
@@ -1016,6 +1084,11 @@ impl PieceOrderLanguageCache {
                 .values()
                 .map(|words| words.len() * core::mem::size_of::<u64>())
                 .sum::<usize>();
+        // The zero-sized identity has only the two Arc reference counters.
+        // Bound membership consumers borrow this allocation; count it once
+        // with the live arena, not once for every cloned Arc handle.
+        #[cfg(feature = "placement-dependency-pc")]
+        let base = base + 2 * core::mem::size_of::<usize>();
         #[cfg(any(
             test,
             all(
@@ -1038,6 +1111,10 @@ impl PieceOrderLanguageCache {
     }
 
     pub fn clear_retain_capacity(&mut self) {
+        #[cfg(feature = "placement-dependency-pc")]
+        {
+            self.arena_identity = Arc::new(());
+        }
         self.nodes.clear();
         self.edges.clear();
         self.piece_range_ends.clear();
@@ -1668,6 +1745,7 @@ mod tests {
                     &active,
                     &mut 0,
                     Some(budget),
+                    None,
                 )
                 .unwrap()
                 .unwrap();
@@ -1679,6 +1757,24 @@ mod tests {
             );
             assert_eq!(cache.frontier_compilations(), expected_frontiers);
         }
+    }
+
+    #[cfg(feature = "placement-dependency-pc")]
+    #[test]
+    fn product_prefix_language_preserves_overlapping_same_kind_suffixes() {
+        use PieceKind::{I, O};
+
+        let (parents, active) = prefix_path_masks(&[[0, 2, 1], [1, 0, 2], [1, 2, 0]]);
+        let mut cache = PieceOrderLanguageCache::default();
+        let root = cache
+            .compile_product_closed_prefix_language(&[I, I, O], &parents, &active, &mut 0)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            words(&cache, root),
+            BTreeSet::from([vec![1, 1, 2], vec![1, 2, 1]])
+        );
+        assert_eq!(cache.frontier_compilations(), 0);
     }
 
     #[test]
@@ -1718,6 +1814,7 @@ mod tests {
                     &active,
                     &mut 0,
                     Some(budget),
+                    None,
                 )
                 .unwrap()
                 .unwrap();
@@ -1740,6 +1837,7 @@ mod tests {
                     &active,
                     &mut 0,
                     Some(256),
+                    None,
                 )
                 .unwrap()
                 .unwrap();

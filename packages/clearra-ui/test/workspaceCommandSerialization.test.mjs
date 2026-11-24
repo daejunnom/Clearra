@@ -160,11 +160,12 @@ test('extended workspace guards result and option capabilities separately from t
     assert.ok(!workspaceValidationCodes(corrected, 'desktop')
       .includes('visible-seven-minimum-cover-unsupported'));
   }
-  for (const change of [
-    { tablebaseEnabled: true }, { precomputeBuildDependencies: true }]) {
-    assert.ok(workspaceValidationCodes({ ...base, ...change }, 'web')
-      .includes('pc_extended_options_unavailable'));
-  }
+  assert.ok(workspaceValidationCodes({ ...base, tablebaseEnabled: true }, 'web')
+    .includes('pc_extended_options_unavailable'));
+  const retiredPrepass = { ...base, precomputeBuildDependencies: true };
+  assert.deepEqual(workspaceValidationCodes(retiredPrepass, 'web'), workspaceValidationCodes(base, 'web'));
+  assert.deepEqual(buildWorkspaceCommandArguments(retiredPrepass), buildWorkspaceCommandArguments(base),
+    'the removed beta prepass must not survive as a hidden extended-PC option');
   for (const backend of ['auto', 'gpu', 'hybrid']) {
     const request = { ...base, backend };
     for (const surface of ['web', 'desktop']) {

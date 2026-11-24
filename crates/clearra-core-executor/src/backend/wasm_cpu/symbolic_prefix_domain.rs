@@ -1,10 +1,10 @@
-//! Exact finite domain for the test-only symbolic placement prefix relation.
+//! Exact finite domain for the symbolic placement prefix relation.
 //!
 //! The bits of a concrete executed subset are its numeric identity. The low
 //! six bits locate a lane, the remaining bits select a word. Dependency words
 //! are labelled by the actual operation, not its (possibly repeated) piece.
 
-pub(super) const MAX_OPERATIONS: usize = 10;
+pub(super) const MAX_OPERATIONS: usize = 11;
 const LANE_OPERATIONS: usize = 6;
 const LANES: usize = u64::BITS as usize;
 pub(super) const MAX_PREFIX_WORDS: usize = 1 << (MAX_OPERATIONS - LANE_OPERATIONS);
@@ -310,7 +310,7 @@ mod tests {
     #[test]
     fn symbolic_prefix_word_owners_match_every_concrete_subset() {
         assert!(PrefixDomain::new(0).is_none());
-        assert!(PrefixDomain::new(11).is_none());
+        assert!(PrefixDomain::new(MAX_OPERATIONS + 1).is_none());
         for operations in 1..=MAX_OPERATIONS {
             let domain = PrefixDomain::new(operations).unwrap();
             let terminal = (1_usize << operations) - 1;

@@ -1,4 +1,6 @@
-use clearra_replay::{trace::PlacementStep, ScoringExecutionEdge};
+use clearra_replay::trace::PlacementStep;
+#[cfg(test)]
+use clearra_replay::ScoringExecutionEdge;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct ClearEvent {
@@ -26,6 +28,7 @@ impl ClearEvent {
     }
 
     /// The graph producer has already determined emptiness after line clear.
+    #[cfg(test)]
     pub(crate) const fn from_execution_edge(edge: ScoringExecutionEdge) -> Self {
         Self::new(edge.cleared_lines(), edge.perfect_clear())
     }

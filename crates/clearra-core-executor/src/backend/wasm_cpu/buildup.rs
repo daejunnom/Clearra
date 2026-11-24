@@ -2,7 +2,15 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 mod compact_snapshot;
+#[cfg(test)]
+mod execution_pruning_tests;
 pub mod generic_board64_search;
+#[cfg(feature = "placement-dependency-pc")]
+mod placement_dependency;
+#[cfg(all(test, feature = "placement-dependency-pc"))]
+mod product_membership_tests;
+#[cfg(all(feature = "parallel", feature = "placement-dependency-pc"))]
+mod shared_saturation;
 pub use compact_snapshot::{
     CompactBuildUpEdge, CompactBuildUpNode, CompactBuildUpSnapshot, CompactBuildUpSnapshotError,
     CompactBuildUpTransitionMode, RustCompactBuildUpWorkspace,
@@ -21,7 +29,7 @@ use clearra_finesse::{
 };
 use clearra_geometry::layout::board64_layout::Board64Layout;
 use clearra_pc_graph::request::PcCountPolicy;
-use clearra_postprocess::BackToBackEdgePolicy;
+use clearra_postprocess::{BackToBackEdgePolicy, BeforeSpinEvidenceDecision};
 use clearra_problem::SearchProblem;
 use clearra_replay::{
     ExactScoringExecutionGraph, RotationRequest, ScoringExecutionEdge, ScoringExecutionNode,
@@ -78,6 +86,36 @@ const SYMBOLIC_CACHE_LIVE_LIMIT: usize = 256 * 1024 * 1024;
 // table, and cannot alias a real node index.
 const LEGAL_BOARD_PENDING_NODE: u32 = u32::MAX - 1;
 const LEGAL_BOARD_REJECTED_NODE: u32 = u32::MAX;
+
+// Only the tests may disable the request-scoped simplifications. No physical
+// certificate, worker cache key, or serialized product option depends on it.
+#[cfg(test)]
+thread_local! {
+    static SEMANTIC_PRUNING: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+}
+
+fn semantic_pruning_enabled() -> bool {
+    #[cfg(test)]
+    {
+        SEMANTIC_PRUNING.with(std::cell::Cell::get)
+    }
+    #[cfg(not(test))]
+    {
+        true
+    }
+}
+
+#[cfg(test)]
+fn with_semantic_pruning<T>(enabled: bool, action: impl FnOnce() -> T) -> T {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            SEMANTIC_PRUNING.with(|slot| slot.set(self.0));
+        }
+    }
+    let _restore = Restore(SEMANTIC_PRUNING.with(|slot| slot.replace(enabled)));
+    action()
+}
 
 #[cfg(any(test, feature = "local-search-ab"))]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -640,9 +678,28 @@ pub(super) fn annotate_frozen_finesse_target_groups(
     scoring_error: &'static str,
 ) -> Result<usize, WasmExactSearchError> {
     let mut query_traversals = 0_usize;
-    for group in groups.into_values() {
+    for mut group in groups.into_values() {
         if control.is_cancelled() {
             return Err(WasmExactSearchError::Cancelled);
+        }
+        if semantic_pruning_enabled() {
+            // Other consumers also share this grouping helper. Clear rejected
+            // output slots even when their caller did not initialize them to
+            // None, then omit those targets from the movement query itself.
+            for target in group.targets.iter().filter(|target| !target.allowed) {
+                *edge_costs.get_mut(target.edge_index).ok_or(
+                    WasmExactSearchError::InvalidProblem("wasm_finesse_grouped_edge_index_invalid"),
+                )? = None;
+                *edge_terminal_evidence.get_mut(target.edge_index).ok_or(
+                    WasmExactSearchError::InvalidProblem(
+                        "wasm_finesse_grouped_evidence_index_invalid",
+                    ),
+                )? = None;
+            }
+            group.targets.retain(|target| target.allowed);
+            if group.targets.is_empty() {
+                continue;
+            }
         }
         query_traversals += 1;
         let query = FrozenFinesseQuery::new(
@@ -865,8 +922,28 @@ pub(super) struct BuildUpMemoryComponents {
     pub other_bytes: usize,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) struct CandidateIlcWork {
+    pub checks: usize,
+    pub rejected_candidates: usize,
+    pub reused_prefix_certificates: usize,
+}
+
+impl CandidateIlcWork {
+    pub fn accumulate(&mut self, other: Self) {
+        self.checks = self.checks.saturating_add(other.checks);
+        self.rejected_candidates = self
+            .rejected_candidates
+            .saturating_add(other.rejected_candidates);
+        self.reused_prefix_certificates = self
+            .reused_prefix_certificates
+            .saturating_add(other.reused_prefix_certificates);
+    }
+}
+
 #[derive(Default)]
 pub(super) struct BuildUpWorkspace {
+    candidate_ilc_work: CandidateIlcWork,
     realization_feasibility: RealizationFeasibilityWorkspace,
     piece_order_languages: PieceOrderLanguageCache,
     standard_bag_coverage: Option<StandardBagCoverage>,
@@ -899,6 +976,24 @@ pub(super) struct BuildUpWorkspace {
 }
 
 impl BuildUpWorkspace {
+    pub(super) const fn candidate_ilc_work(&self) -> CandidateIlcWork {
+        self.candidate_ilc_work
+    }
+
+    #[cfg(any(test, all(feature = "local-search-ab", feature = "parallel")))]
+    fn operation_mask_experiment_active(&self) -> bool {
+        #[cfg(test)]
+        if OPERATION_MASK_TEST.get().is_some() {
+            return true;
+        }
+        #[cfg(all(feature = "local-search-ab", feature = "parallel"))]
+        {
+            self.operation_mask_worker.is_some()
+        }
+        #[cfg(not(all(feature = "local-search-ab", feature = "parallel")))]
+        false
+    }
+
     #[cfg(any(test, all(feature = "local-search-ab", feature = "parallel")))]
     fn operation_masks_enabled(&self) -> bool {
         #[cfg(test)]
@@ -977,7 +1072,6 @@ impl BuildUpWorkspace {
         Ok(())
     }
 
-    #[cfg(not(target_family = "wasm"))]
     pub(super) fn bind_local_import(
         &mut self,
         authority: super::compact_kick_authority::CompactKickAuthority,
@@ -1158,6 +1252,23 @@ impl BuildUpWorkspace {
         }
     }
 
+    /// Capability of this request's existing coverage owner, never a guess
+    /// from a target's queue subset or from another worker's coverage.
+    pub(super) fn can_use_first_pattern_witness(&self) -> bool {
+        #[cfg(feature = "placement-dependency-pc")]
+        {
+            #[cfg(any(test, all(feature = "local-search-ab", feature = "parallel")))]
+            if self.operation_mask_experiment_active() {
+                return false;
+            }
+            self.standard_bag_coverage
+                .as_ref()
+                .is_some_and(StandardBagCoverage::can_use_first_pattern_witness)
+        }
+        #[cfg(not(feature = "placement-dependency-pc"))]
+        false
+    }
+
     pub const fn reachability_metrics(&self) -> super::reachability::ReachabilityMetrics {
         self.reachability.metrics()
     }
@@ -1189,12 +1300,31 @@ impl BuildUpWorkspace {
     }
 
     #[cfg(feature = "parallel")]
+    pub(super) fn publish_worker_concrete_coverage(
+        &self,
+        destination: &super::parallel_coverage::SharedCoverage,
+        coverage: &PatternBitSet,
+    ) -> Result<(), WasmExactSearchError> {
+        #[cfg(feature = "placement-dependency-pc")]
+        return destination.union_for_request(self.shared_standard_bag_request.as_ref(), coverage);
+        #[cfg(not(feature = "placement-dependency-pc"))]
+        destination.union(coverage)
+    }
+
+    #[cfg(feature = "parallel")]
     pub(super) fn publish_worker_standard_bag_coverage(
         &mut self,
         destination: &super::parallel_coverage::SharedCoverage,
     ) -> Result<(), WasmExactSearchError> {
         if let Some(coverage) = self.standard_bag_coverage.as_mut() {
             let (pattern_count, words) = coverage.flushed_global_words()?;
+            #[cfg(feature = "placement-dependency-pc")]
+            destination.union_original_words_for_request(
+                self.shared_standard_bag_request.as_ref(),
+                pattern_count,
+                words,
+            )?;
+            #[cfg(not(feature = "placement-dependency-pc"))]
             destination.union_original_words(pattern_count, words)?;
         }
         Ok(())
@@ -1308,6 +1438,146 @@ impl BuildUpWorkspace {
         coverage
             .cover_language(&self.piece_order_languages, language_root, control)
             .map(Some)
+    }
+
+    /// Compose an exact Boolean placement language with the existing supply
+    /// authority. Complete standard bags keep their symbolic representation;
+    /// all other materialized universes use the same original-ordinal bitset
+    /// product as the concrete verifier, without constructing another graph.
+    #[cfg(feature = "placement-dependency-pc")]
+    fn cover_piece_language(
+        &mut self,
+        problem: &SearchProblem,
+        target: &TargetGroup,
+        language_root: u32,
+        witness_mode: CandidateWitnessMode,
+        retain_trace: bool,
+        source_membership_certified: bool,
+        evaluator: &mut CoverageProductEvaluator,
+        control: &ExecutionControl,
+    ) -> Result<CandidateBuildResult, WasmExactSearchError> {
+        // Once the original universe is globally covered, this immutable
+        // request needs each candidate's existence, and an original ordinal
+        // only when its consumer requests one. Include/capture and every
+        // richer evidence consumer keep the full product. Recheck the owner's
+        // capability at consumption.
+        if witness_mode == CandidateWitnessMode::MembershipOnly
+            && super::uses_pc_placement_dependency(problem)
+            && !problem.solution_probability_policy().requested()
+            && !problem
+                .pc_chance_evidence_policy()
+                .retains_pc_coverage_evidence()
+        {
+            if let Some(coverage) = self.standard_bag_coverage.as_mut().filter(|coverage| {
+                coverage.can_use_first_pattern_witness()
+                    || (problem.output_policy() == clearra_problem::SearchOutputPolicy::Summary
+                        && !retain_trace
+                        && coverage.boolean_membership_enabled()
+                        && coverage.can_use_boolean_pattern_membership())
+            }) {
+                let (states_before, edges_before) = coverage.product_work_counts();
+                // Summary still exposes the canonical representative. Serial
+                // construction retains its first trace here; parallel workers
+                // select the original geometry rank, then reverify that one
+                // candidate with a fresh full owner and retain_trace=true.
+                // Trace keeps minimum-ordinal membership even in bulk work.
+                let (buildable, witness) = if problem.output_policy()
+                    == clearra_problem::SearchOutputPolicy::Summary
+                    && !retain_trace
+                    && coverage.boolean_membership_enabled()
+                {
+                    let buildable = if source_membership_certified {
+                        coverage.accept_certified_pattern_language(
+                            &self.piece_order_languages,
+                            language_root,
+                            control,
+                        )?;
+                        true
+                    } else {
+                        coverage.contains_pattern_language(
+                            &self.piece_order_languages,
+                            language_root,
+                            control,
+                        )?
+                    };
+                    (buildable, None)
+                } else {
+                    let witness = coverage.first_pattern_witness(
+                        &self.piece_order_languages,
+                        language_root,
+                        control,
+                    )?;
+                    (witness.is_some(), witness)
+                };
+                let (states_after, edges_after) = coverage.product_work_counts();
+                let mut result = certified_language_result(None);
+                result.buildable = buildable;
+                result.witness_pattern_id = witness;
+                result.coverage_product_states = states_after.saturating_sub(states_before);
+                result.coverage_product_edge_checks = edges_after.saturating_sub(edges_before);
+                self.recycle_symbolic_caches_if_needed()?;
+                return Ok(result);
+            }
+        }
+        if let Some(coverage) = self.cover_standard_bag_language(problem, language_root, control)? {
+            return Ok(certified_language_result(Some(coverage)));
+        }
+        let pattern_index =
+            target
+                .pattern_index
+                .as_deref()
+                .ok_or(WasmExactSearchError::InvalidProblem(
+                    "wasm_concrete_pattern_index_not_compiled",
+                ))?;
+        let mut result = certified_language_result(None);
+        let coverage = match self
+            .piece_order_languages
+            .coverage(language_root, target.pattern_index_id)?
+        {
+            CoverageCacheLookup::Hit(local_words) => pattern_index
+                .expand_coverage_words(local_words.as_ref())
+                .map_err(|_| {
+                    WasmExactSearchError::InvalidProblem("wasm_cached_coverage_expansion_failed")
+                })?,
+            CoverageCacheLookup::Miss {
+                admit_after_compute,
+            } => {
+                let product = evaluator.evaluate_language(
+                    &self.piece_order_languages,
+                    language_root,
+                    pattern_index,
+                    problem.initial_hold(),
+                    problem.supply().hold_enabled(),
+                    problem.supply().projects_unplaced_lookahead(),
+                    problem.supply().projects_standard_bag_lookahead(),
+                    control,
+                )?;
+                result.coverage_product_words = product.processed_words;
+                result.coverage_product_states = product.active_states;
+                result.coverage_product_edge_checks = product.edge_checks;
+                if admit_after_compute {
+                    self.piece_order_languages.insert_coverage(
+                        language_root,
+                        target.pattern_index_id,
+                        evaluator.local_coverage_words(),
+                    )?;
+                }
+                product.coverage_bits
+            }
+        };
+        if !coverage.is_empty() {
+            result.buildable = true;
+            result.witness_pattern_id = coverage
+                .first_pattern()
+                .map(|pattern| pattern.index() as u32);
+            result.covered_patterns = Some(coverage);
+        }
+        // The materialized result owns its original-ordinal words. No suffix
+        // ID escapes this branch, so its accelerator arena may be recycled
+        // under the same existing bound as the standard-bag consumer. The
+        // latter returns above and keeps its root alive until merge_global.
+        self.recycle_symbolic_caches_if_needed()?;
+        Ok(result)
     }
 
     fn recycle_symbolic_caches_if_needed(&mut self) -> Result<(), WasmExactSearchError> {
@@ -1886,16 +2156,33 @@ impl CandidateWitnessMode {
         target: &TargetGroup,
         coverage_already_known: impl FnOnce() -> bool,
         solution_coverage_required: bool,
+        product_membership_available: bool,
     ) -> Self {
         if solution_coverage_required
             || problem.objective().execution_constraints().requested()
             || problem
+                .pc_chance_evidence_policy()
+                .retains_pc_coverage_evidence()
+            || problem
                 .queue_observation_policy()
                 .requires_observation_policy()
             || problem.count_policy() != PcCountPolicy::CountUnique
-            || !target.single_pattern_witness_is_exact()
         {
             return Self::Disabled;
+        }
+        if !target.single_pattern_witness_is_exact() {
+            // Standard bags have no concrete position index. Their separate
+            // exact scalar owner is admitted only after full original input
+            // coverage, and only for the qualified Boolean product route.
+            return if product_membership_available
+                && super::uses_pc_placement_dependency(problem)
+                && !problem.solution_probability_policy().requested()
+                && coverage_already_known()
+            {
+                Self::MembershipOnly
+            } else {
+                Self::Disabled
+            };
         }
         // Only this witness mode can use the answer. In particular, standard
         // bag targets without a position index never need the superset scan.
@@ -2114,6 +2401,41 @@ fn verify_candidate_for_completion_mode(
             profile_scale,
         );
     }
+    // This Boolean route owns only contracts admitted by SearchProblem.
+    // Score, B2B, CountAll, finesse, observation policies and exact Build
+    // completion continue through their existing concrete producer below.
+    #[cfg(feature = "placement-dependency-pc")]
+    {
+        let use_dependency = matches!(completion, BuildCompletion::ClearToEmpty)
+            && !finesse_requested
+            && !finesse_spin_coverage_requested
+            && super::uses_pc_placement_dependency(problem)
+            && placement_dependency::supports_candidate(catalog, candidate);
+        #[cfg(any(test, all(feature = "local-search-ab", feature = "parallel")))]
+        let use_dependency = use_dependency && !workspace.operation_mask_experiment_active();
+        if use_dependency {
+            if !workspace.has_local_import() {
+                if let Some(authority) = super::dependency_kick_authority(problem)? {
+                    workspace.bind_local_import(authority, catalog)?;
+                }
+            }
+            return placement_dependency::verify_product(
+                problem,
+                catalog,
+                candidate,
+                target,
+                workspace,
+                evaluator,
+                witness_mode,
+                retain_trace,
+                witness_mode.enabled() && problem.piece_source().fixed_sequence().is_some(),
+                control,
+                profile_scale,
+            );
+        }
+    }
+    #[cfg(all(test, feature = "placement-dependency-pc"))]
+    record_product_verifier(false);
     if RealizationFeasibilityWorkspace::dependency_relaxation_is_infeasible(catalog, candidate) {
         return Ok(infeasible_candidate_result(0));
     }
@@ -2301,6 +2623,35 @@ fn verify_strict_prefix_order(
         work.candidates_certified += 1;
         Ok(certified_language_result(coverage))
     })
+}
+
+#[cfg(all(test, feature = "placement-dependency-pc"))]
+thread_local! {
+    static PRODUCT_VERIFIER_COUNTS: std::cell::Cell<Option<(usize, usize)>> = const {
+        std::cell::Cell::new(None)
+    };
+}
+
+#[cfg(all(test, feature = "placement-dependency-pc"))]
+fn record_product_verifier(dependency: bool) {
+    if let Some((build_up, proof)) = PRODUCT_VERIFIER_COUNTS.get() {
+        PRODUCT_VERIFIER_COUNTS.set(Some((
+            build_up + usize::from(!dependency),
+            proof + usize::from(dependency),
+        )));
+    }
+}
+
+#[cfg(all(test, feature = "placement-dependency-pc"))]
+pub(super) fn with_product_verifier_counts<T>(run: impl FnOnce() -> T) -> (T, (usize, usize)) {
+    struct Restore(Option<(usize, usize)>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            PRODUCT_VERIFIER_COUNTS.set(self.0);
+        }
+    }
+    let _restore = Restore(PRODUCT_VERIFIER_COUNTS.replace(Some((0, 0))));
+    (run(), PRODUCT_VERIFIER_COUNTS.get().unwrap())
 }
 
 // Evidence lives only until this candidate's fallback graph is constructed.
@@ -3140,7 +3491,7 @@ fn verify_certified_poset(
     Ok(Some(certified_language_result(Some(coverage))))
 }
 
-#[cfg(any(test, feature = "local-search-ab"))]
+#[cfg(any(test, feature = "local-search-ab", feature = "placement-dependency-pc"))]
 fn certified_language_result(coverage: Option<StandardBagCoverageResult>) -> CandidateBuildResult {
     let buildable = coverage
         .as_ref()
@@ -3277,6 +3628,7 @@ fn verify_candidate_with_projection(
             BuildReachabilityMode::Existing,
             movement_proofs,
             BuildPassRepresentation::OperationMasks,
+            None,
         )?;
         let BuildPassOutput::OperationMasks {
             language_root,
@@ -3328,6 +3680,10 @@ fn verify_candidate_with_projection(
     }
     let finesse_geometry_span =
         finesse_requested.then(|| SearchStageSpan::begin(ExecutorSearchStage::FinesseGeometry));
+    // Finesse uses the original graph edge ordinal to break ties after
+    // candidate languages are unioned. Keep that ordinal space intact here;
+    // its policy/dead-suffix pruning happens before movement annotation below.
+    // Ordinary coverage also retains the unconstrained producer denominator.
     let mut graph = BuildOrderGraph::build(
         problem,
         catalog,
@@ -4296,15 +4652,14 @@ fn visit_witness_state(
             ));
         }
         let hold_piece = witness_piece_from_code(state.hold_code);
-        if super::terminal_hold_projection::finite_terminal_release_allowed(
-            pattern_index.sequence_len(),
-            queue_position,
-            problem.supply().hold_enabled(),
-            problem.supply().projects_unplaced_lookahead(),
-            state.terminal_projection_consumed,
-            state.hold_code != 0,
-            edge.to as usize == projection.all_placed,
-        ) && state.hold_code == desired_piece
+        // The bit-sliced index may contain originals with different lengths.
+        // Its terminal mask owns the per-original EOF check below.
+        if problem.supply().hold_enabled()
+            && problem.supply().projects_unplaced_lookahead()
+            && !state.terminal_projection_consumed
+            && state.hold_code != 0
+            && edge.to as usize == projection.all_placed
+            && state.hold_code == desired_piece
         {
             let terminal_patterns = super::terminal_hold_projection::terminal_release_pattern_word(
                 pattern_index,
@@ -4797,6 +5152,35 @@ impl BuildOrderGraph {
         reachability_mode: BuildReachabilityMode,
         movement_proofs: &CandidateMovementProofs,
     ) -> Result<Self, WasmExactSearchError> {
+        Self::build_with_edge_policy(
+            problem,
+            catalog,
+            candidate,
+            projection,
+            workspace,
+            piece_language_projection_only,
+            completion,
+            feasibility,
+            reachability_mode,
+            movement_proofs,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build_with_edge_policy(
+        problem: &SearchProblem,
+        catalog: &GeometryCatalog,
+        candidate: &GeometryCandidate,
+        projection: &mut CandidateProjection,
+        workspace: &mut BuildUpWorkspace,
+        piece_language_projection_only: bool,
+        completion: BuildCompletion,
+        feasibility: Option<RealizationFeasibility>,
+        reachability_mode: BuildReachabilityMode,
+        movement_proofs: &CandidateMovementProofs,
+        b2b_policy: Option<BackToBackEdgePolicy>,
+    ) -> Result<Self, WasmExactSearchError> {
         Self::build_representation(
             problem,
             catalog,
@@ -4809,6 +5193,7 @@ impl BuildOrderGraph {
             reachability_mode,
             movement_proofs,
             BuildPassRepresentation::Graph,
+            b2b_policy,
         )
         .map(BuildPassOutput::into_graph)
     }
@@ -4826,6 +5211,7 @@ impl BuildOrderGraph {
         reachability_mode: BuildReachabilityMode,
         movement_proofs: &CandidateMovementProofs,
         representation: BuildPassRepresentation,
+        b2b_policy: Option<BackToBackEdgePolicy>,
     ) -> Result<BuildPassOutput, WasmExactSearchError> {
         let legal_board_eligible = catalog.width() == 10
             && catalog.height() == 4
@@ -4846,6 +5232,7 @@ impl BuildOrderGraph {
             legal_board_eligible,
             movement_proofs,
             representation,
+            b2b_policy,
         )
     }
 
@@ -4879,6 +5266,7 @@ impl BuildOrderGraph {
             legal_board_eligible,
             movement_proofs,
             BuildPassRepresentation::Graph,
+            None,
         )
         .map(BuildPassOutput::into_graph)
     }
@@ -4897,6 +5285,7 @@ impl BuildOrderGraph {
         legal_board_eligible: bool,
         movement_proofs: &CandidateMovementProofs,
         representation: BuildPassRepresentation,
+        b2b_policy: Option<BackToBackEdgePolicy>,
     ) -> Result<BuildPassOutput, WasmExactSearchError> {
         #[cfg(any(test, feature = "local-search-ab"))]
         let states_before = (movement_proofs.kick_guard_reuse_enabled || movement_proofs.len != 0)
@@ -4914,6 +5303,7 @@ impl BuildOrderGraph {
             legal_board_eligible,
             movement_proofs,
             representation,
+            b2b_policy,
         )?;
         #[cfg(not(any(test, feature = "local-search-ab")))]
         {
@@ -4952,6 +5342,7 @@ impl BuildOrderGraph {
                 legal_board_eligible,
                 &CandidateMovementProofs::default(),
                 representation,
+                b2b_policy,
             )?
             else {
                 return Err(WasmExactSearchError::InvalidProblem(
@@ -4982,6 +5373,7 @@ impl BuildOrderGraph {
         legal_board_eligible: bool,
         _movement_proofs: &CandidateMovementProofs,
         representation: BuildPassRepresentation,
+        b2b_policy: Option<BackToBackEdgePolicy>,
     ) -> Result<BuildPassAttempt, WasmExactSearchError> {
         if candidate.row_ids().len() > 15 {
             return Err(WasmExactSearchError::InvalidProblem(
@@ -4995,6 +5387,7 @@ impl BuildOrderGraph {
         let operation_count = projection.operation_count();
         let state_count = projection.state_count();
         let all_placed = projection.all_placed;
+        let b2b_policy = b2b_policy.filter(|_| semantic_pruning_enabled());
         let share_piece_edges =
             piece_language_projection_only && matches!(completion, BuildCompletion::ClearToEmpty);
         let materialize_graph = matches!(representation, BuildPassRepresentation::Graph);
@@ -5145,6 +5538,30 @@ impl BuildOrderGraph {
                     || workspace.graph_reachable_generations[child] == graph_generation;
                 let row_id = candidate.row_ids()[operation_index];
                 let row = catalog.skeleton(row_id);
+                if let Some(policy) = b2b_policy.filter(|policy| {
+                    // Profiles admitting this piece's spins have no coarse
+                    // piece-only negative. Avoid eagerly materializing their
+                    // child projection just for a check that cannot reject it.
+                    policy.before_spin_evidence(row.piece, 1, false)
+                        == BeforeSpinEvidenceDecision::Rejects
+                }) {
+                    // Projection owns the exact board and deleted-original-row
+                    // frame for this subset. Every valid realization of this
+                    // operation must produce that same child. A rejected clear
+                    // therefore rejects all its poses, before reachability or
+                    // edge allocation. Never store this request predicate in
+                    // the shared physical reachability/feasibility caches.
+                    let (child_board, child_deleted_rows) = projection.state(child);
+                    let cleared_lines = (child_deleted_rows & !deleted_rows).count_ones() as u8;
+                    if policy.before_spin_evidence(
+                        row.piece,
+                        cleared_lines,
+                        cleared_lines > 0 && child_board == 0,
+                    ) == BeforeSpinEvidenceDecision::Rejects
+                    {
+                        continue;
+                    }
+                }
                 // This memo owns only this candidate, subset, operation and
                 // original deleted-row frame. It never stores an edge pose or
                 // substitutes one realization for another.
@@ -5842,22 +6259,24 @@ fn annotate_and_prune_finesse_graph_with_query_count(
     let layout = Board64Layout::new(size).map_err(|_| {
         WasmExactSearchError::InvalidProblem("wasm_finesse_compact_board_layout_invalid")
     })?;
+    // Admission and the owning finesse material currently use this canonical
+    // table. Borrow the same owner here rather than adding an outer clone;
+    // broader verified/imported tables need their matching payload accounting.
     let kick_profile =
-        super::kick_profiles::builtin_kick_profile(problem.kick_profile().profile_id())
-            .ok_or(WasmExactSearchError::InvalidProblem(
-                "wasm_finesse_kick_profile_unavailable",
-            ))?
-            .clone();
+        super::kick_profiles::builtin_kick_profile(problem.kick_profile().profile_id()).ok_or(
+            WasmExactSearchError::InvalidProblem("wasm_finesse_kick_profile_unavailable"),
+        )?;
     let mut edge_costs = vec![None; graph.edges.len()];
     let mut edge_terminal_evidence = vec![None; graph.edges.len()];
     let b2b_policy = finesse_b2b_policy(problem);
-    let grouped_target_count = graph.edges.len();
+    let prune_semantics = semantic_pruning_enabled();
+    let mut grouped_target_count = 0_usize;
     let mut groups = FrozenFinesseTargetGroups::new();
     for (node_index, &subset) in subsets.iter().enumerate().take(graph.nodes.len()) {
         if control.is_cancelled() {
             return Err(WasmExactSearchError::Cancelled);
         }
-        if subset == usize::MAX {
+        if subset == usize::MAX || (prune_semantics && !graph.nodes[node_index].live) {
             continue;
         }
         let board = projection.state(subset).0;
@@ -5867,7 +6286,42 @@ fn annotate_and_prune_finesse_graph_with_query_count(
             .map_err(|_| WasmExactSearchError::InvalidProblem("wasm_finesse_board_invalid"))?;
         for (local_index, edge) in graph.edges(node_index).iter().copied().enumerate() {
             let edge_index = edge_start + local_index;
-            let (terminal_evidence, allowed) = if spin_coverage_requested || b2b_policy.is_some() {
+            if prune_semantics && !graph.nodes[edge.to as usize].live {
+                continue;
+            }
+            let child_subset = subset | (1_usize << edge.operation_index);
+            let perfect_clear = (spin_coverage_requested || b2b_policy.is_some())
+                && edge.cleared_lines > 0
+                && projection.state(child_subset).0 == 0;
+            if prune_semantics
+                && b2b_policy.is_some_and(|policy| {
+                    policy.before_spin_evidence(edge.piece, edge.cleared_lines, perfect_clear)
+                        == BeforeSpinEvidenceDecision::Rejects
+                })
+            {
+                continue;
+            }
+            // The clear-only predicate reads no movement fields. Keep the
+            // separate terminal-label contract (including Simple T), and keep
+            // all evidence when the caller requests spin coverage as well.
+            let clear_facts = ScoringExecutionEdge::new(
+                edge.to,
+                edge.operation_index,
+                edge.piece,
+                edge.rotation,
+                edge.x,
+                edge.y,
+                edge.cleared_lines,
+                0,
+                0,
+                ScoringLockEvidence::no_rotation(edge.rotation),
+            )
+            .with_perfect_clear(perfect_clear);
+            let needs_lock_evidence = spin_coverage_requested
+                || b2b_policy.is_some_and(|policy| {
+                    !prune_semantics || policy.requires_recognized_spin(clear_facts)
+                });
+            let (terminal_evidence, allowed) = if needs_lock_evidence {
                 let lock_evidence = reachability.scoring_lock_evidence(
                     catalog,
                     board,
@@ -5876,8 +6330,6 @@ fn annotate_and_prune_finesse_graph_with_query_count(
                     edge.x,
                     edge.y,
                 );
-                let child_subset = subset | (1_usize << edge.operation_index);
-                let perfect_clear = edge.cleared_lines > 0 && projection.state(child_subset).0 == 0;
                 let (blocked_t_corners, blocked_t_front_corners) = if edge.piece == PieceKind::T {
                     t_corner_evidence(
                         catalog.width(),
@@ -5917,6 +6369,11 @@ fn annotate_and_prune_finesse_graph_with_query_count(
             } else {
                 (None, true)
             };
+            if prune_semantics && !allowed {
+                // Costs/evidence are already None. Do not retain a target or
+                // start a board/piece BFS for a policy-rejected transition.
+                continue;
+            }
             push_frozen_finesse_target(
                 &mut groups,
                 finesse_board,
@@ -5928,6 +6385,7 @@ fn annotate_and_prune_finesse_graph_with_query_count(
                     allowed,
                 ),
             );
+            grouped_target_count += 1;
         }
     }
     target_grouping_span.finish(grouped_target_count as u64);
@@ -5936,7 +6394,7 @@ fn annotate_and_prune_finesse_graph_with_query_count(
     let query_traversals = annotate_frozen_finesse_target_groups(
         groups,
         problem.spawn_profile(),
-        &kick_profile,
+        kick_profile,
         &mut edge_costs,
         &mut edge_terminal_evidence,
         control,
@@ -5970,28 +6428,57 @@ fn annotate_and_prune_finesse_graph_with_query_count(
             .any(|(offset, edge)| edge_costs[start + offset].is_some() && live[edge.to as usize]);
     }
 
-    let old_edges = core::mem::take(&mut graph.edges);
-    let mut new_edges = Vec::with_capacity(old_edges.len());
-    let mut new_piece_edges = Vec::with_capacity(old_edges.len());
+    let surviving_edges = graph
+        .nodes
+        .iter()
+        .enumerate()
+        .map(|(node_index, node)| {
+            if !live[node_index] {
+                return 0;
+            }
+            let start = node.edge_start as usize;
+            graph
+                .edges(node_index)
+                .iter()
+                .enumerate()
+                .filter(|(offset, edge)| {
+                    edge_costs[start + offset].is_some() && live[edge.to as usize]
+                })
+                .count()
+        })
+        .sum::<usize>();
+    // Stable compaction preserves the original edge-index tie order without
+    // holding old_edges + new_edges + old_piece_edges + new_piece_edges at once.
+    // Reuse both BuildUp buffers; only the owned cost-language output is new.
+    graph.piece_edges.clear();
+    graph
+        .piece_edges
+        .try_reserve_exact(surviving_edges)
+        .map_err(|_| {
+            WasmExactSearchError::InvalidProblem("wasm_finesse_piece_edge_storage_unavailable")
+        })?;
+    let mut write_edge = 0_usize;
     let mut prepared_nodes = Vec::with_capacity(graph.nodes.len());
-    let mut prepared_edges = Vec::with_capacity(old_edges.len());
+    let mut prepared_edges = Vec::with_capacity(surviving_edges);
     for (node_index, node) in graph.nodes.iter_mut().enumerate() {
         let old_start = node.edge_start as usize;
         let old_end = old_start + node.edge_count as usize;
         node.live = live[node_index];
-        node.edge_start = new_edges.len() as u32;
-        node.piece_edge_start = new_piece_edges.len() as u32;
+        node.edge_start = write_edge as u32;
+        node.piece_edge_start = graph.piece_edges.len() as u32;
         let prepared_start = prepared_edges.len() as u32;
         if node.live {
-            for (offset, edge) in old_edges[old_start..old_end].iter().copied().enumerate() {
-                let original_index = old_start + offset;
+            for original_index in old_start..old_end {
+                let edge = graph.edges[original_index];
                 let Some(cost) = edge_costs[original_index] else {
                     continue;
                 };
                 if !live[edge.to as usize] {
                     continue;
                 }
-                new_edges.push(edge);
+                debug_assert!(write_edge <= original_index);
+                graph.edges[write_edge] = edge;
+                write_edge += 1;
                 prepared_edges.push(PreparedFinesseEdge {
                     child: edge.to,
                     piece: edge.piece,
@@ -6007,29 +6494,28 @@ fn annotate_and_prune_finesse_graph_with_query_count(
                 });
             }
         }
-        node.edge_count = new_edges.len() as u32 - node.edge_start;
+        node.edge_count = write_edge as u32 - node.edge_start;
         let mut previous = None;
-        for edge in &new_edges[node.edge_start as usize..] {
+        for edge in &graph.edges[node.edge_start as usize..write_edge] {
             let key = (edge.to, edge.piece);
             if previous != Some(key) {
-                new_piece_edges.push(*edge);
+                graph.piece_edges.push(*edge);
                 previous = Some(key);
             }
         }
-        node.piece_edge_count = new_piece_edges.len() as u32 - node.piece_edge_start;
+        node.piece_edge_count = graph.piece_edges.len() as u32 - node.piece_edge_start;
         prepared_nodes.push(PreparedFinesseNode {
             edge_start: prepared_start,
             edge_count: prepared_edges.len() as u32 - prepared_start,
             depth: node.depth,
             accepting: node.accepting,
-            source_board: (subsets[node_index] != usize::MAX)
+            source_board: (node.live && subsets[node_index] != usize::MAX)
                 .then(|| FinesseBoard::new(layout, projection.state(subsets[node_index]).0))
                 .transpose()
                 .map_err(|_| WasmExactSearchError::InvalidProblem("wasm_finesse_board_invalid"))?,
         });
     }
-    graph.edges = new_edges;
-    graph.piece_edges = new_piece_edges;
+    graph.edges.truncate(write_edge);
     graph.piece_edges_share_operation_edges = false;
     prune_span.finish(prepared_edges.len() as u64);
     Ok(PreparedFinesseLanguage {
@@ -6263,7 +6749,8 @@ pub(super) fn exact_scoring_execution_graph_for_completion(
         problem.backend_policy().conditioned_reachability_enabled(),
     );
     let mut projection = CandidateProjection::compile(catalog, &candidate, workspace, completion)?;
-    let graph = match BuildOrderGraph::build(
+    let b2b_policy = finesse_b2b_policy(problem);
+    let graph = match BuildOrderGraph::build_with_edge_policy(
         problem,
         catalog,
         &candidate,
@@ -6274,6 +6761,7 @@ pub(super) fn exact_scoring_execution_graph_for_completion(
         None,
         BuildReachabilityMode::Existing,
         &CandidateMovementProofs::default(),
+        b2b_policy,
     ) {
         Ok(graph) => graph,
         Err(error) => {
@@ -6284,6 +6772,23 @@ pub(super) fn exact_scoring_execution_graph_for_completion(
     if !graph.nodes[graph.root as usize].live {
         workspace.recycle_graph(graph);
         workspace.recycle_projection(projection);
+        if b2b_policy.is_some() && semantic_pruning_enabled() {
+            // A complete policy rejection is evidence, not a missing physical
+            // graph. Keep the raw candidate identity and a nonaccepting root;
+            // `None` would incorrectly mark the owning batch incomplete.
+            let mut nodes = Vec::new();
+            nodes.try_reserve_exact(1).map_err(|_| {
+                WasmExactSearchError::InvalidProblem("wasm_scoring_node_storage_unavailable")
+            })?;
+            nodes.push(ScoringExecutionNode::new(0, 0, false));
+            return Ok(Some(ExactScoringExecutionGraph::new(
+                candidate_id,
+                identity,
+                0,
+                nodes,
+                Vec::new(),
+            )));
+        }
         return Ok(None);
     }
 
@@ -6605,24 +7110,22 @@ fn first_pattern_path(
         }
         let node = &graph.nodes[state.node as usize];
         if node.accepting() {
-            let projected_terminal_cursor = sequence.len().checked_add(1);
-            return !projects_unplaced_lookahead
-                || (state.cursor as usize == sequence.len() && state.hold.is_none())
-                || (Some(state.cursor as usize) == projected_terminal_cursor
-                    && state.hold.is_some());
+            return accepts_pattern_path(sequence.len(), projects_unplaced_lookahead, state);
         }
         for edge in graph
             .edges(state.node as usize)
             .iter()
             .filter(|edge| graph.nodes[edge.to as usize].live)
         {
-            if projects_unplaced_lookahead
-                && hold_enabled
-                && state.cursor as usize == sequence.len()
-                && state.hold == Some(edge.piece)
-                && graph.nodes[edge.to as usize].accepting()
-                && (!projects_standard_bag_lookahead
-                    || first_standard_bag_lookahead(sequence).is_none())
+            if graph.nodes[edge.to as usize].accepting()
+                && can_release_held_at_terminal(
+                    sequence,
+                    hold_enabled,
+                    projects_unplaced_lookahead,
+                    projects_standard_bag_lookahead,
+                    state,
+                    edge.piece,
+                )
             {
                 path.push(CorePathStep::new(
                     edge.piece,
@@ -6690,6 +7193,33 @@ fn first_pattern_path(
         &mut path,
     );
     path
+}
+
+fn accepts_pattern_path(
+    sequence_len: usize,
+    projects_unplaced_lookahead: bool,
+    state: CoverageState,
+) -> bool {
+    let cursor = usize::from(state.cursor);
+    !projects_unplaced_lookahead
+        || (cursor == sequence_len && state.hold.is_none())
+        || (Some(cursor) == sequence_len.checked_add(1) && state.hold.is_some())
+}
+
+fn can_release_held_at_terminal(
+    sequence: &[PieceKind],
+    hold_enabled: bool,
+    projects_unplaced_lookahead: bool,
+    projects_standard_bag_lookahead: bool,
+    state: CoverageState,
+    required_piece: PieceKind,
+) -> bool {
+    projects_unplaced_lookahead
+        && hold_enabled
+        && !sequence.is_empty()
+        && usize::from(state.cursor) == sequence.len()
+        && state.hold == Some(required_piece)
+        && (!projects_standard_bag_lookahead || first_standard_bag_lookahead(sequence).is_none())
 }
 
 pub(super) fn representative_pattern_path(
@@ -8041,7 +8571,10 @@ mod v081_legal_child_admission_tests {
 
 #[cfg(test)]
 mod fixed_witness_tests {
-    use super::{fixed_witness_branches, witness_piece_code, FixedWitnessProductState};
+    use super::{
+        can_release_held_at_terminal, fixed_witness_branches, witness_piece_code, CoverageState,
+        FixedWitnessProductState,
+    };
     use clearra_core_domain::piece::piece_kind::PieceKind;
 
     fn state(extra_draw: u8, hold: Option<PieceKind>) -> FixedWitnessProductState {
@@ -8165,6 +8698,15 @@ mod fixed_witness_tests {
         let mut consumed = state(0, Some(PieceKind::O));
         consumed.terminal_projection_consumed = true;
         for branches in [
+            fixed_witness_branches(&[], 0, true, true, true, state(0, Some(PieceKind::O))),
+            fixed_witness_branches(
+                &[PieceKind::I],
+                2,
+                true,
+                true,
+                true,
+                state(0, Some(PieceKind::O)),
+            ),
             fixed_witness_branches(
                 &[PieceKind::I],
                 1,
@@ -8186,6 +8728,39 @@ mod fixed_witness_tests {
         ] {
             assert_eq!(branches.iter().count(), 0);
         }
+    }
+
+    #[test]
+    fn representative_terminal_release_uses_actual_nonempty_eof() {
+        use PieceKind::{I, J, L, O, S, T, Z};
+
+        let state = |cursor| CoverageState {
+            node: 0,
+            cursor,
+            hold: Some(I),
+        };
+        for (sequence, cursor, projected_standard) in [
+            (vec![], 0, false),
+            (vec![O], 2, false),
+            (vec![O, T, S, Z, J, L], 6, true),
+        ] {
+            assert!(!can_release_held_at_terminal(
+                &sequence,
+                true,
+                true,
+                projected_standard,
+                state(cursor),
+                I,
+            ));
+        }
+        assert!(can_release_held_at_terminal(
+            &[O],
+            true,
+            true,
+            false,
+            state(1),
+            I,
+        ));
     }
 }
 // SRP rationale: this module has one behavior-level change reason: exact WASM BuildUp state expansion and trace preservation.

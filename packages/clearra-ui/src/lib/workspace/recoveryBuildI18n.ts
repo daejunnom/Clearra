@@ -2,7 +2,7 @@ import type { WorkspaceLanguage } from './workspaceI18n';
 const text = {
   middleStages: ['Middle stages', '중간 필드 선택', '中間フィールド選択'],
   addMiddle: ['Add middle field', '중간 필드 추가', '中間フィールドを追加'],
-  removeMiddle: ['Remove stage (at least 4 middle fields)', '단계 삭제 (중간 필드 4개 이상)', '段階を削除（中間フィールド4個以上）'],
+  removeMiddle: ['Remove stage (keep one middle field)', '단계 삭제 (중간 필드 1개 유지)', '段階を削除（中間フィールドを1個残す）'],
   perSolutionProbability: ['Per-solution build probability', '해법별 구축 확률', '解ごとの構築確率'],
   solutions: ['Solutions', '해법', '解'],
   completeSolutions: ['All solutions', '전체 해법', '全解'],

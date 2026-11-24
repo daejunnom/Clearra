@@ -277,6 +277,20 @@ impl<'a> FrontierCertificate<'a> {
                     {
                         return None;
                     }
+                    let source_mask = template.state_masks[source];
+                    let destination_mask = template.state_masks[usize::from(destination)];
+                    let required_empty = source_mask | destination_mask;
+                    if source_mask == INVALID_STATE_MASK
+                        || targets[..prior].iter().any(|&earlier| {
+                            let mask = template.state_masks[usize::from(earlier)];
+                            mask != INVALID_STATE_MASK && mask & !required_empty == 0
+                        })
+                    {
+                        // This forward candidate cannot be a first success
+                        // on any occupancy. It is absent from the reverse
+                        // index and contributes no frontier obligation.
+                        continue;
+                    }
                     require(
                         destination,
                         FrontierClause::Rotation(ReverseRotationSource {

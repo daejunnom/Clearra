@@ -493,11 +493,32 @@ impl DomainPropagation {
         remaining: u64,
         feasible_piece_mask: u8,
     ) -> (DomainStatus, Self) {
+        // Keep the full scan as the product default. The exact cutoff remains
+        // available for explicit experiments, but end-to-end measurements do
+        // not justify enabling it by default.
         let (status, propagation, _) =
             Self::compile_minimum_support::<false, false>(catalog, remaining, feasible_piece_mask);
         (status, propagation)
     }
 
+    /// Historical full scan for differential tests and the explicit A/B zero
+    /// arm. Keep it separate from the product entry point so changing the
+    /// product default cannot silently change the reference calculation.
+    #[cfg(test)]
+    pub fn compile_minimum_reference(
+        catalog: &GeometryCatalog,
+        remaining: u64,
+        feasible_piece_mask: u8,
+    ) -> (DomainStatus, Self) {
+        let (status, propagation, _) =
+            Self::compile_minimum_support::<false, false>(catalog, remaining, feasible_piece_mask);
+        (status, propagation)
+    }
+
+    /// A later cell can replace the selected pivot only with strictly fewer
+    /// feasible parents. Once its count reaches the current minimum, its
+    /// remaining rows cannot affect the selected cell, its exact piece mask,
+    /// or detection of a zero-support cell. This optimization is opt-in.
     #[cfg(any(feature = "local-search-ab", test))]
     pub fn compile_minimum_cutoff(
         catalog: &GeometryCatalog,
@@ -1011,8 +1032,110 @@ mod tests {
                     DomainPropagation::compile_minimum(&catalog, remaining, piece_mask),
                     reference
                 );
+                assert_eq!(
+                    DomainPropagation::compile_minimum_reference(&catalog, remaining, piece_mask),
+                    reference
+                );
             }
         }
+    }
+
+    #[test]
+    fn minimum_domain_explicit_cutoff_preserves_gaps_initial_fields_and_supply_changes() {
+        let o_only = 1 << piece_index(PieceKind::O);
+        let i_only = 1 << piece_index(PieceKind::I);
+        let supply_masks = [
+            ALL_STANDARD_PIECES,
+            ALL_STANDARD_PIECES & !o_only,
+            i_only,
+            o_only,
+            0,
+            o_only,
+            ALL_STANDARD_PIECES,
+        ];
+        let mut skipped_rows = 0;
+        let mut nonempty_bumper_frames = 0;
+        for width in [4_u8, 7, 10] {
+            let height = 4_u8;
+            let full = (1_u64 << (width * height)) - 1;
+            let middle = width / 2;
+            let middle_column =
+                (0..height).fold(0, |mask, row| mask | 1_u64 << (row * width + middle));
+            // Three filled cells below a remaining top cell exercise the
+            // nonempty-origin bumper route, with one more initial cell to
+            // preserve the tetromino-aligned target area.
+            let nonempty = (middle_column & !(1_u64 << ((height - 1) * width + middle))) | 1;
+            for initial in [0, nonempty] {
+                let required = full & !initial;
+                let catalog = GeometryCatalog::compile_for_required_cells_on_dimensions(
+                    width, height, initial, required,
+                )
+                .unwrap();
+                let right_o = (0b11_u64 << (width - 2)) | (0b11_u64 << (2 * width - 2));
+                let top_rows = full & !((1_u64 << (2 * width)) - 1);
+                for remaining in [
+                    required,
+                    required & !right_o,
+                    required & !middle_column,
+                    required & top_rows,
+                    1_u64 << (width * height - 1),
+                    0,
+                ] {
+                    if initial != 0
+                        && remaining.count_ones() <= BUMPER_DOMAIN_MAX_RESIDUAL_CELLS
+                        && catalog
+                            .separator_catalog()
+                            .dynamic_bumper_cells(remaining)
+                            .next()
+                            .is_some()
+                    {
+                        nonempty_bumper_frames += 1;
+                    }
+                    // Restricting supply, exhausting it, then restoring it
+                    // must not leave a prior count or piece mask in the next
+                    // pivot decision. No support state is retained here.
+                    for piece_mask in supply_masks {
+                        let reference = DomainPropagation::compile_minimum_reference(
+                            &catalog, remaining, piece_mask,
+                        );
+                        let product =
+                            DomainPropagation::compile_minimum(&catalog, remaining, piece_mask);
+                        let cutoff = DomainPropagation::compile_minimum_cutoff(
+                            &catalog, remaining, piece_mask,
+                        );
+                        assert_eq!(
+                            product, reference,
+                            "width={width}, initial={initial:#x}, remaining={remaining:#x}, pieces={piece_mask:#x}"
+                        );
+                        assert_eq!(
+                            cutoff, reference,
+                            "cutoff: width={width}, initial={initial:#x}, remaining={remaining:#x}, pieces={piece_mask:#x}"
+                        );
+                        if initial == 0 {
+                            assert_eq!(
+                                product,
+                                exhaustive_minimum_on_empty_board(&catalog, remaining, piece_mask)
+                            );
+                        }
+                        let (_, _, full_work) = DomainPropagation::compile_minimum_profiled(
+                            &catalog, remaining, piece_mask, false,
+                        );
+                        let (status, pivot, cutoff_work) =
+                            DomainPropagation::compile_minimum_profiled(
+                                &catalog, remaining, piece_mask, true,
+                            );
+                        assert_eq!((status, pivot), cutoff);
+                        assert_eq!(
+                            cutoff_work.incidence_rows_scanned + cutoff_work.incidence_rows_skipped,
+                            full_work.incidence_rows_scanned
+                        );
+                        skipped_rows += cutoff_work.incidence_rows_skipped;
+                    }
+                }
+            }
+        }
+        assert!(skipped_rows > 0);
+        assert!(nonempty_bumper_frames > 0);
     }
 
     fn assert_matches_full(

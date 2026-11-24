@@ -13,7 +13,7 @@ mod t_spin_coverage_only_materializer;
 
 pub use b2b_execution_filter::{
     BackToBackEdgePolicy, BackToBackExecutionFilter, BackToBackFilterError,
-    BackToBackFilterMemoryProjection, BackToBackFilterMemoryReport,
+    BackToBackFilterMemoryProjection, BackToBackFilterMemoryReport, BeforeSpinEvidenceDecision,
 };
 pub use candidate_execution_aggregate::{CandidateExecution, CandidateExecutionAggregate};
 pub use exact_replay_language::{

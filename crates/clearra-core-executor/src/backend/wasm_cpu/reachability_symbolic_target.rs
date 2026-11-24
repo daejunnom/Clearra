@@ -2,7 +2,8 @@
 //!
 //! Each lane is one immutable board and uses the template's real forward
 //! transition semantics. Reaching a sky seed proves that lane. Only a fully
-//! exhausted lane is an exact miss; budget exhaustion refuses the relation.
+//! exhausted lane is an exact miss. Allocation failure refuses the relation;
+//! cancellation and resource refusal are never negative movement answers.
 
 use std::collections::VecDeque;
 
@@ -15,9 +16,7 @@ use super::{
 };
 
 const WORD_BITS: usize = u64::BITS as usize;
-const MAX_POSES: usize = 1024;
-const MAX_WORKLIST_POPS: usize = 8192;
-const MAX_ACTION_TERMS: usize = 131_072;
+const MAX_POSES: usize = u16::MAX as usize;
 const CANCEL_INTERVAL: usize = 64;
 
 #[derive(Clone, Copy, Default)]
@@ -30,15 +29,27 @@ struct Pose {
 /// Worker-owned storage. No board, rule, or result is reused between queries.
 #[derive(Default)]
 pub(super) struct ReverseScratch {
-    computed_free: [u64; MAX_POSES / WORD_BITS],
+    computed_free: Vec<u64>,
     poses: Vec<Pose>,
     queue: VecDeque<u16>,
 }
 
 impl ReverseScratch {
+    pub(super) fn checked_retained_upper_bound(states: u128) -> Option<u128> {
+        states
+            .checked_mul((core::mem::size_of::<Pose>() + 2 * core::mem::size_of::<u16>()) as u128)?
+            .checked_add(
+                states
+                    .checked_add(63)?
+                    .checked_div(64)?
+                    .checked_mul(core::mem::size_of::<u64>() as u128)?,
+            )
+    }
+
     pub(super) fn retained_bytes(&self) -> usize {
         self.poses.capacity() * core::mem::size_of::<Pose>()
             + self.queue.capacity() * core::mem::size_of::<u16>()
+            + self.computed_free.capacity() * core::mem::size_of::<u64>()
     }
 
     fn start<'a>(
@@ -51,6 +62,13 @@ impl ReverseScratch {
         // A witnessed, refused, or cancelled query may have left queued
         // states. Reset its entire frontier and visibility before reuse.
         self.queue.clear();
+        let word_count = state_count.div_ceil(WORD_BITS);
+        if word_count > self.computed_free.len() {
+            self.computed_free
+                .try_reserve_exact(word_count - self.computed_free.len())
+                .ok()?;
+            self.computed_free.resize(word_count, 0);
+        }
         self.computed_free.fill(0);
         if state_count > self.poses.len() {
             self.poses
@@ -225,7 +243,8 @@ pub(super) fn compile_prefix_target_lanes_from_planes(
 
     let mut reached = 0_u64;
     let mut worklist_pops = 0_usize;
-    let mut action_terms = 0;
+    let maximum_pops = state_count * lanes.count_ones() as usize;
+    let mut action_terms = 0_u64;
     while unresolved != 0 {
         let Some((current, pending)) = relation.pop() else {
             break;
@@ -233,11 +252,10 @@ pub(super) fn compile_prefix_target_lanes_from_planes(
         if worklist_pops.is_multiple_of(CANCEL_INTERVAL) {
             check()?;
         }
-        if worklist_pops == MAX_WORKLIST_POPS {
-            check()?;
-            return Ok(None);
-        }
         worklist_pops += 1;
+        // Each enqueue contributes at least one previously unseen pose/lane.
+        // This is a termination invariant, not an empirical work cutoff.
+        debug_assert!(worklist_pops <= maximum_pops);
         work.worklist_pops += 1;
         let delta = pending & unresolved;
         if delta == 0 {
@@ -262,6 +280,9 @@ pub(super) fn compile_prefix_target_lanes_from_planes(
         let end = template.reverse_rotation_offsets[current + 1] as usize;
         for &rotation in &template.reverse_rotation_sources[start..end] {
             action_terms += 1;
+            if action_terms.is_multiple_of(CANCEL_INTERVAL as u64) {
+                check()?;
+            }
             work.ordered_kick_terms += 1;
             let source = usize::from(rotation.source);
             let mut added = delta & relation.free(template, source, work);
@@ -270,16 +291,15 @@ pub(super) fn compile_prefix_target_lanes_from_planes(
                     break;
                 }
                 action_terms += 1;
+                if action_terms.is_multiple_of(CANCEL_INTERVAL as u64) {
+                    check()?;
+                }
                 work.ordered_kick_terms += 1;
                 // Current is already known free. Any earlier free target
                 // wins, even if that earlier pose was already visited.
                 added &= !relation.free(template, usize::from(prior), work);
             }
             relation.enqueue(source, added);
-        }
-        if action_terms > MAX_ACTION_TERMS {
-            check()?;
-            return Ok(None);
         }
     }
 

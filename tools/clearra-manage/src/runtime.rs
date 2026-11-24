@@ -79,6 +79,7 @@ pub struct RunOptions {
     pub producer: String,
     pub profile: String,
     pub timeout_seconds: Option<u64>,
+    pub no_timeout: bool,
     pub command: Vec<OsString>,
     pub keep_stdin_open: bool,
     pub extra_env: BTreeMap<OsString, OsString>,
@@ -97,7 +98,7 @@ pub struct RunOutcome {
     pub child_termination: ChildTermination,
     pub supervisor_termination_reason: Option<String>,
     pub duration_ms: u128,
-    pub timeout_seconds: u64,
+    pub timeout_seconds: Option<u64>,
     pub output_bytes: u64,
     pub output_limit_bytes: u64,
     pub peak_memory_bytes: Option<u64>,
@@ -441,26 +442,69 @@ fn pressure_requires_fail_close(
     recovery_due && (observation.critical || owned_limit_near)
 }
 
+fn select_timeout_seconds(
+    profile_id: &str,
+    profile: &ResourceProfile,
+    requested_seconds: Option<u64>,
+    no_timeout: bool,
+) -> Result<Option<u64>> {
+    if no_timeout && requested_seconds.is_some() {
+        return Err(Error::usage(
+            "--timeout and --no-timeout are mutually exclusive",
+        ));
+    }
+    let allows_no_timeout = matches!(
+        profile_id,
+        "build-test" | "verification" | "benchmark-search"
+    );
+    if no_timeout {
+        if profile.explicit_lease_required {
+            return Err(Error::usage(format!(
+                "profile {profile_id} requires a finite explicit --timeout lease"
+            )));
+        }
+        if !allows_no_timeout {
+            return Err(Error::usage(
+                "--no-timeout is allowed only for build-test, verification, and benchmark-search",
+            ));
+        }
+        // Only the wall-clock deadline is omitted. Memory, process-tree,
+        // output, slot ownership and no-retry supervision remain mandatory.
+        return Ok(None);
+    }
+    if (profile.explicit_timeout_required || profile.explicit_lease_required)
+        && requested_seconds.is_none()
+    {
+        let choice = if allows_no_timeout && !profile.explicit_lease_required {
+            "--timeout or --no-timeout"
+        } else {
+            "--timeout"
+        };
+        return Err(Error::usage(format!(
+            "profile {profile_id} requires an explicit {choice}"
+        )));
+    }
+    let timeout = requested_seconds.unwrap_or(profile.timeout_seconds);
+    if timeout == 0 || timeout > profile.maximum_timeout_seconds {
+        return Err(Error::usage(format!(
+            "timeout for {profile_id} must be between 1 and {} seconds",
+            profile.maximum_timeout_seconds
+        )));
+    }
+    Ok(Some(timeout))
+}
+
 pub fn run(repository: &Path, policy: &Policy, options: RunOptions) -> Result<RunOutcome> {
     if options.command.is_empty() {
         return Err(Error::usage("runtime run requires a command after --"));
     }
     let profile = policy.profile(&options.profile)?.clone();
-    let timeout = options.timeout_seconds.unwrap_or(profile.timeout_seconds);
-    if (profile.explicit_timeout_required || profile.explicit_lease_required)
-        && options.timeout_seconds.is_none()
-    {
-        return Err(Error::usage(format!(
-            "profile {} requires an explicit --timeout",
-            options.profile
-        )));
-    }
-    if timeout == 0 || timeout > profile.maximum_timeout_seconds {
-        return Err(Error::usage(format!(
-            "timeout for {} must be between 1 and {} seconds",
-            options.profile, profile.maximum_timeout_seconds
-        )));
-    }
+    let timeout = select_timeout_seconds(
+        &options.profile,
+        &profile,
+        options.timeout_seconds,
+        options.no_timeout,
+    )?;
     if policy.runtime_policy.memory_pressure.automatic_retry {
         return Err(Error::policy("automatic retry must remain disabled"));
     }
@@ -586,7 +630,7 @@ pub fn run(repository: &Path, policy: &Policy, options: RunOptions) -> Result<Ru
         Arc::clone(&output_exceeded),
     );
 
-    let timeout_at = started + Duration::from_secs(timeout);
+    let timeout_at = timeout.map(|seconds| started + Duration::from_secs(seconds));
     let sample_interval = Duration::from_secs_f64(
         policy
             .runtime_policy
@@ -632,7 +676,7 @@ pub fn run(repository: &Path, policy: &Policy, options: RunOptions) -> Result<Ru
                 .map_err(|error| Error::io("wait after output limit", error))?;
             break;
         }
-        if Instant::now() >= timeout_at {
+        if timeout_at.is_some_and(|deadline| Instant::now() >= deadline) {
             forced_reason = Some(("timeout", "E_CLEARRA_PROCESS_TIMEOUT"));
             terminate_tree(&mut child, &containment, profile.termination_grace_seconds);
             status = child
@@ -1588,6 +1632,100 @@ mod tests {
             concurrency_class: "control".to_owned(),
             explicit_timeout_required: false,
             explicit_lease_required: false,
+        }
+    }
+
+    #[test]
+    fn timeout_selection_preserves_defaults_and_finite_requests() {
+        let profile = profile();
+        for profile_id in ["control", "build-test", "verification", "benchmark-search"] {
+            assert_eq!(
+                select_timeout_seconds(profile_id, &profile, None, false).unwrap(),
+                Some(300)
+            );
+            for seconds in [1, 120, 300] {
+                assert_eq!(
+                    select_timeout_seconds(profile_id, &profile, Some(seconds), false).unwrap(),
+                    Some(seconds)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn timeout_selection_allows_explicit_unbounded_local_computation() {
+        let mut profile = profile();
+        profile.explicit_timeout_required = true;
+        for profile_id in ["build-test", "verification", "benchmark-search"] {
+            assert_eq!(
+                select_timeout_seconds(profile_id, &profile, None, true).unwrap(),
+                None
+            );
+        }
+        for profile_id in ["control", "local-service", "cloud-job", "new-profile"] {
+            let error = select_timeout_seconds(profile_id, &profile, None, true).unwrap_err();
+            assert_eq!(error.kind, "usage");
+            assert!(error.message.contains("allowed only"));
+        }
+    }
+
+    #[test]
+    fn timeout_selection_keeps_required_choice_explicit() {
+        let mut profile = profile();
+        profile.explicit_timeout_required = true;
+        let error = select_timeout_seconds("benchmark-search", &profile, None, false).unwrap_err();
+        assert!(error.message.contains("--timeout or --no-timeout"));
+        assert_eq!(
+            select_timeout_seconds("benchmark-search", &profile, Some(120), false).unwrap(),
+            Some(120)
+        );
+    }
+
+    #[test]
+    fn timeout_selection_rejects_zero_and_over_maximum() {
+        let mut profile = profile();
+        for seconds in [0, 301, u64::MAX] {
+            let error =
+                select_timeout_seconds("build-test", &profile, Some(seconds), false).unwrap_err();
+            assert_eq!(error.kind, "usage");
+            assert!(error.message.contains("between 1 and 300"));
+        }
+        // A malformed default must not turn into an unbounded run either.
+        profile.timeout_seconds = 0;
+        assert!(select_timeout_seconds("build-test", &profile, None, false).is_err());
+        profile.timeout_seconds = 301;
+        assert!(select_timeout_seconds("build-test", &profile, None, false).is_err());
+    }
+
+    #[test]
+    fn timeout_selection_rejects_conflicting_options() {
+        let profile = profile();
+        for seconds in [0, 120, u64::MAX] {
+            let error =
+                select_timeout_seconds("build-test", &profile, Some(seconds), true).unwrap_err();
+            assert_eq!(error.kind, "usage");
+            assert!(error.message.contains("mutually exclusive"));
+        }
+    }
+
+    #[test]
+    fn timeout_selection_never_disables_a_finite_lease() {
+        let mut profile = profile();
+        profile.explicit_lease_required = true;
+        // Even an otherwise eligible name cannot override a finite lease.
+        for profile_id in [
+            "local-service",
+            "build-test",
+            "verification",
+            "benchmark-search",
+        ] {
+            let error = select_timeout_seconds(profile_id, &profile, None, true).unwrap_err();
+            assert!(error.message.contains("finite explicit --timeout lease"));
+            assert!(select_timeout_seconds(profile_id, &profile, None, false).is_err());
+            assert_eq!(
+                select_timeout_seconds(profile_id, &profile, Some(120), false).unwrap(),
+                Some(120)
+            );
         }
     }
 

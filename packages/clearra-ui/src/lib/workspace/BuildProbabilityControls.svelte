@@ -214,21 +214,6 @@
       </label>
       <WorkerAuthorityStatus authority={workerAuthority} {language} />
     </div>
-    <div class="dependency-analysis-control">
-      <label class="workspace-switch-label">
-        <input
-          type="checkbox"
-          checked={request.precomputeBuildDependencies}
-          disabled={request.resultMode !== 'all-solutions' || request.aggregation === 'tiling'}
-          on:change={(event) => patch({
-            precomputeBuildDependencies: (event.currentTarget as HTMLInputElement).checked
-          })}
-        />
-        <span class="workspace-switch" aria-hidden="true"></span>
-        <span>{label('precomputeBuildDependencies')}</span>
-      </label>
-      <small class="workspace-field-help">{label('precomputeBuildDependenciesHelp')}</small>
-    </div>
   </section>
 
   {#if validationCodes.length}
@@ -243,5 +228,4 @@
   .solution-probabilities-control { display: grid; gap: 5px; margin-top: 14px; }
   .solution-probabilities-control fieldset { border: 0; margin: 0; min-width: 0; padding: 0; }
   .worker-policy-control { display: grid; gap: 5px; margin-top: 14px; }
-  .dependency-analysis-control { display: grid; gap: 5px; margin-top: 14px; }
 </style>

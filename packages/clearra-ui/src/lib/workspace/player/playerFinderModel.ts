@@ -123,7 +123,7 @@ export function preparePlayerPcFinder(
     scoreProfile,
     rule: state.settings.kickProfile,
     spinProfile: state.settings.spinProfile,
-    backend: "auto",
+    backend: "cpu",
     workers: defaultBrowserWorkerCount(options.hardwareConcurrency),
     tablebaseEnabled: false,
     precomputeBuildDependencies: false,

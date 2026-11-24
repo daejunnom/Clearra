@@ -675,11 +675,30 @@ fn wasm_pc_minimals_returns_the_exact_portfolio_and_live_page_owner() {
 
 #[test]
 fn canonical_minimals_preserves_the_legacy_count_all_coverage_identity_set() {
+    use clearra_core_domain::solution::{
+        normalized_tiling_solution_set_hash_from_sorted_standard_board64_identities,
+        NormalizedTilingSolutionKey,
+    };
+
     let runtime = WasmCommandRuntime::default();
     // v0.7.4's GUI lowered minimum-cover through the generic count-all route.
-    // The canonical command uses count-unique because path multiplicity is not
-    // part of a coverage portfolio; the exact candidate identity/coverage set
-    // must nevertheless remain identical.
+    // That producer exposes only its selected portfolio. The typed command
+    // retains the complete count-unique source for its App-owned all-optima
+    // proof, so its source report must not be compared to a selected report.
+    // Compare both the unreduced CountAll source and the selected portfolio.
+    let source = runtime.app_context().run(
+        runtime
+            .compile_command_text(
+                "clearra pc --lines 2 --queue IIOOO --count all \
+                 --solution-probabilities --backend cpu --workers 1",
+            )
+            .expect("unreduced CountAll source request"),
+    );
+    assert_eq!(source.status(), clearra_app::AppStatus::Success);
+    let source_core = source
+        .render_model()
+        .and_then(|model| model.core_result())
+        .expect("unreduced CountAll source result");
     let legacy = runtime
         .run_command_text(
             "clearra pc --lines 2 --queue IIOOO --count all \
@@ -694,19 +713,90 @@ fn canonical_minimals_preserves_the_legacy_count_all_coverage_identity_set() {
         .expect("canonical minimum-cover result");
     let legacy_report = legacy.search_report().expect("legacy search report");
     let canonical_report = canonical.search_report().expect("canonical search report");
+    let Some(clearra_app::ProductPageSourceOwner::CoveragePortfolio(portfolio)) =
+        canonical.product_page_source_owner()
+    else {
+        panic!("typed minimum must retain its complete coverage source");
+    };
 
+    assert_eq!(source_core.normalized_solution_keys().len(), 4);
     assert_eq!(
         canonical_report.unique_solution_count,
-        legacy_report.unique_solution_count
+        source_core.normalized_solution_keys().len()
     );
     assert_eq!(
-        canonical_report.normalized_solution_keys,
-        legacy_report.normalized_solution_keys
+        canonical_report.normalized_solution_keys.as_slice(),
+        source_core.normalized_solution_keys()
     );
     assert_eq!(
-        canonical_report.normalized_solution_set_hash,
-        legacy_report.normalized_solution_set_hash
+        Some(canonical_report.normalized_solution_set_hash.as_str()),
+        source_core.field("normalized_solution_set_hash")
     );
+    assert_eq!(portfolio.candidates().len(), 4);
+    assert_eq!(
+        portfolio.coverage_rows().len(),
+        source_core.normalized_solution_coverages().len()
+    );
+    for (index, ((candidate, row), expected)) in portfolio
+        .candidates()
+        .iter()
+        .zip(portfolio.coverage_rows())
+        .zip(source_core.normalized_solution_coverages())
+        .enumerate()
+    {
+        assert_eq!(candidate.candidate_id(), index as u64 + 1);
+        assert_eq!(candidate.normalized_key(), expected.solution_key());
+        assert_eq!(row, expected.covered_patterns());
+    }
+    assert_eq!(
+        portfolio.required_patterns().words(),
+        source_core.coverage_pattern_words()
+    );
+
+    let selected_keys = portfolio.canonical_candidate_keys_owned().unwrap();
+    assert_eq!(portfolio.optimal_cardinality(), 1);
+    assert_eq!(selected_keys.len(), portfolio.optimal_cardinality());
+    assert_eq!(legacy_report.unique_solution_count, selected_keys.len());
+    assert_eq!(legacy_report.normalized_solution_keys, selected_keys);
+    let selected_identities = selected_keys
+        .iter()
+        .map(|key| {
+            NormalizedTilingSolutionKey::parse_canonical(key)
+                .unwrap()
+                .standard_board64_identity()
+                .unwrap()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        legacy_report.normalized_solution_set_hash,
+        normalized_tiling_solution_set_hash_from_sorted_standard_board64_identities(
+            &selected_identities
+        )
+    );
+    let selected_id = portfolio.canonical_page().portfolio().candidate_ids()[0];
+    assert_eq!(
+        &portfolio.coverage_rows()[selected_id as usize - 1],
+        portfolio.required_patterns(),
+        "the selected single candidate must cover the complete original universe"
+    );
+    let ProductResultPayloadContent::CoveragePortfolio(page) = canonical
+        .app_response()
+        .product_result_payload()
+        .expect("typed canonical minimum payload")
+        .content()
+    else {
+        panic!("typed minimum must expose its selected portfolio");
+    };
+    assert_eq!(page.optimal_cardinality(), "1");
+    assert_eq!(
+        page.members()
+            .iter()
+            .map(|member| member.normalized_solution_key())
+            .collect::<Vec<_>>(),
+        selected_keys.iter().map(String::as_str).collect::<Vec<_>>()
+    );
+    assert!(legacy_report.count_complete && canonical_report.count_complete);
+    assert!(legacy_report.probability_complete && canonical_report.probability_complete);
     assert_eq!(
         canonical_report.covered_pattern_count,
         legacy_report.covered_pattern_count
@@ -748,6 +838,203 @@ fn two_line_distinct_bag_is_complete_empty_but_duplicate_fixed_queue_is_not() {
     assert_eq!(p7_report.covered_pattern_count, 0);
     assert_eq!(fixed_report.unique_solution_count, 4);
     assert_eq!(fixed_report.covered_pattern_count, 1);
+}
+
+#[test]
+#[ignore = "bounded P7 product comparison; run explicitly under managed verification"]
+fn p7_gui_b2b_probability_toggles_preserve_original_queue_coverage() {
+    use std::collections::BTreeMap;
+
+    #[derive(Debug, Eq, PartialEq)]
+    struct PublicCoverage {
+        keys: Vec<String>,
+        hash: String,
+        global_words: Vec<u64>,
+        covered_patterns: usize,
+        probability: String,
+        unique_solutions: usize,
+    }
+
+    struct Snapshot {
+        public: PublicCoverage,
+        // Skip deliberately does not require or retain per-solution relations.
+        rows: Option<BTreeMap<String, Vec<u64>>>,
+    }
+
+    let _resource_guard = typed_pc_distributed_test_guard();
+    let runtime = WasmCommandRuntime::default();
+    let run = |preserve_b2b: bool, include_probabilities: bool| {
+        let command = format!(
+            "clearra pc --lines 4 --board-mask 0x3c0f03c0f --height 4 --pieces 6 \
+             --patterns P7 --hold empty --count unique --rule srs-plus \
+             --backend cpu --workers 1 {} {}",
+            if preserve_b2b {
+                "--preserve-b2b --spin-profile t-spins"
+            } else {
+                ""
+            },
+            if include_probabilities {
+                "--solution-probabilities"
+            } else {
+                ""
+            },
+        );
+        let response = runtime.app_context().run(
+            runtime
+                .compile_command_text(&command)
+                .expect("P7 GUI option command"),
+        );
+        assert_eq!(
+            response.status(),
+            clearra_app::AppStatus::Success,
+            "{command}: {response:?}"
+        );
+        let core = response
+            .render_model()
+            .and_then(|model| model.core_result())
+            .expect("P7 finalized App result");
+        assert_eq!(core.usize_field("coverage_pattern_count"), Some(5_040));
+        assert_eq!(core.usize_field("source_sequence_length"), Some(7));
+        assert_eq!(core.field("total_possible_pattern_count"), Some("5040"));
+        assert_eq!(core.bool_field("resource_truncated"), Some(false));
+        if preserve_b2b {
+            assert_eq!(
+                core.bool_field("execution_constraint_preserve_b2b"),
+                Some(true)
+            );
+            assert_eq!(
+                core.bool_field("execution_constraint_materialized"),
+                Some(true)
+            );
+        }
+        let global_words = core.coverage_pattern_words().to_vec();
+        assert_eq!(global_words.len(), 5_040_usize.div_ceil(64));
+        assert_eq!(global_words.last().unwrap() >> (5_040 % 64), 0);
+        let rows = include_probabilities.then(|| {
+            let mut rows = BTreeMap::new();
+            for coverage in core.normalized_solution_coverages() {
+                assert_eq!(coverage.covered_patterns().pattern_count(), 5_040);
+                assert!(
+                    rows.insert(
+                        coverage.solution_key().to_owned(),
+                        coverage.covered_patterns().words().to_vec(),
+                    )
+                    .is_none(),
+                    "a source candidate must have one original-ordinal row"
+                );
+            }
+            rows
+        });
+        // Exercise the same final transport projection used by the GUI after
+        // retaining only the bounded comparison evidence from the Core owner.
+        let projected = WasmExecutionResult::from_app_response(response, false);
+        let report = projected.search_report().expect("P7 public WASM report");
+        assert!(report.count_complete && report.probability_complete);
+        assert_eq!(report.total_possible_pattern_count, "5040");
+        assert_eq!(
+            report.unique_solution_count,
+            report.normalized_solution_keys.len()
+        );
+        assert_eq!(
+            report.covered_pattern_count,
+            global_words
+                .iter()
+                .map(|word| word.count_ones() as usize)
+                .sum::<usize>(),
+        );
+        if let Some(rows) = rows.as_ref() {
+            assert_eq!(rows.len(), report.normalized_solution_keys.len());
+            assert_eq!(report.solution_probabilities.len(), rows.len());
+            let mut union = vec![0_u64; global_words.len()];
+            for (key, words) in rows {
+                assert!(report.normalized_solution_keys.binary_search(key).is_ok());
+                assert_eq!(words.len(), union.len());
+                for (output, word) in union.iter_mut().zip(words) {
+                    *output |= *word;
+                }
+            }
+            assert_eq!(
+                union, global_words,
+                "per-solution rows must reproduce the whole original universe union"
+            );
+            for probability in &report.solution_probabilities {
+                let words = rows
+                    .get(&probability.solution_key)
+                    .expect("probability candidate belongs to the source map");
+                let covered = words
+                    .iter()
+                    .map(|word| word.count_ones() as usize)
+                    .sum::<usize>();
+                assert_eq!(probability.pattern_count, 5_040);
+                assert_eq!(probability.covered_pattern_count, covered);
+                assert!(probability.probability_complete);
+                let actual = probability.probability.parse::<f64>().unwrap();
+                assert!((actual - covered as f64 / 5_040.0).abs() < 1e-12);
+            }
+        } else {
+            assert!(
+                report.solution_probabilities.is_empty(),
+                "Skip must not publish an unrequested per-solution report"
+            );
+        }
+        eprintln!(
+            "P7 GUI options: b2b={preserve_b2b}, solution_probabilities={include_probabilities}, solutions={}, covered={}/5040",
+            report.unique_solution_count, report.covered_pattern_count,
+        );
+        Snapshot {
+            public: PublicCoverage {
+                keys: report.normalized_solution_keys.clone(),
+                hash: report.normalized_solution_set_hash.clone(),
+                global_words,
+                covered_patterns: report.covered_pattern_count,
+                probability: report.coverage_probability.clone(),
+                unique_solutions: report.unique_solution_count,
+            },
+            rows,
+        }
+    };
+
+    let ordinary_skip = run(false, false);
+    let ordinary_include = run(false, true);
+    let b2b_skip = run(true, false);
+    let b2b_include = run(true, true);
+    assert!(!ordinary_include.public.keys.is_empty());
+    assert!(ordinary_include.public.covered_patterns > 0);
+    assert_eq!(
+        ordinary_skip.public, ordinary_include.public,
+        "report-only option must preserve ordinary search results"
+    );
+    assert_eq!(
+        b2b_skip.public, b2b_include.public,
+        "report-only option must preserve finalized B2B search results"
+    );
+    assert!(b2b_include.public.covered_patterns <= ordinary_include.public.covered_patterns);
+    for (constrained, ordinary) in b2b_include
+        .public
+        .global_words
+        .iter()
+        .zip(&ordinary_include.public.global_words)
+    {
+        assert_eq!(
+            constrained & !ordinary,
+            0,
+            "B2B cannot introduce an original queue ordinal"
+        );
+    }
+    let ordinary_rows = ordinary_include.rows.as_ref().unwrap();
+    for (key, constrained) in b2b_include.rows.as_ref().unwrap() {
+        let ordinary = ordinary_rows
+            .get(key)
+            .expect("B2B cannot introduce a solution identity");
+        assert_eq!(constrained.len(), ordinary.len());
+        for (constrained, ordinary) in constrained.iter().zip(ordinary) {
+            assert_eq!(
+                constrained & !ordinary,
+                0,
+                "B2B cannot widen a candidate's queue coverage"
+            );
+        }
+    }
 }
 
 #[test]
@@ -3768,14 +4055,37 @@ fn typed_pc_tiling_one_root_finishes_a_valid_empty_solution_family() {
 
 #[test]
 fn three_piece_fixed_count_all_reaches_the_shared_distributed_coordinator() {
+    use clearra_pc_graph::request::{PcCountPolicy, WorkerPolicy};
+
     let runtime = WasmCommandRuntime::default()
         .with_host_capabilities(WasmHostCapabilities::new(12, false, false));
-    let preparation = WasmDistributedCoordinator::prepare(
-        &runtime,
-        "clearra pc --lines 2 --board-mask 0xf03c0 --height 2 --pieces 3 \
-         --queue OOO --no-hold --backend cpu --workers 11",
-    )
-    .expect("three-piece fixed CountAll preparation");
+    let command = "clearra pc --lines 2 --board-mask 0xf03c0 --height 2 --pieces 3 \
+                   --queue OOO --no-hold --count all --backend cpu --workers 11";
+    let request = runtime.compile_command_text(command).unwrap();
+    let AppCommand::Scenario(scenario) = request.command() else {
+        panic!("the CountAll fixture must retain its scenario command");
+    };
+    assert_eq!(scenario.query().count_policy(), PcCountPolicy::CountAll);
+    assert_eq!(
+        scenario.query().execution_policy().worker_policy(),
+        WorkerPolicy::Fixed(11),
+        "the requested worker policy must survive ingress unchanged"
+    );
+    #[cfg(target_family = "wasm")]
+    let hardware_limit = 12;
+    #[cfg(not(target_family = "wasm"))]
+    let hardware_limit = 12.min(WorkerPolicy::hardware_worker_limit());
+    // An injected browser profile does not grant native CPU capacity. The
+    // unchanged public worker policy reserves one logical CPU unless the
+    // command explicitly requests all logical processors.
+    let expected_workers =
+        WorkerPolicy::Fixed(11).effective_for_hardware_limit(false, hardware_limit);
+    let preparation = WasmDistributedCoordinator::prepare(&runtime, command)
+        .expect("three-piece fixed CountAll preparation");
+    if expected_workers < 2 {
+        assert!(matches!(preparation, WasmDistributedPreparation::Serial));
+        return;
+    }
 
     let coordinator = match preparation {
         WasmDistributedPreparation::Coordinator(coordinator) => coordinator,
@@ -3787,7 +4097,7 @@ fn three_piece_fixed_count_all_reaches_the_shared_distributed_coordinator() {
             result.app_response()
         ),
     };
-    assert_eq!(coordinator.worker_count(), 11);
+    assert_eq!(coordinator.worker_count(), expected_workers);
 }
 
 #[test]

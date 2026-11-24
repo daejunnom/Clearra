@@ -1,5 +1,6 @@
 #[cfg(any(
     test,
+    feature = "placement-dependency-pc",
     all(
         feature = "local-search-ab",
         feature = "parallel",
@@ -44,11 +45,18 @@ mod monotone_reachability;
 pub(super) mod static_influence;
 
 #[cfg(test)]
+#[path = "reachability_global_kick_pruning_tests.rs"]
+mod global_kick_pruning_tests;
+#[cfg(test)]
 #[path = "reachability_peer_tests.rs"]
 mod peer_tests;
+#[cfg(test)]
+#[path = "reachability_visited_first_tests.rs"]
+mod visited_first_tests;
 
 #[cfg(any(
     test,
+    feature = "placement-dependency-pc",
     all(
         feature = "local-search-ab",
         feature = "parallel",
@@ -59,6 +67,7 @@ mod peer_tests;
 mod symbolic_prefix;
 #[cfg(any(
     test,
+    feature = "placement-dependency-pc",
     all(
         feature = "local-search-ab",
         feature = "parallel",
@@ -68,6 +77,7 @@ mod symbolic_prefix;
 pub(super) use symbolic_prefix::{PrefixLockRelation, PrefixPoseWork};
 #[cfg(any(
     test,
+    feature = "placement-dependency-pc",
     all(
         feature = "local-search-ab",
         feature = "parallel",
@@ -78,6 +88,7 @@ pub(super) use symbolic_prefix::{PrefixLockRelation, PrefixPoseWork};
 mod symbolic_target;
 #[cfg(any(
     test,
+    feature = "placement-dependency-pc",
     all(
         feature = "local-search-ab",
         feature = "parallel",
@@ -264,9 +275,12 @@ pub(super) fn checked_reachability_retained_upper_bound(
             .checked_add(63)?
             .checked_div(64)?
             .checked_mul(core::mem::size_of::<u64>() as u128)?;
+        // Forward rotation offsets have three slots per pose; the reverse
+        // index has one. Each array also carries its terminal sentinel.
         let offset_bytes = state_count
-            .checked_add(1)?
-            .checked_mul((core::mem::size_of::<u32>() * 2) as u128)?;
+            .checked_mul(4)?
+            .checked_add(2)?
+            .checked_mul(core::mem::size_of::<u32>() as u128)?;
         let rotation_bytes = rotation_target_count.checked_mul(
             (core::mem::size_of::<u16>()
                 + core::mem::size_of::<u8>()
@@ -294,10 +308,26 @@ pub(super) fn checked_reachability_retained_upper_bound(
             .checked_mul(core::mem::size_of::<Option<PreparedRelationWindows>>() as u128)?,
     )?;
 
-    // Scratch is shared across templates and only needs the largest pose
-    // state count. The queue and generation table each retain one u16.
-    bytes
-        .checked_add(maximum_scratch_states.checked_mul((core::mem::size_of::<u16>() * 2) as u128)?)
+    // Scratch is shared across templates. Cover Vec growth for the scalar
+    // queue/generation table and the separately retained exact lane owner.
+    bytes = bytes.checked_add(
+        maximum_scratch_states.checked_mul((core::mem::size_of::<u16>() * 4) as u128)?,
+    )?;
+    #[cfg(any(
+        test,
+        feature = "placement-dependency-pc",
+        all(
+            feature = "local-search-ab",
+            feature = "parallel",
+            not(target_family = "wasm")
+        )
+    ))]
+    {
+        bytes = bytes.checked_add(ReverseScratch::checked_retained_upper_bound(
+            maximum_scratch_states,
+        )?)?;
+    }
+    bytes.checked_add(core::mem::size_of::<ReachabilityWorkspace>() as u128)
 }
 
 #[derive(Clone, Copy, Default)]
@@ -640,7 +670,6 @@ pub(super) struct ReachabilityMetrics {
 /// stage. Templates are immutable after first use; mutable scratch and cache
 /// never escape the query session.
 pub(super) struct ReachabilityWorkspace {
-    #[cfg(not(target_family = "wasm"))]
     local_import: Option<super::compact_kick_authority::CompactKickAuthority>,
     #[cfg(any(test, feature = "local-search-ab"))]
     placement_dependencies: dependency_cache::PlacementDependencyCache,
@@ -650,6 +679,7 @@ pub(super) struct ReachabilityWorkspace {
     scratch: ReachabilityScratch,
     #[cfg(any(
         test,
+        feature = "placement-dependency-pc",
         all(
             feature = "local-search-ab",
             feature = "parallel",
@@ -725,7 +755,6 @@ fn conditioned_context_frame_capacity(height: u8) -> Option<u128> {
 impl Default for ReachabilityWorkspace {
     fn default() -> Self {
         Self {
-            #[cfg(not(target_family = "wasm"))]
             local_import: None,
             #[cfg(any(test, feature = "local-search-ab"))]
             placement_dependencies: dependency_cache::PlacementDependencyCache::default(),
@@ -735,6 +764,7 @@ impl Default for ReachabilityWorkspace {
             scratch: ReachabilityScratch::default(),
             #[cfg(any(
                 test,
+                feature = "placement-dependency-pc",
                 all(
                     feature = "local-search-ab",
                     feature = "parallel",
@@ -759,7 +789,6 @@ impl Default for ReachabilityWorkspace {
 }
 
 impl ReachabilityWorkspace {
-    #[cfg(not(target_family = "wasm"))]
     pub(super) fn bind_local_import(
         &mut self,
         authority: super::compact_kick_authority::CompactKickAuthority,
@@ -779,14 +808,7 @@ impl ReachabilityWorkspace {
     }
 
     pub(super) fn has_local_import(&self) -> bool {
-        #[cfg(not(target_family = "wasm"))]
-        {
-            self.local_import.is_some()
-        }
-        #[cfg(target_family = "wasm")]
-        {
-            false
-        }
+        self.local_import.is_some()
     }
 
     #[cfg(any(feature = "parallel", test))]
@@ -797,8 +819,13 @@ impl ReachabilityWorkspace {
         if self.shared_templates.is_some()
             || self.template_dimensions.is_some()
             || self.has_local_import()
+            || self.conditioned_profile.is_some()
         {
             return Err("wasm_shared_reachability_request_already_initialized");
+        }
+        self.local_import = templates.authority.clone();
+        if let Some(authority) = &self.local_import {
+            self.kick_profile_id = authority.profile_id();
         }
         self.shared_templates = Some(templates);
         Ok(())
@@ -1833,15 +1860,21 @@ impl ReachabilityWorkspace {
             + self.static_influence_cache.retained_bytes();
         #[cfg(not(any(test, feature = "local-search-ab")))]
         let prototype_bytes = 0;
-        #[cfg(not(target_family = "wasm"))]
-        let import_bytes = self.local_import.as_ref().map_or(
-            0,
-            super::compact_kick_authority::CompactKickAuthority::retained_bytes,
-        );
-        #[cfg(target_family = "wasm")]
-        let import_bytes = 0;
+        let import_bytes = self.local_import.as_ref().map_or(0, |authority| {
+            let shared = self
+                .shared_templates
+                .as_ref()
+                .and_then(|owner| owner.authority.as_ref())
+                == Some(authority);
+            if include_shared || !shared {
+                authority.retained_bytes()
+            } else {
+                0
+            }
+        });
         #[cfg(any(
             test,
+            feature = "placement-dependency-pc",
             all(
                 feature = "local-search-ab",
                 feature = "parallel",
@@ -1851,6 +1884,7 @@ impl ReachabilityWorkspace {
         let symbolic_reverse_bytes = self.symbolic_reverse_scratch.retained_bytes();
         #[cfg(not(any(
             test,
+            feature = "placement-dependency-pc",
             all(
                 feature = "local-search-ab",
                 feature = "parallel",
@@ -1888,6 +1922,7 @@ impl ReachabilityWorkspace {
 
     #[cfg(any(
         test,
+        feature = "placement-dependency-pc",
         all(
             feature = "local-search-ab",
             feature = "parallel",
@@ -1917,6 +1952,7 @@ impl ReachabilityWorkspace {
 
     #[cfg(any(
         test,
+        feature = "placement-dependency-pc",
         all(
             feature = "local-search-ab",
             feature = "parallel",
@@ -1965,17 +2001,21 @@ impl ReachabilityWorkspace {
         let index = piece_index(piece);
         let profile_id = self.kick_profile_id;
         self.templates[index].get_or_insert_with(|| {
-            #[cfg(not(target_family = "wasm"))]
+            if let Some(shared) = &self.shared_templates {
+                if shared.matches(
+                    catalog.width(),
+                    catalog.height(),
+                    profile_id,
+                    self.local_import.as_ref(),
+                ) {
+                    return shared.template(piece);
+                }
+            }
             if let Some(authority) = &self.local_import {
                 // Only the immutable catalog used to bind this workspace
                 // reaches the local ordered-profile path.
                 assert_eq!(authority.dimensions(), dimensions);
                 return Arc::new(ReachabilityTemplate::compile_authority(authority, piece));
-            }
-            if let Some(shared) = &self.shared_templates {
-                if shared.matches(catalog.width(), catalog.height(), profile_id) {
-                    return shared.template(piece);
-                }
             }
             // A reused workspace may change dimensions/profile. Never borrow
             // a stale compiled rule; preserve the exact local path instead.
@@ -2095,6 +2135,7 @@ pub(super) struct SharedReachabilityTemplates {
     width: u8,
     height: u8,
     profile: KickTableProfileId,
+    authority: Option<super::compact_kick_authority::CompactKickAuthority>,
     templates: [OnceLock<Arc<ReachabilityTemplate>>; 7],
 }
 
@@ -2105,16 +2146,41 @@ impl SharedReachabilityTemplates {
             width,
             height,
             profile,
+            authority: None,
             templates: std::array::from_fn(|_| OnceLock::new()),
         }
     }
 
-    fn matches(&self, width: u8, height: u8, profile: KickTableProfileId) -> bool {
-        self.width == width && self.height == height && self.profile == profile
+    #[cfg(any(feature = "parallel", test))]
+    pub fn with_authority(authority: super::compact_kick_authority::CompactKickAuthority) -> Self {
+        let (width, height) = authority.dimensions();
+        Self {
+            width,
+            height,
+            profile: authority.profile_id(),
+            authority: Some(authority),
+            templates: std::array::from_fn(|_| OnceLock::new()),
+        }
+    }
+
+    fn matches(
+        &self,
+        width: u8,
+        height: u8,
+        profile: KickTableProfileId,
+        authority: Option<&super::compact_kick_authority::CompactKickAuthority>,
+    ) -> bool {
+        self.width == width
+            && self.height == height
+            && self.profile == profile
+            && self.authority.as_ref() == authority
     }
 
     fn template(&self, piece: PieceKind) -> Arc<ReachabilityTemplate> {
         Arc::clone(self.templates[piece_index(piece)].get_or_init(|| {
+            if let Some(authority) = &self.authority {
+                return Arc::new(ReachabilityTemplate::compile_authority(authority, piece));
+            }
             Arc::new(ReachabilityTemplate::compile(
                 self.width,
                 self.height,
@@ -2128,6 +2194,10 @@ impl SharedReachabilityTemplates {
     pub fn retained_bytes(&self) -> usize {
         core::mem::size_of::<Self>()
             + 2 * core::mem::size_of::<usize>()
+            + self
+                .authority
+                .as_ref()
+                .map_or(0, |authority| authority.retained_bytes())
             + self
                 .templates
                 .iter()
@@ -2213,7 +2283,6 @@ impl ReachabilityTemplate {
         )
     }
 
-    #[cfg(not(target_family = "wasm"))]
     pub(super) fn compile_authority(
         authority: &super::compact_kick_authority::CompactKickAuthority,
         piece: PieceKind,
@@ -2275,9 +2344,10 @@ impl ReachabilityTemplate {
         let reverse_translation_sources = compile_reverse_translation_sources(&translation_targets);
         let sky_seed_words = compile_seed_words(state_count, &sky_seeds);
         let (reverse_rotation_offsets, reverse_rotation_sources) = compile_reverse_rotation_sources(
-            state_count,
+            &state_masks,
             &rotation_target_offsets,
             &rotation_targets,
+            global_kick_pruning_enabled(),
         );
         Self {
             width,
@@ -2712,11 +2782,69 @@ fn reverse_lock_reachable_large_with_proven_exit_words<const USE_PROVEN_EXITS: b
     scratch: &mut ReachabilityScratch,
     proven_exit_words: &[u64],
 ) -> ReverseReachabilityResult {
+    // Select once per query in local A/B builds. Product builds instantiate
+    // only the visited-first traversal and never inspect a runtime flag.
+    #[cfg(any(test, feature = "local-search-ab"))]
+    if !reachability_visited_first_enabled() {
+        return reverse_lock_reachable_large_with_mode::<USE_PROVEN_EXITS, false>(
+            template,
+            board,
+            target_index,
+            scratch,
+            proven_exit_words,
+        );
+    }
+    reverse_lock_reachable_large_with_mode::<USE_PROVEN_EXITS, true>(
+        template,
+        board,
+        target_index,
+        scratch,
+        proven_exit_words,
+    )
+}
+
+#[cfg(any(test, feature = "local-search-ab"))]
+fn parse_reachability_visited_first(
+    value: Result<String, std::env::VarError>,
+) -> Result<bool, &'static str> {
+    match value {
+        Ok(label) if label == "0" => Ok(false),
+        Ok(label) if label == "1" => Ok(true),
+        Err(std::env::VarError::NotPresent) => Ok(true),
+        _ => Err("wasm_reachability_visited_first_mode_invalid"),
+    }
+}
+
+#[cfg(any(test, feature = "local-search-ab"))]
+fn reachability_visited_first_enabled() -> bool {
+    #[cfg(test)]
+    if let Some(mode) = visited_first_tests::mode_override() {
+        return mode;
+    }
+    static MODE: OnceLock<bool> = OnceLock::new();
+    *MODE.get_or_init(|| {
+        parse_reachability_visited_first(std::env::var("CLEARRA_REACHABILITY_VISITED_FIRST"))
+            .unwrap_or_else(|code| {
+                panic!("{code}: CLEARRA_REACHABILITY_VISITED_FIRST must be 0 or 1")
+            })
+    })
+}
+
+fn reverse_lock_reachable_large_with_mode<
+    const USE_PROVEN_EXITS: bool,
+    const VISITED_FIRST: bool,
+>(
+    template: &ReachabilityTemplate,
+    board: u64,
+    target_index: usize,
+    scratch: &mut ReachabilityScratch,
+    proven_exit_words: &[u64],
+) -> ReverseReachabilityResult {
     let state_count = template.state_masks.len();
     let generation = scratch.begin_search(state_count);
-    // `reverse_lock_reachable` already proved that the target is a valid,
-    // collision-free grounded lock. Seed it directly so every short reverse
-    // search does not repeat those board-mask checks.
+    // The caller already proved that the target is valid and collision-free.
+    // A scoring predecessor need not be grounded. Seed it directly so every
+    // short reverse search does not repeat those board-mask checks.
     scratch.visited_generations[target_index] = generation;
     scratch.queue.push(target_index as u16);
 
@@ -2753,17 +2881,42 @@ fn reverse_lock_reachable_large_with_proven_exit_words<const USE_PROVEN_EXITS: b
         let reverse_start = template.reverse_rotation_offsets[current] as usize;
         let reverse_end = template.reverse_rotation_offsets[current + 1] as usize;
         for source in &template.reverse_rotation_sources[reverse_start..reverse_end] {
+            let source_index = usize::from(source.source);
+            // Compiled predecessors are in range. A mark in this generation
+            // proves that the pose was valid and collision-free on THIS board,
+            // and already has a path to the target. Another incoming edge
+            // cannot enqueue it again, regardless of its ordered-kick guard.
+            // First discovery and the complete queue therefore stay unchanged.
+            if VISITED_FIRST && scratch.visited_generations[source_index] == generation {
+                #[cfg(test)]
+                visited_first_tests::record_visited_skip(source.prior_target_count != 0);
+                continue;
+            }
+            #[cfg(test)]
+            visited_first_tests::record_guard_check(source.prior_target_count != 0);
             if !reverse_rotation_is_first_success(template, board, *source) {
                 continue;
             }
-            push_index_if_placeable(
-                template,
-                board,
-                source.source,
-                &mut scratch.visited_generations,
-                generation,
-                &mut scratch.queue,
-            );
+            if VISITED_FIRST {
+                // The visited check above remains valid: the kick predicate
+                // does not mutate the search. Avoid loading the mark twice.
+                let mask = template.state_masks[source_index];
+                if mask != INVALID_STATE_MASK && board & mask == 0 {
+                    scratch.visited_generations[source_index] = generation;
+                    scratch.queue.push(source.source);
+                }
+            } else {
+                // Preserve the former guard-before-admission traversal as the
+                // same-binary local A/B and differential-test reference.
+                push_index_if_placeable(
+                    template,
+                    board,
+                    source.source,
+                    &mut scratch.visited_generations,
+                    generation,
+                    &mut scratch.queue,
+                );
+            }
         }
     }
 
@@ -3212,13 +3365,39 @@ fn compile_seed_words(state_count: usize, seeds: &[u16]) -> Vec<u64> {
 }
 
 fn compile_reverse_rotation_sources(
-    state_count: usize,
+    state_masks: &[u64],
     forward_offsets: &[u32],
     forward_targets: &[u16],
+    prune_impossible: bool,
 ) -> (Vec<u32>, Vec<ReverseRotationSource>) {
+    let state_count = state_masks.len();
+    // The source and selected destination must both be free. If an earlier
+    // kick fits entirely inside those cells, it must succeed first on every
+    // possible board. Remove only that impossible incoming edge. The original
+    // forward prefix and kick ordinal still guard every retained later edge.
+    // This proof is compiled once, outside the per-board reverse traversal.
+    let retained = |transition: usize, candidate: usize| {
+        !prune_impossible
+            || edge_possible_in_cube(
+                state_masks[transition / 3],
+                state_masks[usize::from(forward_targets[candidate])],
+                forward_targets[forward_offsets[transition] as usize..candidate]
+                    .iter()
+                    .map(|&prior| state_masks[usize::from(prior)]),
+                0,
+                u64::MAX,
+            )
+    };
     let mut counts = vec![0_u32; state_count + 1];
-    for &target in forward_targets {
-        counts[usize::from(target) + 1] = counts[usize::from(target) + 1].saturating_add(1);
+    for transition in 0..state_count * 3 {
+        let start = forward_offsets[transition] as usize;
+        let end = forward_offsets[transition + 1] as usize;
+        for candidate in start..end {
+            if retained(transition, candidate) {
+                let target = usize::from(forward_targets[candidate]);
+                counts[target + 1] = counts[target + 1].saturating_add(1);
+            }
+        }
     }
     for index in 1..counts.len() {
         counts[index] = counts[index].saturating_add(counts[index - 1]);
@@ -3231,7 +3410,7 @@ fn compile_reverse_rotation_sources(
             slot: 0,
             prior_target_count: 0,
         };
-        forward_targets.len()
+        *cursors.last().expect("one count per pose and sentinel") as usize
     ];
     for transition in 0..state_count * 3 {
         let start = forward_offsets[transition] as usize;
@@ -3241,6 +3420,9 @@ fn compile_reverse_rotation_sources(
         };
         let slot = (transition % 3) as u8;
         for (prior_target_count, &target) in forward_targets[start..end].iter().enumerate() {
+            if !retained(transition, start + prior_target_count) {
+                continue;
+            }
             let Ok(prior_target_count) = u8::try_from(prior_target_count) else {
                 continue;
             };
@@ -3255,6 +3437,57 @@ fn compile_reverse_rotation_sources(
         }
     }
     (offsets, sources)
+}
+
+/// Exact edge existence over the independent board cube `fixed | subset(variable)`.
+/// The caller owns the coordinate frame. This proves only that an ordered
+/// rotation can exist, never that its source is reachable or that correlated
+/// placement subsets are independent. `fixed | (variable & !required_empty)`
+/// simultaneously witnesses every prior blocker when the predicate succeeds.
+fn edge_possible_in_cube(
+    source_mask: u64,
+    target_mask: u64,
+    prior_masks: impl IntoIterator<Item = u64>,
+    fixed: u64,
+    variable: u64,
+) -> bool {
+    if source_mask == INVALID_STATE_MASK || target_mask == INVALID_STATE_MASK {
+        return false;
+    }
+    let required_empty = source_mask | target_mask;
+    fixed & required_empty == 0
+        && prior_masks.into_iter().all(|mask| {
+            mask == INVALID_STATE_MASK
+                || mask & fixed != 0
+                || mask & variable & !required_empty != 0
+        })
+}
+
+#[cfg(test)]
+thread_local! {
+    static GLOBAL_KICK_PRUNING_OVERRIDE: std::cell::Cell<Option<bool>> = const {
+        std::cell::Cell::new(None)
+    };
+}
+
+#[cfg(test)]
+pub(super) fn with_global_kick_pruning<T>(enabled: bool, action: impl FnOnce() -> T) -> T {
+    struct Restore(Option<bool>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            GLOBAL_KICK_PRUNING_OVERRIDE.with(|mode| mode.set(self.0));
+        }
+    }
+    let _restore = Restore(GLOBAL_KICK_PRUNING_OVERRIDE.with(|mode| mode.replace(Some(enabled))));
+    action()
+}
+
+fn global_kick_pruning_enabled() -> bool {
+    #[cfg(test)]
+    if let Some(mode) = GLOBAL_KICK_PRUNING_OVERRIDE.with(std::cell::Cell::get) {
+        return mode;
+    }
+    true
 }
 
 fn state_from_index(width: u8, ceiling: i8, index: usize) -> State {

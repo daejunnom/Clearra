@@ -128,9 +128,8 @@ pub(super) fn reverse_lock_dependency_mask(
             {
                 return None;
             }
-            // The primitive checks these BEFORE predecessor admission, even
-            // when the source is blocked, already visited, or geometrically
-            // invalid. An earlier successful kick suppresses this reverse edge.
+            // Retain these guards conservatively even when an already visited
+            // source lets the primitive skip this edge without reading them.
             for &earlier in template.rotation_targets.get(prior_start..prior_end)? {
                 mask |= valid_pose_mask(template, usize::from(earlier), board_mask)?;
             }

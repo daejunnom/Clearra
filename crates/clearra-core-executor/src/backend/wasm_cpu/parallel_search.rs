@@ -12,7 +12,9 @@ use clearra_coverage::row::{coverage_row::CoverageRow, coverage_row_kind::Covera
 use clearra_problem::SearchProblem;
 
 use crate::{
-    cpu_worker_pool, performance::WorkerSearchProfile, solution_probability::SolutionCoverage,
+    cpu_worker_pool,
+    performance::{ExecutorSearchStage, SearchStageSpan, WorkerSearchProfile},
+    solution_probability::SolutionCoverage,
     CorePathStep,
 };
 
@@ -21,7 +23,7 @@ use super::parallel_memory_peak::{self, CoordinatorStorage};
 #[cfg(any(test, feature = "local-search-ab"))]
 use super::result::SolutionCoverageCapture;
 use super::{
-    buildup::{verify_candidate, BuildUpWorkspace, CandidateWitnessMode},
+    buildup::{verify_candidate, BuildUpWorkspace, CandidateIlcWork, CandidateWitnessMode},
     catalog::GeometryCatalog,
     coverage_product::CoverageProductEvaluator,
     geometry::{GeometrySearch, ParallelGeometryPlan, ParallelGeometryPreparation, TargetGroup},
@@ -68,6 +70,7 @@ pub(super) struct ParallelSearchOutcome {
     pub coverage_product_edge_checks: usize,
     pub feasibility_states: usize,
     pub feasibility_rejected_candidates: usize,
+    pub candidate_ilc_work: CandidateIlcWork,
     pub peak_reachability_states: usize,
     pub total_reachability_states: usize,
     pub worker_retained_bytes: usize,
@@ -109,6 +112,7 @@ pub(super) fn execute_if_worthwhile(
         return Ok(ParallelSearchDecision::Serial { geometry, reason });
     }
 
+    let plan_span = SearchStageSpan::begin(ExecutorSearchStage::WasmParallelPlan);
     let (plan, balanced_workers) = match geometry.prepare_parallel(
         &catalog,
         &control,
@@ -123,6 +127,7 @@ pub(super) fn execute_if_worthwhile(
             return Ok(ParallelSearchDecision::Serial { geometry, reason });
         }
     };
+    plan_span.finish(plan.searches.len() as u64);
     execute_plan(
         problem,
         catalog,
@@ -450,6 +455,7 @@ fn execute_plan(
         SolutionCoverageCapture,
     >,
 ) -> Result<ParallelSearchOutcome, WasmExactSearchError> {
+    let initialize_span = SearchStageSpan::begin(ExecutorSearchStage::WasmParallelInitialize);
     let workers_used = requested_workers.min(plan.searches.len()).max(1);
     let pool = if cpu_warmup_requested {
         cpu_worker_pool::prewarm_cpu_workers(workers_used)
@@ -474,11 +480,14 @@ fn execute_plan(
     let strict_prefix = super::symbolic_prefix_parallel::claim_strict_parallel_prefix()?;
     let shared_request = SharedWorkerRequest {
         standard_bag: shared_standard_bag,
-        reachability: Arc::new(SharedReachabilityTemplates::new(
-            catalog.width(),
-            catalog.height(),
-            problem.kick_profile().profile_id(),
-        )),
+        reachability: Arc::new(match super::dependency_kick_authority(&problem)? {
+            Some(authority) => SharedReachabilityTemplates::with_authority(authority),
+            None => SharedReachabilityTemplates::new(
+                catalog.width(),
+                catalog.height(),
+                problem.kick_profile().profile_id(),
+            ),
+        }),
         #[cfg(any(test, feature = "local-search-ab"))]
         solution_coverage_capture,
         #[cfg(feature = "local-search-ab")]
@@ -496,13 +505,22 @@ fn execute_plan(
         ));
     }
     let branch_count = plan.searches.len();
+    #[cfg(feature = "placement-dependency-pc")]
+    let coverage = match shared_request.standard_bag.as_ref() {
+        Some(request) => {
+            SharedCoverage::for_standard_bag_request(pattern_count, Arc::clone(request))
+        }
+        None => SharedCoverage::new(pattern_count),
+    };
+    #[cfg(not(feature = "placement-dependency-pc"))]
+    let coverage = SharedCoverage::new(pattern_count);
     let inputs = Arc::new(BranchWorkerInputs {
         problem,
         catalog,
         targets: plan.targets,
         control,
         queue: ParallelBranchQueue::new(branch_tasks(plan.searches)),
-        coverage: SharedCoverage::new(pattern_count),
+        coverage,
         request: shared_request,
     });
     let (sender, receiver) = mpsc::channel();
@@ -523,6 +541,8 @@ fn execute_plan(
         );
     }
 
+    initialize_span.finish(branch_count as u64);
+    let work_span = SearchStageSpan::begin(ExecutorSearchStage::WasmParallelWorkAndWait);
     for _worker_index in 1..workers_used {
         let worker_inputs = Arc::clone(&inputs);
         let worker_sender = sender.clone();
@@ -570,6 +590,8 @@ fn execute_plan(
     let worker_results = results
         .into_iter()
         .collect::<Result<Vec<_>, WasmExactSearchError>>()?;
+    work_span.finish(workers_used as u64);
+    let merge_span = SearchStageSpan::begin(ExecutorSearchStage::WasmParallelMerge);
     #[cfg(all(feature = "local-search-ab", target_os = "linux"))]
     if let Some(probe) = &memory_probe {
         probe.coordinator(CoordinatorStorage::Merging);
@@ -618,6 +640,7 @@ fn execute_plan(
     if let Some(probe) = &memory_probe {
         probe.coordinator(CoordinatorStorage::Finalizing);
     }
+    merge_span.finish(outcome.packing_candidate_count as u64);
     Ok(outcome)
 }
 
@@ -753,6 +776,7 @@ fn merge_results(
         coverage_product_edge_checks: merged.coverage_product_edge_checks,
         feasibility_states: merged.feasibility_states,
         feasibility_rejected_candidates: merged.feasibility_rejected_candidates,
+        candidate_ilc_work: merged.candidate_ilc_work,
         peak_reachability_states: merged.peak_reachability_states,
         total_reachability_states: merged.total_reachability_states,
         worker_retained_bytes: merged.worker_retained_bytes,

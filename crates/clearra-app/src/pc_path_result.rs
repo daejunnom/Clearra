@@ -444,12 +444,6 @@ pub(crate) fn validate_pc_path_family_v2_result(
     {
         return Err("pc path objective evidence is incomplete");
     }
-    if result.bool_field("build_variant_count_exact") != Some(true) {
-        return Err("pc path build-variant count is inexact");
-    }
-    if page_source.is_none() && !result.postprocess_execution_complete() {
-        return Err("pc path replay batch is incomplete");
-    }
     if result
         .field("problem_preset")
         .is_some_and(|value| value != preset.as_str())
@@ -484,6 +478,10 @@ pub(crate) fn validate_pc_path_family_v2_result(
         {
             return Err("pc replay page source is not bound to the typed result");
         }
+        // A completed, bound manifest proves the exact distinct replay count.
+        // B2B coverage filtering deliberately invalidates Core's raw build
+        // multiplicity; that different count is not this language's authority.
+        // Keep its fields unchanged and use the checked manifest count only.
         return Ok(PcPathFamilyV2Result {
             contract_id: PC_PATH_FAMILY_RESULT_CONTRACT,
             witness_contract: PC_PATH_WITNESS_CONTRACT,
@@ -505,6 +503,16 @@ pub(crate) fn validate_pc_path_family_v2_result(
                 replay_chain_validated: true,
             },
         });
+    }
+
+    // Without a checked manifest, the eager route still requires the original
+    // exact build count and complete replay batch. An inexact scalar alone
+    // cannot certify that an eagerly retained list contains the whole family.
+    if result.bool_field("build_variant_count_exact") != Some(true) {
+        return Err("pc path build-variant count is inexact");
+    }
+    if !result.postprocess_execution_complete() {
+        return Err("pc path replay batch is incomplete");
     }
 
     let producer_to_canonical = result

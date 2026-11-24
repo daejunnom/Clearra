@@ -9,29 +9,41 @@
 //! are enumerated. Failure to obtain a certificate is always `None` (fallback),
 //! never an infeasibility claim.
 //!
-//! The owning module gates this prototype to tests / `local-search-ab`. The
-//! optional catalog guard table replaces repeated same-frame geometric tests,
-//! not movement proofs or the conditions on which they depend. Callers
-//! must additionally keep CountAll, finesse and non-clear-to-empty completion
-//! on their existing paths. A certificate belongs to the supplied candidate;
-//! its operation indices are concrete row IDs, not interchangeable kind IDs.
+//! The symbolic prefix compiler reuses the candidate frame projection below.
+//! The distinct poset and conditional-order prototypes remain local-only.
+//! Their optional catalog guard table replaces repeated same-frame geometric
+//! tests, not movement proofs or the conditions on which they depend. Those
+//! prototypes keep CountAll, finesse and non-clear-to-empty completion on
+//! their existing paths. The symbolic prefix projection can separately qualify
+//! an explicitly requested final board after line clears. A certificate belongs
+//! to the supplied candidate; its operation indices are concrete row IDs, not
+//! interchangeable kind IDs.
 
 use clearra_core_domain::piece::piece_kind::PieceKind;
+#[cfg(any(test, feature = "local-search-ab"))]
 use std::cell::OnceCell;
 
 use super::{
-    buildup::{compact_target_board, placement_is_grounded},
-    catalog::{GeometryCatalog, InstantiatedRealization},
+    buildup::compact_target_board,
+    catalog::GeometryCatalog,
     geometry::GeometryCandidate,
-    placement_conditions::{
-        grounding_sources, vertical_entry_mask, AtomicRowProjection, GroundingSources,
-        GroupedClearConditions, PlacementConditionCatalog, PrecomputedOrderGuard,
-    },
+    placement_conditions::{AtomicRowProjection, GroupedClearConditions},
     MAX_BOARD64_PIECES,
+};
+#[cfg(any(test, feature = "local-search-ab"))]
+use super::{
+    buildup::placement_is_grounded,
+    catalog::InstantiatedRealization,
+    placement_conditions::{
+        grounding_sources, vertical_entry_mask, GroundingSources, PlacementConditionCatalog,
+        PrecomputedOrderGuard,
+    },
 };
 
 const MAX_HEIGHT: usize = 6;
+#[cfg(any(test, feature = "local-search-ab"))]
 const MAX_CLEAR_FRAMES: usize = 1 << MAX_HEIGHT;
+#[cfg(any(test, feature = "local-search-ab"))]
 const MAX_CONDITIONAL_OPERATIONS: usize = 8;
 
 #[cfg(test)]
@@ -96,6 +108,7 @@ pub(super) fn with_joint_clear_admission<T>(enabled: bool, action: impl FnOnce()
     action()
 }
 
+#[cfg(any(test, feature = "local-search-ab"))]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct CertifiedPlacementPoset {
     operation_count: usize,
@@ -104,6 +117,7 @@ pub(super) struct CertifiedPlacementPoset {
     interval_guard_count: usize,
 }
 
+#[cfg(any(test, feature = "local-search-ab"))]
 impl CertifiedPlacementPoset {
     pub(super) fn pieces(&self) -> &[PieceKind] {
         &self.pieces[..self.operation_count]
@@ -127,12 +141,14 @@ pub(super) struct CandidateGeometry {
     height: u8,
     initial_board: u64,
     operation_count: usize,
+    #[cfg(any(test, feature = "local-search-ab"))]
     all_operations: u16,
     pieces: [PieceKind; MAX_BOARD64_PIECES],
     cells: [u64; MAX_BOARD64_PIECES],
     clear_conditions: GroupedClearConditions,
 }
 
+#[cfg(any(test, feature = "local-search-ab"))]
 struct CandidateOrderGuards<'a> {
     conditions: &'a PlacementConditionCatalog,
     // The candidate has disjoint validated original cells and at most 15
@@ -140,6 +156,7 @@ struct CandidateOrderGuards<'a> {
     owner_bits: [u16; u64::BITS as usize],
 }
 
+#[cfg(any(test, feature = "local-search-ab"))]
 impl<'a> CandidateOrderGuards<'a> {
     fn new(catalog: &'a GeometryCatalog, geometry: &CandidateGeometry) -> Option<Self> {
         let conditions = catalog.placement_conditions()?.as_ref();
@@ -189,6 +206,7 @@ impl<'a> CandidateOrderGuards<'a> {
 
 /// One exact executed-board snapshot and its immutable original-row frame.
 /// Kept only while the conditional proof walks this state's outgoing edges.
+#[cfg(any(test, feature = "local-search-ab"))]
 pub(super) struct ConditionalState {
     pub(super) board: u64,
     pub(super) deleted: u16,
@@ -228,6 +246,7 @@ pub(super) fn compile_with_guard(
     })
 }
 
+#[cfg(any(test, feature = "local-search-ab"))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum MovementProof {
     /// Existence of an exact edge on every board in [minimum, maximum].
@@ -237,6 +256,7 @@ pub(super) enum MovementProof {
     Closed,
 }
 
+#[cfg(any(test, feature = "local-search-ab"))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct MovementProofQuery {
     pub(super) piece: PieceKind,
@@ -250,6 +270,7 @@ pub(super) struct MovementProofQuery {
 /// A guard miss is Unknown. Only closed proofs for *all* realizations remove a
 /// frame from the necessary-order calculation. Positive endpoint samples alone
 /// cannot certify an interval under ordered kicks.
+#[cfg(any(test, feature = "local-search-ab"))]
 pub(super) fn compile_with_movement_guard(
     catalog: &GeometryCatalog,
     candidate: &GeometryCandidate,
@@ -556,14 +577,7 @@ pub(super) fn compile_with_movement_guard(
 }
 
 impl CandidateGeometry {
-    #[cfg(any(
-        test,
-        all(
-            feature = "local-search-ab",
-            feature = "parallel",
-            not(target_family = "wasm")
-        )
-    ))]
+    #[cfg(test)]
     pub(super) fn for_symbolic_prefix(
         catalog: &GeometryCatalog,
         candidate: &GeometryCandidate,
@@ -571,8 +585,32 @@ impl CandidateGeometry {
         Self::compile(catalog, candidate)
     }
 
+    /// Qualify the same exact original-cell projection for a requested build
+    /// completion. The terminal value is the board after every operation and
+    /// every completed original row have been consumed, matching
+    /// `BuildCompletion::ExactBoardAfterLineClears` rather than the target-frame
+    /// occupancy. This does not certify any movement or relax the old poset
+    /// and conditional-order clear-to-empty contracts.
     #[cfg(any(
         test,
+        feature = "placement-dependency-pc",
+        all(
+            feature = "local-search-ab",
+            feature = "parallel",
+            not(target_family = "wasm")
+        )
+    ))]
+    pub(super) fn for_symbolic_prefix_completion(
+        catalog: &GeometryCatalog,
+        candidate: &GeometryCandidate,
+        expected_final_board: u64,
+    ) -> Option<Self> {
+        Self::compile_for_final_board(catalog, candidate, expected_final_board)
+    }
+
+    #[cfg(any(
+        test,
+        feature = "placement-dependency-pc",
         all(
             feature = "local-search-ab",
             feature = "parallel",
@@ -585,6 +623,7 @@ impl CandidateGeometry {
 
     #[cfg(any(
         test,
+        feature = "placement-dependency-pc",
         all(
             feature = "local-search-ab",
             feature = "parallel",
@@ -595,9 +634,21 @@ impl CandidateGeometry {
         self.project_frame(deleted)
     }
 
+    #[cfg(feature = "placement-dependency-pc")]
+    pub(super) fn symbolic_deleted_rows(&self, executed: u16) -> u16 {
+        self.clear_conditions.deleted_rows(executed)
+    }
+
+    #[cfg(feature = "placement-dependency-pc")]
+    pub(super) fn symbolic_physical_board(&self, executed: u16, deleted: u16) -> u64 {
+        let board = board_for_operations(self.initial_board, &self.cells, executed);
+        self.row_projection(deleted).physical_board(board)
+    }
+
     /// Start only with small Boolean candidates with a geometric support
     /// disjunction, either initially or after a clear induced by just one
     /// concrete operation. This admission does not prove a physical move.
+    #[cfg(any(test, feature = "local-search-ab"))]
     pub(super) fn for_conditional_order(
         catalog: &GeometryCatalog,
         candidate: &GeometryCandidate,
@@ -627,6 +678,7 @@ impl CandidateGeometry {
     /// The state is only the executed set: completed rows are derived from
     /// their concrete contributor conjunctions, and all such rows are
     /// removed together in the original-row frame.
+    #[cfg(any(test, feature = "local-search-ab"))]
     pub(super) fn conditional_state(&self, executed: u16) -> ConditionalState {
         debug_assert_eq!(executed & !self.all_operations, 0);
         let pending = self.all_operations & !executed;
@@ -664,6 +716,7 @@ impl CandidateGeometry {
         }
     }
 
+    #[cfg(any(test, feature = "local-search-ab"))]
     pub(super) fn conditional_lock_mask(&self, operation: usize, state: &ConditionalState) -> u64 {
         #[cfg(test)]
         record_projection_work(|work| work.lock_projections += 1);
@@ -673,6 +726,7 @@ impl CandidateGeometry {
     /// Return this concrete operation's projected footprint and a deferred
     /// child check bound to the same candidate, executed set and row frame.
     /// Rejecting an ungrounded or uninstantiable operation need not build its child.
+    #[cfg(any(test, feature = "local-search-ab"))]
     pub(super) fn conditional_operation<'a>(
         &'a self,
         state: &'a ConditionalState,
@@ -684,6 +738,7 @@ impl CandidateGeometry {
         })
     }
 
+    #[cfg(any(test, feature = "local-search-ab"))]
     fn conditional_after_operation(
         &self,
         state: &ConditionalState,
@@ -745,7 +800,16 @@ impl CandidateGeometry {
             .expect("candidate geometry owns a validated compact row frame")
     }
 
+    #[cfg(any(test, feature = "local-search-ab"))]
     fn compile(catalog: &GeometryCatalog, candidate: &GeometryCandidate) -> Option<Self> {
+        Self::compile_for_final_board(catalog, candidate, 0)
+    }
+
+    fn compile_for_final_board(
+        catalog: &GeometryCatalog,
+        candidate: &GeometryCandidate,
+        expected_final_board: u64,
+    ) -> Option<Self> {
         let width = catalog.width();
         let height = catalog.height();
         let operation_count = candidate.row_ids().len();
@@ -764,7 +828,6 @@ impl CandidateGeometry {
         {
             return None;
         }
-        let all_operations = (1_u16 << operation_count) - 1;
         let mut pieces = [PieceKind::I; MAX_BOARD64_PIECES];
         let mut cells = [0_u64; MAX_BOARD64_PIECES];
         let mut row_contributors = [0_u16; MAX_HEIGHT];
@@ -803,7 +866,8 @@ impl CandidateGeometry {
                 completed_rows |= 1_u16 << original_row;
             }
         }
-        if compact_target_board(width, height, final_board, completed_rows) != 0 {
+        if compact_target_board(width, height, final_board, completed_rows) != expected_final_board
+        {
             return None;
         }
         Some(Self {
@@ -811,7 +875,8 @@ impl CandidateGeometry {
             height,
             initial_board,
             operation_count,
-            all_operations,
+            #[cfg(any(test, feature = "local-search-ab"))]
+            all_operations: (1_u16 << operation_count) - 1,
             pieces,
             cells,
             clear_conditions: GroupedClearConditions::from_completed_rows(
@@ -821,6 +886,7 @@ impl CandidateGeometry {
         })
     }
 
+    #[cfg(any(test, feature = "local-search-ab"))]
     fn has_unprovable_initial_support_disjunction(
         &self,
         catalog: &GeometryCatalog,
@@ -868,6 +934,7 @@ impl CandidateGeometry {
         false
     }
 
+    #[cfg(any(test, feature = "local-search-ab"))]
     fn has_support_disjunction_after_group_clear<const JOINT: bool>(
         &self,
         catalog: &GeometryCatalog,
@@ -970,6 +1037,7 @@ impl CandidateGeometry {
     }
 }
 
+#[cfg(any(test, feature = "local-search-ab"))]
 fn close_predecessors(predecessors: &mut [u16; MAX_BOARD64_PIECES], count: usize) -> bool {
     for intermediate in 0..count {
         let intermediate_bit = 1_u16 << intermediate;
@@ -986,6 +1054,7 @@ fn close_predecessors(predecessors: &mut [u16; MAX_BOARD64_PIECES], count: usize
         .all(|(operation, &requirements)| requirements & (1_u16 << operation) == 0)
 }
 
+#[cfg(any(test, feature = "local-search-ab"))]
 fn predecessor_closure(mut operations: u16, predecessors: &[u16; MAX_BOARD64_PIECES]) -> u16 {
     // Each predecessor mask already contains its transitive ancestors.
     let mut pending = operations;
@@ -997,6 +1066,7 @@ fn predecessor_closure(mut operations: u16, predecessors: &[u16; MAX_BOARD64_PIE
     operations
 }
 
+#[cfg(any(test, feature = "local-search-ab", feature = "placement-dependency-pc"))]
 fn board_for_operations(
     mut board: u64,
     physical_cells: &[u64; MAX_BOARD64_PIECES],
@@ -1008,6 +1078,92 @@ fn board_for_operations(
         board |= physical_cells[operation];
     }
     board
+}
+
+#[cfg(test)]
+mod symbolic_completion_tests {
+    use super::*;
+    use crate::backend::wasm_cpu::buildup::{
+        BuildCompletion, BuildUpWorkspace, CandidateProjection,
+    };
+
+    #[test]
+    fn symbolic_completion_matches_the_exact_post_clear_board() {
+        let o = 3 | (3 << 10);
+        let bottom_two_rows = (1_u64 << 20) - 1;
+        for (height, initial, expected, deleted) in [
+            (2, 0, o, 0),
+            (3, (bottom_two_rows & !o) | (1 << 20), 1, 0b11),
+            (2, bottom_two_rows & !o, 0, 0b11),
+        ] {
+            let catalog = GeometryCatalog::compile_build_stage(height, initial, o).unwrap();
+            let row = catalog.skeleton_id(PieceKind::O, o).unwrap();
+            let candidate = GeometryCandidate::from_rows(&catalog, 0, &[row]).unwrap();
+            let geometry =
+                CandidateGeometry::for_symbolic_prefix_completion(&catalog, &candidate, expected)
+                    .expect("exact final board");
+            let completion = BuildCompletion::ExactBoardAfterLineClears(expected);
+            let mut workspace = BuildUpWorkspace::default();
+            let mut reference =
+                CandidateProjection::compile(&catalog, &candidate, &mut workspace, completion)
+                    .unwrap();
+
+            for executed in 0..=1 {
+                let state = geometry.conditional_state(executed);
+                assert_eq!(
+                    (state.board, state.deleted),
+                    reference.state(usize::from(executed))
+                );
+            }
+            assert_eq!(reference.state(1), (expected, deleted));
+            assert!(completion.accepts(&mut reference, 1));
+            assert_eq!(
+                BuildCompletion::ClearToEmpty.accepts(&mut reference, 1),
+                expected == 0
+            );
+            assert_eq!(
+                CandidateGeometry::for_symbolic_prefix(&catalog, &candidate).is_some(),
+                expected == 0
+            );
+            assert_eq!(
+                CandidateGeometry::compile(&catalog, &candidate).is_some(),
+                expected == 0
+            );
+            assert!(CandidateGeometry::for_symbolic_prefix_completion(
+                &catalog,
+                &candidate,
+                expected ^ 1,
+            )
+            .is_none());
+        }
+    }
+
+    #[test]
+    fn symbolic_completion_rejects_empty_and_incomplete_candidates() {
+        let o = 3 | (3 << 10);
+        let catalog = GeometryCatalog::compile_build_stage(2, 0, o | (o << 4)).unwrap();
+        let empty = GeometryCandidate::from_rows(&catalog, 0, &[]).unwrap();
+        assert!(CandidateGeometry::for_symbolic_prefix_completion(&catalog, &empty, 0).is_none());
+
+        let row = catalog.skeleton_id(PieceKind::O, o).unwrap();
+        let incomplete = GeometryCandidate::from_rows(&catalog, 0, &[row]).unwrap();
+        // Its own post-clear board matches o, but it does not cover the
+        // catalog's required cells and therefore has no qualified projection.
+        assert!(
+            CandidateGeometry::for_symbolic_prefix_completion(&catalog, &incomplete, o).is_none()
+        );
+    }
+
+    #[test]
+    fn symbolic_completion_preserves_initial_full_row_rejection() {
+        let o = 3 | (3 << 10);
+        let catalog = GeometryCatalog::compile_build_stage(3, (1 << 10) - 1, o << 10).unwrap();
+        let row = catalog.skeleton_id(PieceKind::O, o << 10).unwrap();
+        let candidate = GeometryCandidate::from_rows(&catalog, 0, &[row]).unwrap();
+        assert!(
+            CandidateGeometry::for_symbolic_prefix_completion(&catalog, &candidate, o).is_none()
+        );
+    }
 }
 
 #[cfg(test)]

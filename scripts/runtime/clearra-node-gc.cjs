@@ -2,14 +2,17 @@
 
 // Loaded only for a directly supervised Node root. Descendant Node processes
 // inherit the request paths, but only the root PID named in the request may
-// acknowledge that its own heap completed a full collection.
+// acknowledge that its own heap completed a full collection. Worker threads
+// share that PID and inherit --require, so the isolate must be checked too.
 const fs = require('node:fs');
 const path = require('node:path');
+const { isMainThread, threadId } = require('node:worker_threads');
 
 const requestPath = process.env.CLEARRA_RUNTIME_GC_REQUEST_PATH;
 const acknowledgementPath = process.env.CLEARRA_RUNTIME_GC_ACK_PATH;
 const protocol = process.env.CLEARRA_RUNTIME_GC_PROTOCOL;
-if (requestPath && acknowledgementPath && protocol && typeof global.gc === 'function') {
+if (isMainThread && threadId === 0 && requestPath && acknowledgementPath && protocol &&
+    typeof global.gc === 'function') {
   let lastRequestId;
   const respond = () => {
     let request;
@@ -32,6 +35,8 @@ if (requestPath && acknowledgementPath && protocol && typeof global.gc === 'func
         action: 'full-gc',
         status: 'completed',
         child_pid: process.pid,
+        scope: 'node-main-isolate',
+        thread_id: threadId,
       };
       fs.writeFileSync(temporary, JSON.stringify(acknowledgement));
       fs.renameSync(temporary, acknowledgementPath);
@@ -43,9 +48,16 @@ if (requestPath && acknowledgementPath && protocol && typeof global.gc === 'func
   };
   try {
     const watcher = fs.watch(path.dirname(requestPath), respond);
+    watcher.on('error', () => watcher.close());
     watcher.unref();
-    respond();
   } catch {
-    // The root process is allowed to continue under the hard memory boundary.
+    // Filesystem notifications are an optimization, not collection authority.
   }
+  // Filesystem watchers can fail or miss notifications. Polling keeps the
+  // cooperative request observable without extending the lifetime of the job.
+  // This still requires the main event loop to yield; it does not collect
+  // worker isolates, descendant processes, Rust owners or WASM linear memory.
+  const poller = setInterval(respond, 1_000);
+  poller.unref();
+  respond();
 }

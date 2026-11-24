@@ -58,7 +58,7 @@ use super::{
     buildup::{
         checked_candidate_verification_peak_upper_bound, exact_scoring_execution_graph,
         exact_scoring_execution_graph_memory_projection, verify_candidate, BuildUpWorkspace,
-        CandidateWitnessMode,
+        CandidateIlcWork, CandidateWitnessMode,
     },
     catalog::GeometryCatalog,
     coverage_product::CoverageProductEvaluator,
@@ -68,7 +68,7 @@ use super::{
     exact_collections::{ExactHashMap, ExactHashSet},
     geometry::{
         checked_target_group_build_peak_additional_bytes, GeometryAdvance, GeometryCandidate,
-        GeometrySearch,
+        GeometrySearch, PhysicalPrefixMode,
     },
     kick_profiles::replay_profile_ids,
     mix_digest, mix_order_independent_candidate_digest,
@@ -328,6 +328,7 @@ struct DistributedWorkerScalarEvidence {
     coverage_product_edge_checks: usize,
     realization_feasibility_states: usize,
     realization_feasibility_rejected_candidates: usize,
+    candidate_ilc_work: CandidateIlcWork,
     peak_reachability_states: usize,
     total_reachability_states: usize,
     resource_peak_cpu_bytes: usize,
@@ -396,6 +397,17 @@ fn exact_distributed_worker_scalar_evidence(
             result,
             "realization_feasibility_rejected_candidates",
         )?,
+        candidate_ilc_work: CandidateIlcWork {
+            checks: exact_canonical_usize_field(result, "candidate_ilc_checks")?,
+            rejected_candidates: exact_canonical_usize_field(
+                result,
+                "candidate_ilc_rejected_candidates",
+            )?,
+            reused_prefix_certificates: exact_canonical_usize_field(
+                result,
+                "candidate_ilc_reused_prefix_certificates",
+            )?,
+        },
         peak_reachability_states: exact_canonical_usize_field(result, "peak_reachability_states")?,
         total_reachability_states: exact_canonical_usize_field(
             result,
@@ -849,6 +861,61 @@ enum SearchProblemRetention {
     },
 }
 
+fn physical_pc_prefix_mode(
+    problem: &SearchProblem,
+    catalog: &GeometryCatalog,
+) -> PhysicalPrefixMode {
+    use clearra_objectives::policy::objective_policy::ObjectivePolicy;
+    use clearra_pc_graph::request::PcCountPolicy;
+    use clearra_problem::{goal::SearchGoal, SearchProblemKind, SearchProblemPreset};
+
+    let backend = problem.backend_request();
+    let cells = u32::from(catalog.width()) * u32::from(catalog.height());
+    if cells == 0 || cells > 64 || catalog.height() > 16 {
+        return PhysicalPrefixMode::Disabled;
+    }
+    let full = u64::MAX >> (64 - cells);
+    let required = catalog.required_cells().count_ones() as usize;
+    if !matches!(
+        (problem.preset(), problem.problem_kind()),
+        (SearchProblemPreset::OpeningPc, SearchProblemKind::OpeningPc)
+            | (SearchProblemPreset::ScenarioPc, SearchProblemKind::ScenarioPc)
+    ) || !matches!(problem.search_goal(), SearchGoal::ClearToEmpty)
+        || catalog.initial_board() | catalog.required_cells() != full
+        || catalog.initial_board() & catalog.required_cells() != 0
+        || required == 0
+        || required % 4 != 0
+        // This candidate-local port does not activate the separate 15-lock
+        // full-draw/6L family experiments from the historical branch.
+        || required / 4 > 11
+        || problem.exact_pieces() != Some(required / 4)
+        || problem.objective() != ObjectivePolicy::unique()
+        || problem.count_policy() != PcCountPolicy::CountUnique
+        || problem.pc_chance_evidence_policy() != PcChanceEvidencePolicy::Disabled
+        || !matches!(problem.output_policy(), SearchOutputPolicy::Trace | SearchOutputPolicy::Summary | SearchOutputPolicy::CoverageSummary)
+        || problem.queue_observation_policy().requires_observation_policy()
+        || problem.solution_probability_policy().requested()
+        || problem.build_replay_evidence_requested()
+        || problem.allowed_colored_solution_identities().is_some()
+        || backend.tablebase_requested()
+        || backend.precompute_build_dependencies()
+        || problem.budget().max_nodes() != 0
+        || backend.max_candidates() != 0
+        || backend.max_frontier_states() != 0
+        || backend.max_memory_mib().is_some()
+    {
+        return PhysicalPrefixMode::Disabled;
+    }
+    // Both predicates prove physical impossibility before supply/Hold, kick,
+    // or scoring tests. They never stand in for a successful build witness.
+    // Keep the raw leaf stream whenever the public result promises its digest.
+    if problem.output_policy().retains_candidate_digest() {
+        PhysicalPrefixMode::MarkCandidates
+    } else {
+        PhysicalPrefixMode::SkipSubtrees
+    }
+}
+
 pub(crate) struct WasmExactSearchSession {
     problem: Arc<SearchProblem>,
     problem_retention: SearchProblemRetention,
@@ -909,6 +976,7 @@ pub(crate) struct WasmExactSearchSession {
     parallel_standard_bag_cache_misses: usize,
     parallel_reachability_metrics: ReachabilityMetrics,
     parallel_legal_board_verified_negative_prunes: usize,
+    parallel_candidate_ilc_work: CandidateIlcWork,
     workers_used: usize,
     parallel_active_workers: usize,
     parallel_minimum_worker_candidates: usize,
@@ -1662,7 +1730,7 @@ impl WasmExactSearchSession {
                 .ensure_memory_bound(retained_before_geometry, target_peak)
                 .map_err(WasmExactSearchError::resource_admission)?;
         }
-        let geometry = if external_geometry {
+        let mut geometry = if external_geometry {
             GeometrySearch::external_deferred(
                 universe,
                 &multiset_family,
@@ -1691,6 +1759,16 @@ impl WasmExactSearchSession {
                 )?
             }
         };
+        if !external_geometry && !parent_authorized {
+            let mode = physical_pc_prefix_mode(problem.as_ref(), &catalog);
+            #[cfg(any(test, feature = "local-search-ab"))]
+            let mode = if std::env::var("CLEARRA_PHYSICAL_PREFIX_PRUNING").as_deref() == Ok("0") {
+                PhysicalPrefixMode::Disabled
+            } else {
+                mode
+            };
+            geometry.enable_physical_prefix_pruning(mode);
+        }
         geometry_span.finish(geometry.targets().map_or(0, |targets| targets.len()) as u64);
         let peak_cpu_bytes = catalog
             .retained_bytes()
@@ -1802,6 +1880,7 @@ impl WasmExactSearchSession {
             parallel_standard_bag_cache_misses: 0,
             parallel_reachability_metrics: ReachabilityMetrics::default(),
             parallel_legal_board_verified_negative_prunes: 0,
+            parallel_candidate_ilc_work: CandidateIlcWork::default(),
             workers_used: 1,
             parallel_active_workers: 1,
             parallel_minimum_worker_candidates: 0,
@@ -2146,6 +2225,7 @@ impl WasmExactSearchSession {
         self.parallel_reachability_metrics = outcome.reachability_metrics;
         self.parallel_legal_board_verified_negative_prunes =
             outcome.legal_board_verified_negative_prunes;
+        self.parallel_candidate_ilc_work = outcome.candidate_ilc_work;
         self.workers_used = outcome.workers_used;
         self.parallel_active_workers = outcome.active_workers;
         self.parallel_minimum_worker_candidates = outcome.minimum_worker_candidates;
@@ -2153,6 +2233,10 @@ impl WasmExactSearchSession {
         self.peak_cpu_bytes = self.peak_cpu_bytes.max(
             catalog_payload_bytes
                 .saturating_add(self.geometry.retained_bytes())
+                // Preserve the existing nonadditive logical peak estimate,
+                // while current retention no longer charges dropped family
+                // and optional prefix-count owners after worker completion.
+                .saturating_add(self.geometry.parallel_family_dispatch_bytes())
                 .saturating_add(self.tablebase_retained_bytes)
                 .saturating_add(self.parallel_worker_retained_bytes)
                 .saturating_add(
@@ -2375,6 +2459,14 @@ impl WasmExactSearchSession {
             match geometry_advance {
                 GeometryAdvance::Pending => {}
                 GeometryAdvance::Candidate(candidate) => {
+                    if self.geometry.physical_prefix_mode() == PhysicalPrefixMode::SkipSubtrees {
+                        self.packing_candidate_count = self
+                            .geometry
+                            .last_original_candidate_ordinal()
+                            .ok_or(WasmExactSearchError::InvalidProblem(
+                                "physical_prefix_candidate_ordinal_missing",
+                            ))?;
+                    }
                     processed_candidates += 1;
                     if let Some(outcome) = self.process_candidate(candidate, control)? {
                         return Ok(outcome);
@@ -2392,7 +2484,12 @@ impl WasmExactSearchSession {
                     self.mark_truncated(reason);
                     return self.complete();
                 }
-                GeometryAdvance::Complete => return self.complete(),
+                GeometryAdvance::Complete => {
+                    if let Some(raw_count) = self.geometry.raw_candidate_progress() {
+                        self.packing_candidate_count = raw_count;
+                    }
+                    return self.complete();
+                }
             }
         }
         control.report_progress(
@@ -3306,6 +3403,12 @@ impl WasmExactSearchSession {
         if self.problem.objective().kind() == ObjectiveKind::Tiling {
             return self.observe_tiling_candidate(candidate, candidate_ordinal);
         }
+        if candidate.physical_prefix_impossible() {
+            self.realization_feasibility_rejected_candidates = self
+                .realization_feasibility_rejected_candidates
+                .saturating_add(1);
+            return Ok(None);
+        }
         let profile_scale = profile_sample_scale(self.packing_candidate_count);
         let target = self.geometry.target(candidate.target_index).ok_or(
             WasmExactSearchError::InvalidProblem("wasm_geometry_candidate_target_out_of_range"),
@@ -3348,6 +3451,7 @@ impl WasmExactSearchSession {
                         .expect("candidate pattern group belongs to the session universe")
             },
             exact_candidate_coverage,
+            self.buildup_workspace.can_use_first_pattern_witness(),
         );
         if matches!(
             self.problem_retention,
@@ -3908,6 +4012,8 @@ impl WasmExactSearchSession {
         self.realization_feasibility_rejected_candidates = self
             .realization_feasibility_rejected_candidates
             .saturating_add(scalar.realization_feasibility_rejected_candidates);
+        self.parallel_candidate_ilc_work
+            .accumulate(scalar.candidate_ilc_work);
         self.peak_reachability_states = self
             .peak_reachability_states
             .max(scalar.peak_reachability_states);
@@ -5099,6 +5205,8 @@ impl WasmExactSearchSession {
             &mut reachability_metrics,
             self.parallel_reachability_metrics,
         );
+        let mut candidate_ilc_work = self.buildup_workspace.candidate_ilc_work();
+        candidate_ilc_work.accumulate(self.parallel_candidate_ilc_work);
         let requested_backend = self.problem.backend_policy().requested_backend();
         let runtime_webgpu_available = self.problem.backend_policy().runtime_webgpu_available();
         let explicit_gpu_backend = matches!(
@@ -5280,6 +5388,10 @@ impl WasmExactSearchSession {
                 self.problem.output_policy().as_str(),
             ),
             field("search_traversal", "canonical-skeleton-exact-cover"),
+            field(
+                "pc_placement_dependency_selected",
+                super::uses_pc_placement_dependency(&self.problem),
+            ),
             field("tablebase_requested", self.tablebase_requested),
             field("tablebase_status", self.tablebase_status),
             field("tablebase_tier", "none"),
@@ -5367,7 +5479,48 @@ impl WasmExactSearchSession {
                 self.catalog.has_instantiation_table(),
             ),
             field("packing_candidate_is_solution", tiling_only),
+            field(
+                "geometry_current_retained_bytes",
+                self.geometry.retained_bytes(),
+            ),
+            field(
+                "geometry_parallel_family_dispatch_bytes",
+                self.geometry.parallel_family_dispatch_bytes(),
+            ),
             field("packing_candidate_count", self.packing_candidate_count),
+            field("packing_candidate_domain", "raw"),
+            field(
+                "physical_prefix_pruning_active",
+                self.geometry.physical_prefix_mode() != PhysicalPrefixMode::Disabled,
+            ),
+            field(
+                "physical_prefix_pruning_mode",
+                self.geometry.physical_prefix_mode().label(),
+            ),
+            field(
+                "physical_prefix_dependency_checks",
+                self.geometry.physical_prefix_stats().dependency_checks,
+            ),
+            field(
+                "physical_prefix_first_clear_checks",
+                self.geometry.physical_prefix_stats().first_clear_checks,
+            ),
+            field(
+                "physical_prefix_negative_prefixes",
+                self.geometry.physical_prefix_stats().negative_prefixes,
+            ),
+            field(
+                "physical_prefix_certified_candidate_count",
+                self.geometry.physical_prefix_stats().certified_candidates,
+            ),
+            field(
+                "physical_prefix_skipped_candidate_count",
+                self.geometry.physical_prefix_stats().skipped_candidates,
+            ),
+            field(
+                "physical_prefix_emitted_candidate_count",
+                self.geometry.physical_prefix_stats().emitted_candidates,
+            ),
             field(
                 "geometry_candidate_family_count",
                 self.geometry
@@ -5574,6 +5727,15 @@ impl WasmExactSearchSession {
             field(
                 "realization_feasibility_rejected_candidates",
                 self.realization_feasibility_rejected_candidates,
+            ),
+            field("candidate_ilc_checks", candidate_ilc_work.checks),
+            field(
+                "candidate_ilc_rejected_candidates",
+                candidate_ilc_work.rejected_candidates,
+            ),
+            field(
+                "candidate_ilc_reused_prefix_certificates",
+                candidate_ilc_work.reused_prefix_certificates,
             ),
             field("peak_reachability_states", self.peak_reachability_states),
             field("total_reachability_states", self.total_reachability_states),
@@ -5927,6 +6089,65 @@ impl WasmExactSearchSession {
                 field(
                     "standard_bag_product_memo_promotions",
                     memory.standard_bag_memo.product_promotions,
+                ),
+                field(
+                    "standard_bag_global_merge_calls",
+                    memory.standard_bag_memo.global_merge_calls,
+                ),
+                // Includes already-ACCEPT O(1) unions. This is an omitted
+                // call count, not a count of equally expensive traversals.
+                field(
+                    "standard_bag_global_merge_saturated_skips",
+                    memory.standard_bag_memo.global_merge_saturated_skips,
+                ),
+                field(
+                    "standard_bag_first_witness_calls",
+                    memory.standard_bag_memo.first_witness_calls,
+                ),
+                field(
+                    "standard_bag_first_witness_mode_transitions",
+                    memory.standard_bag_memo.first_witness_mode_transitions,
+                ),
+                field(
+                    "standard_bag_boolean_membership_calls",
+                    memory.standard_bag_memo.boolean_membership_calls,
+                ),
+                field(
+                    "standard_bag_boolean_membership_mode_transitions",
+                    memory.standard_bag_memo.boolean_membership_mode_transitions,
+                ),
+                field(
+                    "standard_bag_boolean_certified_membership_calls",
+                    memory.standard_bag_memo.boolean_certified_membership_calls,
+                ),
+                field(
+                    "standard_bag_boolean_negative_cache_hits",
+                    memory.standard_bag_memo.boolean_negative_cache_hits,
+                ),
+                field(
+                    "standard_bag_boolean_negative_roots",
+                    memory.standard_bag_memo.boolean_negative_roots,
+                ),
+                field(
+                    "standard_bag_boolean_negative_capacity",
+                    memory.standard_bag_memo.boolean_negative_capacity,
+                ),
+                // A subset of the existing StandardBag memo and owner bytes.
+                field(
+                    "standard_bag_boolean_negative_payload_bytes",
+                    memory.standard_bag_memo.boolean_negative_payload_bytes,
+                ),
+                field(
+                    "standard_bag_shared_early_publications",
+                    memory.standard_bag_memo.shared_early_publications,
+                ),
+                field(
+                    "standard_bag_shared_saturation_adoptions",
+                    memory.standard_bag_memo.shared_saturation_adoptions,
+                ),
+                field(
+                    "standard_bag_shared_retire_transitions",
+                    memory.standard_bag_memo.shared_retire_transitions,
                 ),
             ];
             fields.try_reserve_exact(memory_fields.len()).map_err(|_| {
@@ -6445,7 +6666,7 @@ mod tests {
         };
         let forbidden = || panic!("an ineligible witness mode must not scan queue coverage");
         assert_eq!(
-            CandidateWitnessMode::for_candidate(&problem, &target, forbidden, false),
+            CandidateWitnessMode::for_candidate(&problem, &target, forbidden, false, false),
             CandidateWitnessMode::Disabled
         );
         target.pattern_index = Some(Arc::new(
@@ -6453,14 +6674,14 @@ mod tests {
                 .expect("one concrete queue index"),
         ));
         assert_eq!(
-            CandidateWitnessMode::for_candidate(&problem, &target, forbidden, true),
+            CandidateWitnessMode::for_candidate(&problem, &target, forbidden, true, false),
             CandidateWitnessMode::Disabled
         );
         let count_all =
             ProblemCompiler::compile_scenario_pc(&query.with_count_policy(PcCountPolicy::CountAll))
                 .expect("count-all problem");
         assert_eq!(
-            CandidateWitnessMode::for_candidate(&count_all, &target, forbidden, false),
+            CandidateWitnessMode::for_candidate(&count_all, &target, forbidden, false, false),
             CandidateWitnessMode::Disabled
         );
         let mut checked = false;
@@ -6473,12 +6694,13 @@ mod tests {
                     true
                 },
                 false,
+                false,
             ),
             CandidateWitnessMode::MembershipOnly
         );
         assert!(checked);
         assert_eq!(
-            CandidateWitnessMode::for_candidate(&problem, &target, || false, false),
+            CandidateWitnessMode::for_candidate(&problem, &target, || false, false, false),
             CandidateWitnessMode::ExactSinglePatternCoverage
         );
     }
@@ -7282,6 +7504,9 @@ mod tests {
                 "realization_feasibility_rejected_candidates",
                 "0".to_owned(),
             ),
+            ("candidate_ilc_checks", "0".to_owned()),
+            ("candidate_ilc_rejected_candidates", "0".to_owned()),
+            ("candidate_ilc_reused_prefix_certificates", "0".to_owned()),
             ("peak_reachability_states", "0".to_owned()),
             ("total_reachability_states", "0".to_owned()),
             ("resource_peak_cpu_bytes", "0".to_owned()),
@@ -8344,4 +8569,8 @@ mod tests {
         assert_eq!(run.identities.len(), 2);
     }
 }
+#[cfg(test)]
+#[path = "physical_prefix_result_tests.rs"]
+mod physical_prefix_result_tests;
+
 // SRP rationale: this module has one behavior-level change reason: canonical exact-search result accumulation and finalization.

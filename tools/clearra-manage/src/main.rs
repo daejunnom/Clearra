@@ -184,6 +184,7 @@ fn run_command(
                 .map_err(|_| Error::usage("--timeout must be an integer"))
         })
         .transpose()?;
+    let no_timeout = take_flag(&mut arguments, "--no-timeout");
     require_empty(&arguments)?;
     let outcome = runtime::run(
         repository,
@@ -192,6 +193,7 @@ fn run_command(
             producer,
             profile,
             timeout_seconds,
+            no_timeout,
             command,
             keep_stdin_open: false,
             extra_env: Default::default(),
@@ -303,7 +305,8 @@ fn print_help() {
          clearra-manage [--root PATH] storage audit\n\
          clearra-manage [--root PATH] storage verify --path PATH [--force-unmanaged-output --force-reason REASON]\n\
          clearra-manage [--root PATH] runtime audit\n\
-         clearra-manage [--root PATH] runtime run --producer ID --profile ID [--timeout SECONDS] -- COMMAND...\n\
+         clearra-manage [--root PATH] runtime run --producer ID --profile ID [--timeout SECONDS | --no-timeout] -- COMMAND...\n\
+         --no-timeout is explicit and limited to build-test, verification, and benchmark-search; finite leases stay bounded.\n\
          clearra-manage [--root PATH] runtime wsl verify [--distribution NAME]\n\
          clearra-manage [--root PATH] runtime wsl run [--distribution NAME] --entry ID -- ARGUMENTS..."
     );

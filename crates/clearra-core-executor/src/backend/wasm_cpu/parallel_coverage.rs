@@ -1,13 +1,38 @@
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+#[cfg(feature = "placement-dependency-pc")]
+use std::sync::Arc;
 
 use clearra_coverage::pattern::pattern_bitset::PatternBitSet;
 
+#[cfg(feature = "placement-dependency-pc")]
+use super::standard_bag_coverage::SharedStandardBagRequest;
 use super::WasmExactSearchError;
 
 pub(super) struct SharedCoverage {
     pattern_count: usize,
     words: Vec<AtomicU64>,
     complete: AtomicBool,
+    #[cfg(feature = "placement-dependency-pc")]
+    standard_bag_request: Option<Arc<SharedStandardBagRequest>>,
+}
+
+/// The exact, monotonically published bitmap owner is the only constructor.
+/// Borrowing the proof allocates nothing and does not increment an Arc.
+#[cfg(feature = "placement-dependency-pc")]
+pub(super) struct SharedStandardBagCoverageComplete<'a> {
+    request: &'a Arc<SharedStandardBagRequest>,
+    pattern_count: usize,
+}
+
+#[cfg(feature = "placement-dependency-pc")]
+impl SharedStandardBagCoverageComplete<'_> {
+    pub fn request(&self) -> &Arc<SharedStandardBagRequest> {
+        self.request
+    }
+
+    pub const fn pattern_count(&self) -> usize {
+        self.pattern_count
+    }
 }
 
 impl SharedCoverage {
@@ -18,10 +43,69 @@ impl SharedCoverage {
                 .map(|_| AtomicU64::new(0))
                 .collect(),
             complete: AtomicBool::new(pattern_count == 0),
+            #[cfg(feature = "placement-dependency-pc")]
+            standard_bag_request: None,
         }
     }
 
+    #[cfg(feature = "placement-dependency-pc")]
+    pub(super) fn for_standard_bag_request(
+        pattern_count: usize,
+        request: Arc<SharedStandardBagRequest>,
+    ) -> Self {
+        let mut coverage = Self::new(pattern_count);
+        // Bind before any publication. An already full unbound bitmap cannot
+        // be attached to another request and turned into a retirement proof.
+        coverage.standard_bag_request = Some(request);
+        coverage
+    }
+
+    #[cfg(feature = "placement-dependency-pc")]
+    pub(super) fn standard_bag_complete_proof(
+        &self,
+    ) -> Option<SharedStandardBagCoverageComplete<'_>> {
+        let request = self.standard_bag_request.as_ref()?;
+        (self.pattern_count != 0 && self.complete.load(Ordering::Acquire)).then_some(
+            SharedStandardBagCoverageComplete {
+                request,
+                pattern_count: self.pattern_count,
+            },
+        )
+    }
+
+    #[cfg(feature = "placement-dependency-pc")]
+    fn validate_request(
+        &self,
+        request: Option<&Arc<SharedStandardBagRequest>>,
+    ) -> Result<(), WasmExactSearchError> {
+        if let Some(bound) = &self.standard_bag_request {
+            if !request.is_some_and(|request| Arc::ptr_eq(bound, request)) {
+                return Err(WasmExactSearchError::InvalidProblem(
+                    "wasm_parallel_coverage_request_mismatch",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "placement-dependency-pc")]
+    pub(super) fn union_for_request(
+        &self,
+        request: Option<&Arc<SharedStandardBagRequest>>,
+        coverage: &PatternBitSet,
+    ) -> Result<(), WasmExactSearchError> {
+        self.validate_request(request)?;
+        self.union_checked(coverage)
+    }
+
+    #[cfg(any(test, not(feature = "placement-dependency-pc")))]
     pub fn union(&self, coverage: &PatternBitSet) -> Result<(), WasmExactSearchError> {
+        #[cfg(feature = "placement-dependency-pc")]
+        self.validate_request(None)?;
+        self.union_checked(coverage)
+    }
+
+    fn union_checked(&self, coverage: &PatternBitSet) -> Result<(), WasmExactSearchError> {
         if coverage.pattern_count() != self.pattern_count {
             return Err(WasmExactSearchError::InvalidProblem(
                 "wasm_parallel_coverage_universe_mismatch",
@@ -33,7 +117,29 @@ impl SharedCoverage {
 
     /// Borrowed final worker coverage, on the same original universe. Validate
     /// the entire shape before any monotone atomic publication.
+    #[cfg(any(test, not(feature = "placement-dependency-pc")))]
     pub(super) fn union_original_words(
+        &self,
+        pattern_count: usize,
+        coverage: Option<&[u64]>,
+    ) -> Result<(), WasmExactSearchError> {
+        #[cfg(feature = "placement-dependency-pc")]
+        self.validate_request(None)?;
+        self.union_original_words_checked(pattern_count, coverage)
+    }
+
+    #[cfg(feature = "placement-dependency-pc")]
+    pub(super) fn union_original_words_for_request(
+        &self,
+        request: Option<&Arc<SharedStandardBagRequest>>,
+        pattern_count: usize,
+        coverage: Option<&[u64]>,
+    ) -> Result<(), WasmExactSearchError> {
+        self.validate_request(request)?;
+        self.union_original_words_checked(pattern_count, coverage)
+    }
+
+    fn union_original_words_checked(
         &self,
         pattern_count: usize,
         coverage: Option<&[u64]>,
@@ -72,8 +178,13 @@ impl SharedCoverage {
     }
 
     pub fn is_superset(&self, required: &PatternBitSet) -> bool {
-        required.pattern_count() == self.pattern_count
-            && self
+        if required.pattern_count() != self.pattern_count {
+            return false;
+        }
+        // A published exact full bitmap absorbs every set in this same
+        // universe. Keep the count check before the O(1) monotone latch.
+        self.complete.load(Ordering::Acquire)
+            || self
                 .words
                 .iter()
                 .zip(required.words().iter().copied())
@@ -116,6 +227,73 @@ impl SharedCoverage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn complete_superset_latch_still_checks_universe_and_partial_bits() {
+        let coverage = SharedCoverage::new(129);
+        let present = PatternBitSet::from_words(129, vec![1, 2, 1]).unwrap();
+        let absent = PatternBitSet::from_words(129, vec![2, 0, 0]).unwrap();
+        coverage.union(&present).unwrap();
+        assert!(!coverage.complete.load(Ordering::Acquire));
+        assert!(coverage.is_superset(&present));
+        assert!(!coverage.is_superset(&absent));
+        assert!(!coverage.is_superset(&PatternBitSet::new(128)));
+        coverage.union(&PatternBitSet::all(129)).unwrap();
+        assert!(coverage.complete.load(Ordering::Acquire));
+        assert!(coverage.is_superset(&absent));
+        assert!(coverage.is_superset(&PatternBitSet::all(129)));
+        assert!(!coverage.is_superset(&PatternBitSet::new(128)));
+        assert!(!coverage.is_superset(&PatternBitSet::new(130)));
+    }
+
+    #[cfg(feature = "placement-dependency-pc")]
+    #[test]
+    fn bound_publication_rejects_foreign_owner_before_writes_and_requires_exact_nonempty_full_set()
+    {
+        let request = Arc::new(SharedStandardBagRequest::default());
+        let foreign = Arc::new(SharedStandardBagRequest::default());
+        let shared = SharedCoverage::for_standard_bag_request(129, Arc::clone(&request));
+        assert!(shared.standard_bag_complete_proof().is_none());
+        assert!(shared.union(&PatternBitSet::all(129)).is_err());
+        assert!(shared
+            .union_for_request(Some(&foreign), &PatternBitSet::all(129))
+            .is_err());
+        assert!(shared
+            .union_original_words(129, Some(&[u64::MAX; 3]))
+            .is_err());
+        assert!(shared
+            .union_original_words_for_request(Some(&foreign), 129, Some(&[u64::MAX; 3]))
+            .is_err());
+        assert!(shared
+            .union_original_words_for_request(Some(&request), 128, Some(&[u64::MAX; 2]))
+            .is_err());
+        assert!(shared
+            .union_original_words_for_request(Some(&request), 129, Some(&[u64::MAX; 2]))
+            .is_err());
+        assert!(shared.to_bitset().unwrap().is_empty());
+        shared
+            .union_original_words_for_request(Some(&request), 129, Some(&[u64::MAX, u64::MAX, 0]))
+            .unwrap();
+        assert!(shared.standard_bag_complete_proof().is_none());
+        // Invalid high tail bits are masked; only the real 129th ordinal can
+        // complete this universe, regardless of unused storage bits.
+        shared
+            .union_original_words_for_request(Some(&request), 129, Some(&[0, 0, !1]))
+            .unwrap();
+        assert!(shared.standard_bag_complete_proof().is_none());
+        shared
+            .union_original_words_for_request(Some(&request), 129, Some(&[0, 0, u64::MAX]))
+            .unwrap();
+        let proof = shared.standard_bag_complete_proof().unwrap();
+        assert!(Arc::ptr_eq(proof.request(), &request));
+        assert_eq!(proof.pattern_count(), 129);
+        assert_eq!(shared.to_bitset().unwrap(), PatternBitSet::all(129));
+        let unbound = SharedCoverage::new(129);
+        unbound.union(&PatternBitSet::all(129)).unwrap();
+        assert!(unbound.standard_bag_complete_proof().is_none());
+        let empty = SharedCoverage::for_standard_bag_request(0, request);
+        assert!(empty.standard_bag_complete_proof().is_none());
+    }
 
     #[test]
     fn terminal_borrowed_union_masks_tail_and_rejects_malformed_shapes() {

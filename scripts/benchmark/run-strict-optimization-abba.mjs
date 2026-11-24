@@ -25,6 +25,7 @@ const AXES = Object.freeze({
 });
 const NEUTRAL = new Set([...Object.values(AXES).map(([key]) => key),
   "CLEARRA_STRICT_STAGE_PROFILE", "CLEARRA_STRICT_STAGE_LEGACY_UPPER",
+  "CLEARRA_SEARCH_STAGE_PROFILE", "CLEARRA_SEARCH_MEMORY_PROFILE",
   "CLEARRA_STANDARD_BAG_UNION_MEMO_MAX_ENTRIES", "CLEARRA_EXPECTED_VCPUS"]);
 const CASES = Object.freeze({
   p7: { name: "nonempty-4L-P7-srs-plus", solutions: 246, queues: 5_040, candidates: 2_260 },
@@ -35,6 +36,10 @@ const FORCE = {
   CLEARRA_STANDARD_BAG_MEMO: "reference",
   CLEARRA_STANDARD_BAG_PRODUCT_MEMO_LAYOUT: "adaptive",
 };
+const PRODUCT_OFF_AXES = Object.freeze({
+  CLEARRA_REACHABILITY_VISITED_FIRST: "reachability_visited_first_mode",
+  CLEARRA_STANDARD_BAG_GLOBAL_SATURATION: "standard_bag_global_saturation_mode",
+});
 // Read back from the completed e023 frame-owner proof and the independent
 // d936 reference trials for this exact fixture. These checks identify the
 // workload and physical route; they do not prove the per-solution mapping.
@@ -138,6 +143,11 @@ export function validateStrictOptimizationReport(report, options, step, receipt,
       report.coverage.sha256_le_v1 === P7P4_BASELINE.queueUnion &&
       (step.arm !== "A" || Object.entries(P7P4_BASELINE.strictWork).every(([key, value]) => proof[key] === value)))) &&
     Object.entries(FORCE).every(([key, value]) => configuration?.[key] === value) &&
+    Object.entries(PRODUCT_OFF_AXES).every(([key, mode]) =>
+      (!Object.hasOwn(report, mode) && !Object.hasOwn(configuration ?? {}, key)) ||
+      (report[mode] === "0" && configuration?.[key] === "0")) &&
+    !Object.keys(configuration ?? {}).some((key) =>
+      Object.hasOwn(PRODUCT_OFF_AXES, key.toUpperCase()) && key !== key.toUpperCase()) &&
     (expectedAxis === null ? activeAxes.length === 0 : activeAxes.length === 1 &&
       configuration[expectedAxis] === axisValue) &&
     configuration?.[UNION_MEMO] === unionMemo && summary.standard_bag_union_memo_storage === unionMemo,

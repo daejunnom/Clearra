@@ -53,6 +53,7 @@ export type BuildProbabilityRequest = {
   spinProfile: SpinProfile;
   preserveB2B: boolean;
   solutionProbabilities: boolean;
+  /** Saved-draft compatibility; the retired beta prepass is always disabled. */
   precomputeBuildDependencies: boolean;
   legalBoardEnabled: boolean;
   conditionedReachabilityEnabled: boolean;
@@ -157,6 +158,9 @@ export function normalizeBuildProbabilityRequest(
   }
   return {
     ...request,
+    // Candidate dependency optimizations are automatic; the retired beta
+    // feasibility prepass must not remain active through a saved draft.
+    precomputeBuildDependencies: false,
     spinProfile:
       request.aggregation === 'spin' || request.preserveB2B
         ? request.spinProfile
@@ -333,11 +337,7 @@ export function buildProbabilityCommandArguments(request: BuildProbabilityReques
     }
     if (request.preserveB2B) tokens.push('--preserve-b2b');
     if (request.solutionProbabilities) tokens.push('--solution-probabilities');
-    tokens.push(
-      request.precomputeBuildDependencies
-        ? '--build-dependency-dag'
-        : '--no-build-dependency-dag'
-    );
+    tokens.push('--no-build-dependency-dag');
   }
   if (request.resultMode !== 'minimum-solutions') {
     // Transmit the selected product explicitly, including All Solutions. This

@@ -221,23 +221,27 @@ impl StandardBagProductMemo {
             self.failed_admissions_remaining -= 1;
             return Err(ProductMemoAdmissionError::Capacity);
         }
-        self.try_reserve_for(key, 1)?;
         let previous = match &mut self.storage {
-            ProductMemoStorage::Flat(memo) => Ok(memo.insert(key.packed(), value)),
+            ProductMemoStorage::Flat(memo) => {
+                memo.try_reserve(1)
+                    .map_err(|_| ProductMemoAdmissionError::Capacity)?;
+                memo.insert(key.packed(), value)
+            }
             ProductMemoStorage::StateMajor(memo) => {
-                let row_index = memo
-                    .row_index(key)
-                    .ok_or(ProductMemoAdmissionError::OutOfScope)?;
-                let row = memo.rows[row_index]
-                    .as_mut()
-                    .ok_or(ProductMemoAdmissionError::Capacity)?;
-                let previous = row.insert(key.language_node, value);
+                let row_index = memo.prepare_row(key)?;
+                let previous = memo
+                    .mutate_row(row_index, |row| {
+                        row.try_reserve(1)
+                            .map_err(|_| ProductMemoAdmissionError::Capacity)?;
+                        Ok(row.insert(key.language_node, value))
+                    })
+                    .ok_or(ProductMemoAdmissionError::Capacity)??;
                 if previous.is_none() {
                     memo.entry_count += 1;
                 }
-                Ok(previous)
+                previous
             }
-        }?;
+        };
         if previous.is_none() {
             self.maybe_promote();
         }
@@ -251,6 +255,7 @@ impl StandardBagProductMemo {
         self.failed_admissions_remaining = count;
     }
 
+    #[cfg(test)]
     fn try_reserve_for(
         &mut self,
         key: StandardBagProductMemoKey,
@@ -261,23 +266,9 @@ impl StandardBagProductMemo {
                 .try_reserve(additional)
                 .map_err(|_| ProductMemoAdmissionError::Capacity),
             ProductMemoStorage::StateMajor(memo) => {
-                let row_index = memo
-                    .row_index(key)
-                    .ok_or(ProductMemoAdmissionError::OutOfScope)?;
-                if memo.rows.is_empty() {
-                    let row_count = memo.row_count();
-                    memo.rows
-                        .try_reserve_exact(row_count)
-                        .map_err(|_| ProductMemoAdmissionError::Capacity)?;
-                    memo.rows.resize_with(row_count, || None);
-                }
-                memo.rows[row_index]
-                    .get_or_insert_with(|| {
-                        StateMajorRow::with_hasher(StateMajorRowHasher {
-                            source_prefix: key.packed() & !u64::from(u32::MAX),
-                        })
-                    })
-                    .try_reserve(additional)
+                let row_index = memo.prepare_row(key)?;
+                memo.mutate_row(row_index, |row| row.try_reserve(additional))
+                    .ok_or(ProductMemoAdmissionError::Capacity)?
                     .map_err(|_| ProductMemoAdmissionError::Capacity)
             }
         }
@@ -287,10 +278,28 @@ impl StandardBagProductMemo {
         match &mut self.storage {
             ProductMemoStorage::Flat(memo) => memo.clear(),
             ProductMemoStorage::StateMajor(memo) => {
+                let mut row_capacity = 0;
                 for row in memo.rows.iter_mut().flatten() {
                     row.clear();
+                    row_capacity += row.capacity();
                 }
+                memo.row_capacity = row_capacity;
                 memo.entry_count = 0;
+            }
+        }
+    }
+
+    /// Retire an arena/value namespace and release its allocations. Keep the
+    /// selected representation, source bounds and cumulative adaptive policy;
+    /// in particular a prior failed promotion must not trigger an OOM retry.
+    /// Replacement maps/directories are lazy and allocate no entry storage.
+    pub fn clear_and_release(&mut self) {
+        match &mut self.storage {
+            ProductMemoStorage::Flat(memo) => {
+                *memo = ExactU64MemoMap::new(memo.storage());
+            }
+            ProductMemoStorage::StateMajor(memo) => {
+                *memo = StateMajorProductMemo::new(memo.max_source_depth);
             }
         }
     }
@@ -307,20 +316,15 @@ impl StandardBagProductMemo {
     pub fn retained_payload_bytes(&self) -> usize {
         match &self.storage {
             ProductMemoStorage::Flat(memo) => memo.retained_payload_bytes(),
-            ProductMemoStorage::StateMajor(_) => self
-                .capacity()
-                .saturating_mul(core::mem::size_of::<(u32, u32)>()),
+            ProductMemoStorage::StateMajor(memo) => memo.retained_payload_bytes(),
         }
     }
 
+    #[cfg(any(feature = "parallel", test))]
     pub fn capacity(&self) -> usize {
         match &self.storage {
             ProductMemoStorage::Flat(memo) => memo.capacity(),
-            ProductMemoStorage::StateMajor(memo) => memo
-                .rows
-                .iter()
-                .flatten()
-                .fold(0_usize, |total, row| total.saturating_add(row.capacity())),
+            ProductMemoStorage::StateMajor(memo) => memo.row_capacity,
         }
     }
 
@@ -440,6 +444,9 @@ struct StateMajorProductMemo {
     max_source_depth: u8,
     rows: Vec<Option<StateMajorRow>>,
     entry_count: usize,
+    // Exact sum of the row capacities, not their lengths or the directory's
+    // capacity. Browsers request retained bytes repeatedly between candidates.
+    row_capacity: usize,
 }
 
 impl StateMajorProductMemo {
@@ -448,6 +455,7 @@ impl StateMajorProductMemo {
             max_source_depth,
             rows: Vec::new(),
             entry_count: 0,
+            row_capacity: 0,
         }
     }
 
@@ -456,14 +464,46 @@ impl StateMajorProductMemo {
     }
 
     fn retained_payload_bytes(&self) -> usize {
-        self.rows
-            .iter()
-            .flatten()
-            .map(|row| {
-                row.capacity()
-                    .saturating_mul(core::mem::size_of::<(u32, u32)>())
+        self.row_capacity
+            .saturating_mul(core::mem::size_of::<(u32, u32)>())
+    }
+
+    fn prepare_row(
+        &mut self,
+        key: StandardBagProductMemoKey,
+    ) -> Result<usize, ProductMemoAdmissionError> {
+        let index = self
+            .row_index(key)
+            .ok_or(ProductMemoAdmissionError::OutOfScope)?;
+        if self.rows.is_empty() {
+            let row_count = self.row_count();
+            self.rows
+                .try_reserve_exact(row_count)
+                .map_err(|_| ProductMemoAdmissionError::Capacity)?;
+            self.rows.resize_with(row_count, || None);
+        }
+        self.rows[index].get_or_insert_with(|| {
+            StateMajorRow::with_hasher(StateMajorRowHasher {
+                source_prefix: key.packed() & !u64::from(u32::MAX),
             })
-            .fold(0, usize::saturating_add)
+        });
+        Ok(index)
+    }
+
+    #[inline]
+    fn mutate_row<T>(
+        &mut self,
+        index: usize,
+        f: impl FnOnce(&mut StateMajorRow) -> T,
+    ) -> Option<T> {
+        let row = self.rows.get_mut(index)?.as_mut()?;
+        let previous_capacity = row.capacity();
+        let result = f(row);
+        // Reserve can fail; measure the actual post-call capacity either way.
+        // Each capacity is backed by a disjoint allocation, so their sum
+        // cannot overflow the address space.
+        self.row_capacity = self.row_capacity - previous_capacity + row.capacity();
+        Some(result)
     }
 
     fn directory_retained_bytes(&self) -> usize {
@@ -513,6 +553,7 @@ impl StateMajorProductMemo {
             });
             row.try_reserve(count)
                 .map_err(|_| ProductMemoAdmissionError::Capacity)?;
+            target.row_capacity += row.capacity();
             target.rows[index] = Some(row);
         }
         source.try_visit_entries(|packed, value| {
@@ -521,10 +562,9 @@ impl StateMajorProductMemo {
             let index = target
                 .row_index(key)
                 .ok_or(ProductMemoAdmissionError::OutOfScope)?;
-            let row = target.rows[index]
-                .as_mut()
+            target
+                .mutate_row(index, |row| row.insert(key.language_node, value))
                 .ok_or(ProductMemoAdmissionError::Capacity)?;
-            row.insert(key.language_node, value);
             Ok(())
         })?;
         target.entry_count = source.len();
@@ -625,6 +665,89 @@ mod tests {
         )
     }
 
+    fn assert_exact_row_capacity(memo: &StandardBagProductMemo) {
+        let ProductMemoStorage::StateMajor(state) = &memo.storage else {
+            panic!("state-major capacity test requires a row directory");
+        };
+        let walked: usize = state
+            .rows
+            .iter()
+            .flatten()
+            .map(StateMajorRow::capacity)
+            .sum();
+        assert_eq!(memo.capacity(), walked);
+        assert_eq!(
+            memo.retained_payload_bytes(),
+            walked * core::mem::size_of::<(u32, u32)>(),
+        );
+    }
+
+    #[test]
+    fn product_memo_release_preserves_flat_storage_policy_and_state_major_bounds() {
+        let key = StandardBagProductMemoKey::new(17, 0, FULL_STANDARD_BAG, 0);
+        for storage in [ExactU64MemoStorage::Reference, ExactU64MemoStorage::Compact] {
+            for policy in [
+                StandardBagProductMemoLayout::Flat,
+                StandardBagProductMemoLayout::Adaptive,
+            ] {
+                let mut memo = StandardBagProductMemo::new(policy, storage, 2);
+                for language in 0..128 {
+                    memo.try_insert(
+                        StandardBagProductMemoKey::new(language, 0, FULL_STANDARD_BAG, 0),
+                        language,
+                    )
+                    .unwrap();
+                }
+                assert!(memo.capacity() > 0);
+                assert_eq!(memo.layout(), StandardBagProductMemoLayout::Flat);
+                let counts = memo.promotion_counts();
+                memo.clear_and_release();
+                assert_eq!(memo.len(), 0);
+                assert_eq!(memo.capacity(), 0);
+                assert_eq!(memo.retained_payload_bytes(), 0);
+                assert_eq!(memo.directory_retained_bytes(), 0);
+                assert_eq!(memo.policy(), policy);
+                assert_eq!(memo.storage_label(), storage.label());
+                assert_eq!(memo.promotion_counts(), counts);
+                assert_eq!(memo.get(&key), None);
+                assert_eq!(memo.try_insert(key, u32::MAX), Ok(None));
+                assert_eq!(memo.get(&key), Some(&u32::MAX));
+            }
+        }
+        let mut rows = candidate(2);
+        rows.try_insert(key, 7).unwrap();
+        rows.try_insert(
+            StandardBagProductMemoKey::new(18, 2, FULL_STANDARD_BAG, 7),
+            8,
+        )
+        .unwrap();
+        assert!(rows.capacity() > 0);
+        assert!(rows.directory_retained_bytes() > 0);
+        rows.clear_and_release();
+        assert_eq!(rows.policy(), StandardBagProductMemoLayout::StateMajor);
+        assert_eq!(rows.layout(), StandardBagProductMemoLayout::StateMajor);
+        assert_eq!(rows.len(), 0);
+        assert_eq!(rows.capacity(), 0);
+        assert_eq!(rows.directory_retained_bytes(), 0);
+        assert_eq!(rows.row_slots(), 0);
+        assert_exact_row_capacity(&rows);
+        assert_eq!(
+            rows.try_insert(
+                StandardBagProductMemoKey::new(18, 2, FULL_STANDARD_BAG, 7),
+                u32::MAX
+            ),
+            Ok(None)
+        );
+        assert_eq!(
+            rows.try_insert(
+                StandardBagProductMemoKey::new(18, 3, FULL_STANDARD_BAG, 7),
+                1
+            ),
+            Err(ProductMemoAdmissionError::OutOfScope)
+        );
+        assert_exact_row_capacity(&rows);
+    }
+
     #[test]
     fn v081_state_major_product_memo_matches_full_reference_keys_and_values() {
         let mut reference = StandardBagProductMemo::new(
@@ -663,6 +786,7 @@ mod tests {
         );
         assert!(treatment.directory_retained_bytes() > 0);
         assert_eq!(reference.directory_retained_bytes(), 0);
+        assert_exact_row_capacity(&treatment);
     }
 
     #[test]
@@ -698,6 +822,8 @@ mod tests {
             Err(ProductMemoAdmissionError::OutOfScope)
         );
         assert_eq!(bounded.directory_retained_bytes(), 0);
+        assert_exact_row_capacity(&bounded);
+        assert_exact_row_capacity(&memo);
     }
 
     #[test]
@@ -705,9 +831,21 @@ mod tests {
         let key = StandardBagProductMemoKey::new(37, 0, FULL_STANDARD_BAG, 0);
         let mut first = candidate(2);
         let mut second = candidate(2);
+        assert_exact_row_capacity(&first);
         first.try_insert(key, 2).expect("first private root");
         second.try_insert(key, 3).expect("second private root");
+        assert_exact_row_capacity(&first);
+        let old_capacity = first.capacity();
+        first
+            .try_reserve_for(key, old_capacity + 1)
+            .expect("grow an existing row");
+        assert!(first.capacity() > old_capacity);
+        assert_exact_row_capacity(&first);
         assert!(first.try_reserve_for(key, usize::MAX).is_err());
+        // Failure on a new valid row must not charge unallocated capacity.
+        let another_row = StandardBagProductMemoKey::new(37, 1, FULL_STANDARD_BAG, 0);
+        assert!(first.try_reserve_for(another_row, usize::MAX).is_err());
+        assert_exact_row_capacity(&first);
         assert_eq!(first.get(&key), Some(&2));
         assert_eq!(second.get(&key), Some(&3));
         let before = (
@@ -716,6 +854,7 @@ mod tests {
             first.allocated_rows(),
         );
         first.clear();
+        assert_exact_row_capacity(&first);
         assert_eq!(first.len(), 0);
         assert_eq!(first.active_rows(), 0);
         assert_eq!(first.get(&key), None);
@@ -730,6 +869,7 @@ mod tests {
         );
         first.try_insert(key, u32::MAX).expect("new epoch root");
         assert_eq!(first.get(&key), Some(&u32::MAX));
+        assert_exact_row_capacity(&first);
     }
 
     #[test]
@@ -847,6 +987,7 @@ mod tests {
             }
             assert_eq!(memo.layout(), StandardBagProductMemoLayout::StateMajor);
             assert_eq!(memo.promotion_counts(), (1, 1));
+            assert_exact_row_capacity(&memo);
             assert_eq!(memo.len(), reference.len());
             assert!(
                 memo.retained_payload_bytes() + memo.directory_retained_bytes()
@@ -861,14 +1002,30 @@ mod tests {
                 );
             }
             assert_eq!(memo.promotion_counts(), (1, 1));
+            assert_exact_row_capacity(&memo);
             let retained = (memo.capacity(), memo.directory_retained_bytes());
             memo.clear();
+            assert_exact_row_capacity(&memo);
             assert_eq!(memo.len(), 0);
             assert_eq!(memo.get(&key_for(0)), None);
             assert_eq!(memo.layout(), StandardBagProductMemoLayout::StateMajor);
             assert_eq!((memo.capacity(), memo.directory_retained_bytes()), retained);
             assert_eq!(memo.try_insert(key_for(0), 7), Ok(None));
             assert_eq!(memo.get(&key_for(0)), Some(&7));
+            assert_exact_row_capacity(&memo);
+            let next_check = memo.adaptive.as_ref().unwrap().next_check_len;
+            memo.clear_and_release();
+            assert_eq!(memo.policy(), StandardBagProductMemoLayout::Adaptive);
+            assert_eq!(memo.layout(), StandardBagProductMemoLayout::StateMajor);
+            assert_eq!(memo.promotion_counts(), (1, 1));
+            assert_eq!(memo.adaptive.as_ref().unwrap().next_check_len, next_check);
+            assert_eq!(memo.capacity(), 0);
+            assert_eq!(memo.directory_retained_bytes(), 0);
+            assert_eq!(memo.len(), 0);
+            assert_eq!(memo.get(&key_for(0)), None);
+            assert_eq!(memo.try_insert(key_for(0), u32::MAX), Ok(None));
+            assert_eq!(memo.get(&key_for(0)), Some(&u32::MAX));
+            assert_exact_row_capacity(&memo);
             // An epoch in a large request retains its proven layout; a NEW small
             // request does not inherit either its directory or worker-local roots.
             assert_eq!(adaptive(1).layout(), StandardBagProductMemoLayout::Flat);
@@ -901,6 +1058,13 @@ mod tests {
         );
         assert_eq!(failed.promotion_counts(), (1, 0));
         assert_eq!(failed.directory_retained_bytes(), 0);
+        failed.clear_and_release();
+        assert_eq!(failed.layout(), StandardBagProductMemoLayout::Flat);
+        assert_eq!(failed.promotion_counts(), (1, 0));
+        assert_eq!(failed.adaptive.as_ref().unwrap().next_check_len, usize::MAX);
+        assert_eq!(failed.capacity(), 0);
+        assert_eq!(failed.try_insert(key, 4), Ok(None));
+        assert_eq!(failed.promotion_counts(), (1, 0));
     }
 
     #[test]

@@ -11,6 +11,8 @@ use clearra_scoring::{
 
 use crate::score_profile_selection::spin_profile_id;
 
+pub use clearra_scoring::b2b_preservation::BeforeSpinEvidenceDecision;
+
 /// Post-processing-owned predicate used when a consumer needs the exact same
 /// B2B edge decision without importing the scoring implementation itself.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -29,6 +31,18 @@ impl BackToBackEdgePolicy {
 
     pub fn allows(self, edge: ScoringExecutionEdge) -> bool {
         self.policy.allows(edge)
+    }
+
+    /// Request-local negative evidence before movement or spin evidence is
+    /// materialized. A positive answer does not certify a physical lock.
+    pub const fn before_spin_evidence(
+        self,
+        piece: PieceKind,
+        cleared_lines: u8,
+        perfect_clear: bool,
+    ) -> BeforeSpinEvidenceDecision {
+        self.policy
+            .before_spin_evidence(piece, cleared_lines, perfect_clear)
     }
 
     /// Whether preserving B2B for this edge depends on recognized spin

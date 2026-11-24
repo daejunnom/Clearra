@@ -502,8 +502,9 @@ impl AppCoreExecutorService {
         result: CoreExecutionResult,
         control: &ExecutionControl,
     ) -> Result<CoreExecutionResult, CoreExecutionError> {
-        if self.supports_cooperative_wasm_search()
-            && result.bool_field("postprocess_pc_path_requested") == Some(true)
+        let paged_pc_path = self.supports_cooperative_wasm_search()
+            && result.bool_field("postprocess_pc_path_requested") == Some(true);
+        if paged_pc_path
             && (result.bool_field("execution_constraint_preserve_b2b") != Some(true)
                 || result.bool_field("execution_constraint_materialized") == Some(true))
         {
@@ -517,7 +518,30 @@ impl AppCoreExecutorService {
             // filtering path below; page ownership never waives that proof.
             return Ok(result);
         }
-        let result = self.materialize_terminal_replay_partition(result, control)?;
+        let result = if paged_pc_path
+            && result.bool_field("postprocess_pc_save_requested") != Some(true)
+            && !result.exact_scoring_execution_batches().is_empty()
+            && result
+                .exact_scoring_execution_batches()
+                .iter()
+                .all(|batch| batch.complete())
+        {
+            if control.is_cancelled() {
+                return Err(CoreExecutionError::Cancelled);
+            }
+            // B2B filtering consumes the complete scoring graphs directly.
+            // Keep the existing source/host admission and all filtering/audit
+            // below, then let the checked page source enumerate the filtered
+            // graph. An eager copy of every pre-filter replay has no consumer
+            // on this Path route and otherwise overlaps the filter and pager.
+            CompleteReplayWholeLiveBudget::from_result_with_host(
+                &result,
+                self.product_retention_budget,
+            )?;
+            result
+        } else {
+            self.materialize_terminal_replay_partition(result, control)?
+        };
         let pc_save_requested = result.bool_field("postprocess_pc_save_requested") == Some(true);
         let mut memory_guard = |_: &CoreExecutionResult, _: u128| Ok(());
         let result =
@@ -2576,6 +2600,10 @@ fn spin_profile_id(selection: SpinProfileSelection) -> SpinProfileId {
         SpinProfileSelection::AllMiniPlus => SpinProfileId::AllMiniPlus,
     }
 }
+
+#[cfg(test)]
+#[path = "pc_path_deferred_postprocess_tests.rs"]
+mod pc_path_deferred_postprocess_tests;
 
 #[cfg(test)]
 mod execution_constraint_backend_tests {

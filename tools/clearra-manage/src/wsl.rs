@@ -133,6 +133,7 @@ pub fn run_entry(
             producer: "wsl".to_owned(),
             profile: contract.profile,
             timeout_seconds: Some(requested_timeout),
+            no_timeout: false,
             command,
             keep_stdin_open: true,
             extra_env: BTreeMap::new(),

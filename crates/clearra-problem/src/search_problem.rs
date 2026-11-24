@@ -691,6 +691,101 @@ mod model {
             Option<Vec<StandardBoard64ColoredTilingIdentity>>,
     }
 }
+mod pc_placement_dependency {
+    use clearra_core_domain::objective::objective_kind::ObjectiveKind;
+    use clearra_pc_graph::request::RequestedSearchBackend;
+    use clearra_supply::QueueObservationPolicy;
+
+    use crate::goal::SearchGoal;
+
+    use super::{
+        CountPolicy, PcChanceEvidencePolicy, SearchOutputPolicy, SearchProblem, SearchProblemPreset,
+    };
+
+    impl SearchProblem {
+        /// Compatibility query for the former explicit dependency option.
+        /// A false legacy flag does not disable the automatic eligible route.
+        pub fn pc_placement_dependency_requested(&self) -> bool {
+            self.backend_policy().precompute_build_dependencies()
+                && self.pc_placement_dependency_eligible()
+        }
+
+        /// Whether this PC contract uses the bounded dependency product.
+        /// Eligibility is independent of the retained legacy option. It grants
+        /// no candidate proof: the CPU still checks every candidate, witness
+        /// and resource boundary. Full-queue oracle consumers share this exact placement owner.
+        /// Visible-seven and richer evidence retain their concrete producer.
+        pub fn pc_placement_dependency_eligible(&self) -> bool {
+            let backend = self.backend_policy();
+            let ordinary = self.pc_chance_evidence_policy() == PcChanceEvidencePolicy::Disabled
+                && matches!(
+                    self.output_policy(),
+                    SearchOutputPolicy::Trace
+                        | SearchOutputPolicy::Summary
+                        | SearchOutputPolicy::CoverageSummary
+                );
+            let chance = self.pc_chance_evidence_policy()
+                == PcChanceEvidencePolicy::PcProbabilityV2
+                && self.output_policy() == SearchOutputPolicy::CoverageSummary
+                && self.objective().kind() == ObjectiveKind::Unique
+                && !self.solution_probability_policy().requested();
+            if !(ordinary || chance)
+                || !matches!(
+                    self.preset(),
+                    SearchProblemPreset::OpeningPc | SearchProblemPreset::ScenarioPc
+                )
+                || !matches!(self.search_goal(), SearchGoal::ClearToEmpty)
+                || self.initial_board().width() != 10
+                || self.initial_board().has_extended_occupancy()
+                || !(1..=6).contains(&self.visible_height())
+                || !(1..=6).contains(&self.compact_pc_geometry_height())
+                || self.scenario.setup_query().is_some()
+                || self.scenario.build_query().is_some()
+                || !matches!(
+                    self.objective().kind(),
+                    ObjectiveKind::All | ObjectiveKind::Unique
+                )
+                || self.count_policy() != CountPolicy::CountUnique
+                || self.objective().score().requested()
+                || self.objective().execution_constraints().requested()
+                || self.build_replay_evidence_requested()
+                || self.allowed_colored_solution_identities().is_some()
+                || self.queue_observation_policy() != QueueObservationPolicy::FullQueueOracle
+                || !matches!(
+                    backend.requested_backend(),
+                    RequestedSearchBackend::Cpu | RequestedSearchBackend::Auto
+                )
+                || backend.tablebase_requested()
+                || self.budget().max_nodes() != 0
+                || backend.max_candidates() != 0
+                || backend.max_frontier_states() != 0
+                || backend.max_memory_mib().is_some()
+            {
+                return false;
+            }
+            // One catalog fixes the original required cells, so every exact
+            // cover in this session has this same operation count even when
+            // exact_pieces was omitted. Observation roots cannot mix horizons.
+            let area = usize::from(self.compact_pc_geometry_height()) * 10;
+            let all_cells = (1_u64 << area) - 1;
+            let initial = self.initial_board().occupied_mask();
+            let required = (all_cells & !initial).count_ones() as usize;
+            if initial & !all_cells != 0
+                || !required.is_multiple_of(4)
+                || !(1..=11).contains(&(required / 4))
+                || self.compact_pc_proven_empty_family_depth().is_some()
+                || self.compact_pc_has_unqualified_capped_family()
+            {
+                return false;
+            }
+            // Placement feasibility is independent of the supply model.
+            // Preserve arbitrary materialized ordinals and initial hold/cursor
+            // through the existing exact supply product; complete bags merely
+            // select its symbolic representation.
+            self.piece_source().materialized_universe().is_some()
+        }
+    }
+}
 mod retained_capacity {
     use clearra_objectives::policy::objective_policy::ObjectivePolicy;
 

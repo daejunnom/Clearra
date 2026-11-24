@@ -221,6 +221,7 @@ test("capture qualification catches worker substitutions even when counts match"
 test("movement-clear proof neutralizes APDP, kick and geometric edge follow-on modes", () => {
   const input = {
     clearra_minimum_domain_cutoff: "1", CLEARRA_MINIMUM_DOMAIN_WORK: "1", CLEARRA_ORDERED_KICK_GUARD_REUSE: "1", CLEARRA_GEOMETRIC_EDGE_REUSE: "1",
+    clearra_reachability_visited_first: "1", CLEARRA_STANDARD_BAG_GLOBAL_SATURATION: "1",
   };
   const environment = benchmarkEnvironment(input, reference);
   assert.equal(environment.CLEARRA_MINIMUM_DOMAIN_CUTOFF, "0");
@@ -228,14 +229,40 @@ test("movement-clear proof neutralizes APDP, kick and geometric edge follow-on m
   assert.equal(environment.CLEARRA_ORDERED_KICK_GUARD_REUSE, "0");
   assert.equal(environment.CLEARRA_GEOMETRIC_EDGE_REUSE, "0");
   assert.equal(environment.clearra_minimum_domain_cutoff, undefined);
+  assert.equal(environment.clearra_reachability_visited_first, undefined);
+  assert.equal(environment.CLEARRA_REACHABILITY_VISITED_FIRST, "0");
+  assert.equal(environment.CLEARRA_STANDARD_BAG_GLOBAL_SATURATION, "0");
   const options = parseProofArguments(cli("p7p4"));
   const receipt = runtime(reference, 0);
-  for (const axis of ["minimum_domain_cutoff_mode", "minimum_domain_work_mode", "ordered_kick_guard_reuse_mode", "geometric_edge_reuse_mode"]) {
+  for (const axis of ["minimum_domain_cutoff_mode", "minimum_domain_work_mode", "ordered_kick_guard_reuse_mode", "geometric_edge_reuse_mode", "reachability_visited_first_mode", "standard_bag_global_saturation_mode"]) {
     const report = armReport(reference, receipt, options.fixture);
     report[axis] = "1";
     assert.throws(() => validatedProofArm(report, receipt, reference, options, binarySha),
       /unexpected source, mode, or coverage output/u);
   }
+});
+
+test("historical proofs accept recorded product off arms and reject inherited active or mixed-case knobs", () => {
+  const options = parseProofArguments(cli("p7p4"));
+  const receipt = runtime(reference, 0);
+  const report = armReport(reference, receipt, options.fixture);
+  report.reachability_visited_first_mode = "0";
+  report.standard_bag_global_saturation_mode = "0";
+  report.other_process_configuration = {
+    ...report.other_process_configuration,
+    CLEARRA_REACHABILITY_VISITED_FIRST: "0",
+    CLEARRA_STANDARD_BAG_GLOBAL_SATURATION: "0",
+  };
+  const validate = () => validatedProofArm(report, receipt, reference, options, binarySha);
+  assert.doesNotThrow(validate);
+  delete report.other_process_configuration.CLEARRA_REACHABILITY_VISITED_FIRST;
+  assert.throws(validate, /non-isolated benchmark runtime configuration/u);
+  report.other_process_configuration.CLEARRA_REACHABILITY_VISITED_FIRST = "0";
+  report.other_process_configuration.CLEARRA_STANDARD_BAG_GLOBAL_SATURATION = "1";
+  assert.throws(validate, /non-isolated benchmark runtime configuration/u);
+  report.other_process_configuration.CLEARRA_STANDARD_BAG_GLOBAL_SATURATION = "0";
+  report.other_process_configuration.clearra_reachability_visited_first = "0";
+  assert.throws(validate, /non-isolated benchmark runtime configuration/u);
 });
 
 test("explicit minimum-domain proof is P7P4-only and neutralizes every other experiment", () => {
@@ -538,6 +565,7 @@ test("union proof holds strict B1 fixed and selects only the union storage in th
     clearra_standard_bag_memo: "compact", CLEARRA_STANDARD_BAG_PRODUCT_MEMO_LAYOUT: "hash",
     clearra_standard_bag_union_memo: "compact", CLEARRA_STANDARD_BAG_UNION_MEMO_MAX_ENTRIES: "0",
     CLEARRA_STRICT_STAGE_PROFILE: "1", CLEARRA_STRICT_STAGE_LEGACY_UPPER: "1",
+    CLEARRA_SEARCH_STAGE_PROFILE: "1", CLEARRA_SEARCH_MEMORY_PROFILE: "1",
   };
   const baseline = benchmarkEnvironment(inherited, ref);
   const treatment = benchmarkEnvironment(inherited, compact);

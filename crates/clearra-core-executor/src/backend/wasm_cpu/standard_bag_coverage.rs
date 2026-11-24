@@ -22,6 +22,17 @@ use clearra_supply::{
     piece_source::PieceSourceKind,
 };
 
+#[path = "standard_bag_first_witness.rs"]
+mod first_witness;
+#[cfg(feature = "placement-dependency-pc")]
+#[path = "standard_bag_membership.rs"]
+mod membership;
+#[cfg(all(feature = "parallel", feature = "placement-dependency-pc"))]
+#[path = "standard_bag_shared_saturation.rs"]
+mod shared_saturation;
+#[cfg(test)]
+mod supply_reuse_tests;
+
 const REJECT: u32 = 0;
 const ACCEPT: u32 = 1;
 const EMPTY_REFERENCE: u32 = u32::MAX;
@@ -32,6 +43,18 @@ const CANCELLATION_POLL_MASK: u32 = 0xff;
 const STANDARD_PIECE_COUNT: usize = PieceKind::STANDARD_TETROMINOES.len();
 const STANDARD_BAG_MASK_COUNT: usize = 1 << STANDARD_PIECE_COUNT;
 const CURSOR_TRANSITION_UNAVAILABLE: u8 = u8::MAX;
+
+#[inline]
+fn reuse_supply_draws() -> bool {
+    #[cfg(test)]
+    {
+        supply_reuse_tests::reuse_supply_draws()
+    }
+    #[cfg(not(test))]
+    {
+        true
+    }
+}
 
 #[cfg(any(test, feature = "local-search-ab"))]
 const UNION_MEMO_LIMIT_INVALID: &str = "wasm_standard_bag_union_memo_entry_limit_invalid";
@@ -60,6 +83,33 @@ fn parse_accept_absorption(
         Ok(label) if label == "1" => Ok(true),
         Err(std::env::VarError::NotPresent) => Ok(false),
         _ => Err(INVALID),
+    }
+}
+
+#[cfg(any(test, feature = "local-search-ab"))]
+fn parse_global_saturation(
+    value: Result<String, std::env::VarError>,
+) -> Result<bool, &'static str> {
+    match value {
+        Ok(label) if label == "0" => Ok(false),
+        Ok(label) if label == "1" => Ok(true),
+        Err(std::env::VarError::NotPresent) => Ok(true),
+        _ => Err("wasm_standard_bag_global_saturation_mode_invalid"),
+    }
+}
+
+#[cfg(all(
+    feature = "placement-dependency-pc",
+    any(test, feature = "local-search-ab")
+))]
+fn parse_boolean_membership(
+    value: Result<String, std::env::VarError>,
+) -> Result<bool, &'static str> {
+    match value {
+        Ok(label) if label == "0" => Ok(false),
+        Ok(label) if label == "1" => Ok(true),
+        Err(std::env::VarError::NotPresent) => Ok(true),
+        _ => Err("wasm_standard_bag_boolean_membership_mode_invalid"),
     }
 }
 
@@ -377,6 +427,8 @@ impl StandardBagCursorTransitions {
         source: SourceState,
         piece_index: usize,
     ) -> Result<Option<SourceState>, WasmExactSearchError> {
+        #[cfg(test)]
+        supply_reuse_tests::record_cursor_advance();
         let source = self.validate_source(source)?;
         if piece_index >= STANDARD_PIECE_COUNT {
             return Err(WasmExactSearchError::InvalidProblem(
@@ -680,6 +732,20 @@ pub(super) struct StandardBagMemoAccounting {
     pub product_row_slots: usize,
     pub product_promotion_attempts: usize,
     pub product_promotions: usize,
+    pub global_merge_calls: usize,
+    pub global_merge_saturated_skips: usize,
+    pub first_witness_calls: usize,
+    pub first_witness_mode_transitions: usize,
+    pub boolean_membership_calls: usize,
+    pub boolean_membership_mode_transitions: usize,
+    pub boolean_certified_membership_calls: usize,
+    pub boolean_negative_cache_hits: usize,
+    pub boolean_negative_roots: usize,
+    pub boolean_negative_capacity: usize,
+    pub boolean_negative_payload_bytes: usize,
+    pub shared_early_publications: usize,
+    pub shared_saturation_adoptions: usize,
+    pub shared_retire_transitions: usize,
 }
 
 #[cfg(any(feature = "parallel", test))]
@@ -702,6 +768,20 @@ impl Default for StandardBagMemoAccounting {
             product_row_slots: 0,
             product_promotion_attempts: 0,
             product_promotions: 0,
+            global_merge_calls: 0,
+            global_merge_saturated_skips: 0,
+            first_witness_calls: 0,
+            first_witness_mode_transitions: 0,
+            boolean_membership_calls: 0,
+            boolean_membership_mode_transitions: 0,
+            boolean_certified_membership_calls: 0,
+            boolean_negative_cache_hits: 0,
+            boolean_negative_roots: 0,
+            boolean_negative_capacity: 0,
+            boolean_negative_payload_bytes: 0,
+            shared_early_publications: 0,
+            shared_saturation_adoptions: 0,
+            shared_retire_transitions: 0,
         }
     }
 }
@@ -750,7 +830,57 @@ impl StandardBagMemoAccounting {
         self.product_promotions = self
             .product_promotions
             .saturating_add(other.product_promotions);
+        self.global_merge_calls = self
+            .global_merge_calls
+            .saturating_add(other.global_merge_calls);
+        self.global_merge_saturated_skips = self
+            .global_merge_saturated_skips
+            .saturating_add(other.global_merge_saturated_skips);
+        self.first_witness_calls = self
+            .first_witness_calls
+            .saturating_add(other.first_witness_calls);
+        self.first_witness_mode_transitions = self
+            .first_witness_mode_transitions
+            .saturating_add(other.first_witness_mode_transitions);
+        self.boolean_membership_calls = self
+            .boolean_membership_calls
+            .saturating_add(other.boolean_membership_calls);
+        self.boolean_membership_mode_transitions = self
+            .boolean_membership_mode_transitions
+            .saturating_add(other.boolean_membership_mode_transitions);
+        self.boolean_certified_membership_calls = self
+            .boolean_certified_membership_calls
+            .saturating_add(other.boolean_certified_membership_calls);
+        self.boolean_negative_cache_hits = self
+            .boolean_negative_cache_hits
+            .saturating_add(other.boolean_negative_cache_hits);
+        self.boolean_negative_roots = self
+            .boolean_negative_roots
+            .saturating_add(other.boolean_negative_roots);
+        self.boolean_negative_capacity = self
+            .boolean_negative_capacity
+            .saturating_add(other.boolean_negative_capacity);
+        self.boolean_negative_payload_bytes = self
+            .boolean_negative_payload_bytes
+            .saturating_add(other.boolean_negative_payload_bytes);
+        self.shared_early_publications = self
+            .shared_early_publications
+            .saturating_add(other.shared_early_publications);
+        self.shared_saturation_adoptions = self
+            .shared_saturation_adoptions
+            .saturating_add(other.shared_saturation_adoptions);
+        self.shared_retire_transitions = self
+            .shared_retire_transitions
+            .saturating_add(other.shared_retire_transitions);
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ProductMemoMeaning {
+    CoverageRoot,
+    MinimumOriginalOrdinal,
+    #[cfg(feature = "placement-dependency-pc")]
+    BooleanMembership,
 }
 
 /// Exact symbolic product for a lexicographically materialized standard 7-bag.
@@ -774,6 +904,7 @@ pub(super) struct StandardBagCoverage {
     node_valid_masks: Vec<u8>,
     bucket_heads: Vec<u32>,
     product_memo: StandardBagProductMemo,
+    product_memo_meaning: ProductMemoMeaning,
     union_memo: ExactU64MemoMap,
     // Experimental admission bound on live keys, not a byte/RSS cap. Hash
     // allocation still follows the map's growth policy and survives recycling.
@@ -781,6 +912,13 @@ pub(super) struct StandardBagCoverage {
     union_memo_entry_limit: Option<usize>,
     #[cfg(any(test, feature = "local-search-ab"))]
     absorb_accepted_suffix: bool,
+    #[cfg(any(test, feature = "local-search-ab"))]
+    skip_complete_global_union: bool,
+    #[cfg(all(
+        feature = "placement-dependency-pc",
+        any(test, feature = "local-search-ab")
+    ))]
+    boolean_membership_enabled: bool,
     epoch_global_root: u32,
     global_words: Vec<u64>,
     global_covered_pattern_count: usize,
@@ -790,6 +928,14 @@ pub(super) struct StandardBagCoverage {
     edge_check_count: usize,
     root_cache_hits: usize,
     root_cache_misses: usize,
+    global_merge_calls: usize,
+    global_merge_saturated_skips: usize,
+    first_witness_calls: usize,
+    first_witness_mode_transitions: usize,
+    #[cfg(feature = "placement-dependency-pc")]
+    boolean_membership: membership::BooleanMembershipCache,
+    #[cfg(all(feature = "parallel", feature = "placement-dependency-pc"))]
+    shared_saturation: shared_saturation::SharedSaturationState,
     #[cfg(any(test, feature = "local-search-ab"))]
     p7p4_capture: P7P4CaptureCache,
 }
@@ -870,6 +1016,14 @@ impl StandardBagCoverage {
             parse_accept_absorption(std::env::var("CLEARRA_STANDARD_BAG_ABSORB"))
                 .map_err(WasmExactSearchError::InvalidProblem)?;
         #[cfg(feature = "local-search-ab")]
+        let skip_complete_global_union =
+            parse_global_saturation(std::env::var("CLEARRA_STANDARD_BAG_GLOBAL_SATURATION"))
+                .map_err(WasmExactSearchError::InvalidProblem)?;
+        #[cfg(all(feature = "placement-dependency-pc", feature = "local-search-ab"))]
+        let boolean_membership_enabled =
+            parse_boolean_membership(std::env::var("CLEARRA_STANDARD_BAG_BOOLEAN_MEMBERSHIP"))
+                .map_err(WasmExactSearchError::InvalidProblem)?;
+        #[cfg(feature = "local-search-ab")]
         let union_memo_entry_limit =
             match std::env::var("CLEARRA_STANDARD_BAG_UNION_MEMO_MAX_ENTRIES") {
                 Ok(value) => parse_union_memo_entry_limit(Some(&value)),
@@ -897,6 +1051,7 @@ impl StandardBagCoverage {
                 memo_storage,
                 max_source_depth,
             ),
+            product_memo_meaning: ProductMemoMeaning::CoverageRoot,
             union_memo: ExactU64MemoMap::new(union_storage),
             #[cfg(feature = "local-search-ab")]
             union_memo_entry_limit,
@@ -906,6 +1061,18 @@ impl StandardBagCoverage {
             absorb_accepted_suffix,
             #[cfg(all(test, not(feature = "local-search-ab")))]
             absorb_accepted_suffix: false,
+            #[cfg(feature = "local-search-ab")]
+            skip_complete_global_union,
+            #[cfg(all(test, not(feature = "local-search-ab")))]
+            skip_complete_global_union: true,
+            #[cfg(all(feature = "placement-dependency-pc", feature = "local-search-ab"))]
+            boolean_membership_enabled,
+            #[cfg(all(
+                feature = "placement-dependency-pc",
+                test,
+                not(feature = "local-search-ab")
+            ))]
+            boolean_membership_enabled: true,
             epoch_global_root: REJECT,
             global_words: Vec::new(),
             global_covered_pattern_count: 0,
@@ -915,6 +1082,14 @@ impl StandardBagCoverage {
             edge_check_count: 0,
             root_cache_hits: 0,
             root_cache_misses: 0,
+            global_merge_calls: 0,
+            global_merge_saturated_skips: 0,
+            first_witness_calls: 0,
+            first_witness_mode_transitions: 0,
+            #[cfg(feature = "placement-dependency-pc")]
+            boolean_membership: membership::BooleanMembershipCache::default(),
+            #[cfg(all(feature = "parallel", feature = "placement-dependency-pc"))]
+            shared_saturation: shared_saturation::SharedSaturationState::from_environment()?,
             #[cfg(any(test, feature = "local-search-ab"))]
             p7p4_capture: P7P4CaptureCache::default(),
         })
@@ -926,6 +1101,7 @@ impl StandardBagCoverage {
         language_root: u32,
         control: &ExecutionControl,
     ) -> Result<StandardBagCoverageResult, WasmExactSearchError> {
+        self.require_coverage_root_mode()?;
         let state = SourceState {
             depth: 0,
             bag_remainder: FULL_STANDARD_BAG,
@@ -977,7 +1153,10 @@ impl StandardBagCoverage {
         };
         Ok(StandardBagCoverageResult {
             root,
-            covers_any_pattern: root != REJECT,
+            // A symbolic root can contain only queues beyond a materialized
+            // lexicographic prefix. Membership belongs to the original
+            // request's clipped domain, just like its count and witness.
+            covers_any_pattern: covered_pattern_count != 0,
             witness_pattern_id,
             covered_pattern_count,
             product_states: self.product_state_count.saturating_sub(states_before),
@@ -986,6 +1165,22 @@ impl StandardBagCoverage {
     }
 
     pub fn merge_global(&mut self, root: u32) -> Result<(), WasmExactSearchError> {
+        self.require_coverage_root_mode()?;
+        self.global_merge_calls = self.global_merge_calls.saturating_add(1);
+        // Every root belongs to this owner's original input universe. Once
+        // its exact union is full, another candidate cannot add an ordinal.
+        // Per-candidate roots, counts and witnesses remain valid for their
+        // separate consumers; only the redundant global union is omitted.
+        // In particular, a flush/recycle resets epoch_global_root to REJECT
+        // but must not start rebuilding unions over already-full global_words.
+        #[cfg(any(test, feature = "local-search-ab"))]
+        let skip_complete = self.skip_complete_global_union;
+        #[cfg(not(any(test, feature = "local-search-ab")))]
+        let skip_complete = true;
+        if skip_complete && self.global_is_complete() {
+            self.global_merge_saturated_skips = self.global_merge_saturated_skips.saturating_add(1);
+            return Ok(());
+        }
         self.epoch_global_root = self.union(self.epoch_global_root, root)?;
         Ok(())
     }
@@ -1037,6 +1232,7 @@ impl StandardBagCoverage {
     }
 
     pub fn materialize_root(&self, root: u32) -> Result<PatternBitSet, WasmExactSearchError> {
+        self.require_coverage_root_mode()?;
         let word_count = self.materialized_pattern_count.div_ceil(u64::BITS as usize);
         let mut words = Vec::new();
         words.try_reserve_exact(word_count).map_err(|_| {
@@ -1066,6 +1262,7 @@ impl StandardBagCoverage {
         &mut self,
         root: u32,
     ) -> Result<Option<Arc<P7P4CoverageBlocks>>, WasmExactSearchError> {
+        self.require_coverage_root_mode()?;
         if self.sequence_len != 11
             || self.materialized_pattern_count != P7P4_PREFIXES * P7P4_TAIL_BITS
             || !self.hold_enabled
@@ -1222,6 +1419,8 @@ impl StandardBagCoverage {
             + self.memo_retained_payload_bytes()
             + self.product_memo.directory_retained_bytes()
             + self.global_words.capacity() * core::mem::size_of::<u64>();
+        #[cfg(feature = "placement-dependency-pc")]
+        let retained = retained + self.boolean_membership.detached_identity_retained_bytes();
         #[cfg(any(test, feature = "local-search-ab"))]
         let retained = retained + self.p7p4_capture.retained_bytes();
         retained
@@ -1247,6 +1446,32 @@ impl StandardBagCoverage {
     #[cfg(any(feature = "parallel", test))]
     pub fn memo_accounting(&self) -> StandardBagMemoAccounting {
         let (product_promotion_attempts, product_promotions) = self.product_memo.promotion_counts();
+        #[cfg(all(feature = "parallel", feature = "placement-dependency-pc"))]
+        let (shared_early_publications, shared_saturation_adoptions, shared_retire_transitions) =
+            self.shared_saturation.accounting();
+        #[cfg(not(all(feature = "parallel", feature = "placement-dependency-pc")))]
+        let (shared_early_publications, shared_saturation_adoptions, shared_retire_transitions) =
+            (0, 0, 0);
+        #[cfg(feature = "placement-dependency-pc")]
+        let (
+            boolean_membership_calls,
+            boolean_membership_mode_transitions,
+            boolean_certified_membership_calls,
+            boolean_negative_cache_hits,
+            boolean_negative_roots,
+            boolean_negative_capacity,
+            boolean_negative_payload_bytes,
+        ) = self.boolean_membership.accounting();
+        #[cfg(not(feature = "placement-dependency-pc"))]
+        let (
+            boolean_membership_calls,
+            boolean_membership_mode_transitions,
+            boolean_certified_membership_calls,
+            boolean_negative_cache_hits,
+            boolean_negative_roots,
+            boolean_negative_capacity,
+            boolean_negative_payload_bytes,
+        ) = (0, 0, 0, 0, 0, 0, 0);
         StandardBagMemoAccounting {
             product_policy: self.product_memo.policy().label(),
             product_layout: self.product_memo.layout().label(),
@@ -1264,13 +1489,31 @@ impl StandardBagCoverage {
             product_row_slots: self.product_memo.row_slots(),
             product_promotion_attempts,
             product_promotions,
+            global_merge_calls: self.global_merge_calls,
+            global_merge_saturated_skips: self.global_merge_saturated_skips,
+            first_witness_calls: self.first_witness_calls,
+            first_witness_mode_transitions: self.first_witness_mode_transitions,
+            boolean_membership_calls,
+            boolean_membership_mode_transitions,
+            boolean_certified_membership_calls,
+            boolean_negative_cache_hits,
+            boolean_negative_roots,
+            boolean_negative_capacity,
+            boolean_negative_payload_bytes,
+            shared_early_publications,
+            shared_saturation_adoptions,
+            shared_retire_transitions,
         }
     }
 
     pub fn memo_retained_payload_bytes(&self) -> usize {
-        self.product_memo
+        let retained = self
+            .product_memo
             .retained_payload_bytes()
-            .saturating_add(self.union_memo.retained_payload_bytes())
+            .saturating_add(self.union_memo.retained_payload_bytes());
+        #[cfg(feature = "placement-dependency-pc")]
+        let retained = retained.saturating_add(self.boolean_membership.retained_payload_bytes());
+        retained
     }
 
     pub fn local_live_bytes(&self) -> usize {
@@ -1280,13 +1523,16 @@ impl StandardBagCoverage {
         // Actual representation payload is reported separately above.
         // Preserve the accepted per-arena recycle threshold after sharing.
         // This is a logical live estimate, not unique process allocation.
-        self.tables.cursor_transitions.retained_bytes()
+        let live = self.tables.cursor_transitions.retained_bytes()
             + self.nodes.len() * core::mem::size_of::<DecisionNode>()
             + self.node_summaries.len() * core::mem::size_of::<DecisionSummary>()
             + self.node_levels.len() * core::mem::size_of::<u8>()
             + self.node_valid_masks.len() * core::mem::size_of::<u8>()
             + self.product_memo.len() * (core::mem::size_of::<u64>() + core::mem::size_of::<u32>())
-            + self.union_memo.len() * (core::mem::size_of::<u64>() + core::mem::size_of::<u32>())
+            + self.union_memo.len() * (core::mem::size_of::<u64>() + core::mem::size_of::<u32>());
+        #[cfg(feature = "placement-dependency-pc")]
+        let live = live + self.boolean_membership.live_payload_bytes();
+        live
     }
 
     pub fn flush_and_recycle_local_cache(&mut self) -> Result<(), WasmExactSearchError> {
@@ -1302,6 +1548,8 @@ impl StandardBagCoverage {
         self.bucket_heads.fill(EMPTY_REFERENCE);
         self.product_memo.clear();
         self.union_memo.clear();
+        #[cfg(feature = "placement-dependency-pc")]
+        self.boolean_membership.clear_retain_capacity();
         self.interning_disabled = false;
         Ok(())
     }
@@ -1407,6 +1655,29 @@ impl StandardBagCoverage {
         }
     }
 
+    fn stored_step_after_current(
+        &self,
+        after_current: SourceState,
+        current_code: u8,
+        desired_index: usize,
+    ) -> Result<CompactSupplyStep, WasmExactSearchError> {
+        // Current has already certified the first draw and Hold state.
+        // Store consumes one more draw from that same cursor and keeps the
+        // original current piece. The existing table remains the authority
+        // across bag boundaries and for a single projected complement.
+        let next_source = self
+            .tables
+            .cursor_transitions
+            .advance(after_current, desired_index)?
+            .ok_or(WasmExactSearchError::InvalidProblem(
+                "wasm_standard_bag_store_transition_missing",
+            ))?;
+        Ok(CompactSupplyStep {
+            next_source,
+            next_hold_code: current_code,
+        })
+    }
+
     fn solve(
         &mut self,
         language: &PieceOrderLanguageCache,
@@ -1479,9 +1750,14 @@ impl StandardBagCoverage {
                         return Ok(ACCEPT);
                     }
                 }
-                let held_piece = PieceKind::STANDARD_TETROMINOES[usize::from(hold_code - 1)];
-                let swap_step = self
-                    .matching_supply_step(
+                let swap_step = if reuse_supply_draws() {
+                    CompactSupplyStep {
+                        next_source: current_step.next_source,
+                        next_hold_code: lookahead_code,
+                    }
+                } else {
+                    let held_piece = PieceKind::STANDARD_TETROMINOES[usize::from(hold_code - 1)];
+                    self.matching_supply_step(
                         source,
                         hold_code,
                         held_piece,
@@ -1490,7 +1766,8 @@ impl StandardBagCoverage {
                     )?
                     .ok_or(WasmExactSearchError::InvalidProblem(
                         "wasm_standard_bag_swap_transition_missing",
-                    ))?;
+                    ))?
+                };
                 let swap_source = swap_step.next_source;
                 for edge in held_edges.iter().copied() {
                     self.edge_check_count = self.edge_check_count.saturating_add(1);
@@ -1588,9 +1865,17 @@ impl StandardBagCoverage {
             // edge with exactly the same next cursor, bag remainder and hold.
             // CountAll still traverses both actions in CoverageProductEvaluator.
             if self.hold_enabled && hold_code != 0 && hold_code != current_code {
-                let held_piece = PieceKind::STANDARD_TETROMINOES[usize::from(hold_code - 1)];
-                let swap_step = self
-                    .matching_supply_step(
+                let swap_step = if reuse_supply_draws() {
+                    // Current and Swap consume the same original draw. The
+                    // already-certified cursor is independent of which
+                    // language edges match; only the held kind changes.
+                    CompactSupplyStep {
+                        next_source: current_step.next_source,
+                        next_hold_code: current_code,
+                    }
+                } else {
+                    let held_piece = PieceKind::STANDARD_TETROMINOES[usize::from(hold_code - 1)];
+                    self.matching_supply_step(
                         source,
                         hold_code,
                         held_piece,
@@ -1599,7 +1884,8 @@ impl StandardBagCoverage {
                     )?
                     .ok_or(WasmExactSearchError::InvalidProblem(
                         "wasm_standard_bag_swap_transition_missing",
-                    ))?;
+                    ))?
+                };
                 let swap_source = swap_step.next_source;
                 let held_edges = language.edges_for_piece(language_node, hold_code).ok_or(
                     WasmExactSearchError::InvalidProblem("wasm_piece_language_node_out_of_range"),
@@ -1633,21 +1919,30 @@ impl StandardBagCoverage {
                         .ok_or(WasmExactSearchError::InvalidProblem(
                             "wasm_piece_language_node_out_of_range",
                         ))?;
+                    if desired_edges.is_empty() {
+                        continue;
+                    }
+                    // All same-piece continuations consume the same second
+                    // draw from the certified Current cursor. Only the
+                    // language child varies; preserve edge and union order.
+                    let store_step = if reuse_supply_draws() {
+                        self.stored_step_after_current(next_source, current_code, desired_index)?
+                    } else {
+                        let desired_piece = PieceKind::STANDARD_TETROMINOES[desired_index];
+                        self.matching_supply_step(
+                            source,
+                            hold_code,
+                            desired_piece,
+                            SupplyBranchKind::StoreCurrent,
+                            current_piece,
+                        )?
+                        .ok_or(WasmExactSearchError::InvalidProblem(
+                            "wasm_standard_bag_store_transition_missing",
+                        ))?
+                    };
+                    let after_next = store_step.next_source;
                     for edge in desired_edges.iter().copied() {
                         self.edge_check_count = self.edge_check_count.saturating_add(1);
-                        let desired_piece = PieceKind::STANDARD_TETROMINOES[desired_index];
-                        let store_step = self
-                            .matching_supply_step(
-                                source,
-                                hold_code,
-                                desired_piece,
-                                SupplyBranchKind::StoreCurrent,
-                                current_piece,
-                            )?
-                            .ok_or(WasmExactSearchError::InvalidProblem(
-                                "wasm_standard_bag_store_transition_missing",
-                            ))?;
-                        let after_next = store_step.next_source;
                         let next = self.solve(
                             language,
                             edge.child(),
@@ -1685,8 +1980,10 @@ impl StandardBagCoverage {
                     .ok_or(WasmExactSearchError::InvalidProblem(
                         "wasm_piece_language_node_out_of_range",
                     ))?;
-                let store_step = self
-                    .matching_supply_step(
+                let store_step = if reuse_supply_draws() {
+                    self.stored_step_after_current(next_source, current_code, lookahead_index)?
+                } else {
+                    self.matching_supply_step(
                         source,
                         hold_code,
                         lookahead_piece,
@@ -1695,7 +1992,8 @@ impl StandardBagCoverage {
                     )?
                     .ok_or(WasmExactSearchError::InvalidProblem(
                         "wasm_standard_bag_store_transition_missing",
-                    ))?;
+                    ))?
+                };
                 let after_lookahead = store_step.next_source;
                 for edge in lookahead_edges.iter().copied() {
                     self.edge_check_count = self.edge_check_count.saturating_add(1);
@@ -2384,6 +2682,265 @@ mod supply_automaton_tests {
     }
 
     #[test]
+    fn global_saturation_mode_is_default_on_with_a_strict_reference_opt_out() {
+        use std::env::VarError;
+
+        assert_eq!(parse_global_saturation(Err(VarError::NotPresent)), Ok(true));
+        assert_eq!(parse_global_saturation(Ok("0".into())), Ok(false));
+        assert_eq!(parse_global_saturation(Ok("1".into())), Ok(true));
+        for value in [
+            Ok("".into()),
+            Ok("true".into()),
+            Ok(" 1".into()),
+            Ok("1 ".into()),
+            Ok("+1".into()),
+            Ok("2".into()),
+            Err(VarError::NotUnicode(std::ffi::OsString::new())),
+        ] {
+            assert_eq!(
+                parse_global_saturation(value),
+                Err("wasm_standard_bag_global_saturation_mode_invalid")
+            );
+        }
+    }
+
+    #[test]
+    fn global_saturation_skips_only_redundant_unions_after_flush_and_recycle() {
+        let (_, initial) = request_fixture(3);
+        for limit in [0, 13] {
+            let universe = PatternUniverseMaterializer::standard_7_bag(3, limit, 0x77)
+                .expect("complete or limited standard bag");
+            assert_eq!(universe.pattern_count(), if limit == 0 { 210 } else { 13 });
+            let make = |skip| {
+                let mut coverage =
+                    StandardBagCoverage::for_universe(&universe, initial, false, false)
+                        .unwrap()
+                        .unwrap();
+                coverage.skip_complete_global_union = skip;
+                coverage.union_memo_entry_limit = None;
+                coverage
+            };
+            let (mut baseline, mut treatment) = (make(false), make(true));
+            let prefix_root = |coverage: &mut StandardBagCoverage, index: usize| {
+                let mut children = [REJECT; 7];
+                children[index] = ACCEPT;
+                coverage
+                    .intern_node(0, FULL_STANDARD_BAG, children)
+                    .unwrap()
+            };
+            for coverage in [&mut baseline, &mut treatment] {
+                // A complete universe reaches ACCEPT in the pending epoch.
+                // A limited universe can be full while its symbolic root is
+                // a strict subset of all 210 possible source strings.
+                let prefix_count = if limit == 0 { 7 } else { 1 };
+                for index in 0..prefix_count {
+                    let root = prefix_root(coverage, index);
+                    coverage.merge_global(root).unwrap();
+                }
+                assert_eq!(coverage.epoch_global_root == ACCEPT, limit == 0);
+                assert_eq!(coverage.global_is_complete(), limit == 0);
+                assert_eq!(coverage.global_covered_pattern_count, 0);
+                let before = coverage.epoch_global_root;
+                let root = prefix_root(coverage, 0);
+                coverage.merge_global(root).unwrap();
+                assert_eq!(coverage.epoch_global_root, before);
+                let full = coverage.materialize_global().unwrap();
+                assert_eq!(full.count_ones() as usize, universe.pattern_count());
+                assert!(coverage.global_is_complete());
+                coverage.flush_and_recycle_local_cache().unwrap();
+                assert_eq!(coverage.epoch_global_root, REJECT);
+                assert_eq!(coverage.union_memo.len(), 0);
+                assert_eq!(coverage.product_memo.len(), 0);
+            }
+
+            // Keep several later candidates in one fresh epoch. The reference
+            // must really construct nontrivial unions; simply comparing two
+            // already-ACCEPT roots would not exercise the omitted work.
+            for index in 0..3 {
+                let a = prefix_root(&mut baseline, index);
+                let b = prefix_root(&mut treatment, index);
+                let expected = (0..universe.pattern_count())
+                    .filter(|&ordinal| {
+                        universe.sequence_at(ordinal)[0] == PieceKind::STANDARD_TETROMINOES[index]
+                    })
+                    .fold(
+                        vec![0_u64; universe.pattern_count().div_ceil(64)],
+                        |mut words, ordinal| {
+                            words[ordinal / 64] |= 1_u64 << (ordinal % 64);
+                            words
+                        },
+                    );
+                assert_eq!(
+                    baseline.materialize_root(a).unwrap().to_owned_words(),
+                    expected
+                );
+                assert_eq!(
+                    treatment.materialize_root(b).unwrap().to_owned_words(),
+                    expected
+                );
+                let retained = treatment.retained_bytes();
+                let nodes = treatment.nodes.len();
+                baseline.merge_global(a).unwrap();
+                treatment.merge_global(b).unwrap();
+                assert_eq!(treatment.epoch_global_root, REJECT);
+                assert_eq!(treatment.union_memo.len(), 0);
+                assert_eq!(treatment.nodes.len(), nodes);
+                assert_eq!(treatment.retained_bytes(), retained);
+                // Include/capture consumers retain the same candidate root
+                // even after its global merge was skipped.
+                assert_eq!(
+                    treatment.materialize_root(b).unwrap().to_owned_words(),
+                    expected
+                );
+            }
+            assert_eq!(baseline.union_memo.len(), 2);
+            assert!(baseline.nodes.len() > treatment.nodes.len());
+            assert_eq!(baseline.global_merge_calls, treatment.global_merge_calls);
+            assert_eq!(baseline.global_merge_saturated_skips, 0);
+            assert!(treatment.global_merge_saturated_skips >= 3);
+            for coverage in [&mut baseline, &mut treatment] {
+                coverage.flush_and_recycle_local_cache().unwrap();
+                let full = coverage.materialize_global().unwrap();
+                assert_eq!(full.count_ones() as usize, universe.pattern_count());
+                assert_eq!(coverage.epoch_global_root, REJECT);
+                assert!(coverage.global_is_complete());
+            }
+            assert_eq!(
+                baseline.materialize_global().unwrap(),
+                treatment.materialize_global().unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn global_saturation_preserves_hold_ordinals_witnesses_and_uncached_candidates() {
+        let kinds = PieceKind::STANDARD_TETROMINOES;
+        let control = ExecutionControl::default();
+        let mut language = PieceOrderLanguageCache::default();
+        for limit in [0, 13] {
+            let universe = PatternUniverseMaterializer::standard_7_bag(2, limit, 0x77)
+                .expect("two-draw source");
+            for (hold_enabled, held) in [(false, None), (true, None), (true, Some(kinds[0]))] {
+                let initial = HoldAutomatonState::new(
+                    PieceSourceId::new(0x77),
+                    0,
+                    held,
+                    0,
+                    BagState::fresh_standard_7_bag().packed_remainder_key(),
+                    SupplyProvenanceId(0x77),
+                );
+                let make = |skip| {
+                    let mut coverage =
+                        StandardBagCoverage::for_universe(&universe, initial, hold_enabled, false)
+                            .unwrap()
+                            .unwrap();
+                    coverage.skip_complete_global_union = skip;
+                    coverage.absorb_accepted_suffix = false;
+                    coverage
+                };
+                let (mut baseline, mut treatment) = (make(false), make(true));
+                let mut expected_global = 0_u64;
+                let mut skipped_candidates = 0;
+                for phase in 0..14 {
+                    let accepted = [kinds[phase % 7], kinds[(phase + 2) % 7]];
+                    let root = language
+                        .canonicalize(&branching_piece_language(1, phase))
+                        .unwrap();
+                    // Literal one-placement oracle, independent of the
+                    // symbolic union and the supply-product recurrence.
+                    let expected = (0..universe.pattern_count()).fold(0_u64, |bits, ordinal| {
+                        let queue = universe.sequence_at(ordinal);
+                        let succeeds = accepted.contains(&queue[0])
+                            || (hold_enabled
+                                && held.is_some_and(|piece| accepted.contains(&piece)))
+                            || (hold_enabled && held.is_none() && accepted.contains(&queue[1]));
+                        bits | (u64::from(succeeds) << ordinal)
+                    });
+                    expected_global |= expected;
+                    let a = baseline.cover_language(&language, root, &control).unwrap();
+                    let b = treatment.cover_language(&language, root, &control).unwrap();
+                    assert_eq!(a.covers_any_pattern, b.covers_any_pattern);
+                    for (coverage, result) in [(&mut baseline, a), (&mut treatment, b)] {
+                        assert_eq!(result.covered_pattern_count, expected.count_ones() as usize);
+                        assert_eq!(
+                            result.witness_pattern_id,
+                            (expected != 0).then(|| expected.trailing_zeros())
+                        );
+                        assert_eq!(
+                            coverage
+                                .materialize_root(result.root)
+                                .unwrap()
+                                .to_owned_words(),
+                            vec![expected]
+                        );
+                        let already_full = coverage.global_is_complete();
+                        let nodes = coverage.nodes.len();
+                        let union_entries = coverage.union_memo.len();
+                        coverage.merge_global(result.root).unwrap();
+                        if already_full && coverage.skip_complete_global_union {
+                            skipped_candidates += 1;
+                            assert_eq!(coverage.nodes.len(), nodes);
+                            assert_eq!(coverage.union_memo.len(), union_entries);
+                            assert_eq!(coverage.epoch_global_root, REJECT);
+                        }
+                        assert_eq!(
+                            coverage
+                                .materialize_root(result.root)
+                                .unwrap()
+                                .to_owned_words(),
+                            vec![expected]
+                        );
+                        assert_eq!(
+                            coverage.materialize_global().unwrap().to_owned_words(),
+                            vec![expected_global]
+                        );
+                        if phase == 6 || phase == 10 {
+                            coverage.flush_and_recycle_local_cache().unwrap();
+                            // A failed memo admission must still calculate
+                            // exact per-candidate evidence after saturation.
+                            coverage.product_memo.fail_admissions_for_test(usize::MAX);
+                        }
+                        if phase >= 7 {
+                            assert_eq!(coverage.product_memo.len(), 0);
+                        }
+                    }
+                }
+                assert!(skipped_candidates >= 7);
+                assert_eq!(
+                    expected_global.count_ones() as usize,
+                    universe.pattern_count()
+                );
+                assert_eq!(baseline.global_merge_calls, 14);
+                assert_eq!(treatment.global_merge_calls, 14);
+                assert_eq!(baseline.global_merge_saturated_skips, 0);
+                assert_eq!(treatment.global_merge_saturated_skips, skipped_candidates);
+            }
+        }
+    }
+
+    #[test]
+    fn global_saturation_does_not_bypass_candidate_cancellation() {
+        let mut language = PieceOrderLanguageCache::default();
+        let root = language
+            .canonicalize(&branching_piece_language(2, 0))
+            .unwrap();
+        let control = ExecutionControl::default();
+        control.cancellation.handle().cancel();
+        for skip in [false, true] {
+            let mut coverage = coverage_for_len(3, true);
+            coverage.skip_complete_global_union = skip;
+            coverage.merge_global(ACCEPT).unwrap();
+            coverage.flush_and_recycle_local_cache().unwrap();
+            assert!(coverage.global_is_complete());
+            coverage.cancellation_poll_counter = CANCELLATION_POLL_MASK;
+            assert!(matches!(
+                coverage.cover_language(&language, root, &control),
+                Err(WasmExactSearchError::Cancelled)
+            ));
+        }
+    }
+
+    #[test]
     fn accept_absorption_preserves_ordinals_witness_and_recycled_global_union() {
         let universe = PatternUniverseMaterializer::standard_7_bag(2, 0, 0x77)
             .expect("full two-draw standard bag");
@@ -2568,6 +3125,9 @@ mod supply_automaton_tests {
             );
             coverage.union_memo = ExactU64MemoMap::new(union_storage);
             coverage.union_memo_entry_limit = None;
+            // This test measures union representation, including redundant
+            // global unions. Saturation has its own full-reference oracle.
+            coverage.skip_complete_global_union = false;
             coverage
         };
         let (mut reference, mut treatment) = (make(Reference), make(Compact));
@@ -2653,6 +3213,7 @@ mod supply_automaton_tests {
                 .expect("supported universe");
             coverage.union_memo = ExactU64MemoMap::new(storage);
             coverage.union_memo_entry_limit = limit;
+            coverage.skip_complete_global_union = false;
             coverage
         };
         for storage in [ExactU64MemoStorage::Reference, ExactU64MemoStorage::Compact] {
@@ -2937,6 +3498,133 @@ mod supply_automaton_tests {
             (12, 42)
         );
         assert!((report.probability().parse::<f64>().unwrap() - 12.0 / 42.0).abs() < 1e-14);
+    }
+
+    #[test]
+    fn empty_hold_store_fanout_preserves_original_ordinals_witness_and_recycling() {
+        use super::super::buildup::{BuildOrderGraph, BuildOrderNodeSpec};
+        use clearra_core_domain::piece::rotation::RotationState;
+        use PieceKind::{I, O, S, T};
+
+        // Two distinct suffixes keep two same-O edges after canonicalization.
+        // Unlike a single edge per piece, this exercises transition reuse
+        // across every child of the same empty-Hold draw.
+        let graph = |tails: [PieceKind; 2]| {
+            BuildOrderGraph::from_topological_parts(
+                vec![
+                    BuildOrderNodeSpec {
+                        edge_start: 0,
+                        edge_count: 2,
+                        depth: 0,
+                        accepting: false,
+                    },
+                    BuildOrderNodeSpec {
+                        edge_start: 2,
+                        edge_count: 1,
+                        depth: 1,
+                        accepting: false,
+                    },
+                    BuildOrderNodeSpec {
+                        edge_start: 3,
+                        edge_count: 1,
+                        depth: 1,
+                        accepting: false,
+                    },
+                    BuildOrderNodeSpec {
+                        edge_start: 4,
+                        edge_count: 0,
+                        depth: 2,
+                        accepting: true,
+                    },
+                ],
+                vec![
+                    BuildOrderGraph::edge(1, 0, O, RotationState::Zero, 0, 0, 0),
+                    BuildOrderGraph::edge(2, 0, O, RotationState::Zero, 0, 0, 0),
+                    BuildOrderGraph::edge(3, 1, tails[0], RotationState::Zero, 0, 0, 0),
+                    BuildOrderGraph::edge(3, 1, tails[1], RotationState::Zero, 0, 0, 0),
+                ],
+                0,
+                0,
+                true,
+            )
+            .expect("two exact piece words with same-kind root fanout")
+        };
+        let universe = PatternUniverseMaterializer::standard_7_bag(3, 0, 0x77)
+            .expect("complete three-draw standard bag");
+        assert_eq!(universe.pattern_count(), 210);
+        let initial = HoldAutomatonState::new(
+            PieceSourceId::new(0x77),
+            0,
+            None,
+            0,
+            BagState::fresh_standard_7_bag().packed_remainder_key(),
+            SupplyProvenanceId(0x77),
+        );
+        let control = ExecutionControl::default();
+        let mut languages = PieceOrderLanguageCache::default();
+        for hold_enabled in [false, true] {
+            let mut coverage =
+                StandardBagCoverage::for_universe(&universe, initial, hold_enabled, false)
+                    .unwrap()
+                    .unwrap();
+            let mut expected_global = vec![0_u64; universe.pattern_count().div_ceil(64)];
+            // Overlapping languages and a repeated first language exercise
+            // union and reuse after the decision arena has changed epochs.
+            for tails in [[I, T], [T, S], [I, T]] {
+                let root = languages.canonicalize(&graph(tails)).unwrap();
+                assert_eq!(
+                    languages
+                        .edges_for_piece(root, piece_code(O))
+                        .unwrap()
+                        .len(),
+                    2
+                );
+                let mut expected = vec![0_u64; expected_global.len()];
+                let mut expected_witness = None;
+                for ordinal in 0..universe.pattern_count() {
+                    let queue = universe.sequence_at(ordinal);
+                    // Independent literal enumeration of the two placements:
+                    // O is either the first draw or the empty-Hold second draw;
+                    // the suffix then comes from current, store, or held.
+                    let succeeds = if hold_enabled {
+                        (queue[0] == O && (tails.contains(&queue[1]) || tails.contains(&queue[2])))
+                            || (queue[1] == O
+                                && (tails.contains(&queue[0]) || tails.contains(&queue[2])))
+                    } else {
+                        queue[0] == O && tails.contains(&queue[1])
+                    };
+                    if succeeds {
+                        expected[ordinal / 64] |= 1_u64 << (ordinal % 64);
+                        expected_witness.get_or_insert(ordinal as u32);
+                    }
+                }
+                let expected_count = expected
+                    .iter()
+                    .map(|word| word.count_ones() as usize)
+                    .sum::<usize>();
+                assert_eq!(expected_count, if hold_enabled { 36 } else { 10 });
+                let result = coverage.cover_language(&languages, root, &control).unwrap();
+                assert!(result.covers_any_pattern);
+                assert_eq!(result.covered_pattern_count, expected_count);
+                assert_eq!(result.witness_pattern_id, expected_witness);
+                assert_eq!(
+                    coverage
+                        .materialize_root(result.root)
+                        .unwrap()
+                        .to_owned_words(),
+                    expected
+                );
+                for (global, local) in expected_global.iter_mut().zip(&expected) {
+                    *global |= *local;
+                }
+                coverage.merge_global(result.root).unwrap();
+                coverage.flush_and_recycle_local_cache().unwrap();
+                assert_eq!(
+                    coverage.materialize_global().unwrap().to_owned_words(),
+                    expected_global
+                );
+            }
+        }
     }
 
     fn full_p7p4_capture_fixture(

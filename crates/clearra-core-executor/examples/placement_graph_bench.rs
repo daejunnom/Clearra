@@ -1,7 +1,12 @@
 //! Finite same-binary A/B entrypoint for the placement-condition experiment.
 //! Build with --release --features parallel,local-search-ab. Large runs require
 //! the repository supervisor; A/B selection is fixed by the process environment.
-//! Add wasm-stage-profiling for a separate strict-prefix diagnostic report.
+//! Add wasm-stage-profiling and CLEARRA_SEARCH_STAGE_PROFILE=1 for the ordinary
+//! product route, or CLEARRA_STRICT_STAGE_PROFILE=1 for strict-prefix diagnostics.
+//! Product diagnostics also require CLEARRA_STANDARD_BAG_UNION_MEMO=compact;
+//! minimum-domain cutoff remains opt-in (default 0); the visited-first and
+//! complete-global-union optimizations default to 1 with independent off arms.
+//! Diagnostic reports cannot serve as uninstrumented timing adoption evidence.
 
 #[cfg(not(all(feature = "parallel", feature = "local-search-ab")))]
 fn main() {
@@ -32,6 +37,9 @@ mod solution_coverage_compare;
 #[cfg(all(feature = "parallel", feature = "local-search-ab"))]
 #[path = "placement_graph_bench/solution_coverage_spool.rs"]
 mod solution_coverage_spool;
+#[cfg(all(feature = "parallel", feature = "local-search-ab"))]
+#[path = "placement_graph_bench/stage_diagnostic.rs"]
+mod stage_diagnostic;
 
 #[cfg(all(feature = "parallel", feature = "local-search-ab"))]
 mod run {
@@ -48,6 +56,9 @@ mod run {
         self, CoverageComparison, CoverageUniverse, CoverageWriter, P7_INITIAL,
     };
     use super::solution_coverage_spool::{CoverageFragment, CoverageSpool, CoverageSpoolLimits};
+    use super::stage_diagnostic::{
+        validate_product_memo_environment, validate_product_memo_observation, SearchStageDiagnostic,
+    };
 
     use clearra_core_domain::{
         execution_cancellation::ExecutionControl,
@@ -208,6 +219,7 @@ mod run {
     fn parse_fixture(args: &[String]) -> Result<(Fixture, Option<&str>), String> {
         match args {
             [] => Ok((Fixture::P7P4, None)),
+            [flag] if flag == "--summary" => Ok((Fixture::P7P4, None)),
             [flag] if flag == "--small" => Ok((Fixture::OneI, None)),
             [flag] if flag == "--p7" => Ok((Fixture::P7, None)),
             [flag] if flag == "--nonempty-eight-i" => Ok((Fixture::NonemptyEightI, None)),
@@ -236,10 +248,45 @@ mod run {
                 Err(GROUNDED_O_CAPTURE_ERROR.into())
             }
             _ => Err(
-                "usage: placement_graph_bench [[--small | --p7] [--coverage-slot SLOT] | --nonempty-eight-i | --empty-ten-i | --grounded-o-two-lines | --grounded-o-two-lines-unique | --scalar-demo | --compare FILE FILE ... | --compare-coverage FILE FILE]"
+                "usage: placement_graph_bench [--summary | [--small | --p7] [--coverage-slot SLOT] | --nonempty-eight-i | --empty-ten-i | --grounded-o-two-lines | --grounded-o-two-lines-unique | --scalar-demo | --compare FILE FILE ... | --compare-coverage FILE FILE]"
                     .into(),
             ),
         }
+    }
+
+    fn validate_fixture_diagnostic_route(
+        fixture: Fixture,
+        diagnostic: Option<SearchStageDiagnostic>,
+        strict_arm: Option<bool>,
+        minimum_domain_cutoff: bool,
+        geometric_edge_reuse_arm: Option<bool>,
+        grounded_o_other_axes: bool,
+    ) -> Result<(), String> {
+        let product_diagnostic = diagnostic.is_some_and(SearchStageDiagnostic::is_product);
+        if fixture == Fixture::P7 && strict_arm.is_none() && !product_diagnostic {
+            return Err(
+                "--p7 requires an explicit CLEARRA_STRICT_PREFIX arm or a product stage diagnostic"
+                    .into(),
+            );
+        }
+        if fixture.is_grounded_o() {
+            if grounded_o_other_axes {
+                return Err("grounded two-line O fixtures isolate geometric edge reuse".into());
+            }
+            if product_diagnostic && geometric_edge_reuse_arm == Some(true) {
+                return Err("product stage diagnostics keep geometric edge reuse disabled".into());
+            }
+            // Plain fixture runs use the product cutoff default. Explicit
+            // geometric-edge A/B arms retain the historical cutoff=0 baseline;
+            // neither arm may silently acquire a second changed mechanism.
+            if !product_diagnostic && geometric_edge_reuse_arm.is_some() && minimum_domain_cutoff {
+                return Err(
+                    "grounded geometric-edge reuse arms require CLEARRA_MINIMUM_DOMAIN_CUTOFF=0; omit CLEARRA_GEOMETRIC_EDGE_REUSE for a default fixture run"
+                        .into(),
+                );
+            }
+        }
+        Ok(())
     }
 
     pub fn main() -> Result<(), String> {
@@ -256,6 +303,7 @@ mod run {
             return scalar_demo();
         }
         let (fixture, coverage_slot) = parse_fixture(&args)?;
+        let summary_requested = args.as_slice() == ["--summary"];
         if ((fixture != Fixture::OneI && !fixture.is_grounded_o()) || coverage_slot.is_some())
             && (std::env::var("CLEARRA_RUNTIME_SUPERVISED").as_deref() != Ok("1")
                 || std::env::var("CLEARRA_RUNTIME_PROFILE").as_deref() != Ok("benchmark-search"))
@@ -288,10 +336,28 @@ mod run {
         let incremental_domain_mode = experiment_mode("CLEARRA_INCREMENTAL_DOMAIN")?;
         let minimum_domain_cutoff_mode = experiment_mode("CLEARRA_MINIMUM_DOMAIN_CUTOFF")?;
         let minimum_domain_work_mode = experiment_mode("CLEARRA_MINIMUM_DOMAIN_WORK")?;
+        let reachability_visited_first_mode =
+            experiment_mode_with_default("CLEARRA_REACHABILITY_VISITED_FIRST", "1")?;
+        let standard_bag_global_saturation_mode =
+            experiment_mode_with_default("CLEARRA_STANDARD_BAG_GLOBAL_SATURATION", "1")?;
+        let physical_prefix_pruning_mode =
+            experiment_mode_with_default("CLEARRA_PHYSICAL_PREFIX_PRUNING", "1")?;
+        let candidate_ilc_pruning_mode =
+            experiment_mode_with_default("CLEARRA_CANDIDATE_ILC_PRUNING", "1")?;
+        let standard_bag_boolean_membership_mode =
+            experiment_mode_with_default("CLEARRA_STANDARD_BAG_BOOLEAN_MEMBERSHIP", "1")?;
+        let standard_bag_shared_saturation_mode =
+            experiment_mode_with_default("CLEARRA_STANDARD_BAG_SHARED_SATURATION", "1")?;
         let first_kick_interval_mode = experiment_mode("CLEARRA_FIRST_KICK_INTERVAL")?;
         let ordered_kick_interval_mode = experiment_mode("CLEARRA_ORDERED_KICK_INTERVAL")?;
         let ordered_kick_guard_reuse_mode = experiment_mode("CLEARRA_ORDERED_KICK_GUARD_REUSE")?;
-        let geometric_edge_reuse_mode = experiment_mode("CLEARRA_GEOMETRIC_EDGE_REUSE")?;
+        let geometric_edge_reuse_arm = optional_experiment_mode("CLEARRA_GEOMETRIC_EDGE_REUSE")?;
+        let geometric_edge_reuse_mode = if geometric_edge_reuse_arm == Some(true) {
+            "1"
+        } else {
+            "0"
+        }
+        .to_owned();
         let ilc_lazy_frame_mode = experiment_mode("CLEARRA_ILC_LAZY_FRAME")?;
         let no_entry_components_mode = experiment_mode("CLEARRA_NO_ENTRY_COMPONENTS")?;
         let same_tile_parent_reuse_mode = experiment_mode("CLEARRA_SAME_TILE_PARENT_REUSE")?;
@@ -299,6 +365,9 @@ mod run {
         let terminal_identity_move_mode = experiment_mode("CLEARRA_TERMINAL_IDENTITY_MOVE")?;
         let operation_mask_mode = optional_experiment_mode("CLEARRA_OPERATION_MASKS")?;
         let strict_prefix_mode = optional_experiment_mode("CLEARRA_STRICT_PREFIX")?;
+        if summary_requested && (strict_prefix_mode.is_some() || operation_mask_mode.is_some()) {
+            return Err("--summary uses the ordinary product route without strict-prefix or operation-mask overrides".into());
+        }
         let catalog_guard_mode = optional_experiment_mode("CLEARRA_STRICT_CATALOG_GUARDS")?;
         let frontier_mode = optional_experiment_mode("CLEARRA_STRICT_LANGUAGE_FRONTIER")?;
         let subsumption_mode = optional_experiment_mode("CLEARRA_STRICT_SUBSUMPTION")?;
@@ -307,7 +376,7 @@ mod run {
         {
             return Err("strict optimization requires an enabled strict-prefix request".into());
         }
-        let stage_diagnostic = StrictStageDiagnostic::select(
+        let stage_diagnostic = SearchStageDiagnostic::select_strict(
             optional_experiment_mode("CLEARRA_STRICT_STAGE_PROFILE")? == Some(true),
             optional_experiment_mode("CLEARRA_STRICT_STAGE_LEGACY_UPPER")? == Some(true),
             strict_prefix_mode,
@@ -315,18 +384,17 @@ mod run {
             cfg!(feature = "wasm-stage-profiling"),
         )?;
         if catalog_guard_mode == Some(true)
-            && stage_diagnostic == Some(StrictStageDiagnostic::LegacyUpper)
+            && stage_diagnostic == Some(SearchStageDiagnostic::LegacyUpper)
         {
             return Err("catalog guards and legacy upper diagnostics cannot be combined".into());
         }
-        let other_axis_enabled = [
+        let auxiliary_axis_enabled = [
             &mode,
             &structural_mode,
             &static_influence_mode,
             &translation_interval_mode,
             &movement_clear_certificates_mode,
             &incremental_domain_mode,
-            &minimum_domain_cutoff_mode,
             &minimum_domain_work_mode,
             &first_kick_interval_mode,
             &ordered_kick_interval_mode,
@@ -340,10 +408,45 @@ mod run {
         ]
         .into_iter()
         .any(|mode| mode != "0");
+        // Geometry experiments retain their explicit all-zero reference arms.
+        // The ordinary physical-path diagnostic can ablate the two product
+        // optimizations independently. The minimum-support cutoff remains an
+        // opt-in experiment after its measured end-to-end regression.
+        let other_axis_enabled = auxiliary_axis_enabled || minimum_domain_cutoff_mode != "0";
+        let product_optimization_enabled =
+            reachability_visited_first_mode != "0" || standard_bag_global_saturation_mode != "0";
+        let stage_diagnostic = SearchStageDiagnostic::select_product(
+            optional_experiment_mode("CLEARRA_SEARCH_STAGE_PROFILE")? == Some(true),
+            stage_diagnostic,
+            auxiliary_axis_enabled
+                || operation_mask_mode.is_some()
+                || strict_prefix_mode.is_some()
+                || catalog_guard_mode.is_some()
+                || frontier_mode.is_some()
+                || subsumption_mode.is_some(),
+            coverage_slot.is_some(),
+            cfg!(feature = "wasm-stage-profiling"),
+            valid_experiment_source(option_env!("CLEARRA_SOURCE_COMMIT")),
+            minimum_domain_cutoff_mode == "1",
+        )?;
+        if stage_diagnostic.is_some_and(SearchStageDiagnostic::is_product) {
+            validate_product_memo_environment(|name| std::env::var(name))?;
+        }
+        let memory_profile =
+            optional_experiment_mode("CLEARRA_SEARCH_MEMORY_PROFILE")? == Some(true);
+        if memory_profile
+            && (!stage_diagnostic.is_some_and(SearchStageDiagnostic::is_product)
+                || !cfg!(target_os = "linux"))
+        {
+            return Err(
+                "CLEARRA_SEARCH_MEMORY_PROFILE requires the Linux product stage diagnostic".into(),
+            );
+        }
         if operation_mask_mode.is_some()
             && (fixture != Fixture::P7P4
                 || !valid_experiment_source(option_env!("CLEARRA_SOURCE_COMMIT"))
                 || other_axis_enabled
+                || product_optimization_enabled
                 || strict_prefix_mode.is_some())
         {
             return Err("operation masks require a source-bound P7P4 run with all other experiment axes off".into());
@@ -351,40 +454,41 @@ mod run {
         if strict_prefix_mode.is_some()
             && (!matches!(fixture, Fixture::P7 | Fixture::P7P4)
                 || !valid_experiment_source(option_env!("CLEARRA_SOURCE_COMMIT"))
-                || other_axis_enabled)
+                || other_axis_enabled
+                || product_optimization_enabled)
         {
             return Err(
                 "strict prefix requires a source-bound P7/P7P4 run with all other experiment axes off"
                     .into(),
             );
         }
-        if fixture == Fixture::P7 && strict_prefix_mode.is_none() {
-            return Err("--p7 requires an explicit CLEARRA_STRICT_PREFIX arm".into());
-        }
-        if fixture.is_grounded_o()
-            && [
-                &mode,
-                &structural_mode,
-                &static_influence_mode,
-                &translation_interval_mode,
-                &movement_clear_certificates_mode,
-                &incremental_domain_mode,
-                &minimum_domain_cutoff_mode,
-                &minimum_domain_work_mode,
-                &first_kick_interval_mode,
-                &ordered_kick_interval_mode,
-                &ordered_kick_guard_reuse_mode,
-                &ilc_lazy_frame_mode,
-                &no_entry_components_mode,
-                &same_tile_parent_reuse_mode,
-                &conditional_order_mode,
-                &terminal_identity_move_mode,
-            ]
-            .into_iter()
-            .any(|mode| mode != "0")
-        {
-            return Err("grounded two-line O fixtures isolate geometric edge reuse".into());
-        }
+        let grounded_o_other_axes = [
+            &mode,
+            &structural_mode,
+            &static_influence_mode,
+            &translation_interval_mode,
+            &movement_clear_certificates_mode,
+            &incremental_domain_mode,
+            &minimum_domain_work_mode,
+            &first_kick_interval_mode,
+            &ordered_kick_interval_mode,
+            &ordered_kick_guard_reuse_mode,
+            &ilc_lazy_frame_mode,
+            &no_entry_components_mode,
+            &same_tile_parent_reuse_mode,
+            &conditional_order_mode,
+            &terminal_identity_move_mode,
+        ]
+        .into_iter()
+        .any(|mode| mode != "0");
+        validate_fixture_diagnostic_route(
+            fixture,
+            stage_diagnostic,
+            strict_prefix_mode,
+            minimum_domain_cutoff_mode == "1",
+            geometric_edge_reuse_arm,
+            grounded_o_other_axes,
+        )?;
         if fixture == Fixture::EmptyTenI
             && [
                 &mode,
@@ -424,6 +528,11 @@ mod run {
             .with_tablebase_requested(false);
         let compile_started = Instant::now();
         let problem = compile_problem(fixture, policy, strict_prefix_mode.is_some())?;
+        let problem = if summary_requested {
+            product_summary(problem)?
+        } else {
+            problem
+        };
         if problem.count_policy() != fixture.count_policy() {
             return Err("compiled fixture changed the requested count policy".into());
         }
@@ -457,7 +566,7 @@ mod run {
         let stage_profile = stage_diagnostic
             .map(|_| ExecutorSearchProfileSession::start())
             .transpose()
-            .map_err(|error| format!("cannot start strict stage profile: {error:?}"))?;
+            .map_err(|error| format!("cannot start search stage profile: {error:?}"))?;
         let search_started = Instant::now();
         let control = ExecutionControl::default();
         let execute = || -> Result<_, String> {
@@ -538,24 +647,35 @@ mod run {
                 ))
             }
         };
-        let (outcome, operation_masks, strict_prefix) =
-            match (operation_mask_mode, strict_prefix_mode) {
-                (Some(enabled), None) => {
-                    let (outcome, report) = with_operation_mask_experiment(enabled, execute);
-                    (outcome, Some((enabled, report)), None)
-                }
-                (None, Some(true)) => {
-                    let (outcome, report) = if catalog_guard_mode == Some(true) {
-                        with_catalog_guard_strict_parallel_prefix_experiment(execute)
-                    } else if stage_diagnostic == Some(StrictStageDiagnostic::LegacyUpper) {
-                        with_legacy_strict_parallel_prefix_experiment(execute)
-                    } else {
-                        with_strict_parallel_prefix_experiment(execute)
-                    };
-                    (outcome, None, Some(report))
-                }
-                _ => (execute(), None, None),
-            };
+        let execute_variant = || match (operation_mask_mode, strict_prefix_mode) {
+            (Some(enabled), None) => {
+                let (outcome, report) = with_operation_mask_experiment(enabled, execute);
+                (outcome, Some((enabled, report)), None)
+            }
+            (None, Some(true)) => {
+                let (outcome, report) = if catalog_guard_mode == Some(true) {
+                    with_catalog_guard_strict_parallel_prefix_experiment(execute)
+                } else if stage_diagnostic == Some(SearchStageDiagnostic::LegacyUpper) {
+                    with_legacy_strict_parallel_prefix_experiment(execute)
+                } else {
+                    with_strict_parallel_prefix_experiment(execute)
+                };
+                (outcome, None, Some(report))
+            }
+            _ => (execute(), None, None),
+        };
+        #[cfg(target_os = "linux")]
+        let ((outcome, operation_masks, strict_prefix), memory_observation) = if memory_profile {
+            let (outcome, observation) =
+                clearra_core_executor::backend::observe_native_pc_memory(execute_variant)
+                    .map_err(|error| format!("cannot finish product memory diagnostic: {error}"))?;
+            (outcome, Some(observation))
+        } else {
+            (execute_variant(), None)
+        };
+        #[cfg(not(target_os = "linux"))]
+        let ((outcome, operation_masks, strict_prefix), memory_observation) =
+            (execute_variant(), None::<Value>);
         let (result, spool) = outcome?;
         let search_ms = search_started.elapsed().as_secs_f64() * 1000.0;
         #[cfg(feature = "wasm-stage-profiling")]
@@ -579,7 +699,16 @@ mod run {
             },
         );
         let union_storage = std::env::var("CLEARRA_STANDARD_BAG_UNION_MEMO").ok();
-        if let Some(requested) = &union_storage {
+        if stage_diagnostic.is_some_and(SearchStageDiagnostic::is_product) {
+            if let Err(error) = validate_product_memo_observation(
+                result.field("standard_bag_product_memo_policy"),
+                result.field("standard_bag_product_memo_layout"),
+                result.field("standard_bag_product_memo_storage"),
+                result.field("standard_bag_union_memo_storage"),
+            ) {
+                errors.push(error);
+            }
+        } else if let Some(requested) = &union_storage {
             if result.field("standard_bag_union_memo_storage") != Some(requested.as_str()) {
                 errors.push("the requested union memo storage was not used".into());
             }
@@ -671,12 +800,13 @@ mod run {
         let metadata = json!({
             // Neither the proof runner nor the adoption checker accepts
             // profiled measurements as uninstrumented timing evidence.
-            "schema": StrictStageDiagnostic::schema(stage_diagnostic),
+            "schema": SearchStageDiagnostic::schema(stage_diagnostic),
             "case": fixture.name(),
             "binary_sha256": binary_sha,
             "compiled_source_commit": option_env!("CLEARRA_SOURCE_COMMIT"),
             "supervisor_run_id": std::env::var("CLEARRA_RUNTIME_RUN_ID").ok(),
             "output_mode": if coverage_slot.is_some() { "solution-coverage" } else { "global-only" },
+            "search_output_policy": format!("{:?}", problem.output_policy()),
             "solution_coverage": solution_coverage,
             "mode": mode,
             "structural_mode": structural_mode,
@@ -690,6 +820,12 @@ mod run {
             "incremental_domain_mode": incremental_domain_mode,
             "minimum_domain_cutoff_mode": minimum_domain_cutoff_mode,
             "minimum_domain_work_mode": minimum_domain_work_mode,
+            "reachability_visited_first_mode": reachability_visited_first_mode,
+            "standard_bag_global_saturation_mode": standard_bag_global_saturation_mode,
+            "physical_prefix_pruning_mode": physical_prefix_pruning_mode,
+            "candidate_ilc_pruning_mode": candidate_ilc_pruning_mode,
+            "standard_bag_boolean_membership_mode": standard_bag_boolean_membership_mode,
+            "standard_bag_shared_saturation_mode": standard_bag_shared_saturation_mode,
             "first_kick_interval_mode": first_kick_interval_mode,
             "ordered_kick_interval_mode": ordered_kick_interval_mode,
             "ordered_kick_guard_reuse_mode": ordered_kick_guard_reuse_mode,
@@ -821,7 +957,13 @@ mod run {
         });
         let mut process_configuration = json!({
             "CLEARRA_STANDARD_BAG_MEMO": std::env::var("CLEARRA_STANDARD_BAG_MEMO").ok(),
-            "CLEARRA_STANDARD_BAG_PRODUCT_MEMO_LAYOUT": std::env::var("CLEARRA_STANDARD_BAG_PRODUCT_MEMO_LAYOUT").ok()
+            "CLEARRA_STANDARD_BAG_PRODUCT_MEMO_LAYOUT": std::env::var("CLEARRA_STANDARD_BAG_PRODUCT_MEMO_LAYOUT").ok(),
+            "CLEARRA_REACHABILITY_VISITED_FIRST": reachability_visited_first_mode,
+            "CLEARRA_STANDARD_BAG_GLOBAL_SATURATION": standard_bag_global_saturation_mode,
+            "CLEARRA_PHYSICAL_PREFIX_PRUNING": physical_prefix_pruning_mode,
+            "CLEARRA_CANDIDATE_ILC_PRUNING": candidate_ilc_pruning_mode,
+            "CLEARRA_STANDARD_BAG_BOOLEAN_MEMBERSHIP": standard_bag_boolean_membership_mode,
+            "CLEARRA_STANDARD_BAG_SHARED_SATURATION": standard_bag_shared_saturation_mode
         });
         if let Some(storage) = union_storage {
             process_configuration["CLEARRA_STANDARD_BAG_UNION_MEMO"] = json!(storage);
@@ -887,7 +1029,18 @@ mod run {
         #[cfg(feature = "wasm-stage-profiling")]
         let diagnostic_section = stage_diagnostic.zip(profiled_stages).map_or_else(
             || json!({}),
-            |(diagnostic, (caller, workers))| diagnostic.report(caller, workers),
+            |(diagnostic, (caller, workers))| {
+                diagnostic.report(
+                    caller,
+                    workers,
+                    reachability_visited_first_mode == "1",
+                    standard_bag_global_saturation_mode == "1",
+                    physical_prefix_pruning_mode == "1",
+                    candidate_ilc_pruning_mode == "1",
+                    standard_bag_boolean_membership_mode == "1",
+                    standard_bag_shared_saturation_mode == "1",
+                )
+            },
         );
         #[cfg(not(feature = "wasm-stage-profiling"))]
         let diagnostic_section = json!({});
@@ -902,6 +1055,10 @@ mod run {
             operation_mask_section,
             strict_prefix_section,
             diagnostic_section,
+            memory_observation.map_or_else(
+                || json!({}),
+                |observation| json!({ "product_memory_profile": observation }),
+            ),
         ])?;
         println!(
             "{}",
@@ -913,60 +1070,18 @@ mod run {
         Ok(())
     }
 
-    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-    enum StrictStageDiagnostic {
-        Reference,
-        OptimizedUpper,
-        LegacyUpper,
-    }
-
-    impl StrictStageDiagnostic {
-        const fn schema(diagnostic: Option<Self>) -> &'static str {
-            match diagnostic {
-                Some(_) => "clearra.placement-graph-stage-diagnostic.v1",
-                None => "clearra.placement-graph-benchmark.v1",
-            }
-        }
-
-        fn select(
-            profile: bool,
-            legacy_upper: bool,
-            strict_arm: Option<bool>,
-            captures_coverage: bool,
-            profiler_available: bool,
-        ) -> Result<Option<Self>, String> {
-            if legacy_upper && !(profile && strict_arm == Some(true)) {
-                return Err(
-                    "CLEARRA_STRICT_STAGE_LEGACY_UPPER requires CLEARRA_STRICT_STAGE_PROFILE=1 and CLEARRA_STRICT_PREFIX=1"
-                        .into(),
-                );
-            }
-            if !profile {
-                return Ok(None);
-            }
-            let Some(arm) = strict_arm.filter(|_| !captures_coverage) else {
-                return Err(
-                    "CLEARRA_STRICT_STAGE_PROFILE requires the global-only strict-prefix experiment"
-                        .into(),
-                );
-            };
-            if !profiler_available {
-                return Err(
-                    "CLEARRA_STRICT_STAGE_PROFILE requires feature wasm-stage-profiling".into(),
-                );
-            }
-            Ok(Some(match (arm, legacy_upper) {
-                (false, _) => Self::Reference,
-                (true, true) => Self::LegacyUpper,
-                (true, false) => Self::OptimizedUpper,
-            }))
-        }
-
+    impl SearchStageDiagnostic {
         #[cfg(feature = "wasm-stage-profiling")]
         fn report(
             self,
             caller: Vec<ExecutorSearchProfileStage>,
             workers: Vec<ExecutorSearchProfileStage>,
+            reachability_visited_first: bool,
+            standard_bag_global_saturation: bool,
+            physical_prefix_pruning: bool,
+            candidate_ilc_pruning: bool,
+            standard_bag_boolean_membership: bool,
+            standard_bag_shared_saturation: bool,
         ) -> Value {
             let stages: Vec<_> = caller
                 .into_iter()
@@ -979,6 +1094,10 @@ mod run {
                         "stage": caller.name,
                         "caller_ns": caller.duration_ns,
                         "pool_workers_ns": workers.duration_ns,
+                        "caller_measured_ns": caller.measured_duration_ns,
+                        "pool_workers_measured_ns": workers.measured_duration_ns,
+                        "caller_measured_samples": caller.sample_count,
+                        "pool_worker_measured_samples": workers.sample_count,
                         "caller_invocations": caller.invocation_count,
                         "pool_worker_invocations": workers.invocation_count,
                         "caller_work_items": caller.work_item_count,
@@ -986,16 +1105,40 @@ mod run {
                     })
                 })
                 .collect();
+            let key = if self.is_product() {
+                "product_stage_profile"
+            } else {
+                "strict_stage_profile"
+            };
             json!({
-                "strict_stage_profile": {
+                (key): {
                     "diagnostic_only": true,
                     "timing_adoption_authority": false,
+                    "execution_route": if self.is_product() { "ordinary-product" } else { "strict-prefix-experiment" },
+                    "configuration": match self {
+                        Self::ProductDefault if reachability_visited_first && standard_bag_global_saturation && physical_prefix_pruning && candidate_ilc_pruning && standard_bag_boolean_membership && standard_bag_shared_saturation => "product-default",
+                        Self::ProductDefault => "product-ablation",
+                        Self::ProductCutoffExperiment => "product-cutoff-experiment",
+                        Self::Reference => "strict-reference",
+                        Self::OptimizedUpper => "strict-optimized-upper",
+                        Self::LegacyUpper => "strict-legacy-upper",
+                    },
                     "upper_strategy": match self {
-                        Self::Reference => "not-applicable",
+                        Self::ProductDefault | Self::ProductCutoffExperiment | Self::Reference => "not-applicable",
                         Self::OptimizedUpper => "optimized",
                         Self::LegacyUpper => "legacy",
                     },
+                    "product_optimizations": self.is_product().then(|| json!({
+                        "minimum_domain_cutoff": self == Self::ProductCutoffExperiment,
+                        "reachability_visited_first": reachability_visited_first,
+                        "standard_bag_global_saturation": standard_bag_global_saturation,
+                        "physical_prefix_pruning": physical_prefix_pruning,
+                        "candidate_ilc_pruning": candidate_ilc_pruning,
+                        "standard_bag_boolean_membership": standard_bag_boolean_membership,
+                        "standard_bag_shared_saturation": standard_bag_shared_saturation,
+                    })),
                     "scope": "sampled accumulated elapsed stage time; caller can execute a worker; stage spans may nest and must not be summed as wall time",
+                    "sampling": "*_ns and *_invocations include sample expansion; *_measured_ns and *_measured_samples contain only observed spans; neither is end-to-end wall time",
                     "stages": stages,
                 },
             })
@@ -1023,7 +1166,17 @@ mod run {
     }
 
     fn experiment_mode(name: &str) -> Result<String, String> {
-        let value = std::env::var(name).unwrap_or_else(|_| "0".into());
+        experiment_mode_with_default(name, "0")
+    }
+
+    fn experiment_mode_with_default(name: &str, default: &str) -> Result<String, String> {
+        let value = match std::env::var(name) {
+            Ok(value) => value,
+            Err(std::env::VarError::NotPresent) => default.into(),
+            Err(std::env::VarError::NotUnicode(_)) => {
+                return Err(format!("{name} must be Unicode 0 or 1 at process start"));
+            }
+        };
         if matches!(value.as_str(), "0" | "1") {
             Ok(value)
         } else {
@@ -1449,6 +1602,18 @@ mod run {
         } else {
             Err("per-solution coverage differs".into())
         }
+    }
+
+    fn product_summary(problem: SearchProblem) -> Result<SearchProblem, String> {
+        if problem.count_policy() != PcCountPolicy::CountUnique
+            || problem.solution_probability_policy() != PcSolutionProbabilityPolicy::Omit
+        {
+            return Err(
+                "ordinary Summary timing requires CountUnique and omitted per-solution coverage"
+                    .into(),
+            );
+        }
+        Ok(problem.with_output_policy(SearchOutputPolicy::Summary))
     }
 
     fn compile_problem(
@@ -2384,36 +2549,188 @@ mod run {
         use super::*;
 
         #[test]
-        fn strict_stage_diagnostics_cannot_claim_unprofiled_or_exact_output() {
-            use StrictStageDiagnostic::{LegacyUpper, OptimizedUpper, Reference};
-            let select = StrictStageDiagnostic::select;
-            assert_eq!(select(false, false, Some(true), true, false), Ok(None));
-            assert_eq!(
-                select(true, false, Some(false), false, true),
-                Ok(Some(Reference))
-            );
-            assert_eq!(
-                select(true, false, Some(true), false, true),
-                Ok(Some(OptimizedUpper))
-            );
-            assert_eq!(
-                select(true, true, Some(true), false, true),
-                Ok(Some(LegacyUpper))
-            );
-            for (profile, legacy, arm, capture, available) in [
-                (true, false, None, false, true),
-                (true, false, Some(true), true, true),
-                (true, false, Some(false), false, false),
-                (false, true, Some(true), false, true),
-                (true, true, Some(false), false, true),
-            ] {
-                assert!(select(profile, legacy, arm, capture, available).is_err());
+        fn product_diagnostic_p7_and_small_admit_both_cutoff_arms() {
+            for flag in ["--p7", "--small"] {
+                let args = vec![flag.to_owned()];
+                let (fixture, capture) = parse_fixture(&args).unwrap();
+                assert!(capture.is_none());
+                for cutoff in [false, true] {
+                    let diagnostic = SearchStageDiagnostic::select_product(
+                        true,
+                        None,
+                        false,
+                        capture.is_some(),
+                        true,
+                        true,
+                        cutoff,
+                    )
+                    .unwrap();
+                    assert_eq!(
+                        diagnostic,
+                        Some(if cutoff {
+                            SearchStageDiagnostic::ProductCutoffExperiment
+                        } else {
+                            SearchStageDiagnostic::ProductDefault
+                        })
+                    );
+                    assert!(validate_fixture_diagnostic_route(
+                        fixture, diagnostic, None, cutoff, None, false,
+                    )
+                    .is_ok());
+                    assert!(validate_product_memo_environment(|name| {
+                        if name == "CLEARRA_STANDARD_BAG_UNION_MEMO" {
+                            Ok("compact".to_owned())
+                        } else {
+                            Err(std::env::VarError::NotPresent)
+                        }
+                    })
+                    .is_ok());
+                }
             }
-            for diagnostic in [Reference, OptimizedUpper, LegacyUpper] {
-                assert_ne!(
-                    StrictStageDiagnostic::schema(Some(diagnostic)),
-                    StrictStageDiagnostic::schema(None),
+            assert!(
+                validate_fixture_diagnostic_route(Fixture::P7, None, None, true, None, false,)
+                    .is_err()
+            );
+            // Historical strict A/B still admits both explicit reference arms.
+            for strict_arm in [false, true] {
+                assert!(validate_fixture_diagnostic_route(
+                    Fixture::P7,
+                    None,
+                    Some(strict_arm),
+                    false,
+                    None,
+                    false,
+                )
+                .is_ok());
+            }
+        }
+
+        #[test]
+        fn grounded_o_defaults_and_product_cutoff_profiles_preserve_reuse_isolation() {
+            for fixture in [
+                Fixture::GroundedOTwoLinesAll,
+                Fixture::GroundedOTwoLinesUnique,
+            ] {
+                assert!(
+                    validate_fixture_diagnostic_route(fixture, None, None, false, None, false,)
+                        .is_ok()
                 );
+                for cutoff in [false, true] {
+                    let diagnostic = SearchStageDiagnostic::select_product(
+                        true, None, false, false, true, true, cutoff,
+                    )
+                    .unwrap();
+                    for disabled in [None, Some(false)] {
+                        assert!(validate_fixture_diagnostic_route(
+                            fixture, diagnostic, None, cutoff, disabled, false,
+                        )
+                        .is_ok());
+                    }
+                    assert!(validate_fixture_diagnostic_route(
+                        fixture,
+                        diagnostic,
+                        None,
+                        cutoff,
+                        Some(true),
+                        false,
+                    )
+                    .is_err());
+                    assert!(validate_fixture_diagnostic_route(
+                        fixture, diagnostic, None, cutoff, None, true,
+                    )
+                    .is_err());
+                }
+                for reuse in [false, true] {
+                    assert!(validate_fixture_diagnostic_route(
+                        fixture,
+                        None,
+                        None,
+                        false,
+                        Some(reuse),
+                        false,
+                    )
+                    .is_ok());
+                    assert!(validate_fixture_diagnostic_route(
+                        fixture,
+                        None,
+                        None,
+                        true,
+                        Some(reuse),
+                        false,
+                    )
+                    .is_err());
+                }
+            }
+        }
+
+        #[cfg(feature = "wasm-stage-profiling")]
+        #[test]
+        fn product_default_and_cutoff_experiment_reports_keep_product_labels() {
+            for (diagnostic, label) in [
+                (SearchStageDiagnostic::ProductDefault, "product-default"),
+                (
+                    SearchStageDiagnostic::ProductCutoffExperiment,
+                    "product-cutoff-experiment",
+                ),
+            ] {
+                let report =
+                    diagnostic.report(Vec::new(), Vec::new(), true, true, true, true, true, true);
+                assert!(report.get("strict_stage_profile").is_none());
+                assert_eq!(
+                    report["product_stage_profile"]["execution_route"],
+                    "ordinary-product"
+                );
+                assert_eq!(report["product_stage_profile"]["configuration"], label);
+                assert_eq!(
+                    report["product_stage_profile"]["timing_adoption_authority"],
+                    false
+                );
+                assert_eq!(
+                    report["product_stage_profile"]["upper_strategy"],
+                    "not-applicable"
+                );
+            }
+            for (
+                visited_first,
+                global_saturation,
+                physical_prefix,
+                candidate_ilc,
+                boolean_membership,
+                shared_saturation,
+            ) in [
+                (false, false, true, true, true, true),
+                (true, false, true, true, true, true),
+                (false, true, true, true, true, true),
+                (true, true, false, true, true, true),
+                (true, true, true, false, true, true),
+                (true, true, true, true, false, true),
+                (true, true, true, true, true, false),
+            ] {
+                let report = SearchStageDiagnostic::ProductDefault.report(
+                    Vec::new(),
+                    Vec::new(),
+                    visited_first,
+                    global_saturation,
+                    physical_prefix,
+                    candidate_ilc,
+                    boolean_membership,
+                    shared_saturation,
+                );
+                let profile = &report["product_stage_profile"];
+                assert_eq!(profile["configuration"], "product-ablation");
+                assert_eq!(
+                    profile["product_optimizations"],
+                    json!({
+                        "minimum_domain_cutoff": false,
+                        "reachability_visited_first": visited_first,
+                        "standard_bag_global_saturation": global_saturation,
+                        "physical_prefix_pruning": physical_prefix,
+                        "candidate_ilc_pruning": candidate_ilc,
+                        "standard_bag_boolean_membership": boolean_membership,
+                        "standard_bag_shared_saturation": shared_saturation,
+                    })
+                );
+                assert_eq!(profile["timing_adoption_authority"], false);
             }
         }
 
@@ -2443,6 +2760,7 @@ mod run {
                 parse_fixture(&arguments).map(|(fixture, slot)| (fixture, slot.map(str::to_owned)))
             };
             assert_eq!(parse(&[]).unwrap(), (Fixture::P7P4, None));
+            assert_eq!(parse(&["--summary"]).unwrap(), (Fixture::P7P4, None));
             assert_eq!(parse(&["--small"]).unwrap(), (Fixture::OneI, None));
             assert_eq!(parse(&["--p7"]).unwrap(), (Fixture::P7, None));
             assert_eq!(
@@ -2506,6 +2824,33 @@ mod run {
                 assert_eq!(universe.pattern_count(), 1);
                 assert_eq!(universe.sequence_at(0).as_ref(), &[PieceKind::O]);
             }
+        }
+
+        #[test]
+        fn ordinary_summary_keeps_the_full_original_p7p4_request() {
+            let trace =
+                compile_problem(Fixture::P7P4, PcExecutionPolicy::mvp_default(), false).unwrap();
+            assert_eq!(trace.output_policy(), SearchOutputPolicy::Trace);
+            let summary = product_summary(trace).unwrap();
+            assert_eq!(summary.output_policy(), SearchOutputPolicy::Summary);
+            assert_eq!(summary.count_policy(), PcCountPolicy::CountUnique);
+            assert_eq!(
+                summary.solution_probability_policy(),
+                PcSolutionProbabilityPolicy::Omit
+            );
+            assert!(summary.supply().hold_enabled());
+            let universe = summary.piece_source().materialized_universe().unwrap();
+            assert!(universe.complete());
+            assert_eq!(universe.pattern_count(), 4_233_600);
+            assert_eq!(universe.sequence_at(0).len(), 11);
+            assert_eq!(universe.sequence_at(4_233_599).len(), 11);
+            let richer = compile_problem(
+                Fixture::GroundedOTwoLinesUnique,
+                PcExecutionPolicy::mvp_default(),
+                false,
+            )
+            .unwrap();
+            assert!(product_summary(richer).is_err());
         }
 
         #[test]

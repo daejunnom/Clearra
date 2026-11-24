@@ -20,11 +20,13 @@ use super::result::{capture_candidate_solution_coverage, SolutionCoverageCapture
 use super::{
     buildup::{
         verify_candidate, BuildUpMemoryComponents, BuildUpWorkspace, CandidateBuildResult,
-        CandidateWitnessMode,
+        CandidateIlcWork, CandidateWitnessMode,
     },
     catalog::GeometryCatalog,
     coverage_product::CoverageProductEvaluator,
-    geometry::{GeometryAdvance, GeometryCandidate, GeometrySearch, TargetGroup},
+    geometry::{
+        GeometryAdvance, GeometryCandidate, GeometrySearch, PhysicalPrefixMode, TargetGroup,
+    },
     parallel_coverage::SharedCoverage,
     reachability::{ReachabilityMetrics, SharedReachabilityTemplates},
     result::retains_buildable_identity_evidence,
@@ -330,6 +332,7 @@ pub(super) struct WorkerAggregate {
     pub coverage_product_edge_checks: usize,
     pub feasibility_states: usize,
     pub feasibility_rejected_candidates: usize,
+    pub candidate_ilc_work: CandidateIlcWork,
     pub peak_reachability_states: usize,
     pub total_reachability_states: usize,
     pub worker_retained_bytes: usize,
@@ -513,6 +516,7 @@ impl WorkerAggregate {
         self.feasibility_rejected_candidates = self
             .feasibility_rejected_candidates
             .saturating_add(other.feasibility_rejected_candidates);
+        self.candidate_ilc_work.accumulate(other.candidate_ilc_work);
         self.peak_reachability_states = self
             .peak_reachability_states
             .max(other.peak_reachability_states);
@@ -795,6 +799,7 @@ fn run_branch_worker_inner(
     aggregate.piece_language_cache_misses = workspace.piece_language_coverage_misses();
     aggregate.standard_bag_cache_hits = workspace.standard_bag_coverage_hits();
     aggregate.standard_bag_cache_misses = workspace.standard_bag_coverage_misses();
+    aggregate.candidate_ilc_work = workspace.candidate_ilc_work();
     aggregate.reachability_metrics = workspace.reachability_metrics();
     aggregate.legal_board_verified_negative_prunes =
         workspace.legal_board_verified_negative_prunes();
@@ -890,6 +895,12 @@ fn run_branch(
         .is_some();
     let mut failed_queue_rows = Vec::new();
     let solution_coverage_required = retains_solution_coverage_evidence(problem);
+    let exact_candidate_coverage = solution_coverage_required || retain_failed_queue_rows;
+    #[cfg(any(test, feature = "local-search-ab"))]
+    let exact_candidate_coverage = exact_candidate_coverage || solution_coverage_capture.is_some();
+    #[cfg(feature = "placement-dependency-pc")]
+    let shared_saturation_scope =
+        BuildUpWorkspace::shared_saturation_request_eligible(problem, exact_candidate_coverage);
     #[cfg(any(feature = "search-stage-profiling", feature = "wasm-stage-profiling"))]
     let mut geometry_advance_calls = 0_usize;
     loop {
@@ -917,12 +928,24 @@ fn run_branch(
         geometry_span.finish(1);
         match advancement {
             GeometryAdvance::Pending => {}
-            GeometryAdvance::Complete => break,
+            GeometryAdvance::Complete => {
+                if let Some(raw_count) = search.raw_candidate_progress() {
+                    local_ordinal = raw_count;
+                }
+                break;
+            }
             GeometryAdvance::ResourceIncomplete(reason) => {
                 truncated_reason = Some(reason);
                 break;
             }
             GeometryAdvance::Candidate(candidate) => {
+                if search.physical_prefix_mode() == PhysicalPrefixMode::SkipSubtrees {
+                    local_ordinal = search.last_original_candidate_ordinal().ok_or(
+                        WasmExactSearchError::InvalidProblem(
+                            "physical_prefix_candidate_ordinal_missing",
+                        ),
+                    )?;
+                }
                 if !problem.allows_solution_identity(&candidate.identity) {
                     continue;
                 }
@@ -934,24 +957,45 @@ fn run_branch(
                     local_ordinal = local_ordinal.saturating_add(1);
                     continue;
                 }
+                if candidate.physical_prefix_impossible() {
+                    aggregate.feasibility_rejected_candidates =
+                        aggregate.feasibility_rejected_candidates.saturating_add(1);
+                    local_ordinal = local_ordinal.saturating_add(1);
+                    #[cfg(all(feature = "local-search-ab", target_os = "linux"))]
+                    sample_branch_memory(
+                        memory_probe,
+                        local_ordinal,
+                        workspace,
+                        evaluator,
+                        aggregate,
+                        candidate_digest.retained_bytes(),
+                    );
+                    continue;
+                }
                 let target = targets.get(candidate.target_index as usize).ok_or(
                     WasmExactSearchError::InvalidProblem(
                         "wasm_geometry_candidate_target_out_of_range",
                     ),
                 )?;
-                let exact_candidate_coverage =
-                    solution_coverage_required || retain_failed_queue_rows;
-                #[cfg(any(test, feature = "local-search-ab"))]
-                let exact_candidate_coverage =
-                    exact_candidate_coverage || solution_coverage_capture.is_some();
+                #[cfg(feature = "placement-dependency-pc")]
+                let shared_boolean_complete = if shared_saturation_scope {
+                    workspace.adopt_shared_standard_bag_saturation(shared_coverage, control)?;
+                    workspace.shared_boolean_saturation_available()
+                } else {
+                    false
+                };
+                #[cfg(not(feature = "placement-dependency-pc"))]
+                let shared_boolean_complete = false;
                 let witness_mode = CandidateWitnessMode::for_candidate(
                     problem,
                     target,
                     || {
                         workspace.standard_bag_coverage_complete()
+                            || shared_boolean_complete
                             || shared_coverage.is_superset(target.possible_patterns.as_ref())
                     },
                     exact_candidate_coverage,
+                    workspace.can_use_first_pattern_witness() || shared_boolean_complete,
                 );
                 let mut result = verify_candidate(
                     problem,
@@ -976,7 +1020,7 @@ fn run_branch(
                     )?;
                 }
                 if let Some(coverage) = result.covered_patterns.as_ref() {
-                    shared_coverage.union(coverage)?;
+                    workspace.publish_worker_concrete_coverage(shared_coverage, coverage)?;
                     if solution_coverage_required {
                         solution_coverage = Some(coverage.clone());
                     }
@@ -1040,22 +1084,20 @@ fn run_branch(
                     retain_identity,
                     problem.output_policy().retains_representative_trace(),
                 )?;
+                #[cfg(feature = "placement-dependency-pc")]
+                if shared_saturation_scope {
+                    workspace.publish_early_standard_bag_saturation(shared_coverage, control)?;
+                }
                 local_ordinal = local_ordinal.saturating_add(1);
                 #[cfg(all(feature = "local-search-ab", target_os = "linux"))]
-                if let Some((probe, worker, branch_bytes)) = memory_probe {
-                    if local_ordinal & super::parallel_memory_peak::WORKER_SAMPLE_MASK == 0 {
-                        probe.worker(
-                            worker,
-                            worker_storage(
-                                workspace,
-                                evaluator,
-                                aggregate,
-                                branch_bytes.saturating_add(candidate_digest.retained_bytes()),
-                            ),
-                            false,
-                        );
-                    }
-                }
+                sample_branch_memory(
+                    memory_probe,
+                    local_ordinal,
+                    workspace,
+                    evaluator,
+                    aggregate,
+                    candidate_digest.retained_bytes(),
+                );
             }
         }
     }
@@ -1070,6 +1112,31 @@ fn run_branch(
         },
         local_ordinal,
     ))
+}
+
+#[cfg(all(feature = "local-search-ab", target_os = "linux"))]
+fn sample_branch_memory(
+    memory_probe: Option<(&super::parallel_memory_peak::MemoryProbe, usize, usize)>,
+    local_ordinal: usize,
+    workspace: &BuildUpWorkspace,
+    evaluator: &CoverageProductEvaluator,
+    aggregate: &WorkerAggregate,
+    candidate_digest_bytes: usize,
+) {
+    if let Some((probe, worker, branch_bytes)) = memory_probe {
+        if local_ordinal & super::parallel_memory_peak::WORKER_SAMPLE_MASK == 0 {
+            probe.worker(
+                worker,
+                worker_storage(
+                    workspace,
+                    evaluator,
+                    aggregate,
+                    branch_bytes.saturating_add(candidate_digest_bytes),
+                ),
+                false,
+            );
+        }
+    }
 }
 
 fn record_failed_queue_branch_row(
@@ -1391,7 +1458,7 @@ mod tests {
             solution_coverage_bytes: 800,
             candidate_digest_bytes: 900,
             // Nested memo payload must not be added to the total again.
-            standard_bag_memo_payload_bytes: 144,
+            standard_bag_memo_payload_bytes: 184,
             standard_bag_memo: StandardBagMemoAccounting {
                 product_policy: "adaptive",
                 product_layout: "state-major",
@@ -1409,6 +1476,20 @@ mod tests {
                 product_row_slots: 1024,
                 product_promotion_attempts: 2,
                 product_promotions: 1,
+                global_merge_calls: 17,
+                global_merge_saturated_skips: 9,
+                first_witness_calls: 0,
+                first_witness_mode_transitions: 0,
+                boolean_membership_calls: 13,
+                boolean_membership_mode_transitions: 1,
+                boolean_certified_membership_calls: 4,
+                boolean_negative_cache_hits: 7,
+                boolean_negative_roots: 3,
+                boolean_negative_capacity: 10,
+                boolean_negative_payload_bytes: 40,
+                shared_early_publications: 1,
+                shared_saturation_adoptions: 2,
+                shared_retire_transitions: 2,
             },
             // Eleven workers share this exact request owner once.
             shared_standard_bag_request_bytes: 64,
@@ -1447,7 +1528,7 @@ mod tests {
             total
                 .worker_memory_components
                 .standard_bag_memo_payload_bytes,
-            1584
+            2024
         );
         assert_eq!(total.standard_bag_memo_storage, "state-major");
         let memo = total.worker_memory_components.standard_bag_memo;
@@ -1455,7 +1536,9 @@ mod tests {
         assert_eq!(memo.union_payload_bytes, 704);
         assert_eq!(memo.product_directory_bytes, 176);
         assert_eq!(
-            memo.product_payload_bytes + memo.union_payload_bytes,
+            memo.product_payload_bytes
+                + memo.union_payload_bytes
+                + memo.boolean_negative_payload_bytes,
             total
                 .worker_memory_components
                 .standard_bag_memo_payload_bytes
@@ -1468,6 +1551,18 @@ mod tests {
         assert_eq!(memo.product_policy, "adaptive");
         assert_eq!(memo.product_promotion_attempts, 22);
         assert_eq!(memo.product_promotions, 11);
+        assert_eq!(memo.global_merge_calls, 187);
+        assert_eq!(memo.global_merge_saturated_skips, 99);
+        assert_eq!(memo.boolean_membership_calls, 143);
+        assert_eq!(memo.boolean_membership_mode_transitions, 11);
+        assert_eq!(memo.boolean_certified_membership_calls, 44);
+        assert_eq!(memo.boolean_negative_cache_hits, 77);
+        assert_eq!(memo.boolean_negative_roots, 33);
+        assert_eq!(memo.boolean_negative_capacity, 110);
+        assert_eq!(memo.boolean_negative_payload_bytes, 440);
+        assert_eq!(memo.shared_early_publications, 11);
+        assert_eq!(memo.shared_saturation_adoptions, 22);
+        assert_eq!(memo.shared_retire_transitions, 22);
         assert_eq!(memo.product_storage, "state-major");
         assert_eq!(memo.union_storage, "reference");
         let mut mixed = memo;

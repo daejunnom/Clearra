@@ -373,6 +373,27 @@ struct SelectedSetupDetail {
     depth: u8,
 }
 
+impl SelectedSetupDetail {
+    fn permits_prefix(self, board: u64, deleted_rows: u16, depth: u8) -> bool {
+        // A detail selects an exact prefix, not the PC continuation after it.
+        if depth > self.depth {
+            return true;
+        }
+        // Deletions use the original row coordinates and can only accumulate.
+        // A deleted row outside the selected prefix cannot be restored later.
+        if deleted_rows & !self.deleted_rows != 0 {
+            return false;
+        }
+        if depth == self.depth {
+            return deleted_rows == self.deleted_rows && board == self.board;
+        }
+        // Equal deleted-row masks put both boards in the same compacted frame.
+        // All selected clears have happened, so subsequent placements can only
+        // add occupied cells. Before that point, a clear can remove or move them.
+        deleted_rows != self.deleted_rows || board & !self.board == 0
+    }
+}
+
 const SETUP_ROW_BITS: usize = 12;
 const SETUP_ROW_MASK: u128 = (1_u128 << SETUP_ROW_BITS) - 1;
 const MAX_SETUP_ROW_ID: u32 = SETUP_ROW_MASK as u32 - 1;
@@ -503,6 +524,8 @@ pub(super) struct PartialBuildGraphBuilder {
     selected_detail: Option<SelectedSetupDetail>,
     prefix_only: bool,
     resource_truncated: bool,
+    #[cfg(test)]
+    reachability_query_count: usize,
 }
 
 impl PartialBuildGraphBuilder {
@@ -609,6 +632,8 @@ impl PartialBuildGraphBuilder {
             selected_detail: None,
             prefix_only,
             resource_truncated: false,
+            #[cfg(test)]
+            reachability_query_count: 0,
         })
     }
 
@@ -786,32 +811,63 @@ impl PartialBuildGraphBuilder {
             add_packed_piece(source_residual.packed_counts, super::piece_index(row.piece)).ok_or(
                 WasmExactSearchError::InvalidProblem("setup_partial_build_piece_count_overflow"),
             )?;
-        let placement_set_id = if source.depth < self.placement_identity_depth {
-            self.extend_placement_set(source.placement_set_id(), source.depth, row_id)?
-        } else {
-            0
-        };
+        // Do not retain an identity for a row with no accepted realization.
+        // The first surviving pose interns it; additional poses reuse that ID.
+        let mut placement_set_id = (source.depth >= self.placement_identity_depth).then_some(0);
         let remaining = source_residual.remaining ^ row.cells;
         for realization in catalog.instantiations(row_id, source.deleted_rows) {
-            if source.board & realization.lock_mask != 0
-                || !self.reachability.lock_reachable_instantiated(
-                    catalog,
-                    source.board,
-                    row.piece,
-                    realization,
-                )
-            {
+            if source.board & realization.lock_mask != 0 {
                 continue;
             }
-            let (board, cleared_current, _) = place_and_clear(
-                catalog.width(),
-                catalog.height(),
-                source.board | realization.lock_mask,
-            );
-            let Some(deleted_rows) =
+            let project = || {
+                let (board, cleared_current, _) = place_and_clear(
+                    catalog.width(),
+                    catalog.height(),
+                    source.board | realization.lock_mask,
+                );
                 merge_deleted_rows(catalog.height(), source.deleted_rows, cleared_current)
-            else {
+                    .map(|deleted_rows| (board, cleared_current, deleted_rows))
+            };
+            // For an exact detail, reject impossible prefix edges before any
+            // motion search or identity/node allocation. Ordinary setup search
+            // and post-detail continuations still project only reachable poses.
+            let projected = if let Some(detail) = self
+                .selected_detail
+                .filter(|detail| source.depth < detail.depth)
+            {
+                let Some(projected) = project() else {
+                    continue;
+                };
+                if !detail.permits_prefix(projected.0, projected.2, source.depth + 1) {
+                    continue;
+                }
+                Some(projected)
+            } else {
+                None
+            };
+            #[cfg(test)]
+            {
+                self.reachability_query_count += 1;
+            }
+            if !self.reachability.lock_reachable_instantiated(
+                catalog,
+                source.board,
+                row.piece,
+                realization,
+            ) {
                 continue;
+            }
+            let Some((board, cleared_current, deleted_rows)) = projected.or_else(project) else {
+                continue;
+            };
+            let placement_set_id = match placement_set_id {
+                Some(id) => id,
+                None => {
+                    let id =
+                        self.extend_placement_set(source.placement_set_id(), source.depth, row_id)?;
+                    placement_set_id = Some(id);
+                    id
+                }
             };
             let key = PartialStateKey::new(
                 board,
@@ -1295,6 +1351,147 @@ mod tests {
         let mut full = PlacementSetStorage::new(6);
         full.try_push(full_rows).expect("full rows");
         assert_eq!(full.get(1), Some(full_rows));
+    }
+
+    fn detail_fixture(board: u64, deleted_rows: u16, depth: u8) -> SelectedSetupDetail {
+        SelectedSetupDetail {
+            board,
+            placement_rows: 0,
+            rows: [0; MAX_SETUP_CANDIDATE_LOCKS as usize],
+            deleted_rows,
+            depth,
+        }
+    }
+
+    #[test]
+    fn selected_detail_prefix_pruning_respects_clear_frames_and_continuations() {
+        let detail = detail_fixture(0x2, 0b001, 3);
+        // The upper cell will descend when the still-required original row 0
+        // clears. Comparing these boards as subsets now would be unsound.
+        assert!(detail.permits_prefix(0x20, 0, 1));
+        assert!(detail.permits_prefix(0x2, 0b001, 2));
+        assert!(!detail.permits_prefix(0x20, 0b001, 2));
+        // Equal deletion counts are insufficient: original row identity matters.
+        assert!(!detail.permits_prefix(0x2, 0b010, 2));
+        assert!(!detail.permits_prefix(0x2, 0b011, 2));
+        assert!(detail.permits_prefix(0x2, 0b001, 3));
+        assert!(!detail.permits_prefix(0x2, 0, 3));
+        assert!(!detail.permits_prefix(0, 0b001, 3));
+        // Later PC completion is allowed to add blocks and clear more rows.
+        assert!(detail.permits_prefix(0x30, 0b011, 4));
+    }
+
+    #[test]
+    fn selected_detail_prefix_pruning_keeps_every_small_exact_clear_path() {
+        // Exhaust an over-approximation of two tetromino locks on a 4x2 board:
+        // every four-cell addition, without imposing a shape or motion rule.
+        // Every target accepted by the old final-state predicate must retain
+        // its whole prefix under the new early predicate. This also exercises
+        // clears that remove cells and shift surviving cells between row frames.
+        let additions = (0_u64..256)
+            .filter(|mask| mask.count_ones() == 4)
+            .collect::<Vec<_>>();
+        let mut checked_paths = 0_usize;
+        let mut paths_with_shifted_prefix = 0_usize;
+        for first in &additions {
+            let (prefix, first_clears, _) = place_and_clear(4, 2, *first);
+            let prefix_deleted = merge_deleted_rows(2, 0, first_clears).expect("first clear");
+            for second in &additions {
+                if prefix & *second != 0 {
+                    continue;
+                }
+                let (target, second_clears, _) = place_and_clear(4, 2, prefix | *second);
+                let Some(target_deleted) = merge_deleted_rows(2, prefix_deleted, second_clears)
+                else {
+                    continue;
+                };
+                let detail = detail_fixture(target, target_deleted, 2);
+                assert!(detail.permits_prefix(0, 0, 0));
+                assert!(detail.permits_prefix(prefix, prefix_deleted, 1));
+                assert!(detail.permits_prefix(target, target_deleted, 2));
+                checked_paths += 1;
+                if prefix & !target != 0 {
+                    paths_with_shifted_prefix += 1;
+                }
+            }
+        }
+        assert!(checked_paths > 0);
+        assert!(paths_with_shifted_prefix > 0);
+    }
+
+    fn isolated_setup_edge_fixture() -> (GeometryCatalog, PartialBuildGraphBuilder, ExecutionControl)
+    {
+        use clearra_core_domain::pc::pc_target::PcTarget;
+        use clearra_pc_graph::request::{OpeningPcSearchQuery, PcHoldPolicy};
+        use clearra_problem::ProblemCompiler;
+
+        let query = OpeningPcSearchQuery::new(PcTarget::two_lines())
+            .with_hold_policy(PcHoldPolicy::Disabled);
+        let problem = ProblemCompiler::compile_opening_pc(&query).expect("two-line problem");
+        let catalog = GeometryCatalog::compile(&problem).expect("two-line catalog");
+        let control = ExecutionControl::new(ExecutionCancellationToken::new());
+        let mut counts = [0_u8; 7];
+        counts[super::super::piece_index(PieceKind::O)] = 5;
+        // No geometry enumeration is needed to exercise one admitted row's
+        // physical edge and identity lifetime. The empty candidate family is
+        // test-local and is never used as a product completeness certificate.
+        let mut geometry = GeometryFamilyCompileSession::new_with_complete_candidates(
+            catalog.required_cells(),
+            vec![PieceMultisetKey::from_counts(counts)],
+            vec![0, pack_piece_counts(counts)],
+            std::sync::Arc::from(Vec::new()),
+        )
+        .expect("empty geometry fixture");
+        let GeometryFamilyCompileAdvance::Complete(compiled) =
+            geometry.advance(&catalog, 1, &control)
+        else {
+            panic!("empty geometry fixture must finish in one step");
+        };
+        let mut builder = PartialBuildGraphBuilder::new(compiled, &catalog, &problem, 2)
+            .expect("edge fixture builder");
+        builder.available_rows.push(
+            catalog
+                .skeleton_id(PieceKind::O, 0xc03)
+                .expect("floor O row"),
+        );
+        builder.edge_source = Some(ActivePartialState { node: 0 });
+        builder.phase = PartialBuildPhase::EmitEdges;
+        (catalog, builder, control)
+    }
+
+    #[test]
+    fn setup_rows_without_accepted_poses_do_not_intern_placement_sets() {
+        let (catalog, mut blocked, control) = isolated_setup_edge_fixture();
+        blocked.nodes[0].board = catalog.required_cells();
+        blocked
+            .emit_edge_task(&catalog, &control)
+            .expect("blocked edge");
+        assert_eq!(blocked.placement_sets.len(), 1);
+        assert!(blocked.source_edges.is_empty());
+
+        let (catalog, mut reachable, control) = isolated_setup_edge_fixture();
+        reachable
+            .emit_edge_task(&catalog, &control)
+            .expect("reachable edge");
+        assert!(!reachable.source_edges.is_empty());
+        assert_eq!(reachable.placement_sets.len(), 2);
+        assert!(reachable.reachability_query_count > 0);
+        assert!(reachable
+            .source_edges
+            .iter()
+            .all(|edge| reachable.nodes[edge.edge.to as usize].placement_set_id() == 1));
+    }
+
+    #[test]
+    fn wrong_setup_detail_skips_motion_and_identity_storage() {
+        let (catalog, mut builder, control) = isolated_setup_edge_fixture();
+        builder.selected_detail = Some(detail_fixture(0xc03 << 2, 0, 1));
+        builder
+            .emit_edge_task(&catalog, &control)
+            .expect("detail edge");
+        assert_eq!(builder.reachability_query_count, 0);
+        assert_eq!(builder.placement_sets.len(), 1);
+        assert!(builder.source_edges.is_empty());
     }
 
     #[test]

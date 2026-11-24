@@ -35,8 +35,8 @@ export function addRecoveryMiddle(request: RecoveryBuildRequest): RecoveryBuildR
   return { ...request, resultFrame: 'shared', nextMiddleId: id + 1,
     extraMiddles: [...(request.extraMiddles ?? []), { id, mask: 0n, supply: '' }] };
 }
-/** Literal product rule: enable removal only with FOUR middle fields, not four total fields. */
-export function canRemoveRecoveryMiddle(request: RecoveryBuildRequest): boolean { return recoveryMiddleCount(request) >= 4; }
+/** Keep the required first middle; every additional middle can be removed. */
+export function canRemoveRecoveryMiddle(request: RecoveryBuildRequest): boolean { return recoveryMiddleCount(request) > 1; }
 export function removeRecoveryMiddle(request: RecoveryBuildRequest): RecoveryBuildRequest {
   if (!canRemoveRecoveryMiddle(request)) return request;
   const stages = recoveryStageEntries(request).slice(0, -1);

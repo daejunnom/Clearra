@@ -23,9 +23,11 @@ const MAX_JSON_BYTES = 4 * 1024 * 1024;
 const INDEPENDENT_UNION_STORAGE = "CLEARRA_STANDARD_BAG_UNION_MEMO";
 const OPTIMIZATION_AXES = new Set([INDEPENDENT_UNION_STORAGE,
   "CLEARRA_STRICT_CATALOG_GUARDS", "CLEARRA_STANDARD_BAG_ABSORB",
+  "CLEARRA_REACHABILITY_VISITED_FIRST", "CLEARRA_STANDARD_BAG_GLOBAL_SATURATION",
   "CLEARRA_STRICT_LANGUAGE_FRONTIER", "CLEARRA_STRICT_SUBSUMPTION",
   "CLEARRA_STANDARD_BAG_UNION_MEMO_MAX_ENTRIES",
-  "CLEARRA_STRICT_STAGE_PROFILE", "CLEARRA_STRICT_STAGE_LEGACY_UPPER"]);
+  "CLEARRA_STRICT_STAGE_PROFILE", "CLEARRA_STRICT_STAGE_LEGACY_UPPER",
+  "CLEARRA_SEARCH_STAGE_PROFILE", "CLEARRA_SEARCH_MEMORY_PROFILE"]);
 const FIXED_MEMO_PROCESS = Object.freeze({
   CLEARRA_STANDARD_BAG_MEMO: "reference",
   CLEARRA_STANDARD_BAG_PRODUCT_MEMO_LAYOUT: "adaptive",
@@ -73,6 +75,8 @@ const MODES = Object.freeze({
   CLEARRA_MOVEMENT_CLEAR_CERTIFICATES: "0",
   CLEARRA_MINIMUM_DOMAIN_CUTOFF: "0",
   CLEARRA_MINIMUM_DOMAIN_WORK: "0",
+  CLEARRA_REACHABILITY_VISITED_FIRST: "0",
+  CLEARRA_STANDARD_BAG_GLOBAL_SATURATION: "0",
   CLEARRA_FIRST_KICK_INTERVAL: "0",
   CLEARRA_CONDITIONAL_ORDER: "0",
   CLEARRA_TERMINAL_IDENTITY_MOVE: "0",
@@ -96,9 +100,16 @@ const LEGACY_OPTIONAL_AXES = [
 const LEGACY_NULLABLE_AXES = [
   "ordered_kick_interval_mode", "ilc_lazy_frame_mode", "no_entry_components_mode", "same_tile_parent_reuse_mode",
 ];
+// Older source-bound reports predate these product optimizations. New reports
+// must record their explicit off arms so a geometry proof cannot mix axes.
+const PRODUCT_OPTIMIZATION_AXES = Object.freeze({
+  CLEARRA_REACHABILITY_VISITED_FIRST: "reachability_visited_first_mode",
+  CLEARRA_STANDARD_BAG_GLOBAL_SATURATION: "standard_bag_global_saturation_mode",
+});
 const KNOWN_MODE_KEYS = new Set([
   "output_mode", "structural_mode", AXIS, OPERATION_MASKS_EXPERIMENT.axis, STRICT_PREFIX_EXPERIMENT.axis,
   ...NEUTRAL_AXES, ...LEGACY_OPTIONAL_AXES, ...LEGACY_NULLABLE_AXES,
+  ...Object.values(PRODUCT_OPTIMIZATION_AXES),
 ]);
 const CASES = Object.freeze({
   small: Object.freeze({
@@ -370,6 +381,7 @@ export function validatedProofArm(report, receipt, step, options, binarySha, out
     (experiment.axis === AXIS || report[AXIS] === "0") &&
     NEUTRAL_AXES.every((name) => report[name] === "0") && LEGACY_OPTIONAL_AXES.every(neutralFollowOn) &&
     LEGACY_NULLABLE_AXES.every((name) => report[name] === "0" || (!strictSource && report[name] == null)) &&
+    Object.values(PRODUCT_OPTIMIZATION_AXES).every((name) => !Object.hasOwn(report, name) || report[name] === "0") &&
     (!strictSource || Object.keys(report).every((key) => !key.endsWith("_mode") || KNOWN_MODE_KEYS.has(key))) &&
     (operationMasks ? outputMode === "solution-coverage" :
       [OPERATION_MASKS_EXPERIMENT.axis, "operation_masks", "operation_mask_representative"]
@@ -414,8 +426,13 @@ export function validatedProofArm(report, receipt, step, options, binarySha, out
   const process = report.other_process_configuration;
   requireThat(typeof report.backend_contract === "string" && report.backend_contract.length > 0 &&
     process && typeof process === "object" && !Array.isArray(process) &&
+    Object.entries(PRODUCT_OPTIMIZATION_AXES).every(([key, mode]) =>
+      (!Object.hasOwn(report, mode) && !Object.hasOwn(process, key)) ||
+      (report[mode] === "0" && process[key] === "0")) &&
     !Object.keys(process).some((key) => OPTIMIZATION_AXES.has(key.toUpperCase()) &&
-      !(unionStorage && key === INDEPENDENT_UNION_STORAGE)) &&
+      !(unionStorage && key === INDEPENDENT_UNION_STORAGE) &&
+      !(Object.hasOwn(PRODUCT_OPTIMIZATION_AXES, key) && process[key] === "0" &&
+        report[PRODUCT_OPTIMIZATION_AXES[key]] === "0")) &&
     (!unionStorage || (process[INDEPENDENT_UNION_STORAGE] === unionStorage &&
       Object.entries(FIXED_MEMO_PROCESS).every(([key, value]) => process[key] === value))),
   step.name + ": missing or non-isolated benchmark runtime configuration");

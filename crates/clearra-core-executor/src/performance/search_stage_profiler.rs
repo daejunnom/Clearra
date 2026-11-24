@@ -121,6 +121,18 @@ pub(crate) enum ExecutorSearchStage {
     WasmSessionCatalogCompile,
     WasmSessionSupplyCompile,
     WasmSessionGeometryPrepare,
+    #[cfg_attr(not(feature = "parallel"), allow(dead_code))]
+    WasmParallelPlan,
+    #[cfg_attr(not(feature = "parallel"), allow(dead_code))]
+    WasmParallelInitialize,
+    #[cfg_attr(not(feature = "parallel"), allow(dead_code))]
+    WasmParallelWorkAndWait,
+    #[cfg_attr(not(feature = "parallel"), allow(dead_code))]
+    WasmParallelMerge,
+    #[cfg_attr(not(feature = "parallel"), allow(dead_code))]
+    WasmSharedCoveragePublish,
+    #[cfg_attr(not(feature = "parallel"), allow(dead_code))]
+    WasmSharedCoverageRetire,
     WasmSetupGeometryCompile,
     WasmSetupPartialBuild,
     WasmSetupCoverageGraphCompile,
@@ -129,6 +141,10 @@ pub(crate) enum ExecutorSearchStage {
     WasmCandidateFeasibility,
     WasmBuildOrderReachability,
     WasmCoverageLanguageProduct,
+    #[cfg(feature = "placement-dependency-pc")]
+    PlacementDependencyPc,
+    #[cfg(feature = "placement-dependency-pc")]
+    PlacementDependencyPcLanguage,
     WasmWitnessSearch,
     WasmCandidateResultReduce,
     WasmFinalCoverage,
@@ -144,6 +160,7 @@ pub(crate) enum ExecutorSearchStage {
     FinesseWitness,
     #[cfg(any(
         test,
+        feature = "placement-dependency-pc",
         all(
             feature = "local-search-ab",
             feature = "parallel",
@@ -153,6 +170,7 @@ pub(crate) enum ExecutorSearchStage {
     StrictPrefixUpper,
     #[cfg(any(
         test,
+        feature = "placement-dependency-pc",
         all(
             feature = "local-search-ab",
             feature = "parallel",
@@ -162,6 +180,7 @@ pub(crate) enum ExecutorSearchStage {
     StrictPrefixReverse,
     #[cfg(any(
         test,
+        feature = "placement-dependency-pc",
         all(
             feature = "local-search-ab",
             feature = "parallel",
@@ -242,6 +261,12 @@ impl ExecutorSearchStage {
         Self::WasmSessionCatalogCompile,
         Self::WasmSessionSupplyCompile,
         Self::WasmSessionGeometryPrepare,
+        Self::WasmParallelPlan,
+        Self::WasmParallelInitialize,
+        Self::WasmParallelWorkAndWait,
+        Self::WasmParallelMerge,
+        Self::WasmSharedCoveragePublish,
+        Self::WasmSharedCoverageRetire,
         Self::WasmSetupGeometryCompile,
         Self::WasmSetupPartialBuild,
         Self::WasmSetupCoverageGraphCompile,
@@ -250,6 +275,10 @@ impl ExecutorSearchStage {
         Self::WasmCandidateFeasibility,
         Self::WasmBuildOrderReachability,
         Self::WasmCoverageLanguageProduct,
+        #[cfg(feature = "placement-dependency-pc")]
+        Self::PlacementDependencyPc,
+        #[cfg(feature = "placement-dependency-pc")]
+        Self::PlacementDependencyPcLanguage,
         Self::WasmWitnessSearch,
         Self::WasmCandidateResultReduce,
         Self::WasmFinalCoverage,
@@ -265,6 +294,7 @@ impl ExecutorSearchStage {
         Self::FinesseWitness,
         #[cfg(any(
             test,
+            feature = "placement-dependency-pc",
             all(
                 feature = "local-search-ab",
                 feature = "parallel",
@@ -274,6 +304,7 @@ impl ExecutorSearchStage {
         Self::StrictPrefixUpper,
         #[cfg(any(
             test,
+            feature = "placement-dependency-pc",
             all(
                 feature = "local-search-ab",
                 feature = "parallel",
@@ -283,6 +314,7 @@ impl ExecutorSearchStage {
         Self::StrictPrefixReverse,
         #[cfg(any(
             test,
+            feature = "placement-dependency-pc",
             all(
                 feature = "local-search-ab",
                 feature = "parallel",
@@ -356,6 +388,12 @@ impl ExecutorSearchStage {
             Self::WasmSessionCatalogCompile => "wasm.session.catalog_compile",
             Self::WasmSessionSupplyCompile => "wasm.session.supply_compile",
             Self::WasmSessionGeometryPrepare => "wasm.session.geometry_prepare",
+            Self::WasmParallelPlan => "wasm.parallel.plan",
+            Self::WasmParallelInitialize => "wasm.parallel.initialize",
+            Self::WasmParallelWorkAndWait => "wasm.parallel.work_and_wait",
+            Self::WasmParallelMerge => "wasm.parallel.merge",
+            Self::WasmSharedCoveragePublish => "wasm.parallel.shared_coverage_publish",
+            Self::WasmSharedCoverageRetire => "wasm.parallel.shared_coverage_retire",
             Self::WasmSetupGeometryCompile => "wasm.setup.geometry_compile",
             Self::WasmSetupPartialBuild => "wasm.setup.partial_build",
             Self::WasmSetupCoverageGraphCompile => "wasm.setup.coverage_graph_compile",
@@ -364,6 +402,12 @@ impl ExecutorSearchStage {
             Self::WasmCandidateFeasibility => "wasm.candidate.feasibility",
             Self::WasmBuildOrderReachability => "wasm.candidate.build_order_reachability",
             Self::WasmCoverageLanguageProduct => "wasm.candidate.coverage_language_product",
+            #[cfg(feature = "placement-dependency-pc")]
+            Self::PlacementDependencyPc => "wasm.candidate.placement_dependency_pc",
+            #[cfg(feature = "placement-dependency-pc")]
+            Self::PlacementDependencyPcLanguage => {
+                "wasm.candidate.placement_dependency_pc.language"
+            }
             Self::WasmWitnessSearch => "wasm.candidate.witness_search",
             Self::WasmCandidateResultReduce => "wasm.candidate.result_reduce",
             Self::WasmFinalCoverage => "wasm.finalize.coverage",
@@ -382,6 +426,7 @@ impl ExecutorSearchStage {
             }
             #[cfg(any(
                 test,
+                feature = "placement-dependency-pc",
                 all(
                     feature = "local-search-ab",
                     feature = "parallel",
@@ -391,6 +436,7 @@ impl ExecutorSearchStage {
             Self::StrictPrefixUpper => "wasm.candidate.strict_prefix.upper",
             #[cfg(any(
                 test,
+                feature = "placement-dependency-pc",
                 all(
                     feature = "local-search-ab",
                     feature = "parallel",
@@ -400,6 +446,7 @@ impl ExecutorSearchStage {
             Self::StrictPrefixReverse => "wasm.candidate.strict_prefix.reverse",
             #[cfg(any(
                 test,
+                feature = "placement-dependency-pc",
                 all(
                     feature = "local-search-ab",
                     feature = "parallel",
@@ -427,6 +474,8 @@ impl ExecutorSearchStage {
 #[derive(Clone, Copy, Debug, Default)]
 struct StageTotals {
     duration: Duration,
+    measured_duration: Duration,
+    sample_count: u64,
     invocation_count: u64,
     work_item_count: u64,
 }
@@ -545,6 +594,10 @@ impl Drop for WorkerSearchProfileGuard {
 fn add_stage_totals(totals: &mut SearchStageTotals, additional: SearchStageTotals) {
     for (total, next) in totals.iter_mut().zip(additional) {
         total.duration = total.duration.saturating_add(next.duration);
+        total.measured_duration = total
+            .measured_duration
+            .saturating_add(next.measured_duration);
+        total.sample_count = total.sample_count.saturating_add(next.sample_count);
         total.invocation_count = total.invocation_count.saturating_add(next.invocation_count);
         total.work_item_count = total.work_item_count.saturating_add(next.work_item_count);
     }
@@ -634,6 +687,8 @@ impl SearchStageSpan {
                 };
                 let stage = &mut profile.totals[stage as usize];
                 stage.duration = stage.duration.saturating_add(elapsed);
+                stage.measured_duration = stage.measured_duration.saturating_add(elapsed);
+                stage.sample_count = stage.sample_count.saturating_add(1);
                 stage.invocation_count = stage.invocation_count.saturating_add(1);
                 stage.work_item_count = stage.work_item_count.saturating_add(work_items);
             });
@@ -653,13 +708,8 @@ impl SearchStageSpan {
         if self.scale == 0 {
             return;
         }
-        let elapsed = self
-            .started
-            .take()
-            .map(|started| {
-                stage_elapsed(started).saturating_mul(self.scale.min(u64::from(u32::MAX)) as u32)
-            })
-            .unwrap_or_default();
+        let measured_elapsed = self.started.take().map(stage_elapsed).unwrap_or_default();
+        let elapsed = measured_elapsed.saturating_mul(self.scale.min(u64::from(u32::MAX)) as u32);
         ACTIVE_PROFILE.with(|profile| {
             let mut profile = profile.borrow_mut();
             let Some(profile) = profile.as_mut() else {
@@ -667,6 +717,8 @@ impl SearchStageSpan {
             };
             let stage = &mut profile.totals[self.stage as usize];
             stage.duration = stage.duration.saturating_add(elapsed);
+            stage.measured_duration = stage.measured_duration.saturating_add(measured_elapsed);
+            stage.sample_count = stage.sample_count.saturating_add(1);
             stage.invocation_count = stage.invocation_count.saturating_add(self.scale);
             stage.work_item_count = stage
                 .work_item_count
@@ -696,6 +748,11 @@ pub struct ExecutorSearchProfileStage {
     /// their durations and counters; overlapping stages may count the same
     /// interval on one thread or across workers.
     pub duration_ns: u64,
+    /// Time measured by the observed spans, before expanding sampled calls.
+    /// This still includes nested spans and work on parallel threads.
+    pub measured_duration_ns: u64,
+    /// Actual number of observed spans, before sampling expansion.
+    pub sample_count: u64,
     pub invocation_count: u64,
     pub work_item_count: u64,
 }
@@ -775,6 +832,11 @@ impl ExecutorSearchProfileSession {
             .map(|(stage, totals)| ExecutorSearchProfileStage {
                 name: stage.name(),
                 duration_ns: totals.duration.as_nanos().min(u128::from(u64::MAX)) as u64,
+                measured_duration_ns: totals
+                    .measured_duration
+                    .as_nanos()
+                    .min(u128::from(u64::MAX)) as u64,
+                sample_count: totals.sample_count,
                 invocation_count: totals.invocation_count,
                 work_item_count: totals.work_item_count,
             })
@@ -842,6 +904,7 @@ mod tests {
             session.finish()
         });
         assert_eq!(stage(&stages).invocation_count, 5);
+        assert_eq!(stage(&stages).sample_count, 3);
         assert_eq!(stage(&stages).work_item_count, 27);
     }
 
@@ -859,8 +922,10 @@ mod tests {
         });
         let (caller, pool) = session.finish_partitioned();
         assert_eq!(stage(&caller).invocation_count, 1);
+        assert_eq!(stage(&caller).sample_count, 1);
         assert_eq!(stage(&caller).work_item_count, 3);
         assert_eq!(stage(&pool).invocation_count, 2);
+        assert_eq!(stage(&pool).sample_count, 1);
         assert_eq!(stage(&pool).work_item_count, 10);
     }
 
@@ -911,5 +976,25 @@ mod tests {
         .join()
         .expect("worker handled panic");
         assert_eq!(stage(&session.finish()).work_item_count, 4);
+    }
+
+    #[test]
+    fn sampled_profile_keeps_actual_measurements_separate_from_expanded_estimates() {
+        let session = ExecutorSearchProfileSession::start().unwrap();
+        SearchStageSpan::begin_scaled(STAGE, 0).finish(99);
+        SearchStageSpan::begin_scaled(STAGE, 1_024).finish(7);
+        let rows = session.finish();
+        let row = stage(&rows);
+        assert_eq!(row.sample_count, 1);
+        assert_eq!(row.invocation_count, 1_024);
+        assert_eq!(row.work_item_count, 7 * 1_024);
+        assert_eq!(
+            row.duration_ns,
+            row.measured_duration_ns.saturating_mul(1_024)
+        );
+
+        let fresh = ExecutorSearchProfileSession::start().unwrap().finish();
+        assert_eq!(stage(&fresh).sample_count, 0);
+        assert_eq!(stage(&fresh).measured_duration_ns, 0);
     }
 }

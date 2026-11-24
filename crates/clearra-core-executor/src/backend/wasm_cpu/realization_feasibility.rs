@@ -82,6 +82,16 @@ impl RealizationFeasibilityWorkspace {
         if !crate::search_prune_policy::dependency_relaxation_enabled() {
             return false;
         }
+        Self::relaxed_ilc_order_is_impossible(catalog, candidate)
+    }
+
+    /// The existing complete-candidate closure without a product policy gate.
+    /// Shared by the optional prepass and prefix-subset differential tests;
+    /// a pass still does not certify physical buildability.
+    pub(super) fn relaxed_ilc_order_is_impossible(
+        catalog: &GeometryCatalog,
+        candidate: &GeometryCandidate,
+    ) -> bool {
         let operation_count = candidate.row_ids().len();
         if operation_count == 0 || operation_count > MAX_BOARD64_PIECES {
             return false;

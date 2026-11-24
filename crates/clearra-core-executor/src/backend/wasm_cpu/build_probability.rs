@@ -2623,6 +2623,7 @@ impl CompactBuildProbabilitySession {
                         .expect("candidate pattern group belongs to the build probability universe")
             },
             solution_coverage_required,
+            false,
         );
         let result = if self.finesse_requested {
             verify_candidate_for_completion_with_finesse(
@@ -3663,6 +3664,7 @@ impl CompactBuildProbabilitySession {
                             )
                 },
                 solution_coverage_required,
+                false,
             );
             let result = verify_candidate_for_completion_with_finesse(
                 &self.problem,
@@ -4908,22 +4910,29 @@ fn checked_finesse_report_build_future_upper_bound(
             .checked_add(core::mem::size_of::<Vec<CostedGeometryLanguage>>() as u128)?
             .checked_add(TREE_ENTRY_OVERHEAD_UPPER_BOUND)?,
     )?;
-    // `build_finesse_report` first unions alternatives that share one exact
-    // solution key. Policy evaluation then unions the distinct solution
-    // languages to calculate the overall adaptive cost. Any second source
-    // language can therefore participate in one of those union stages.
-    let language_union_required = language_count > 1;
+    // Oracle combines the already evaluated per-queue minima, so it needs
+    // only same-key alternative unions. Visible-7 still needs the distinct
+    // solutions' joint language: choosing a solution before observing the
+    // unknown suffix would change its online policy.
+    let solution_union_required =
+        language_count > 1 && !finesse_materials_have_unique_solution_keys(materials);
+    let overall_union_required =
+        language_count > 1 && !matches!(pattern_knowledge, FinessePatternKnowledge::Oracle);
+    let language_union_required = solution_union_required || overall_union_required;
     let (effective_node_count, union_peak) = if !language_union_required {
         (node_count, 0_u128)
     } else {
-        let shift = u32::try_from(node_count).ok()?;
-        let union_state_count = 1_u128.checked_shl(shift)?.checked_sub(1)?;
+        let union_state_count = checked_finesse_union_state_upper_bound(materials, node_count)?;
         let pair_bytes = node_count.checked_mul(
             (core::mem::size_of::<usize>() + core::mem::size_of::<GeometryNodeId>()) as u128,
         )?;
+        // Three pair copies cover interned keys, queued states and the
+        // current state. Nodes can coexist with their Vec backing while
+        // converting to boxed storage; both union stages also retain their
+        // input languages until construction completes.
         let per_state = pair_bytes
             .checked_mul(3)?
-            .checked_add(core::mem::size_of::<GeometryLanguageNode>() as u128)?
+            .checked_add((core::mem::size_of::<GeometryLanguageNode>() as u128).checked_mul(3)?)?
             .checked_add(
                 edge_count.checked_mul(core::mem::size_of::<CostedGeometryEdge>() as u128)?,
             )?
@@ -4931,12 +4940,20 @@ fn checked_finesse_report_build_future_upper_bound(
         let retained = union_state_count.checked_mul(per_state)?;
         let current_group_scratch = edge_count.checked_mul(
             pair_bytes
+                .checked_mul(3)?
                 .checked_add(core::mem::size_of::<CostedGeometryEdge>() as u128)?
                 .checked_add(TREE_ENTRY_OVERHEAD_UPPER_BOUND)?,
         )?;
+        let coexisting_union_stages =
+            1 + u128::from(solution_union_required && overall_union_required);
         (
-            union_state_count,
-            retained.checked_add(current_group_scratch)?,
+            // Single-key languages bypass union and retain their original
+            // node storage, including any unreachable nodes a valid input
+            // may contain. Keep that bound for their product evaluators.
+            node_count.max(union_state_count),
+            retained
+                .checked_mul(coexisting_union_stages)?
+                .checked_add(current_group_scratch)?,
         )
     };
 
@@ -4981,6 +4998,86 @@ fn checked_finesse_report_build_future_upper_bound(
         .checked_add(retained_cost_tables)?
         .checked_add(report_bytes.checked_mul(2)?)?
         .checked_add(movement_peak)
+}
+
+fn finesse_materials_have_unique_solution_keys(materials: &[FinesseSearchMaterial]) -> bool {
+    // Production material is sorted by exact key before this boundary. A
+    // noncanonical caller conservatively keeps the union allowance instead
+    // of allocating an unguarded temporary key set just to size the guard.
+    if materials.iter().any(|material| {
+        material
+            .languages
+            .windows(2)
+            .any(|pair| pair[0].0 >= pair[1].0)
+    }) {
+        return false;
+    }
+    for (index, material) in materials.iter().enumerate() {
+        for previous in &materials[..index] {
+            let mut left = material.languages.iter().peekable();
+            let mut right = previous.languages.iter().peekable();
+            while let (Some((left_key, _)), Some((right_key, _))) = (left.peek(), right.peek()) {
+                match left_key.cmp(right_key) {
+                    core::cmp::Ordering::Less => {
+                        left.next();
+                    }
+                    core::cmp::Ordering::Greater => {
+                        right.next();
+                    }
+                    core::cmp::Ordering::Equal => return false,
+                }
+            }
+        }
+    }
+    true
+}
+
+fn checked_finesse_union_state_upper_bound(
+    materials: &[FinesseSearchMaterial],
+    node_count: u128,
+) -> Option<u128> {
+    // Every reachable determinized state has an action/evidence prefix in
+    // at least one original language. Distinct prefixes map to distinct
+    // input edge histories, while several prefixes may reach one union
+    // state. The sum of input prefix counts therefore bounds all reachable
+    // union states, including a union of prior same-key unions. No new
+    // prefix is introduced by either union stage.
+    //
+    // CostedGeometryLanguage::new validates depth(child) = depth(parent)+1.
+    // Multiplying the maximum outgoing degree at each depth bounds its
+    // prefix count without a temporary memo or exponential subset scan.
+    let prefix_bound = materials
+        .iter()
+        .flat_map(|material| material.languages.iter())
+        .try_fold(0_u128, |total, (_, language)| {
+            let max_depth = language.nodes().iter().map(|node| node.depth()).max()?;
+            let mut prefixes = 1_u128;
+            let mut frontier = 1_u128;
+            for depth in 0..max_depth {
+                let degree = language
+                    .nodes()
+                    .iter()
+                    .filter(|node| node.depth() == depth)
+                    .map(|node| node.edges().len() as u128)
+                    .max()
+                    .unwrap_or(0);
+                frontier = frontier.checked_mul(degree)?;
+                prefixes = prefixes.checked_add(frontier)?;
+                if frontier == 0 {
+                    break;
+                }
+            }
+            total.checked_add(prefixes)
+        });
+    let subset_bound = u32::try_from(node_count)
+        .ok()
+        .and_then(|shift| 1_u128.checked_shl(shift))
+        .and_then(|count| count.checked_sub(1));
+    match (prefix_bound, subset_bound) {
+        (Some(prefixes), Some(subsets)) => Some(prefixes.min(subsets)),
+        (Some(bound), None) | (None, Some(bound)) => Some(bound),
+        (None, None) => None,
+    }
 }
 
 fn checked_finesse_movement_witness_peak_bytes(
@@ -5308,13 +5405,14 @@ pub(super) fn build_finesse_report(
     } else {
         visible.as_ref()
     };
-    let representative_witness = if fixed_queue && classes.classes().len() == 1 {
+    // Oracle already selected the same strict minimum (cost, solution,
+    // class) while evaluating its cost tables. Its selected-language replay
+    // also serves a fixed queue, without reevaluating every solution's DP.
+    // Keep the established fixed Visible-7 reconstruction path unchanged.
+    let representative_witness = if fixed_queue && classes.classes().len() == 1 && !oracle_requested
+    {
         fixed_queue_representative_witness(
-            if oracle_requested {
-                "oracle"
-            } else {
-                "visible-7"
-            },
+            "visible-7",
             &languages,
             &classes,
             initial_hold,
@@ -5684,6 +5782,12 @@ fn evaluate_finesse_policy(
     control: &ExecutionControl,
 ) -> Result<EvaluatedFinessePolicy, WasmExactSearchError> {
     let product_span = SearchStageSpan::begin(ExecutorSearchStage::FinesseProductDp);
+    let mut oracle_overall_costs = (policy == "oracle")
+        .then(|| QueueCostTable::unreachable(classes.classes().len()))
+        .transpose()
+        .map_err(|_| {
+            WasmExactSearchError::InvalidProblem("wasm_finesse_overall_cost_storage_unavailable")
+        })?;
     let mut solutions = Vec::new();
     solutions.try_reserve_exact(languages.len()).map_err(|_| {
         WasmExactSearchError::InvalidProblem("wasm_finesse_solution_cost_storage_unavailable")
@@ -5703,9 +5807,30 @@ fn evaluate_finesse_policy(
             control,
             "wasm_finesse_policy_evaluation_failed",
         )?;
+        if let Some(overall) = &mut oracle_overall_costs {
+            // With the entire queue known, min over the union of accepted
+            // routes equals min of the already evaluated solution costs.
+            // Fold per queue before aggregation; min of solution averages
+            // would choose one solution for all queues and is not equivalent.
+            for class_index in 0..classes.classes().len() {
+                if class_index % 64 == 0 {
+                    ensure_finesse_not_cancelled(control)?;
+                }
+                if let Some(cost) = costs.get(class_index).flatten() {
+                    overall.set_min(class_index, cost).map_err(|error| {
+                        map_finesse_product_error(
+                            error,
+                            "wasm_finesse_overall_policy_evaluation_failed",
+                        )
+                    })?;
+                }
+            }
+        }
         solutions.push((solution_key.clone(), costs));
     }
-    let overall_costs = if languages.is_empty() {
+    let overall_costs = if let Some(costs) = oracle_overall_costs {
+        costs
+    } else if languages.is_empty() {
         QueueCostTable::unreachable(classes.classes().len()).map_err(|_| {
             WasmExactSearchError::InvalidProblem("wasm_finesse_overall_cost_storage_unavailable")
         })?
@@ -5738,8 +5863,10 @@ fn evaluate_finesse_policy(
             "wasm_finesse_overall_policy_evaluation_failed",
         )?
     };
-    product_span
-        .finish((languages.len().saturating_add(1)).saturating_mul(classes.classes().len()) as u64);
+    let policy_evaluations = languages
+        .len()
+        .saturating_add(usize::from(policy != "oracle" && !languages.is_empty()));
+    product_span.finish(policy_evaluations.saturating_mul(classes.classes().len()) as u64);
 
     let aggregation_span = SearchStageSpan::begin(ExecutorSearchStage::FinesseAggregation);
     let mut solution_averages = Vec::new();
@@ -7880,6 +8007,531 @@ mod finesse_integration_tests {
         assert_eq!(evaluated.report.successful_probability_mass(), Some("0.25"));
         assert_eq!(evaluated.report.successful_unique_queue_count(), Some(1));
         assert_eq!(evaluated.report.total_unique_queue_count(), Some(2));
+    }
+
+    #[test]
+    fn finesse_oracle_reuses_per_queue_minima_without_changing_weights_or_ties() {
+        let language = |x, i_cost, o_cost| {
+            CostedGeometryLanguage::new(
+                GeometryNodeId::new(0),
+                vec![
+                    GeometryLanguageNode::new(
+                        0,
+                        false,
+                        [(PieceKind::I, i_cost), (PieceKind::O, o_cost)]
+                            .into_iter()
+                            .enumerate()
+                            .map(|(order, (piece, cost))| {
+                                CostedGeometryEdge::new(
+                                    piece,
+                                    GeometryNodeId::new(1),
+                                    cost,
+                                    order as u32,
+                                )
+                                .with_action_key(
+                                    GeometryActionKey::new(piece, RotationState::Zero, x, 0),
+                                )
+                            })
+                            .collect::<Vec<_>>(),
+                    ),
+                    GeometryLanguageNode::new(1, true, Vec::<CostedGeometryEdge>::new()),
+                ],
+            )
+            .unwrap()
+        };
+        let languages = vec![
+            ("first".to_owned(), language(0, 2, 9)),
+            ("second".to_owned(), language(1, 7, 3)),
+            ("tied-later".to_owned(), language(2, 2, 9)),
+        ];
+        let classes = QueueClassSet::group(
+            &[
+                QueuePattern::new(PatternId::new(9), vec![PieceKind::I], probability(0.1)),
+                QueuePattern::new(PatternId::new(2), vec![PieceKind::O], probability(0.6)),
+                QueuePattern::new(PatternId::new(7), vec![PieceKind::I], probability(0.2)),
+                QueuePattern::new(PatternId::new(4), vec![PieceKind::T], probability(0.1)),
+            ],
+            true,
+        )
+        .unwrap();
+        let references = languages
+            .iter()
+            .map(|(_, language)| language)
+            .collect::<Vec<_>>();
+        let union = union_costed_geometry_languages(&references).unwrap();
+        for hold_enabled in [false, true] {
+            for initial_hold in [None, Some(PieceKind::T)] {
+                for terminal_hold_release in [false, true] {
+                    let evaluated = evaluate_finesse_policy(
+                        "oracle",
+                        &languages,
+                        &classes,
+                        false,
+                        initial_hold,
+                        hold_enabled,
+                        terminal_hold_release,
+                        SpawnProfile::STANDARD_10,
+                        &ExecutionControl::default(),
+                    )
+                    .unwrap();
+                    let reference = QueueClassProductEvaluator::new(&union)
+                        .with_hold_enabled(hold_enabled)
+                        .with_terminal_hold_release_enabled(terminal_hold_release)
+                        .oracle(&classes, initial_hold)
+                        .unwrap();
+                    assert_eq!(evaluated.overall_costs, reference.costs);
+                    assert_eq!(evaluated.overall_costs.to_vec(), [Some(2), Some(3), None]);
+                    // The established mean is over unique successful queues;
+                    // source weights remain in success probability mass.
+                    assert_eq!(evaluated.report.overall_average_inputs(), "2.5");
+                    assert_eq!(
+                        evaluated.report.solution_averages()[0].average_inputs(),
+                        "5.5"
+                    );
+                    assert_eq!(
+                        evaluated.report.solution_averages()[1].average_inputs(),
+                        "5"
+                    );
+                    assert!(
+                        (evaluated.aggregation.successful_probability_mass - 0.9).abs() < 1e-12
+                    );
+                    assert_eq!(evaluated.aggregation.successful_unique_queue_count, 2);
+                    assert_eq!(evaluated.aggregation.total_unique_queue_count, 3);
+                    assert_eq!(
+                        evaluated.representative,
+                        Some(FinesseRepresentativeSelection {
+                            solution_index: 0,
+                            class_index: 0,
+                            expected_cost: 2,
+                        })
+                    );
+                    assert_eq!(
+                        classes.classes()[0].pattern_ids(),
+                        [PatternId::new(9), PatternId::new(7)]
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn finesse_visible_seven_keeps_joint_language_before_hidden_suffix_is_known() {
+        let common = [
+            PieceKind::I,
+            PieceKind::O,
+            PieceKind::T,
+            PieceKind::S,
+            PieceKind::Z,
+            PieceKind::J,
+            PieceKind::L,
+        ];
+        let language = |x, last| {
+            let pieces = common.into_iter().chain([last]).collect::<Vec<_>>();
+            let mut nodes = pieces
+                .into_iter()
+                .enumerate()
+                .map(|(depth, piece)| {
+                    GeometryLanguageNode::new(
+                        depth as u16,
+                        false,
+                        vec![CostedGeometryEdge::new(
+                            piece,
+                            GeometryNodeId::new(depth as u32 + 1),
+                            1,
+                            0,
+                        )
+                        .with_action_key(GeometryActionKey::new(
+                            piece,
+                            RotationState::Zero,
+                            x,
+                            depth as i16,
+                        ))],
+                    )
+                })
+                .collect::<Vec<_>>();
+            nodes.push(GeometryLanguageNode::new(
+                8,
+                true,
+                Vec::<CostedGeometryEdge>::new(),
+            ));
+            CostedGeometryLanguage::new(GeometryNodeId::new(0), nodes).unwrap()
+        };
+        let languages = vec![
+            ("finish-i".to_owned(), language(0, PieceKind::I)),
+            ("finish-o".to_owned(), language(1, PieceKind::O)),
+        ];
+        let classes = QueueClassSet::group(
+            &[
+                QueuePattern::new(
+                    PatternId::new(0),
+                    common.into_iter().chain([PieceKind::I]).collect::<Vec<_>>(),
+                    probability(0.4),
+                ),
+                QueuePattern::new(
+                    PatternId::new(1),
+                    common.into_iter().chain([PieceKind::O]).collect::<Vec<_>>(),
+                    probability(0.6),
+                ),
+            ],
+            true,
+        )
+        .unwrap();
+        for (policy, expected) in [
+            ("oracle", [Some(8), Some(8)]),
+            ("visible-7", [None, Some(8)]),
+        ] {
+            let evaluated = evaluate_finesse_policy(
+                policy,
+                &languages,
+                &classes,
+                false,
+                None,
+                false,
+                false,
+                SpawnProfile::STANDARD_10,
+                &ExecutionControl::default(),
+            )
+            .unwrap();
+            assert_eq!(evaluated.overall_costs.to_vec(), expected, "{policy}");
+        }
+    }
+
+    #[test]
+    fn finesse_fixed_oracle_reuses_selection_with_the_complete_legacy_witness_report() {
+        for (queue, piece, placement_cost, hold_enabled, expected_cost) in [
+            (vec![PieceKind::I], PieceKind::I, 3, false, Some(3)),
+            (
+                vec![PieceKind::I, PieceKind::O],
+                PieceKind::O,
+                2,
+                true,
+                Some(3),
+            ),
+            (
+                vec![PieceKind::I, PieceKind::O],
+                PieceKind::O,
+                2,
+                false,
+                None,
+            ),
+        ] {
+            for knowledge in [
+                FinessePatternKnowledge::Oracle,
+                FinessePatternKnowledge::Both,
+            ] {
+                let query = PcScenarioQuery::new(
+                    PcScenarioBoard::standard_10(4, 0),
+                    PcQueueInput::fixed_sequence(FixedSequence::new(queue.clone())),
+                    PieceWindow::new(1),
+                )
+                .with_allow_hold(hold_enabled)
+                .with_exact_pieces(Some(1));
+                let problem = ProblemCompiler::compile_scenario_pc(&query).unwrap();
+                let languages = ["a-first", "b-equal-cost"]
+                    .into_iter()
+                    .map(|key| {
+                        (
+                            key.to_owned(),
+                            costed_finesse_language(&one_piece_language(piece, placement_cost))
+                                .unwrap(),
+                        )
+                    })
+                    .collect();
+                let material = FinesseSearchMaterial::new(&problem, languages, true).unwrap();
+                assert!(material.fixed_queue);
+                assert_eq!(material.classes.classes().len(), 1);
+                // The compiler retains one extra supplied piece only when
+                // Hold can use it. Without Hold, this one-placement query
+                // intentionally projects IO to the executed universe I.
+                let compiled_queue = if hold_enabled {
+                    queue.as_slice()
+                } else {
+                    &queue[..1]
+                };
+                assert_eq!(material.classes.classes()[0].queue(), compiled_queue);
+                let legacy_witness = fixed_queue_representative_witness(
+                    "oracle",
+                    &material.languages,
+                    &material.classes,
+                    material.initial_hold,
+                    material.hold_enabled,
+                    material.terminal_hold_release,
+                    material.spawn_profile,
+                    &material.kick_profile,
+                    &ExecutionControl::default(),
+                )
+                .unwrap();
+                assert_eq!(
+                    legacy_witness
+                        .as_ref()
+                        .map(|witness| witness.total_inputs()),
+                    expected_cost
+                );
+                if let Some(witness) = &legacy_witness {
+                    assert_eq!(witness.solution_key(), Some("a-first"));
+                    assert_eq!(witness.pattern_ids(), [0]);
+                    assert_eq!(witness.queue(), compiled_queue);
+                }
+                let mean = if expected_cost.is_some() {
+                    "3"
+                } else {
+                    "not-calculated"
+                };
+                let successful = usize::from(expected_cost.is_some());
+                let policy_result = |policy| {
+                    FinessePolicyResult::new(
+                        policy,
+                        mean,
+                        true,
+                        ["a-first", "b-equal-cost"]
+                            .into_iter()
+                            .map(|key| FinesseSolutionAverage::new(key, mean, true))
+                            .collect(),
+                    )
+                    .with_success_summary(
+                        successful.to_string(),
+                        successful,
+                        1,
+                    )
+                };
+                let mut policies = vec![policy_result("oracle")];
+                if matches!(knowledge, FinessePatternKnowledge::Both) {
+                    policies.push(policy_result("visible-7").with_comparison(
+                        expected_cost.map(|cost| cost.to_string()),
+                        expected_cost.map(|_| "0".to_owned()),
+                        Some("0".to_owned()),
+                    ));
+                }
+                let expected = FinesseReport::new(
+                    "search",
+                    knowledge.as_str(),
+                    true,
+                    expected_cost.map(|cost| cost.to_string()),
+                    policies,
+                );
+                let expected = match legacy_witness {
+                    Some(witness) => expected.with_representative_witness(witness),
+                    None => expected,
+                };
+                let actual =
+                    build_finesse_report(vec![material], knowledge, &ExecutionControl::default())
+                        .unwrap();
+                assert_eq!(
+                    actual, expected,
+                    "queue={queue:?}, hold={hold_enabled}, knowledge={knowledge:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn finesse_projection_uses_real_union_prefix_bounds_for_large_language_catalogs() {
+        let query = PcScenarioQuery::new(
+            PcScenarioBoard::standard_10(4, 0),
+            PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::I])),
+            PieceWindow::new(1),
+        )
+        .with_allow_hold(false)
+        .with_exact_pieces(Some(1));
+        let problem = ProblemCompiler::compile_scenario_pc(&query).unwrap();
+        for same_key in [false, true] {
+            for policy in [
+                FinessePatternKnowledge::Oracle,
+                FinessePatternKnowledge::Both,
+            ] {
+                let languages = (0..70)
+                    .map(|index| {
+                        (
+                            if same_key {
+                                "same".to_owned()
+                            } else {
+                                format!("solution-{index:02}")
+                            },
+                            costed_finesse_language(&one_piece_language(PieceKind::I, 3)).unwrap(),
+                        )
+                    })
+                    .collect();
+                let material = FinesseSearchMaterial::new(&problem, languages, true).unwrap();
+                assert_eq!(
+                    finesse_materials_have_unique_solution_keys(std::slice::from_ref(&material)),
+                    !same_key
+                );
+                assert_eq!(
+                    checked_finesse_union_state_upper_bound(std::slice::from_ref(&material), 140),
+                    Some(140)
+                );
+                let projection = checked_finesse_report_build_future_upper_bound(
+                    std::slice::from_ref(&material),
+                    policy,
+                )
+                .expect("140 input nodes are not 2^140 reachable union states");
+                let report = attach_finesse_report_with_memory_guard(
+                    CoreExecutionResult::default(),
+                    vec![material],
+                    FinesseMetric::Inputs,
+                    policy,
+                    &ExecutionControl::default(),
+                    |_, _| Ok(()),
+                )
+                .unwrap();
+                let report = report.finesse_report().unwrap();
+                assert_eq!(report.exact_total_inputs(), Some("3"));
+                assert!(report.checked_nested_retained_bytes().unwrap() <= projection);
+            }
+        }
+    }
+
+    #[test]
+    fn finesse_projection_retains_cross_material_alternatives_without_allocating_key_sets() {
+        let query = PcScenarioQuery::new(
+            PcScenarioBoard::standard_10(4, 0),
+            PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::I])),
+            PieceWindow::new(1),
+        )
+        .with_exact_pieces(Some(1));
+        let problem = ProblemCompiler::compile_scenario_pc(&query).unwrap();
+        let material = |keys: &[&str]| {
+            FinesseSearchMaterial::new(
+                &problem,
+                keys.iter()
+                    .map(|key| {
+                        (
+                            (*key).to_owned(),
+                            costed_finesse_language(&one_piece_language(PieceKind::I, 3)).unwrap(),
+                        )
+                    })
+                    .collect(),
+                true,
+            )
+            .unwrap()
+        };
+        assert!(finesse_materials_have_unique_solution_keys(&[
+            material(&["a", "b"]),
+            material(&["c"])
+        ]));
+        assert!(!finesse_materials_have_unique_solution_keys(&[
+            material(&["a", "b"]),
+            material(&["b", "c"])
+        ]));
+        assert!(!finesse_materials_have_unique_solution_keys(&[material(
+            &["b", "a"]
+        )]));
+    }
+
+    #[test]
+    fn finesse_union_prefix_bound_covers_nondeterministic_labels_and_nested_unions() {
+        let query = PcScenarioQuery::new(
+            PcScenarioBoard::standard_10(4, 0),
+            PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::I, PieceKind::O])),
+            PieceWindow::new(2),
+        )
+        .with_exact_pieces(Some(2));
+        let problem = ProblemCompiler::compile_scenario_pc(&query).unwrap();
+        let language = |width: u32| {
+            let mut nodes = vec![GeometryLanguageNode::new(
+                0,
+                false,
+                (0..width)
+                    .map(|branch| {
+                        CostedGeometryEdge::new(
+                            PieceKind::I,
+                            GeometryNodeId::new(branch + 1),
+                            1,
+                            branch,
+                        )
+                        .with_action_key(GeometryActionKey::new(
+                            PieceKind::I,
+                            RotationState::Zero,
+                            (branch % 2) as i16,
+                            0,
+                        ))
+                    })
+                    .collect::<Vec<_>>(),
+            )];
+            for branch in 0..width {
+                let edge =
+                    CostedGeometryEdge::new(PieceKind::O, GeometryNodeId::new(width + 1), 2, 0)
+                        .with_action_key(GeometryActionKey::new(
+                            PieceKind::O,
+                            RotationState::Zero,
+                            (branch % 2) as i16,
+                            0,
+                        ));
+                nodes.push(GeometryLanguageNode::new(
+                    1,
+                    false,
+                    vec![
+                        edge,
+                        edge.with_terminal_evidence(
+                            clearra_finesse::TerminalEvidenceLabel::NoRotation,
+                        ),
+                    ],
+                ));
+            }
+            nodes.push(GeometryLanguageNode::new(
+                2,
+                true,
+                Vec::<CostedGeometryEdge>::new(),
+            ));
+            CostedGeometryLanguage::new(GeometryNodeId::new(0), nodes).unwrap()
+        };
+        for width in 2..8 {
+            let languages = (0..4)
+                .map(|index| (format!("solution-{}", index / 2), language(width + index)))
+                .collect();
+            let material = FinesseSearchMaterial::new(&problem, languages, true).unwrap();
+            let node_count = material
+                .languages
+                .iter()
+                .map(|(_, language)| language.nodes().len() as u128)
+                .sum();
+            let bound = checked_finesse_union_state_upper_bound(
+                std::slice::from_ref(&material),
+                node_count,
+            )
+            .unwrap();
+            let groups = material
+                .languages
+                .chunks(2)
+                .map(|group| {
+                    union_costed_geometry_languages(
+                        &group
+                            .iter()
+                            .map(|(_, language)| language)
+                            .collect::<Vec<_>>(),
+                    )
+                    .unwrap()
+                })
+                .collect::<Vec<_>>();
+            assert!(
+                groups
+                    .iter()
+                    .map(|language| language.nodes().len() as u128)
+                    .sum::<u128>()
+                    <= bound
+            );
+            let nested =
+                union_costed_geometry_languages(&groups.iter().collect::<Vec<_>>()).unwrap();
+            let flat = union_costed_geometry_languages(
+                &material
+                    .languages
+                    .iter()
+                    .map(|(_, language)| language)
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap();
+            assert!(nested.nodes().len() as u128 <= bound);
+            assert!(flat.nodes().len() as u128 <= bound);
+            let queue = [PieceKind::I, PieceKind::O];
+            assert_eq!(
+                QueueClassProductEvaluator::new(&nested)
+                    .fixed_queue_cost(&queue, None)
+                    .unwrap(),
+                QueueClassProductEvaluator::new(&flat)
+                    .fixed_queue_cost(&queue, None)
+                    .unwrap()
+            );
+        }
     }
 
     #[test]

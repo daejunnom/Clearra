@@ -6,6 +6,7 @@
   import { createEventDispatcher } from 'svelte';
 
   import {
+    isWorkspaceScoreProduct,
     updateWorkspaceDraft,
     type SolverWorkspaceRequest,
     type WorkspaceValidationCode
@@ -20,7 +21,6 @@
   export let request: SolverWorkspaceRequest;
   export let language: WorkspaceLanguage;
   export let validationCodes: WorkspaceValidationCode[] = [];
-  export let dependencyDagControlAvailable = false;
   export let workerAuthority: WorkerAuthorityReport;
 
   const dispatch = createEventDispatcher<{ change: SolverWorkspaceRequest }>();
@@ -29,10 +29,7 @@
   $: pathOnly = request.scoreMode === 'path';
   $: failedQueueOnly = request.scoreMode === 'failed-queue';
   $: scoreFinderOnly = request.scoreMode === 'score-finder';
-  $: fixedScoreProduct =
-    request.scoreMode === 'summary' ||
-    request.scoreMode === 'score-finder' ||
-    request.scoreMode === 'score-minimals';
+  $: fixedScoreProduct = isWorkspaceScoreProduct(request.scoreMode);
   $: scoreMinimalsOnly = request.scoreMode === 'score-minimals';
   // Minimum products reject visible-seven rather than silently substituting
   // oracle semantics, so their visibility control must remain editable.
@@ -166,23 +163,6 @@
       </label>
       <WorkerAuthorityStatus authority={workerAuthority} {language} />
     </div>
-    {#if dependencyDagControlAvailable}
-      <div class="dependency-dag-control">
-        <label class="workspace-switch-label">
-          <input
-            type="checkbox"
-            checked={request.precomputeBuildDependencies}
-            disabled={tilingOnly || pathOnly || fixedScoreProduct}
-            on:change={(event) => patch({
-              precomputeBuildDependencies: (event.currentTarget as HTMLInputElement).checked
-            })}
-          />
-          <span class="workspace-switch" aria-hidden="true"></span>
-          <span>{label('precomputeBuildDependencies')}</span>
-        </label>
-        <small class="workspace-field-help">{label('precomputeBuildDependenciesHelp')}</small>
-      </div>
-    {/if}
   </section>
 
   {#if validationCodes.length}
@@ -197,15 +177,4 @@
 <style>
   .policy-toggle { grid-template-columns: 1fr; }
   .b2b-preservation-control { display: grid; gap: 5px; }
-  .dependency-dag-control {
-    align-content: start;
-    display: grid;
-    gap: 5px;
-    margin-top: 14px;
-    min-width: 0;
-  }
-  .dependency-dag-control :global(.workspace-field-help) {
-    display: block;
-    overflow-wrap: anywhere;
-  }
 </style>

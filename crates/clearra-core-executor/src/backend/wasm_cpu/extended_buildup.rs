@@ -7,7 +7,7 @@ use clearra_core_domain::{
     piece::piece_kind::PieceKind,
 };
 use clearra_finesse::{FinesseBoard, FinesseTarget, GeometryActionKey};
-use clearra_postprocess::score_batch::BackToBackEdgePolicy;
+use clearra_postprocess::score_batch::{BackToBackEdgePolicy, BeforeSpinEvidenceDecision};
 use clearra_problem::SearchProblem;
 use clearra_replay::{ScoringExecutionEdge, ScoringExecutionNode, SpinCoverageExecutionGraph};
 
@@ -367,7 +367,7 @@ pub(super) fn build_extended_order_graph(
     spin_candidate: Option<(u64, String)>,
     control: &ExecutionControl,
 ) -> Result<ExtendedBuildOrderResult, WasmExactSearchError> {
-    build_extended_order_graph_mode(
+    build_extended_order_graph_mode::<true>(
         catalog,
         candidate,
         workspace,
@@ -393,7 +393,7 @@ pub(super) fn build_extended_pc_order_graph(
     spin_candidate: Option<(u64, String)>,
     control: &ExecutionControl,
 ) -> Result<ExtendedBuildOrderResult, WasmExactSearchError> {
-    build_extended_order_graph_mode(
+    build_extended_order_graph_mode::<true>(
         catalog,
         candidate,
         workspace,
@@ -418,7 +418,7 @@ pub(super) fn build_extended_order_graph_with_finesse(
     spin_coverage_requested: bool,
     control: &ExecutionControl,
 ) -> Result<ExtendedBuildOrderResult, WasmExactSearchError> {
-    build_extended_order_graph_mode(
+    build_extended_order_graph_mode::<true>(
         catalog,
         candidate,
         workspace,
@@ -432,7 +432,7 @@ pub(super) fn build_extended_order_graph_with_finesse(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn build_extended_order_graph_mode(
+fn build_extended_order_graph_mode<const EARLY_B2B_PRUNING: bool>(
     catalog: &ExtendedInverseCatalog,
     candidate: &ExtendedGeometryCandidate,
     workspace: &mut ExtendedBuildOrderWorkspace,
@@ -690,6 +690,26 @@ fn build_extended_order_graph_mode(
                 continue;
             }
             let piece = projection.operation_pieces[operation];
+            let child_subset = subset | operation_bit;
+            let (expected_board, expected_deleted) = projection.state_for_subset(child_subset);
+            if EARLY_B2B_PRUNING
+                && b2b_policy.is_some_and(|policy| {
+                    // Every valid realization of this operation reaches this
+                    // exact child board and original-row deletion frame. A
+                    // clear-only negative rejects all poses before acquiring
+                    // their lock set; unknown spin evidence still takes the
+                    // existing ordered-kick path. Finesse and ordinary Build
+                    // retain their original edge ordinals and denominator.
+                    let cleared_lines = (expected_deleted & !deleted_rows).count_ones() as u8;
+                    policy.before_spin_evidence(
+                        piece,
+                        cleared_lines,
+                        cleared_lines > 0 && expected_board.is_empty(),
+                    ) == BeforeSpinEvidenceDecision::Rejects
+                })
+            {
+                continue;
+            }
             let piece_slot = piece_index(piece);
             if (!geometry_only || spin_candidate.is_some()) && lock_sets[piece_slot].is_none() {
                 lock_sets[piece_slot] = Some(workspace.reachability.reachable_locks_with_scoring(
@@ -699,8 +719,6 @@ fn build_extended_order_graph_mode(
                 ));
             }
             let locks = lock_sets[piece_slot].as_ref();
-            let child_subset = subset | operation_bit;
-            let (expected_board, expected_deleted) = projection.state_for_subset(child_subset);
             let mut build_edge_added = false;
             for realization in catalog.instantiations(row_id, deleted_rows) {
                 let lock_reachable = locks.is_some_and(|locks| {
@@ -1350,10 +1368,16 @@ mod finesse_tests {
     use clearra_objectives::policy::{
         objective_policy::ObjectivePolicy, score_objective_policy::SpinProfileSelection,
     };
-    use clearra_pc_graph::request::{OpeningPcSearchQuery, PcHoldPolicy, PcQueueInput};
-    use clearra_problem::{ProblemCompiler, SearchProblem};
+    use clearra_pc_graph::request::{
+        OpeningPcSearchQuery, PcHoldPolicy, PcQueueInput, PcScenarioBoard, PcScenarioQuery,
+        PieceWindow,
+    };
+    use clearra_problem::{BuildProbabilityField, ProblemCompiler, SearchProblem};
     use clearra_replay::{RotationRequest, ScoringLockEvidence};
+    use clearra_rules::kicks::KickTableProfileId;
+    use clearra_supply::queue::fixed_sequence::FixedSequence;
 
+    use super::super::extended_geometry::ExtendedGeometrySearch;
     use super::*;
 
     #[test]
@@ -1419,6 +1443,209 @@ mod finesse_tests {
                     .with_back_to_back_preservation(SpinProfileSelection::TSpins),
             );
         ProblemCompiler::compile_opening_pc(&query).expect("B2B test problem")
+    }
+
+    fn extended_b2b_candidate(
+        base: u64,
+        placements: &[(PieceKind, u64)],
+    ) -> (ExtendedInverseCatalog, ExtendedGeometryCandidate) {
+        let target = placements.iter().fold(0, |cells, (_, mask)| cells | mask);
+        let field = BuildProbabilityField::from_words_preserving_height(
+            7,
+            [base, 0, 0, 0],
+            [target, 0, 0, 0],
+        )
+        .unwrap();
+        let catalog = ExtendedInverseCatalog::compile(field).unwrap();
+        assert_eq!(catalog.height(), 7, "must exercise the extended builder");
+        let query = PcScenarioQuery::new(
+            PcScenarioBoard::standard_10(7, base),
+            PcQueueInput::fixed_sequence(FixedSequence::new(
+                placements.iter().map(|(piece, _)| *piece).collect(),
+            )),
+            PieceWindow::new(placements.len()),
+        )
+        .with_exact_pieces(Some(placements.len()))
+        .with_allow_hold(false);
+        let problem = ProblemCompiler::compile_scenario_pc(&query).unwrap();
+        let universe = problem.piece_source().materialized_universe().unwrap();
+        let family = universe.packing_multiset_family_for_execution(
+            placements.len(),
+            problem.initial_hold(),
+            false,
+            super::super::packing_hold_projection(&problem),
+        );
+        // Supply/catalog validation only: no geometry-family enumeration is
+        // needed for the explicitly specified one- or two-piece candidate.
+        let geometry = ExtendedGeometrySearch::new(universe, &family, &catalog).unwrap();
+        let row_ids = placements
+            .iter()
+            .map(|&(piece, cells)| {
+                catalog
+                    .skeletons()
+                    .iter()
+                    .position(|row| {
+                        row.piece == piece
+                            && row.cells == ExtendedBoard::from_words([cells, 0, 0, 0])
+                    })
+                    .expect("specified placement belongs to the actual catalog")
+                    as u32
+            })
+            .collect::<Vec<_>>();
+        let candidate = geometry.external_candidate(&catalog, &row_ids).unwrap();
+        (catalog, candidate)
+    }
+
+    fn extended_b2b_arm<const EARLY: bool>(
+        catalog: &ExtendedInverseCatalog,
+        candidate: &ExtendedGeometryCandidate,
+        rule: KickTableProfileId,
+        policy: Option<BackToBackEdgePolicy>,
+    ) -> (BuildOrderGraph, SpinCoverageExecutionGraph, usize) {
+        let mut workspace = ExtendedBuildOrderWorkspace::new(10, 7, rule);
+        let output = build_extended_order_graph_mode::<EARLY>(
+            catalog,
+            candidate,
+            &mut workspace,
+            0,
+            Some((0, "bounded-b2b-candidate".to_owned())),
+            None,
+            false,
+            policy,
+            &ExecutionControl::default(),
+        )
+        .unwrap();
+        let ExtendedBuildOrderResult::Complete {
+            graph,
+            spin_graph,
+            reachability_states,
+            ..
+        } = output
+        else {
+            panic!("tiny exact candidate must complete");
+        };
+        (graph, spin_graph.unwrap(), reachability_states)
+    }
+
+    #[test]
+    fn extended_b2b_early_clear_pruning_matches_late_filter_across_rules_and_spins() {
+        use PieceKind::{I, O, T};
+        let o = 0xc03;
+        let vertical_i = 1 | (1 << 10) | (1 << 20) | (1 << 30);
+        let cases: &[(&str, u64, &[(PieceKind, u64)])] = &[
+            ("plain-I-clear", 0x803f0, &[(I, 0xf)]),
+            ("I-PC", 0x3f0, &[(I, 0xf)]),
+            ("zero-line-I", 0, &[(I, 0xf)]),
+            ("T-mini-pocket", 0x27f8, &[(T, 0x807)]),
+            ("two-O-orders", 0, &[(O, o), (O, o << 2)]),
+            (
+                "non-PC-tetris",
+                (((1_u64 << 40) - 1) & !vertical_i) | (1 << 49),
+                &[(I, vertical_i)],
+            ),
+        ];
+        for &(label, base, placements) in cases {
+            let (catalog, candidate) = extended_b2b_candidate(base, placements);
+            for rule in [
+                KickTableProfileId::Srs90,
+                KickTableProfileId::SrsPlus,
+                KickTableProfileId::SrsX,
+                KickTableProfileId::Jstris180,
+                KickTableProfileId::NoKick,
+            ] {
+                for spin in [
+                    SpinProfileSelection::TSpins,
+                    SpinProfileSelection::TSpinsPlus,
+                    SpinProfileSelection::AllSpin,
+                    SpinProfileSelection::AllSpinPlus,
+                    SpinProfileSelection::AllMini,
+                    SpinProfileSelection::AllMiniPlus,
+                ] {
+                    let policy = Some(BackToBackEdgePolicy::new(spin));
+                    let (reference, reference_spin, reference_states) =
+                        extended_b2b_arm::<false>(&catalog, &candidate, rule, policy);
+                    let (pruned, pruned_spin, pruned_states) =
+                        extended_b2b_arm::<true>(&catalog, &candidate, rule, policy);
+                    assert_eq!(reference.root, pruned.root, "{label}/{rule:?}/{spin:?}");
+                    assert_eq!(
+                        reference.nodes.len(),
+                        pruned.nodes.len(),
+                        "{label}/{rule:?}/{spin:?}"
+                    );
+                    for (index, (before, after)) in
+                        reference.nodes.iter().zip(&pruned.nodes).enumerate()
+                    {
+                        assert_eq!(
+                            (before.depth, before.live, before.accepting()),
+                            (after.depth, after.live, after.accepting()),
+                            "{label}/{rule:?}/{spin:?}, node={index}",
+                        );
+                        assert_eq!(
+                            reference
+                                .edges(index)
+                                .iter()
+                                .map(BuildEdge::canonical_key)
+                                .collect::<Vec<_>>(),
+                            pruned
+                                .edges(index)
+                                .iter()
+                                .map(BuildEdge::canonical_key)
+                                .collect::<Vec<_>>(),
+                            "{label}/{rule:?}/{spin:?}, node={index}",
+                        );
+                    }
+                    assert_eq!(reference_spin, pruned_spin, "{label}/{rule:?}/{spin:?}");
+                    assert!(
+                        pruned_states <= reference_states,
+                        "{label}/{rule:?}/{spin:?}"
+                    );
+                    if label == "plain-I-clear"
+                        && matches!(
+                            spin,
+                            SpinProfileSelection::TSpins | SpinProfileSelection::TSpinsPlus
+                        )
+                    {
+                        assert!(!pruned.nodes[pruned.root as usize].live);
+                        assert!(
+                            reference_states > 0,
+                            "the old path really traverses movement"
+                        );
+                        assert_eq!(
+                            pruned_states, 0,
+                            "the clear-only negative skips the entire movement query"
+                        );
+                    }
+                    if matches!(label, "I-PC" | "zero-line-I" | "two-O-orders") {
+                        assert!(
+                            pruned.nodes[pruned.root as usize].live,
+                            "{label}/{rule:?}/{spin:?} must retain a real path"
+                        );
+                        assert!(pruned_states > 0);
+                    }
+                    if label == "T-mini-pocket" && rule == KickTableProfileId::Srs90 {
+                        assert!(
+                            pruned.nodes[pruned.root as usize].live,
+                            "spin-eligible transitions need exact kick evidence"
+                        );
+                        assert!(pruned_states > 0);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn extended_b2b_early_clear_pruning_keeps_unconstrained_build_language() {
+        let (catalog, candidate) = extended_b2b_candidate(0x803f0, &[(PieceKind::I, 0xf)]);
+        let (reference, reference_spin, reference_states) =
+            extended_b2b_arm::<false>(&catalog, &candidate, KickTableProfileId::SrsPlus, None);
+        let (pruned, pruned_spin, pruned_states) =
+            extended_b2b_arm::<true>(&catalog, &candidate, KickTableProfileId::SrsPlus, None);
+        assert!(reference.nodes[reference.root as usize].live);
+        assert!(pruned.nodes[pruned.root as usize].live);
+        assert_eq!(reference_spin, pruned_spin);
+        assert!(reference_states > 0);
+        assert_eq!(reference_states, pruned_states);
     }
 
     fn one_t_projection(height: u8) -> CandidateProjection {

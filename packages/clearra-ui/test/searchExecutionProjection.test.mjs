@@ -474,7 +474,60 @@ test('fixture backend by fallback Cartesian representatives preserve argv and ty
   }
 });
 
-test('PC scenario validation preserves odd-height fields and enforces the documented B2B bound', () => {
+test('retired GUI dependency prepass drafts cannot change PC or Build execution', () => {
+  for (const scoreMode of ['tiling', 'path', 'off', 'minimum-cover', 'summary', 'score-finder', 'score-minimals', 'failed-queue']) {
+    const baseline = {
+      ...production.createDefaultWorkspaceRequest(),
+      lines: 1,
+      boardMask: 0x3fn,
+      queue: 'I',
+      scoreMode
+    };
+    const legacy = { ...baseline, precomputeBuildDependencies: true };
+    assert.equal(production.normalizeWorkspaceRequest(legacy).precomputeBuildDependencies, false, scoreMode);
+    assert.deepEqual(production.buildWorkspaceCommandArguments(legacy), production.buildWorkspaceCommandArguments(baseline), scoreMode);
+    assert.deepEqual(production.workspaceRequestForDesktop(legacy, 'ko'), production.workspaceRequestForDesktop(baseline, 'ko'), scoreMode);
+    for (const surface of ['web', 'desktop']) {
+      assert.deepEqual(production.workspaceValidationCodes(legacy, surface), production.workspaceValidationCodes(baseline, surface), `${scoreMode}/${surface}`);
+    }
+  }
+  for (const resultMode of ['all-solutions', 'complete-replay-paths', 'minimum-solutions', 'field-average-score', 'fixed-queue-maximum-score', 'highest-score-minimum-set', 'failed-queues']) {
+    for (const aggregation of ['tiling', 'buildability', 'spin']) {
+      const baseline = {
+        ...production.createDefaultBuildProbabilityRequest(),
+        height: 4,
+        targetMask: 0xfn,
+        queue: 'I',
+        resultMode,
+        aggregation
+      };
+      const legacy = { ...baseline, precomputeBuildDependencies: true };
+      const label = `${resultMode}/${aggregation}`;
+      assert.equal(production.normalizeBuildProbabilityRequest(legacy).precomputeBuildDependencies, false, label);
+      assert.deepEqual(production.buildProbabilityCommandArguments(legacy), production.buildProbabilityCommandArguments(baseline), label);
+      assert.deepEqual(production.buildProbabilityRequestForDesktop(legacy, 'ja'), production.buildProbabilityRequestForDesktop(baseline, 'ja'), label);
+      assert.deepEqual(production.buildProbabilityValidationCodes(legacy), production.buildProbabilityValidationCodes(baseline), label);
+    }
+  }
+});
+
+test('retired GUI GPU device drafts cannot block the CPU product', () => {
+  const baseline = {
+    ...production.createDefaultWorkspaceRequest(),
+    lines: 1,
+    boardMask: 0x3fn,
+    queue: 'I'
+  };
+  for (const backend of ['auto', 'gpu', 'hybrid']) {
+    const legacy = { ...baseline, backend, gpuDevice: 'unavailable-legacy-adapter' };
+    assert.deepEqual(production.buildWorkspaceCommandArguments(legacy), production.buildWorkspaceCommandArguments(baseline), backend);
+    for (const surface of ['web', 'desktop']) {
+      assert.deepEqual(production.workspaceValidationCodes(legacy, surface), production.workspaceValidationCodes(baseline, surface), `${backend}/${surface}`);
+    }
+  }
+});
+
+test('PC scenario validation preserves odd-height fields and enforces the active score B2B bound', () => {
   const oddScenario = {
     ...production.createDefaultWorkspaceRequest(),
     lines: 1,
@@ -487,8 +540,8 @@ test('PC scenario validation preserves odd-height fields and enforces the docume
     contractRow('pc', 'lines').dependencies
   );
 
-  const maximum = { ...oddScenario, initialB2B: 0xffff };
-  const overflow = { ...oddScenario, initialB2B: 0x10000 };
+  const maximum = { ...oddScenario, scoreMode: 'summary', initialB2B: 0xffff };
+  const overflow = { ...oddScenario, scoreMode: 'summary', initialB2B: 0x10000 };
   assert.equal(
     production.workspaceValidationCodes(maximum, 'web').includes('initial_b2b_invalid'),
     false
@@ -497,6 +550,40 @@ test('PC scenario validation preserves odd-height fields and enforces the docume
     production.workspaceValidationCodes(overflow, 'web').includes('initial_b2b_invalid'),
     true
   );
+});
+
+test('PC mode transitions validate initial B2B only while its score policy is active', () => {
+  const baseline = {
+    ...production.createDefaultWorkspaceRequest(),
+    lines: 1,
+    boardMask: 0x3fn,
+    queue: 'I'
+  };
+  for (const initialB2B of [Number.NaN, Number.POSITIVE_INFINITY, -1, 1.5, 0x10000]) {
+    for (const scoreMode of ['off', 'tiling', 'path', 'minimum-cover', 'failed-queue']) {
+      const draft = { ...baseline, scoreMode, initialB2B };
+      const valid = { ...draft, initialB2B: 0 };
+      for (const surface of ['web', 'desktop']) {
+        assert.deepEqual(production.workspaceValidationCodes(draft, surface), [], `${scoreMode}/${surface}/${initialB2B}`);
+      }
+      assert.equal(production.normalizeWorkspaceRequest(draft).initialB2B, 0, scoreMode);
+      assert.deepEqual(production.buildWorkspaceCommandArguments(draft), production.buildWorkspaceCommandArguments(valid), scoreMode);
+      assert.deepEqual(production.workspaceRequestForDesktop(draft, 'ko'), production.workspaceRequestForDesktop(valid, 'ko'), scoreMode);
+      assert.equal(draft.initialB2B, initialB2B, 'inactive draft stays editable on returning to score mode');
+    }
+    for (const scoreMode of ['summary', 'score-finder', 'score-minimals']) {
+      const returnedToScore = { ...baseline, scoreMode, initialB2B };
+      for (const surface of ['web', 'desktop']) {
+        assert.deepEqual(production.workspaceValidationCodes(returnedToScore, surface), ['initial_b2b_invalid'], `${scoreMode}/${surface}/${initialB2B}`);
+      }
+    }
+  }
+  for (const scoreMode of ['summary', 'score-finder', 'score-minimals']) {
+    const validMaximum = { ...baseline, scoreMode, initialB2B: 0xffff };
+    assert.deepEqual(production.workspaceValidationCodes(validMaximum, 'web'), [], scoreMode);
+    assert.equal(production.normalizeWorkspaceRequest(validMaximum).initialB2B,
+      scoreMode === 'score-finder' ? 1 : 0xffff, 'active score normalization remains unchanged');
+  }
 });
 
 test('PC GUI shares the 1..6L target-frame and initial-clear corpus without dropping high cells', () => {

@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+## 0.9.1 - 2026-11-24
+
+- Remove the dependency pre-analysis beta controls and unused GUI GPU setup
+  paths, while preserving supported CPU and non-GUI execution options.
+- Allow Boundary Recovery stages to be removed repeatedly down to one field,
+  preserving the remaining fields and their piece-supply origins.
+- Prune B2B-rejected clears before movement checks and reuse Finesse queue
+  minima and fixed-queue witnesses without changing original-input coverage.
+- Reuse shared Hold supply transitions and reject incompatible Setup prefixes
+  before retaining placement identities.
+- Keep complete B2B Path replay pages in their checked lazy source, release
+  producer buffers after handoff, and preserve exact replay count authority.
+- Coalesce GUI progress updates without dropping lifecycle events, and limit
+  cooperative Node GC acknowledgements to the requested main isolate.
+- Check already-visited reachability predecessors before repeated kick work,
+  and skip global standard-bag unions after the original universe is covered
+  while retaining each candidate's coverage and witnesses.
+
 ## 0.9.0 - 2026-11-21
 
 - Use the Rust CPU solver in product builds and keep the C solver isolated as

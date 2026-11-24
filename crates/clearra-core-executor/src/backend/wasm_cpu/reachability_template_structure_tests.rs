@@ -279,11 +279,26 @@ fn verify_template(
                         {
                             return Err(Rotation);
                         }
-                        expected_inv_rotations[usize::from(destination)].push((
-                            source,
-                            slot as u8,
-                            u8::try_from(packed).map_err(|_| InverseRotation)?,
-                        ));
+                        // A real move requires source and destination to be
+                        // empty. Any earlier footprint contained in their
+                        // union therefore wins on every board. Derive this
+                        // directly from the independent cell masks, without
+                        // calling the compiler's pruning predicate.
+                        let selectable = masks[source_index].is_some_and(|source_mask| {
+                            let required_empty =
+                                source_mask | masks[usize::from(destination)].unwrap();
+                            targets[..packed].iter().all(|&earlier| {
+                                masks[usize::from(earlier)]
+                                    .is_none_or(|mask| mask & !required_empty != 0)
+                            })
+                        });
+                        if selectable {
+                            expected_inv_rotations[usize::from(destination)].push((
+                                source,
+                                slot as u8,
+                                u8::try_from(packed).map_err(|_| InverseRotation)?,
+                            ));
+                        }
                         packed += 1;
                     }
                     if packed != targets.len() {

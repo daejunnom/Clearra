@@ -25,7 +25,8 @@ test("exactly one new mechanism changes in treatment, even with hostile inherite
   const [a, b] = strictOptimizationSchedule(opts, "/abs/example");
   const ambient = { KEEP: "yes", CLEARRA_STANDARD_BAG_MEMO: "compact",
     clearra_strict_language_frontier: "1", CLEARRA_STRICT_CATALOG_GUARDS: "1",
-    CLEARRA_STANDARD_BAG_UNION_MEMO: "compact", CLEARRA_EXPECTED_VCPUS: "12" };
+    CLEARRA_STANDARD_BAG_UNION_MEMO: "compact", CLEARRA_EXPECTED_VCPUS: "12",
+    clearra_reachability_visited_first: "1", CLEARRA_STANDARD_BAG_GLOBAL_SATURATION: "1" };
   const baseline = strictOptimizationEnvironment(ambient, opts.axis, a);
   const treatment = strictOptimizationEnvironment(ambient, opts.axis, b);
   assert.deepEqual(treatment, { ...baseline, CLEARRA_STANDARD_BAG_UNION_MEMO: "compact" });
@@ -33,6 +34,9 @@ test("exactly one new mechanism changes in treatment, even with hostile inherite
   assert.equal(baseline.CLEARRA_STANDARD_BAG_MEMO, "reference");
   assert.equal(baseline.CLEARRA_STANDARD_BAG_UNION_MEMO, "reference");
   assert.equal(baseline.CLEARRA_STRICT_PREFIX, "1");
+  assert.equal(baseline.CLEARRA_REACHABILITY_VISITED_FIRST, "0");
+  assert.equal(baseline.CLEARRA_STANDARD_BAG_GLOBAL_SATURATION, "0");
+  assert.equal(baseline.clearra_reachability_visited_first, undefined);
   for (const key of ["CLEARRA_EXPECTED_VCPUS", "clearra_strict_language_frontier", "CLEARRA_STRICT_CATALOG_GUARDS"]) {
     assert.equal(Object.hasOwn(baseline, key), false);
   }
@@ -98,6 +102,19 @@ test("validation binds real worker activity, exact-scope aggregate results and a
       CLEARRA_STANDARD_BAG_PRODUCT_MEMO_LAYOUT: "adaptive", CLEARRA_STANDARD_BAG_UNION_MEMO: "compact" },
   };
   assert.doesNotThrow(() => validateStrictOptimizationReport(report, opts, step, receipt, binSha));
+  const productOff = { ...report,
+    reachability_visited_first_mode: "0", standard_bag_global_saturation_mode: "0",
+    other_process_configuration: { ...report.other_process_configuration,
+      CLEARRA_REACHABILITY_VISITED_FIRST: "0", CLEARRA_STANDARD_BAG_GLOBAL_SATURATION: "0" } };
+  assert.doesNotThrow(() => validateStrictOptimizationReport(productOff, opts, step, receipt, binSha));
+  assert.throws(() => validateStrictOptimizationReport({ ...productOff,
+    other_process_configuration: { ...productOff.other_process_configuration,
+      clearra_reachability_visited_first: "1" } }, opts, step, receipt, binSha), /unexpected or incomplete/);
+  assert.throws(() => validateStrictOptimizationReport({ ...productOff, reachability_visited_first_mode: "1" },
+    opts, step, receipt, binSha), /unexpected or incomplete/);
+  assert.throws(() => validateStrictOptimizationReport({ ...productOff,
+    other_process_configuration: { ...productOff.other_process_configuration,
+      CLEARRA_STANDARD_BAG_GLOBAL_SATURATION: "1" } }, opts, step, receipt, binSha), /unexpected or incomplete/);
   for (const patch of [{ parallel_active_workers: "2" }, { standard_bag_union_memo_storage: "reference" },
     { total_build_order_nodes: "1" }]) {
     assert.throws(() => validateStrictOptimizationReport({ ...report, summary: { ...report.summary, ...patch } },

@@ -3,7 +3,6 @@ import { get, writable } from 'svelte/store';
 import {
   cancelJob,
   getJobEvents,
-  prewarmSearchBackend,
   startJob,
   validateRequest,
   type ClearraDesktopAppResponse,
@@ -64,8 +63,6 @@ const DESKTOP_JOB_POLL_INTERVAL_MS = 100;
 let pollTimer: ReturnType<typeof setTimeout> | null = null;
 let pollEpoch = 0;
 const desktopJobStartGeneration = new DesktopJobStartGeneration();
-let gpuWarmupPromise: Promise<void> | null = null;
-let gpuWarmupAttempted = false;
 
 export function clearDesktopTerminalResult() {
   desktopJobState.update((state) => {
@@ -271,46 +268,6 @@ export function resumeDesktopJobPolling() {
   if (jobId === null) return;
   stopDesktopJobPolling();
   scheduleDesktopJobPoll(jobId, pollEpoch, 0);
-}
-
-export async function prewarmDesktopSearchBackend() {
-  const request = get(desktopJobState).request;
-  if (!requestsGpu(desktopRequestBackend(request))) {
-    return;
-  }
-  await beginDesktopSearchBackendPrewarm();
-}
-
-function beginDesktopSearchBackendPrewarm(): Promise<void> {
-  if (gpuWarmupAttempted) return Promise.resolve();
-  if (gpuWarmupPromise !== null) return gpuWarmupPromise;
-
-  gpuWarmupPromise = prewarmSearchBackend()
-    .then(() => {
-      gpuWarmupAttempted = true;
-    })
-    .catch(() => {
-      // The real request remains the authority for capability and fallback evidence.
-      gpuWarmupAttempted = true;
-    })
-    .finally(() => {
-      gpuWarmupPromise = null;
-    });
-  return gpuWarmupPromise;
-}
-
-function desktopRequestBackend(
-  request: ClearraDesktopRequest
-): 'auto' | 'cpu' | 'gpu' | 'hybrid' | undefined {
-  const optionIndex = request.arguments.lastIndexOf('--backend');
-  const value = optionIndex >= 0 ? request.arguments[optionIndex + 1] : undefined;
-  return value === 'auto' || value === 'cpu' || value === 'gpu' || value === 'hybrid'
-    ? value
-    : undefined;
-}
-
-function requestsGpu(backend: 'auto' | 'cpu' | 'gpu' | 'hybrid' | undefined): boolean {
-  return backend === 'auto' || backend === 'gpu' || backend === 'hybrid';
 }
 
 function scheduleDesktopJobPoll(jobId: number, epoch: number, delay: number) {

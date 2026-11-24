@@ -29,6 +29,79 @@ const UNION_LEVEL_COUNT: usize = 32;
 const AVAILABLE_ROW_CACHE_MAX_ROWS: usize = 8 * 1024 * 1024;
 const TARGET_PATTERN_SCAN_WORK_BUDGET: usize = 8_192;
 
+#[path = "geometry_prefix_pruning.rs"]
+mod prefix_pruning;
+#[cfg(test)]
+#[path = "geometry_prefix_pruning_tests.rs"]
+mod prefix_pruning_tests;
+
+const PHYSICAL_PREFIX_WORK_QUANTUM: usize = 4_096;
+const PREFIX_DEPENDENCY_VERIFIED: u8 = 1;
+const PREFIX_FIRST_CLEAR_VERIFIED: u8 = 2;
+const PREFIX_IMPOSSIBLE: u8 = 4;
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(super) enum PhysicalPrefixMode {
+    #[default]
+    Disabled,
+    /// Retain every original leaf, digest and ordinal; skip verification only.
+    MarkCandidates,
+    /// No raw candidate digest is requested. Exact counts preserve ordinals.
+    SkipSubtrees,
+}
+
+impl PhysicalPrefixMode {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Disabled => "disabled",
+            Self::MarkCandidates => "preserve-raw-candidates",
+            Self::SkipSubtrees => "skip-subtrees-preserve-ordinals",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) struct PhysicalPrefixStats {
+    pub dependency_checks: usize,
+    pub first_clear_checks: usize,
+    pub negative_prefixes: usize,
+    pub certified_candidates: usize,
+    pub skipped_candidates: usize,
+    pub emitted_candidates: usize,
+}
+
+impl PhysicalPrefixStats {
+    #[cfg(feature = "parallel")]
+    fn add(&mut self, other: Self) {
+        self.dependency_checks = self
+            .dependency_checks
+            .saturating_add(other.dependency_checks);
+        self.first_clear_checks = self
+            .first_clear_checks
+            .saturating_add(other.first_clear_checks);
+        self.negative_prefixes = self
+            .negative_prefixes
+            .saturating_add(other.negative_prefixes);
+        self.certified_candidates = self
+            .certified_candidates
+            .saturating_add(other.certified_candidates);
+        self.skipped_candidates = self
+            .skipped_candidates
+            .saturating_add(other.skipped_candidates);
+        self.emitted_candidates = self
+            .emitted_candidates
+            .saturating_add(other.emitted_candidates);
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct PhysicalPrefixSummary {
+    mode: PhysicalPrefixMode,
+    stats: PhysicalPrefixStats,
+    raw_candidates: usize,
+    last_original_ordinal: Option<usize>,
+}
+
 #[cfg(any(feature = "local-search-ab", test))]
 fn incremental_domain_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -40,6 +113,8 @@ fn minimum_domain_modes() -> (bool, bool) {
     static MODES: std::sync::OnceLock<(bool, bool)> = std::sync::OnceLock::new();
     *MODES.get_or_init(|| {
         (
+            // Unset and explicit 0 use the product's full scan. Only explicit
+            // 1 opts into the exact pivot-cutoff experiment.
             std::env::var("CLEARRA_MINIMUM_DOMAIN_CUTOFF").as_deref() == Ok("1"),
             std::env::var("CLEARRA_MINIMUM_DOMAIN_WORK").as_deref() == Ok("1"),
         )
@@ -199,9 +274,22 @@ pub(super) struct GeometryCandidate {
     row_ids: [u32; MAX_BOARD64_PIECES],
     row_count: u8,
     pub target_index: u32,
+    physically_impossible: bool,
+    // Issued only by this catalog's enumerator for these immutable rows.
+    // This is a nonstalling necessary closure, never physical success.
+    ilc_dependency_checked: bool,
 }
 
 impl GeometryCandidate {
+    pub const fn physical_prefix_impossible(&self) -> bool {
+        self.physically_impossible
+    }
+
+    #[cfg(any(test, feature = "placement-dependency-pc"))]
+    pub const fn ilc_dependency_checked(&self) -> bool {
+        self.ilc_dependency_checked
+    }
+
     pub fn row_ids(&self) -> &[u32] {
         &self.row_ids[..usize::from(self.row_count)]
     }
@@ -232,6 +320,9 @@ impl GeometryCandidate {
             row_ids,
             row_count: rows.len() as u8,
             target_index,
+            physically_impossible: false,
+            // Reconstructed/external candidates carry no prior proof.
+            ilc_dependency_checked: false,
         })
     }
 }
@@ -2185,6 +2276,7 @@ struct TraversalTask {
     continuations: [u32; MAX_BOARD64_PIECES],
     depth: u8,
     continuation_count: u8,
+    physical_prefix_state: u8,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -2201,9 +2293,14 @@ struct FamilyEnumerator {
     targets: Arc<[TargetGroup]>,
     family: Arc<GeometrySolutionFamily>,
     tasks: Vec<TraversalTask>,
+    active_task: Option<TraversalTask>,
     rows: [u32; MAX_BOARD64_PIECES],
     target_depth: u8,
     retained_limit_bytes: Option<u128>,
+    prefix: PhysicalPrefixSummary,
+    // Counts the existing immutable geometry expression only. It supplies no
+    // positive physical/source proof. Shared once, only for subtree skipping.
+    prefix_counts: Option<Arc<Vec<u128>>>,
     #[cfg(feature = "parallel")]
     candidate_count: Option<u128>,
 }
@@ -2212,8 +2309,8 @@ impl FamilyEnumerator {
     /// The unbounded handoff queries the root once. Its value is returned to
     /// the search for reporting/admission, including an already-observed
     /// None (overflow/allocation failure). The bounded constructor does not
-    /// query at all. The native parallel dispatcher may retain the same table
-    /// briefly for partition weights, but the enumerator never owns it.
+    /// query at all. The native parallel dispatcher reuses this table for
+    /// partition weights; a no-digest pruning owner may then adopt it once.
     fn from_completed_family(
         targets: Arc<[TargetGroup]>,
         family: GeometrySolutionFamily,
@@ -2237,6 +2334,7 @@ impl FamilyEnumerator {
                 continuations: [FAMILY_INVALID; MAX_BOARD64_PIECES],
                 depth: 0,
                 continuation_count: 0,
+                physical_prefix_state: 0,
             });
         }
         (
@@ -2244,9 +2342,12 @@ impl FamilyEnumerator {
                 targets,
                 family: Arc::new(family),
                 tasks,
+                active_task: None,
                 rows: [0; MAX_BOARD64_PIECES],
                 target_depth,
                 retained_limit_bytes: None,
+                prefix: PhysicalPrefixSummary::default(),
+                prefix_counts: None,
                 #[cfg(feature = "parallel")]
                 candidate_count,
             },
@@ -2279,15 +2380,19 @@ impl FamilyEnumerator {
                 continuations: [FAMILY_INVALID; MAX_BOARD64_PIECES],
                 depth: 0,
                 continuation_count: 0,
+                physical_prefix_state: 0,
             });
         }
         let enumerator = Self {
             targets,
             family: Arc::new(family),
             tasks,
+            active_task: None,
             rows: [0; MAX_BOARD64_PIECES],
             target_depth,
             retained_limit_bytes: Some(retained_limit_bytes),
+            prefix: PhysicalPrefixSummary::default(),
+            prefix_counts: None,
             #[cfg(feature = "parallel")]
             candidate_count: None,
         };
@@ -2302,7 +2407,7 @@ impl FamilyEnumerator {
         desired_partition_count: usize,
         path_counts: Vec<u128>,
     ) -> Result<(Vec<Self>, usize), Self> {
-        if self.tasks.len() != 1 {
+        if self.tasks.len() != 1 || self.active_task.is_some() {
             return Err(self);
         }
         let task = self.tasks[0];
@@ -2333,10 +2438,26 @@ impl FamilyEnumerator {
                 None => seeds[index].splittable = false,
             }
         }
-        // The table is only dispatch scratch; do not carry it into the
-        // enumerators, the shared family, or worker memory accounting.
-        drop(path_counts);
-        let shared_family_bytes = self.family.retained_bytes();
+        // Raw candidate digests retain the original leaf stream and need no
+        // table after dispatch. A no-digest skip owner shares these same exact
+        // counts to preserve original ordinals; allocation is never repeated
+        // per worker. An unrepresentable ordinal keeps the full leaf stream.
+        let mut mode = self.prefix.mode;
+        let prefix_counts = if mode == PhysicalPrefixMode::SkipSubtrees
+            && self
+                .candidate_count
+                .is_some_and(|count| count <= usize::MAX as u128)
+        {
+            Some(Arc::new(path_counts))
+        } else {
+            if mode == PhysicalPrefixMode::SkipSubtrees {
+                mode = PhysicalPrefixMode::MarkCandidates;
+            }
+            drop(path_counts);
+            None
+        };
+        let shared_family_bytes = self.family.retained_bytes()
+            + prefix_counts.as_deref().map_or(0, prefix_count_owner_bytes);
         let mut enumerators = Vec::new();
         if enumerators.try_reserve_exact(seeds.len()).is_err() {
             return Err(self);
@@ -2346,9 +2467,15 @@ impl FamilyEnumerator {
                 targets: Arc::clone(&self.targets),
                 family: Arc::clone(&self.family),
                 tasks: vec![seed.task],
+                active_task: None,
                 rows: seed.rows,
                 target_depth: self.target_depth,
                 retained_limit_bytes: None,
+                prefix: PhysicalPrefixSummary {
+                    mode,
+                    ..PhysicalPrefixSummary::default()
+                },
+                prefix_counts: prefix_counts.as_ref().map(Arc::clone),
                 #[cfg(feature = "parallel")]
                 candidate_count: Some(seed.weight),
             });
@@ -2360,9 +2487,108 @@ impl FamilyEnumerator {
         &mut self,
         catalog: &GeometryCatalog,
     ) -> Result<Option<GeometryCandidate>, ()> {
-        while let Some(mut task) = self.tasks.pop() {
+        match self.next_candidate_impl::<false, false, false>(catalog, usize::MAX)? {
+            FamilyEnumerationAdvance::Candidate(candidate) => Ok(Some(candidate)),
+            FamilyEnumerationAdvance::Complete => Ok(None),
+            FamilyEnumerationAdvance::Pending => Err(()),
+        }
+    }
+
+    fn next_physical_candidate(
+        &mut self,
+        catalog: &GeometryCatalog,
+    ) -> Result<FamilyEnumerationAdvance, ()> {
+        if self.prefix.mode == PhysicalPrefixMode::SkipSubtrees && self.prefix_counts.is_none() {
+            let counts = self.family.path_count_table().filter(|counts| {
+                self.tasks
+                    .iter()
+                    .try_fold(0_u128, |total, task| {
+                        total.checked_add(exact_traversal_weight(*task, counts)?)
+                    })
+                    .is_some_and(|total| total <= usize::MAX as u128)
+            });
+            if let Some(counts) = counts {
+                self.prefix_counts = Some(Arc::new(counts));
+            } else {
+                // This optional optimization cannot invent a skipped count.
+                self.prefix.mode = PhysicalPrefixMode::MarkCandidates;
+            }
+        }
+        match self.prefix.mode {
+            PhysicalPrefixMode::Disabled => {
+                self.next_candidate_impl::<false, false, false>(catalog, usize::MAX)
+            }
+            PhysicalPrefixMode::MarkCandidates => {
+                self.next_candidate_impl::<true, false, false>(catalog, usize::MAX)
+            }
+            PhysicalPrefixMode::SkipSubtrees => {
+                self.next_candidate_impl::<true, true, true>(catalog, PHYSICAL_PREFIX_WORK_QUANTUM)
+            }
+        }
+    }
+
+    fn next_candidate_impl<const PHYSICAL: bool, const SKIP: bool, const YIELD: bool>(
+        &mut self,
+        catalog: &GeometryCatalog,
+        work_budget: usize,
+    ) -> Result<FamilyEnumerationAdvance, ()> {
+        let mut work = 0_usize;
+        while let Some(mut task) = if YIELD {
+            self.active_task.take().or_else(|| self.tasks.pop())
+        } else {
+            self.tasks.pop()
+        } {
             loop {
+                if YIELD {
+                    if work >= work_budget.max(1) {
+                        self.active_task = Some(task);
+                        return Ok(FamilyEnumerationAdvance::Pending);
+                    }
+                    work += 1;
+                }
                 if task.family == FAMILY_INVALID {
+                    break;
+                }
+                if PHYSICAL && task.physical_prefix_state & PREFIX_IMPOSSIBLE == 0 {
+                    if task.physical_prefix_state & PREFIX_DEPENDENCY_VERIFIED == 0 {
+                        self.prefix.stats.dependency_checks += 1;
+                        if prefix_pruning::selected_prefix_stalls(
+                            catalog,
+                            &self.rows[..usize::from(task.depth)],
+                        ) {
+                            task.physical_prefix_state |= PREFIX_IMPOSSIBLE;
+                            self.prefix.stats.negative_prefixes += 1;
+                        }
+                        task.physical_prefix_state |= PREFIX_DEPENDENCY_VERIFIED;
+                    }
+                    if task.physical_prefix_state
+                        & (PREFIX_IMPOSSIBLE | PREFIX_FIRST_CLEAR_VERIFIED)
+                        == 0
+                    {
+                        self.prefix.stats.first_clear_checks += 1;
+                        if prefix_pruning::selected_first_clear_stalls(
+                            catalog,
+                            &self.rows[..usize::from(task.depth)],
+                        ) {
+                            task.physical_prefix_state |= PREFIX_IMPOSSIBLE;
+                            self.prefix.stats.negative_prefixes += 1;
+                        }
+                        task.physical_prefix_state |= PREFIX_FIRST_CLEAR_VERIFIED;
+                    }
+                }
+                if SKIP && task.physical_prefix_state & PREFIX_IMPOSSIBLE != 0 {
+                    let skipped =
+                        exact_traversal_weight(task, self.prefix_counts.as_deref().ok_or(())?)
+                            .and_then(|count| usize::try_from(count).ok())
+                            .ok_or(())?;
+                    self.prefix.raw_candidates =
+                        self.prefix.raw_candidates.checked_add(skipped).ok_or(())?;
+                    self.prefix.stats.skipped_candidates = self
+                        .prefix
+                        .stats
+                        .skipped_candidates
+                        .checked_add(skipped)
+                        .ok_or(())?;
                     break;
                 }
                 if task.family == FAMILY_EMPTY {
@@ -2374,7 +2600,20 @@ impl FamilyEnumerator {
                     if task.depth != self.target_depth {
                         return Err(());
                     }
-                    return self.candidate(catalog, task.depth).map(Some).ok_or(());
+                    let mut candidate = self.candidate(catalog, task.depth).ok_or(())?;
+                    if PHYSICAL {
+                        candidate.physically_impossible =
+                            task.physical_prefix_state & PREFIX_IMPOSSIBLE != 0;
+                        candidate.ilc_dependency_checked = !candidate.physically_impossible
+                            && task.physical_prefix_state & PREFIX_DEPENDENCY_VERIFIED != 0;
+                        self.prefix.last_original_ordinal = Some(self.prefix.raw_candidates);
+                        self.prefix.raw_candidates =
+                            self.prefix.raw_candidates.checked_add(1).ok_or(())?;
+                        self.prefix.stats.emitted_candidates += 1;
+                        self.prefix.stats.certified_candidates +=
+                            usize::from(candidate.physically_impossible);
+                    }
+                    return Ok(FamilyEnumerationAdvance::Candidate(candidate));
                 }
 
                 let node = self.family.node(task.family).ok_or(())?;
@@ -2388,6 +2627,14 @@ impl FamilyEnumerator {
                         self.rows[task.depth as usize] = node.row_id;
                         task.depth += 1;
                         task.family = node.left;
+                        if PHYSICAL && task.physical_prefix_state & PREFIX_IMPOSSIBLE == 0 {
+                            task.physical_prefix_state &= !PREFIX_FIRST_CLEAR_VERIFIED;
+                            // A zero-requirement row can be placed first in
+                            // the relaxed closure, preserving its old proof.
+                            if !catalog.realization_requirement_is_satisfied(node.row_id, 0) {
+                                task.physical_prefix_state &= !PREFIX_DEPENDENCY_VERIFIED;
+                            }
+                        }
                     }
                     FamilyNodeKind::Union => {
                         let mut right = task;
@@ -2406,7 +2653,7 @@ impl FamilyEnumerator {
                 }
             }
         }
-        Ok(None)
+        Ok(FamilyEnumerationAdvance::Complete)
     }
 
     fn push_task(&mut self, task: TraversalTask) -> Result<(), ()> {
@@ -2455,7 +2702,32 @@ impl FamilyEnumerator {
             + usize::from(Arc::strong_count(&self.family) == 1)
                 * (core::mem::size_of::<GeometrySolutionFamily>() + self.family.retained_bytes())
             + self.tasks.capacity() * core::mem::size_of::<TraversalTask>()
+            + self
+                .prefix_counts
+                .as_ref()
+                .filter(|counts| Arc::strong_count(counts) == 1)
+                .map_or(0, |counts| prefix_count_owner_bytes(counts))
     }
+}
+
+enum FamilyEnumerationAdvance {
+    Pending,
+    Candidate(GeometryCandidate),
+    Complete,
+}
+
+fn prefix_count_owner_bytes(counts: &Vec<u128>) -> usize {
+    core::mem::size_of::<Vec<u128>>()
+        + 2 * core::mem::size_of::<usize>()
+        + counts.capacity() * core::mem::size_of::<u128>()
+}
+
+fn exact_traversal_weight(task: TraversalTask, counts: &[u128]) -> Option<u128> {
+    task.continuations[..usize::from(task.continuation_count)]
+        .iter()
+        .try_fold(*counts.get(task.family as usize)?, |weight, &family| {
+            weight.checked_mul(*counts.get(family as usize)?)
+        })
 }
 
 #[cfg(test)]
@@ -2721,6 +2993,9 @@ fn split_traversal_seed(
                 seed.rows[depth] = node.row_id;
                 seed.task.depth += 1;
                 seed.task.family = node.left;
+                // Dispatch extends the selected prefix without running either
+                // predicate. No positive certificate covers the new row yet.
+                seed.task.physical_prefix_state &= PREFIX_IMPOSSIBLE;
             }
             FamilyNodeKind::Union => {
                 let mut left = seed;
@@ -2882,7 +3157,9 @@ pub(super) enum GeometryAdvance {
 
 pub(super) struct GeometrySearch {
     group_pattern_index_bytes: usize,
-    shared_family_bytes: usize,
+    // Historical logical dispatch payload only. A merged search takes no
+    // family/count-table Arc and must not report this as current retention.
+    parallel_family_dispatch_bytes: usize,
     target_preparation: Option<TargetGroupCompileSession>,
     target_preparation_mode: Option<TargetGroupPreparationMode>,
     compiler: Option<FamilyCompiler>,
@@ -2897,6 +3174,7 @@ pub(super) struct GeometrySearch {
     tablebase_pruned_states: usize,
     external_targets: Option<Arc<[TargetGroup]>>,
     resource_authoritative: bool,
+    prefix: PhysicalPrefixSummary,
 }
 
 #[derive(Clone, Debug)]
@@ -3516,7 +3794,7 @@ impl GeometrySearch {
     pub fn placeholder() -> Self {
         Self {
             group_pattern_index_bytes: 0,
-            shared_family_bytes: 0,
+            parallel_family_dispatch_bytes: 0,
             target_preparation: None,
             target_preparation_mode: None,
             compiler: None,
@@ -3531,6 +3809,7 @@ impl GeometrySearch {
             tablebase_pruned_states: 0,
             external_targets: None,
             resource_authoritative: false,
+            prefix: PhysicalPrefixSummary::default(),
         }
     }
 
@@ -3630,7 +3909,7 @@ impl GeometrySearch {
         })?;
         Ok(Self {
             group_pattern_index_bytes: 0,
-            shared_family_bytes: 0,
+            parallel_family_dispatch_bytes: 0,
             target_preparation: Some(TargetGroupCompileSession::new(
                 universe,
                 family,
@@ -3649,13 +3928,14 @@ impl GeometrySearch {
             tablebase_pruned_states: 0,
             external_targets: None,
             resource_authoritative: memory_limit.is_some(),
+            prefix: PhysicalPrefixSummary::default(),
         })
     }
 
     pub fn new_shared(required_cells: u64, shared: &SharedTargetGroups) -> Self {
         Self {
             group_pattern_index_bytes: shared.group_pattern_index_bytes,
-            shared_family_bytes: 0,
+            parallel_family_dispatch_bytes: 0,
             target_preparation: None,
             target_preparation_mode: None,
             compiler: Some(FamilyCompiler::new(
@@ -3673,6 +3953,7 @@ impl GeometrySearch {
             tablebase_pruned_states: 0,
             external_targets: None,
             resource_authoritative: false,
+            prefix: PhysicalPrefixSummary::default(),
         }
     }
 
@@ -3682,7 +3963,7 @@ impl GeometrySearch {
     ) -> Result<Self, WasmExactSearchError> {
         Ok(Self {
             group_pattern_index_bytes: shared.group_pattern_index_bytes,
-            shared_family_bytes: 0,
+            parallel_family_dispatch_bytes: 0,
             target_preparation: None,
             target_preparation_mode: None,
             compiler: Some(FamilyCompiler::try_new(
@@ -3700,6 +3981,7 @@ impl GeometrySearch {
             tablebase_pruned_states: 0,
             external_targets: None,
             resource_authoritative: true,
+            prefix: PhysicalPrefixSummary::default(),
         })
     }
 
@@ -3764,7 +4046,7 @@ impl GeometrySearch {
         })?;
         Ok(Self {
             group_pattern_index_bytes: 0,
-            shared_family_bytes: 0,
+            parallel_family_dispatch_bytes: 0,
             target_preparation: Some(TargetGroupCompileSession::new(
                 universe,
                 family,
@@ -3783,13 +4065,14 @@ impl GeometrySearch {
             tablebase_pruned_states: 0,
             external_targets: None,
             resource_authoritative: memory_limit.is_some(),
+            prefix: PhysicalPrefixSummary::default(),
         })
     }
 
     pub fn external_shared(shared: &SharedTargetGroups) -> Self {
         Self {
             group_pattern_index_bytes: shared.group_pattern_index_bytes,
-            shared_family_bytes: 0,
+            parallel_family_dispatch_bytes: 0,
             target_preparation: None,
             target_preparation_mode: None,
             compiler: None,
@@ -3804,6 +4087,7 @@ impl GeometrySearch {
             tablebase_pruned_states: 0,
             external_targets: Some(Arc::clone(&shared.targets)),
             resource_authoritative: false,
+            prefix: PhysicalPrefixSummary::default(),
         }
     }
 
@@ -3895,7 +4179,6 @@ impl GeometrySearch {
                     .or(self.external_targets.as_deref());
                 let fixed = live_targets
                     .map_or(Some(0_u128), checked_target_nested_retained_bytes)
-                    .and_then(|bytes| bytes.checked_add(self.shared_family_bytes as u128))
                     .and_then(|bytes| {
                         bytes.checked_add(
                             self.external_targets
@@ -3947,7 +4230,27 @@ impl GeometrySearch {
                         };
                         self.enumerator = Some(enumerator);
                     } else {
-                        let (enumerator, root_count) = compiler.into_enumerator(parallel_counts);
+                        let mut serial_prefix_counts = None;
+                        let count_slot = if parallel_counts.is_some() {
+                            parallel_counts
+                        } else if self.prefix.mode == PhysicalPrefixMode::SkipSubtrees {
+                            Some(&mut serial_prefix_counts)
+                        } else {
+                            None
+                        };
+                        let (mut enumerator, root_count) = compiler.into_enumerator(count_slot);
+                        enumerator.prefix.mode = if self.prefix.mode
+                            == PhysicalPrefixMode::SkipSubtrees
+                            && !root_count.is_some_and(|count| count <= usize::MAX as u128)
+                        {
+                            PhysicalPrefixMode::MarkCandidates
+                        } else {
+                            self.prefix.mode
+                        };
+                        if enumerator.prefix.mode == PhysicalPrefixMode::SkipSubtrees {
+                            enumerator.prefix_counts = serial_prefix_counts.map(Arc::new);
+                        }
+                        self.prefix = enumerator.prefix;
                         self.candidate_family_count = root_count;
                         self.enumerator = Some(enumerator);
                     }
@@ -3966,8 +4269,24 @@ impl GeometrySearch {
         let Some(enumerator) = self.enumerator.as_mut() else {
             return GeometryAdvance::Complete;
         };
-        let advance = match enumerator.next_candidate(catalog) {
-            Ok(Some(candidate)) => {
+        let next = if enumerator.prefix.mode == PhysicalPrefixMode::Disabled {
+            enumerator
+                .next_candidate(catalog)
+                .map(|candidate| match candidate {
+                    Some(candidate) => FamilyEnumerationAdvance::Candidate(candidate),
+                    None => FamilyEnumerationAdvance::Complete,
+                })
+        } else {
+            enumerator.next_physical_candidate(catalog)
+        };
+        if matches!(&next, Ok(FamilyEnumerationAdvance::Complete)) {
+            // During traversal the enumerator owns the live counters. Copy
+            // once at release, not a full summary on every raw leaf.
+            self.prefix = enumerator.prefix;
+        }
+        let advance = match next {
+            Ok(FamilyEnumerationAdvance::Pending) => GeometryAdvance::Pending,
+            Ok(FamilyEnumerationAdvance::Candidate(candidate)) => {
                 if retained_limit_bytes.is_some_and(|limit| self.retained_bytes() as u128 > limit) {
                     GeometryAdvance::ResourceIncomplete(
                         "geometry_solution_family_traversal_memory_capacity_exceeded",
@@ -3976,7 +4295,7 @@ impl GeometrySearch {
                     GeometryAdvance::Candidate(candidate)
                 }
             }
-            Ok(None) => {
+            Ok(FamilyEnumerationAdvance::Complete) => {
                 self.enumerator = None;
                 GeometryAdvance::Complete
             }
@@ -4039,9 +4358,20 @@ impl GeometrySearch {
             // build its one transient table only when there is a split seed.
             path_counts = self
                 .enumerator
-                .as_ref()
-                .filter(|enumerator| enumerator.tasks.len() == 1)
-                .and_then(|enumerator| enumerator.family.path_count_table());
+                .as_mut()
+                .filter(|enumerator| {
+                    enumerator.tasks.len() == 1 && enumerator.active_task.is_none()
+                })
+                .and_then(|enumerator| match enumerator.prefix_counts.take() {
+                    Some(counts) => match Arc::try_unwrap(counts) {
+                        Ok(counts) => Some(counts),
+                        Err(counts) => {
+                            enumerator.prefix_counts = Some(counts);
+                            None
+                        }
+                    },
+                    None => enumerator.family.path_count_table(),
+                });
         }
         #[cfg(all(feature = "local-search-ab", target_os = "linux"))]
         if let Some(probe) = &memory_probe {
@@ -4077,11 +4407,18 @@ impl GeometrySearch {
 
     #[cfg(feature = "parallel")]
     fn prepare_compiled_parallel(
-        self,
+        mut self,
         balanced_workers: usize,
         path_counts: Option<Vec<u128>>,
     ) -> ParallelGeometryPreparation {
         if balanced_workers < 2 {
+            if let Some(enumerator) = self.enumerator.as_mut() {
+                if enumerator.prefix.mode == PhysicalPrefixMode::SkipSubtrees {
+                    enumerator.prefix_counts = path_counts
+                        .map(Arc::new)
+                        .or(enumerator.prefix_counts.take());
+                }
+            }
             return ParallelGeometryPreparation::Serial {
                 geometry: self,
                 reason: "small-compiled-candidate-family",
@@ -4140,11 +4477,12 @@ impl GeometrySearch {
         for (index, enumerator) in enumerators.into_iter().enumerate() {
             searches.push(Self {
                 group_pattern_index_bytes: 0,
-                shared_family_bytes: 0,
+                parallel_family_dispatch_bytes: 0,
                 target_preparation: None,
                 target_preparation_mode: None,
                 compiler: None,
                 candidate_family_count: enumerator.candidate_count,
+                prefix: enumerator.prefix,
                 enumerator: Some(enumerator),
                 expanded_nodes: usize::from(index == 0) * self.expanded_nodes,
                 peak_frontier: usize::from(index == 0) * self.peak_frontier,
@@ -4180,9 +4518,16 @@ impl GeometrySearch {
     ) -> Self {
         let mut geometry = Self::placeholder();
         geometry.group_pattern_index_bytes = group_pattern_index_bytes;
-        geometry.shared_family_bytes = shared_family_bytes;
+        geometry.parallel_family_dispatch_bytes = shared_family_bytes;
         geometry.candidate_family_count = Some(0);
         for search in searches {
+            let prefix = search.prefix_summary();
+            geometry.prefix.mode = prefix.mode;
+            geometry.prefix.stats.add(prefix.stats);
+            geometry.prefix.raw_candidates = geometry
+                .prefix
+                .raw_candidates
+                .saturating_add(prefix.raw_candidates);
             geometry.expanded_nodes = geometry
                 .expanded_nodes
                 .saturating_add(search.expanded_nodes);
@@ -4231,6 +4576,55 @@ impl GeometrySearch {
 
     pub const fn candidate_family_count(&self) -> Option<u128> {
         self.candidate_family_count
+    }
+
+    pub const fn parallel_family_dispatch_bytes(&self) -> usize {
+        self.parallel_family_dispatch_bytes
+    }
+
+    /// Set once before enumeration, after the caller has qualified the whole
+    /// request. Bounded/external producers retain their original admission and
+    /// candidate-evidence contracts.
+    pub fn enable_physical_prefix_pruning(&mut self, mode: PhysicalPrefixMode) {
+        if self.resource_authoritative
+            || self.external_targets.is_some()
+            || matches!(
+                self.target_preparation_mode,
+                Some(TargetGroupPreparationMode::External)
+            )
+        {
+            return;
+        }
+        debug_assert_eq!(self.prefix.raw_candidates, 0);
+        self.prefix.mode = mode;
+        if let Some(enumerator) = self.enumerator.as_mut() {
+            enumerator.prefix.mode = mode;
+        }
+    }
+
+    fn prefix_summary(&self) -> &PhysicalPrefixSummary {
+        self.enumerator
+            .as_ref()
+            .map_or(&self.prefix, |enumerator| &enumerator.prefix)
+    }
+
+    pub fn physical_prefix_mode(&self) -> PhysicalPrefixMode {
+        self.prefix_summary().mode
+    }
+
+    pub fn physical_prefix_stats(&self) -> PhysicalPrefixStats {
+        self.prefix_summary().stats
+    }
+
+    pub fn raw_candidate_progress(&self) -> Option<usize> {
+        match self.prefix_summary().mode {
+            PhysicalPrefixMode::Disabled => None,
+            _ => Some(self.prefix_summary().raw_candidates),
+        }
+    }
+
+    pub fn last_original_candidate_ordinal(&self) -> Option<usize> {
+        self.prefix_summary().last_original_ordinal
     }
 
     pub const fn target_preparation_pending(&self) -> bool {
@@ -4303,9 +4697,7 @@ impl GeometrySearch {
 
     pub fn retained_bytes(&self) -> usize {
         if let Some(preparation) = self.target_preparation.as_ref() {
-            return preparation
-                .retained_upper_bound_bytes()
-                .saturating_add(self.shared_family_bytes);
+            return preparation.retained_upper_bound_bytes();
         }
         let current_target_nested_bytes = self
             .compiler
@@ -4326,7 +4718,7 @@ impl GeometrySearch {
                         || self.external_targets.is_some(),
                 ) * usize::MAX
             });
-        current_target_nested_bytes.saturating_add(self.shared_family_bytes)
+        current_target_nested_bytes
             + self
                 .compiler
                 .as_ref()

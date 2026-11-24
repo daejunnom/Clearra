@@ -14,6 +14,7 @@ pub(super) const fn finite_terminal_release_allowed(
         && !terminal_projection_consumed
         && held_piece_present
         && terminal_step
+        && sequence_len != 0
         && queue_position == sequence_len
 }
 
@@ -24,26 +25,37 @@ pub(super) fn terminal_release_pattern_word(
     active_patterns: u64,
     projects_standard_bag_lookahead: bool,
 ) -> u64 {
-    if queue_position != pattern_index.sequence_len() {
+    if active_patterns == 0 || queue_position == 0 || queue_position > pattern_index.sequence_len()
+    {
         return 0;
     }
-    // At the end of an explicit finite source the ordinary position index has
-    // no current piece. Only the standard-bag lookahead can shadow a release.
-    if !projects_standard_bag_lookahead {
-        return active_patterns;
-    }
-    active_patterns
+    // The index length is the maximum across its original patterns. A shorter
+    // original reaches EOF before that maximum; an empty or already exhausted
+    // original must not acquire another terminal release. Require its previous
+    // actual draw and exclude its actual or authorized projected current draw.
+    let without_current = active_patterns
         & !projected_current_word(
             pattern_index,
             queue_position,
             word_index,
             projects_standard_bag_lookahead,
-        )
+        );
+    if without_current == 0 {
+        return 0;
+    }
+    let previous_actual = (1..=7).fold(0_u64, |word, piece_code| {
+        word | pattern_index.piece_word(queue_position - 1, piece_code, word_index)
+    });
+    without_current & previous_actual
 }
 
 #[cfg(test)]
 #[path = "component_shuffle_contract_tests.rs"]
 mod component_shuffle_contract_tests;
+
+#[cfg(test)]
+#[path = "terminal_hold_projection_regression_tests.rs"]
+mod terminal_hold_projection_regression_tests;
 
 pub(super) fn projected_current_word(
     pattern_index: &PatternPiecePositionIndex,
