@@ -83,7 +83,11 @@ export function nativeSearchProgressCounter(
 
 export function isSearchPostprocessLabel(label: string | undefined): boolean {
   return label === 'postprocess' || label === 'pc-minimals-finalize'
-    || label?.startsWith('complete-replay-') === true;
+    || label?.startsWith('complete-replay-') === true
+    || label?.startsWith('execution-') === true
+    || label?.startsWith('setup-score-') === true
+    || label === 'result-projection' || label === 'result-publish'
+    || label === 'cover-minimum';
 }
 
 // Desktop publishes one labeled scalar at a time; retain independent

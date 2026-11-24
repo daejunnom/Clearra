@@ -12,6 +12,12 @@ const DISPLAY_FAMILY_LIMIT = 24;
 const SCORE_ONLY_EQUALITY = "score-only-attack-informational";
 const SCORE_ONLY_SUMMARY_EQUALITY = "score-only";
 const CANONICAL_SELECTION = "smallest-canonical-candidate-id";
+const PC_REPLAY_PAGE_FIELDS = Object.freeze([
+  "page_contract", "page_source_available", "page_source_identity_sha256",
+  "geometry_count", "geometry_page_number", "candidate_id",
+  "geometry_witness_count", "geometry_pattern_count", "member_page_number",
+  "member_page_count",
+]);
 
 const SETUP_FAMILIES = new Map([
   ["setup-joint-ranking.v2", "setup.joint"],
@@ -80,9 +86,12 @@ function projectPcPath(structured, semantics = "pc") {
     summary.complete !== true ||
     !canonicalDecimal(summary.witness_count) ||
     !canonicalDecimal(summary.materialized_pattern_count) ||
-    !Array.isArray(summary.witnesses) ||
-    BigInt(summary.witness_count) !== BigInt(summary.witnesses.length)
+    !Array.isArray(summary.witnesses)
   ) throw invalid(capabilityId, "family evidence");
+  const paged = !build && validateCanonicalPcPathPage(summary);
+  if (!paged && BigInt(summary.witness_count) !== BigInt(summary.witnesses.length)) {
+    throw invalid(capabilityId, "family count");
+  }
   const targetTerminal = build ? summary.target_terminal_board_mask : null;
   if (
     (build && !canonicalBoardMask(targetTerminal)) ||
@@ -113,7 +122,9 @@ function projectPcPath(structured, semantics = "pc") {
       BigInt(witness.candidate_id) < suppliedCandidateId
     )) throw invalid(capabilityId, "core-owned canonical witness");
   }
-  rejectAlternativeMetadata(structured);
+  rejectAlternativeMetadata(structured, paged
+    ? new Set(PC_REPLAY_PAGE_FIELDS.map((field) => `summary.${field}`))
+    : new Set());
   const projected = clonePlain(structured);
   projected.summary = {
     capability_id: capabilityId,
@@ -130,6 +141,33 @@ function projectPcPath(structured, semantics = "pc") {
       : clonePlain(suppliedCanonical),
   };
   return deepFreeze(projected);
+}
+
+function validateCanonicalPcPathPage(summary) {
+  if (!PC_REPLAY_PAGE_FIELDS.some((field) => Object.hasOwn(summary, field))) return false;
+  if (
+    !PC_REPLAY_PAGE_FIELDS.every((field) => Object.hasOwn(summary, field)) ||
+    summary.page_contract !== "pc-replay-member-page.v2" ||
+    summary.page_source_available !== true ||
+    !/^[0-9a-f]{64}$/u.test(summary.page_source_identity_sha256) ||
+    summary.geometry_page_number !== "1" ||
+    summary.candidate_id !== "1" ||
+    summary.member_page_number !== "1" ||
+    !["geometry_count", "geometry_witness_count", "geometry_pattern_count", "member_page_count"]
+      .every((field) => canonicalPositiveDecimalU64(summary[field]))
+  ) throw invalid("pc.path", "canonical first member page");
+  const geometryWitnesses = BigInt(summary.geometry_witness_count);
+  const totalWitnesses = BigInt(summary.witness_count);
+  const geometries = BigInt(summary.geometry_count);
+  if (
+    geometryWitnesses > totalWitnesses || geometries > totalWitnesses ||
+    (geometries === 1n && geometryWitnesses !== totalWitnesses) ||
+    BigInt(summary.geometry_pattern_count) > BigInt(summary.materialized_pattern_count) ||
+    BigInt(summary.member_page_count) !== (geometryWitnesses + 99n) / 100n ||
+    BigInt(summary.witnesses.length) !== (geometryWitnesses < 100n ? geometryWitnesses : 100n) ||
+    summary.witnesses.some((witness) => witness?.candidate_id !== summary.candidate_id)
+  ) throw invalid("pc.path", "member page cardinality");
+  return true;
 }
 
 /**

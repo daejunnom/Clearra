@@ -256,6 +256,11 @@ function applyExactProgress(stages: WorkspaceProgressStage[], input: WorkspacePr
   const buildNodes = localBuildStarted && !workerBuildStarted
     ? telemetryCount(telemetry, 'producer_build_nodes', telemetry.producer_build_nodes)
     : telemetryCount(telemetry, 'build_nodes', telemetry.build_nodes);
+  const workerChecksStarted = telemetryPositive(telemetry, 'coverage_checks', telemetry.coverage_checks);
+  const coverageChecks = !workerChecksStarted &&
+    telemetryPositive(telemetry, 'producer_coverage_checks', telemetry.producer_coverage_checks)
+    ? telemetryCount(telemetry, 'producer_coverage_checks', telemetry.producer_coverage_checks)
+    : telemetryCount(telemetry, 'coverage_checks', telemetry.coverage_checks);
   const predictedCandidates = predictedCandidateTotal(telemetry);
   const candidateGenerationStarted = telemetry.availability.candidates_emitted &&
     (telemetryPositive(telemetry, 'candidates_emitted', telemetry.candidates_emitted) ||
@@ -267,7 +272,8 @@ function applyExactProgress(stages: WorkspaceProgressStage[], input: WorkspacePr
       'candidates_verified',
       telemetry.candidates_verified
     ) ||
-      telemetryPositive(telemetry, 'coverage_checks', telemetry.coverage_checks) ||
+      workerChecksStarted ||
+      telemetryPositive(telemetry, 'producer_coverage_checks', telemetry.producer_coverage_checks) ||
       localBuildStarted ||
       workerBuildStarted ||
       producerDone);
@@ -346,10 +352,21 @@ function applyExactProgress(stages: WorkspaceProgressStage[], input: WorkspacePr
     addMetric(
       verify,
       'progressMetricChecks',
-      telemetryCount(telemetry, 'coverage_checks', telemetry.coverage_checks)
+      coverageChecks
     );
   }
-  if (finalize) finalize.status = isFinalizingPhase(phase) ? 'running' : 'pending';
+  if (finalize) {
+    finalize.status = isFinalizingPhase(phase) ? 'running' : 'pending';
+    if (isSearchPostprocessLabel(input.progressLabel)) {
+      applyMetric(finalize, safeProgressCount(input.progressDone),
+        input.progressTotal > 0 ? safeProgressCount(input.progressTotal) : null);
+    }
+  }
+}
+
+function safeProgressCount(value: number): string | null {
+  return Number.isSafeInteger(value) && value >= 0 && value < 0xffff_ffff
+    ? String(value) : null;
 }
 
 function applySetupProgress(stages: WorkspaceProgressStage[], input: WorkspaceProgressInput) {

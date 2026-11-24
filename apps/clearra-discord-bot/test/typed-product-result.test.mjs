@@ -71,6 +71,43 @@ test("pc.path fails closed when the supplied canonical witness is missing or mis
   assert.equal(validDiscordTypedProductResult(forged), false);
 });
 
+test("pc.path accepts a source-bound first page without treating it as the whole family", () => {
+  const witnesses = Array.from({ length: 100 }, (_, index) =>
+    pathWitness("1", "0", `trace-${String(index).padStart(3, "0")}`));
+  const raw = envelope("pc-path-family.v2", {
+    capability_id: "pc.path", witness_contract: "pc-path-witness.v2",
+    ordering: "candidate-id-ascending-then-pattern-id-ascending-then-trace-key-ascending",
+    problem_id: "paged-problem", materialized_pattern_count: "5040",
+    witness_count: "4011520", complete: true,
+    canonical_selection: "smallest-canonical-candidate-id",
+    canonical_witness: structuredClone(witnesses[0]), witnesses,
+    page_contract: "pc-replay-member-page.v2", page_source_available: true,
+    page_source_identity_sha256: "a".repeat(64), geometry_count: "246",
+    geometry_page_number: "1", candidate_id: "1", geometry_witness_count: "2400",
+    geometry_pattern_count: "120", member_page_number: "1", member_page_count: "24",
+  });
+  const projected = projectDiscordTypedProductResult(raw);
+  assert.deepEqual(projected.summary.canonical_witness, witnesses[0]);
+  assert.equal(Object.hasOwn(projected.summary, "member_page_number"), false);
+  assert.deepEqual(projectDiscordTypedProductResult(projected), projected);
+  for (const mutate of [
+    (s) => { delete s.page_contract; },
+    (s) => { s.page_source_available = false; },
+    (s) => { s.member_page_number = "2"; },
+    (s) => { s.member_page_count = "25"; },
+    (s) => { s.geometry_page_number = "2"; },
+    (s) => { s.geometry_witness_count = "99"; },
+    (s) => { s.witness_count = "2399"; },
+    (s) => { s.witnesses.pop(); },
+    (s) => { s.witnesses[99].candidate_id = "2"; },
+    (s) => { s.alternative_page_number = "1"; },
+  ]) {
+    const forged = structuredClone(raw);
+    mutate(forged.summary);
+    assert.equal(validDiscordTypedProductResult(forged), false);
+  }
+});
+
 test("full-height PC replay survives both canonical projection hops without narrowing its zero terminal", () => {
   const witness = fullHeightPcReplayWitness();
   const raw = envelope("pc-path-family.v2", {
