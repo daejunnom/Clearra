@@ -208,6 +208,54 @@ fn success_output_carries_zero_exit_code() {
 }
 
 #[test]
+fn empty_native_document_exports_report_no_file_without_inventing_a_solution() {
+    for (format, keyword) in [
+        (SolutionArtifactOutputFormat::Ctk3, "ctk3"),
+        (SolutionArtifactOutputFormat::Fumen, "fumen"),
+    ] {
+        let artifact = SolutionSetArtifact::try_new(
+            "test-solution-set",
+            "key-v1",
+            "hash-v1",
+            "hash:empty",
+            0,
+            vec![],
+        )
+        .expect("complete empty solution set");
+        let pending = PendingSolutionArtifact::try_new(
+            PathBuf::from("empty-solutions.bin"),
+            format,
+            artifact,
+            DEFAULT_MAX_ARTIFACT_BYTES,
+            r#"{"summary":{"normalized_unique_solution_count":"0"}}"#.to_owned(),
+            RenderFormat::Json,
+        )
+        .expect("pending empty document");
+        let output = CliOutput::success("unused").with_pending_solution_artifact(pending);
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code =
+            CliOutputDispatcher::dispatch_with_writers(&output, &mut stdout, &mut stderr, |_| {
+                panic!("an empty native document has no encodable page or file")
+            });
+        assert_eq!(code, ExitCode::Success.code());
+        assert!(stderr.is_empty());
+        let value: serde_json::Value = serde_json::from_slice(&stdout).expect("JSON receipt");
+        assert_eq!(value["summary"]["normalized_unique_solution_count"], "0");
+        assert_eq!(value["solution_artifact"]["status"], "empty");
+        assert_eq!(value["solution_artifact"]["encoding"], keyword);
+        assert_eq!(
+            value["solution_artifact"]["schema"],
+            "solution-set-artifact.v2"
+        );
+        assert_eq!(value["solution_artifact"]["solution_count"], 0);
+        assert_eq!(value["solution_artifact"]["bytes"], 0);
+        assert_eq!(value["solution_artifact"]["target_owned"], false);
+        assert!(value["solution_artifact"].get("file_identity").is_none());
+    }
+}
+
+#[test]
 fn validation_error_carries_requested_exit_code() {
     let mut report = DiagnosticReport::new();
     report.push(Diagnostic::new(

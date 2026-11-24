@@ -53,6 +53,22 @@ test('browser response accepts multi-role evidence but rejects count overflow or
   assert.notEqual(validateBoundaryRecoveryPayload(wrap({ ...report, borrow_role_index: 1, borrow_placement_mask: '0xc03' })), null);
 });
 
+test('browser recovery evidence preserves roles across a bitset word boundary', () => {
+  const steps = Array.from({ length: 65 }, (_, index) => ({ source_queue_index: index,
+    placement_role_index: index, piece: 'I', placement_mask: '0xf', board_after_mask: '0x0' }));
+  const report = { status: 'normal', knowledge_basis: 'full-fixed-queue', placement_role_scope: 'exact-lock-time',
+    max_early_placements: 64, early_placement_limit_mode: 'auto', borrow_role_index: null,
+    borrow_placement_mask: null, normal_states: 65, recovery_states: 0,
+    stage_one_checkpoint_step: 1, checkpoint_is_pc: true, borrowed_stage_two_count: 0, steps };
+  const wrap = payload => ({ contract: 'boundary-recovery.v1', result_kind: 'boundary-recovery',
+    content: { payload_kind: 'boundary-recovery', payload } });
+  assert.equal(validateBoundaryRecoveryPayload(wrap(report)), null);
+  const duplicate = structuredClone(report); duplicate.steps[64].placement_role_index = 0;
+  assert.notEqual(validateBoundaryRecoveryPayload(wrap(duplicate)), null);
+  const outOfRange = structuredClone(report); outOfRange.steps[64].source_queue_index = 65535;
+  assert.notEqual(validateBoundaryRecoveryPayload(wrap(outOfRange)), null);
+});
+
 test('Auto is a distinct request mode and is never serialized as NaN or a guessed numeric cap', () => {
   for (const queue of ['OO', 'OOOO', 'OOOOO']) {
     const input = { ...request(), queue };

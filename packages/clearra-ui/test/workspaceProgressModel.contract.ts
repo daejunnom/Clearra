@@ -164,6 +164,36 @@ assert.equal(buildNodeOnly.stages.find((stage) => stage.id === 'geometry')?.stat
 assert.equal(buildNodeOnly.stages.find((stage) => stage.id === 'verify')?.status, 'running');
 assert.equal(buildNodeOnly.completedStages, 1);
 
+for (const profile of ['pc', 'build'] as const) {
+  const producerChecks = buildWorkspaceProgressModel(input(profile,
+    telemetry({ producer_coverage_checks: 123, coverage_checks: 0 })));
+  assert.equal(producerChecks.stages.find(stage => stage.id === 'verify')?.status, 'running');
+  assert.equal(producerChecks.stages.find(stage => stage.id === 'verify')?.metrics
+    .find(metric => metric.labelKey === 'progressMetricChecks')?.value, '123');
+  const workerChecks = buildWorkspaceProgressModel(input(profile,
+    telemetry({ producer_coverage_checks: 123, coverage_checks: 456 })));
+  assert.equal(workerChecks.stages.find(stage => stage.id === 'verify')?.metrics
+    .find(metric => metric.labelKey === 'progressMetricChecks')?.value, '456');
+}
+
+for (const label of ['execution-score', 'execution-coverage', 'execution-replay', 'setup-score-reduction']) {
+  const progress = mergeNativeSearchProgress(telemetry(), label, 37, 100);
+  assert.ok(progress);
+  const finalizing = buildWorkspaceProgressModel({ ...input('pc', progress),
+    progressLabel: label, progressDone: 37, progressTotal: 100 });
+  assert.equal(finalizing.stages.find(stage => stage.id === 'finalize')?.status, 'running');
+  assert.equal(finalizing.stages.find(stage => stage.id === 'finalize')?.done, '37');
+  assert.equal(finalizing.stages.find(stage => stage.id === 'finalize')?.total, '100');
+  const saturated = buildWorkspaceProgressModel({ ...input('pc', progress),
+    progressLabel: label, progressDone: 0xffff_ffff, progressTotal: 0xffff_ffff });
+  assert.equal(saturated.stages.find(stage => stage.id === 'finalize')?.done, null);
+  assert.equal(saturated.stages.find(stage => stage.id === 'finalize')?.total, null);
+  const setupFinalizing = buildWorkspaceProgressModel({ ...input('setup', progress),
+    progressLabel: label, progressDone: 37, progressTotal: 100 });
+  assert.equal(setupFinalizing.stages.find(stage => stage.id === 'finalize')?.done, '37');
+  assert.equal(setupFinalizing.stages.find(stage => stage.id === 'finalize')?.total, '100');
+}
+
 // The Desktop bridge delivers each counter as a separate, bounded scalar
 // event. A published snapshot must keep the earlier active stage's evidence.
 let native = mergeNativeSearchProgress(null, 'build-geometry', 1_024, 0);

@@ -274,6 +274,44 @@ impl PendingSolutionArtifact {
         self.maximum_bytes
     }
 
+    /// CTK3/Fumen require at least one page. A complete empty solution set
+    /// therefore has a typed receipt and no invented blank solution/file.
+    pub(crate) fn empty_document_stdout(
+        &self,
+    ) -> Result<Option<String>, SolutionArtifactOutputError> {
+        if self.artifact.solution_count() != 0
+            || !matches!(
+                self.format,
+                SolutionArtifactOutputFormat::Ctk3 | SolutionArtifactOutputFormat::Fumen
+            )
+        {
+            return Ok(None);
+        }
+        match self.render_format {
+            RenderFormat::Json => {
+                let mut value: serde_json::Value = serde_json::from_str(&self.base_stdout)
+                    .map_err(|_| SolutionArtifactOutputError::StdoutJsonInvalid)?;
+                let object = value.as_object_mut().ok_or(SolutionArtifactOutputError::StdoutJsonInvalid)?;
+                if object.contains_key("solution_artifact") {
+                    return Err(SolutionArtifactOutputError::StdoutMetadataCollision);
+                }
+                object.insert("solution_artifact".to_owned(), serde_json::json!({
+                    "status": "empty", "schema": self.format.encoding().schema(),
+                    "encoding": self.format.encoding().keyword(), "bytes": 0,
+                    "solution_count": 0, "annotated_solution_count": 0,
+                    "target_owned": false
+                }));
+                serde_json::to_string(&value).map(Some)
+                    .map_err(|_| SolutionArtifactOutputError::StdoutJsonInvalid)
+            }
+            RenderFormat::Text | RenderFormat::TextVerbose | RenderFormat::TextDiagnostics => Ok(Some(format!(
+                "{}\nsolution_artifact_status: empty\nsolution_artifact_schema: {}\nsolution_artifact_encoding: {}\nsolution_artifact_bytes: 0\nsolution_artifact_solution_count: 0\nsolution_artifact_annotated_solution_count: 0\nsolution_artifact_target_owned: false",
+                self.base_stdout, self.format.encoding().schema(), self.format.encoding().keyword()
+            ))),
+            RenderFormat::FumenLike => Err(SolutionArtifactOutputError::StdoutFormatUnsupported),
+        }
+    }
+
     pub(crate) fn committed_stdout(
         &self,
         commit: &ArtifactCommit,

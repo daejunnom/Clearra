@@ -191,6 +191,15 @@ export function buildWorkspaceProgressModel(
     applyExactProgress(stages, input);
   }
 
+  if (isSearchPostprocessLabel(input.progressLabel)) {
+    const finalize = stage(stages, 'finalize');
+    if (finalize) {
+      markOrderedStage(stages, 'finalize');
+      applyMetric(finalize, safeProgressCount(input.progressDone),
+        input.progressTotal > 0 ? safeProgressCount(input.progressTotal) : null);
+    }
+  }
+
   if (input.status === 'completed') {
     for (const stage of stages) stage.status = 'complete';
   } else if (
@@ -357,10 +366,6 @@ function applyExactProgress(stages: WorkspaceProgressStage[], input: WorkspacePr
   }
   if (finalize) {
     finalize.status = isFinalizingPhase(phase) ? 'running' : 'pending';
-    if (isSearchPostprocessLabel(input.progressLabel)) {
-      applyMetric(finalize, safeProgressCount(input.progressDone),
-        input.progressTotal > 0 ? safeProgressCount(input.progressTotal) : null);
-    }
   }
 }
 

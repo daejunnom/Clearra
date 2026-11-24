@@ -72,7 +72,7 @@ export function recoveryPlacementHorizon(request: BoundaryRecoveryRequest): numb
 /** A physical role bound, not an arbitrary search budget. Do not clamp a user's draft. */
 export function availableEarlyPlacementCount(request: BoundaryRecoveryRequest): number {
   const horizon = recoveryPlacementHorizon(request);
-  if (!Number.isSafeInteger(horizon) || horizon > 42 ||
+  if (!Number.isSafeInteger(horizon) || horizon > 65535 ||
       !Number.isSafeInteger(request.stageOneCount) || request.stageOneCount < 1 ||
       request.stageOneCount >= horizon) return 0;
   return horizon - request.stageOneCount;
@@ -91,7 +91,7 @@ function validOptionalStateLimit(value: number | null): boolean {
 export function boundaryRecoveryBagSlots(stageOneCount: number, placements: number):
     Array<{ position: number; stage: 1 | 2; stageBag: number }> {
   if (!Number.isInteger(stageOneCount) || !Number.isInteger(placements) ||
-      stageOneCount < 1 || placements <= stageOneCount || placements > 42) return [];
+      stageOneCount < 1 || placements <= stageOneCount || placements > 65535) return [];
   const first = Math.ceil(stageOneCount / 7);
   const second = Math.ceil((placements - stageOneCount) / 7);
   return Array.from({ length: first + second }, (_, index) => ({
@@ -105,11 +105,11 @@ export function validateBoundaryRecoveryRequest(request: BoundaryRecoveryRequest
   const errors: string[] = [];
   const queue = request.queue.trim().toUpperCase();
   const horizon = recoveryPlacementHorizon(request);
-  if (!/^[IJLOSTZ]{2,42}$/u.test(queue)) errors.push('queue');
+  if (!/^[IJLOSTZ]{2,65535}$/u.test(queue)) errors.push('queue');
   if (!Number.isInteger(request.height) || request.height < 1 || request.height > 25) errors.push('height');
   if (!Number.isInteger(request.stageOneCount) || request.stageOneCount < 1 || request.stageOneCount >= horizon) errors.push('stage-one');
   if ((request.placements !== null && !Number.isInteger(request.placements)) ||
-      !Number.isInteger(horizon) || horizon < 2 || horizon > 42 || horizon > queue.length) errors.push('placements');
+      !Number.isInteger(horizon) || horizon < 2 || horizon > 65535 || horizon > queue.length) errors.push('placements');
   if (request.maxEarlyPlacements !== 'auto' && (!Number.isSafeInteger(request.maxEarlyPlacements) || request.maxEarlyPlacements < 0 ||
       request.maxEarlyPlacements > availableEarlyPlacementCount(request))) errors.push('max-early');
   if (request.borrowRolePosition !== undefined &&
@@ -216,7 +216,7 @@ export function updateRecoveryField(request: BoundaryRecoveryRequest, field: Rec
 }
 
 export function updateRecoveryPlacements(request: BoundaryRecoveryRequest, value: number): BoundaryRecoveryRequest {
-  if (!Number.isInteger(value) || value < 2 || value > 42) return { ...request, placements: value };
+  if (!Number.isInteger(value) || value < 2 || value > 65535) return { ...request, placements: value };
   return { ...request, placements: value,
     preserveB2BBags: value === request.placements ? request.preserveB2BBags : [],
     placementRoleMasks: request.placementRoleMasks.length === 0 ? [] :

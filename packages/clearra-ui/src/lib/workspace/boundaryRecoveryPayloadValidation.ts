@@ -20,10 +20,10 @@ export function validateBoundaryRecoveryPayload(product: ClearraProductResultPay
         ['normal', 'pc-preserving-recovery', 'non-pc-recovery', 'no-path-within-declared-scope', 'incomplete'].includes(report.status)) &&
     (report.early_placement_limit_mode === undefined || ['auto', 'maximum'].includes(report.early_placement_limit_mode)) &&
     (report.early_placement_limit_mode !== 'auto' || report.borrow_role_index === null) &&
-    Number.isInteger(report.max_early_placements) && report.max_early_placements >= 0 && report.max_early_placements < 42 &&
+    Number.isInteger(report.max_early_placements) && report.max_early_placements >= 0 && report.max_early_placements < 65535 &&
     ((report.borrow_role_index === null && report.borrow_placement_mask === null) ||
       (Number.isInteger(report.borrow_role_index) && report.borrow_role_index !== null &&
-       report.borrow_role_index >= 0 && report.borrow_role_index < 42 &&
+       report.borrow_role_index >= 0 && report.borrow_role_index < 65535 &&
        typeof report.borrow_placement_mask === 'string' && /^0x[0-9a-f]{1,64}$/u.test(report.borrow_placement_mask) &&
        report.max_early_placements <= 1)) &&
     Number.isInteger(report.borrowed_stage_two_count) && report.borrowed_stage_two_count >= 0 &&
@@ -37,12 +37,12 @@ export function validateBoundaryRecoveryPayload(product: ClearraProductResultPay
 }
 
 function validSteps(steps: ClearraBoundaryRecoveryStepPayload[]): boolean {
-  return Array.isArray(steps) && steps.length <= 42 &&
+  return Array.isArray(steps) && steps.length <= 65535 &&
     new Set(steps.map((step) => step.source_queue_index)).size === steps.length &&
     new Set(steps.map((step) => step.placement_role_index)).size === steps.length &&
     steps.every((step) =>
-      Number.isInteger(step.source_queue_index) && step.source_queue_index >= 0 && step.source_queue_index < 42 &&
-      Number.isInteger(step.placement_role_index) && step.placement_role_index >= 0 && step.placement_role_index < 42 &&
+      Number.isInteger(step.source_queue_index) && step.source_queue_index >= 0 && step.source_queue_index < 65535 &&
+      Number.isInteger(step.placement_role_index) && step.placement_role_index >= 0 && step.placement_role_index < 65535 &&
       /^[IJLOSTZ]$/u.test(step.piece) &&
       /^0x[0-9a-f]{1,64}$/u.test(step.placement_mask) &&
       /^0x[0-9a-f]{1,64}$/u.test(step.board_after_mask)
@@ -72,7 +72,7 @@ function validatePopulation(population: ClearraBoundaryRecoveryPopulationPayload
 function validExample(example: ClearraBoundaryRecoveryPopulationExamplePayload | undefined): boolean {
   return example === undefined || (
     Number.isSafeInteger(example.pattern_index) && example.pattern_index >= 0 &&
-    /^[IJLOSTZ]{1,42}$/u.test(example.queue) &&
+    /^[IJLOSTZ]{1,65535}$/u.test(example.queue) &&
     ['normal', 'pc-preserving-recovery', 'non-pc-recovery'].includes(example.status) &&
     validSteps(example.steps)
   );

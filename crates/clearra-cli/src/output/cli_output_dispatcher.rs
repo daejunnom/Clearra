@@ -255,46 +255,58 @@ impl CliOutputDispatcher {
         let mut published_commit = None;
         let mut published_document_commits = Vec::new();
         let stdout_text = if let Some(pending) = output.pending_solution_artifact() {
-            let outcome = match publish_solution(pending) {
-                Ok(outcome) => outcome,
-                Err(reason) => {
-                    let _ = write_error(stderr, CliErrorCode::CliArtifactPublishFailed, &reason);
-                    return ExitCode::InternalError.code();
-                }
-            };
-            let commit = match outcome {
-                ArtifactPublicationOutcome::Committed(commit) => commit,
-                ArtifactPublicationOutcome::DurabilityUncertain { commit, reason } => {
-                    let detail = committed_failure_detail(
-                        &commit,
-                        "durability-uncertain",
-                        Some(reason.as_str()),
-                    );
-                    let _ = write_error(
-                        stderr,
-                        CliErrorCode::CliArtifactDurabilityUncertain,
-                        &detail,
-                    );
-                    return ExitCode::InternalError.code();
-                }
-            };
-            match pending.committed_stdout(&commit) {
-                Ok(stdout) => {
-                    published_commit = Some(commit);
-                    stdout
-                }
+            let empty = match pending.empty_document_stdout() {
+                Ok(value) => value,
                 Err(error) => {
-                    let detail = committed_failure_detail(
-                        &commit,
-                        "metadata-render-failed",
-                        Some(error.as_str()),
-                    );
-                    let _ = write_error(
-                        stderr,
-                        CliErrorCode::CliArtifactCommittedButOutputFailed,
-                        &detail,
-                    );
+                    let _ = write_error(stderr, CliErrorCode::CliArtifactInvalid, error.as_str());
                     return ExitCode::InternalError.code();
+                }
+            };
+            if let Some(stdout) = empty {
+                stdout
+            } else {
+                let outcome = match publish_solution(pending) {
+                    Ok(outcome) => outcome,
+                    Err(reason) => {
+                        let _ =
+                            write_error(stderr, CliErrorCode::CliArtifactPublishFailed, &reason);
+                        return ExitCode::InternalError.code();
+                    }
+                };
+                let commit = match outcome {
+                    ArtifactPublicationOutcome::Committed(commit) => commit,
+                    ArtifactPublicationOutcome::DurabilityUncertain { commit, reason } => {
+                        let detail = committed_failure_detail(
+                            &commit,
+                            "durability-uncertain",
+                            Some(reason.as_str()),
+                        );
+                        let _ = write_error(
+                            stderr,
+                            CliErrorCode::CliArtifactDurabilityUncertain,
+                            &detail,
+                        );
+                        return ExitCode::InternalError.code();
+                    }
+                };
+                match pending.committed_stdout(&commit) {
+                    Ok(stdout) => {
+                        published_commit = Some(commit);
+                        stdout
+                    }
+                    Err(error) => {
+                        let detail = committed_failure_detail(
+                            &commit,
+                            "metadata-render-failed",
+                            Some(error.as_str()),
+                        );
+                        let _ = write_error(
+                            stderr,
+                            CliErrorCode::CliArtifactCommittedButOutputFailed,
+                            &detail,
+                        );
+                        return ExitCode::InternalError.code();
+                    }
                 }
             }
         } else if let Some(pending) = output.pending_document_utility_artifact() {

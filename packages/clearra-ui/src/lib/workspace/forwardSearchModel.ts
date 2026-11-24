@@ -14,7 +14,7 @@ import {
 } from './cliCommandModel.ts';
 
 const MAX_DAMAGE = 0xffff_ffff;
-export const MAX_REN_QUEUE_PIECES = 22;
+export const MAX_REN_QUEUE_PIECES = 65_535;
 export { MAX_FORWARD_CHAIN } from './forwardSearchLimits.ts';
 
 export type ForwardTool = 'damage' | 'spin-finder' | 'ren';

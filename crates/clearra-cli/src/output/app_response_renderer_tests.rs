@@ -13,6 +13,64 @@ use crate::{args::CliParser, assemble::CliAppRequestAssembler, output::RenderFor
 
 use super::*;
 
+#[test]
+fn pc_path_renderer_preserves_complete_source_count_and_member_page_evidence() {
+    let witness = PcPathWitnessPayload::new("1", "1", "0", "trace", "trace", "0", None, vec![]);
+    let payload = PcPathFamilyPayload::new(
+        "pc-path-witness.v2",
+        "canonical",
+        "problem",
+        "5040",
+        "4011520",
+        true,
+        PC_PATH_CANONICAL_SELECTION,
+        Some(witness.clone()),
+        vec![witness],
+    )
+    .with_page_metadata(clearra_host_contract::PcReplayPageMetadata {
+        page_contract: "pc-replay-member-page.v2".to_owned(),
+        page_source_available: true,
+        page_source_identity_sha256: "a".repeat(64),
+        geometry_count: "246".to_owned(),
+        geometry_page_number: "1".to_owned(),
+        candidate_id: "1".to_owned(),
+        geometry_witness_count: "2400".to_owned(),
+        geometry_pattern_count: "100".to_owned(),
+        member_page_number: "1".to_owned(),
+        member_page_count: "24".to_owned(),
+    });
+    let fields = pc_path_fields(&payload).expect("first source-owned member page");
+    let field = |key| {
+        fields
+            .iter()
+            .find(|field| field.key() == key)
+            .expect("retained field")
+            .value()
+    };
+    for (key, expected) in [
+        ("witness_count", "4011520"),
+        ("materialized_pattern_count", "5040"),
+        ("page_contract", "pc-replay-member-page.v2"),
+        ("geometry_count", "246"),
+        ("geometry_page_number", "1"),
+        ("candidate_id", "1"),
+        ("geometry_witness_count", "2400"),
+        ("geometry_pattern_count", "100"),
+        ("member_page_number", "1"),
+        ("member_page_count", "24"),
+    ] {
+        assert_eq!(field(key), &RenderFieldValue::from(expected));
+    }
+    assert_eq!(
+        field("page_source_available"),
+        &RenderFieldValue::from(true)
+    );
+    assert_eq!(
+        field("page_source_identity_sha256"),
+        &RenderFieldValue::from("a".repeat(64))
+    );
+}
+
 const DAMAGE_TWO_WORKERS: &str = concat!(
     "clearra damage --board-mask 0xffbfe --height 4 --queue IOTJ --no-hold ",
     "--spin-profile all-mini-plus --minimum-damage 1 --workers 2"

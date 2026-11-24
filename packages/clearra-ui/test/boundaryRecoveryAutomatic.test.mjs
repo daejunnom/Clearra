@@ -46,6 +46,16 @@ test('no-limit does not turn invalid numeric drafts into automatic requests', ()
   }
 });
 
+test('recovery queues and roles cross the old 42-bit and one-word boundaries', () => {
+  for (const length of [43, 65, 65535]) {
+    const value = { ...request(), queue: 'I'.repeat(length), placements: length };
+    assert.deepEqual(validateBoundaryRecoveryRequest(value), []);
+    const args = boundaryRecoveryArguments(value);
+    assert.equal(args[args.indexOf('--placements') + 1], String(length));
+  }
+  assert.ok(validateBoundaryRecoveryRequest({ ...request(), queue: 'I'.repeat(65536) }).includes('queue'));
+});
+
 test('pattern help does not grant unsupported reference plans and total states remain opt-in', () => {
   const input = { ...request(), queue: 'IJLOSTZIJLOSTZ', queuePattern: 'P7P7',
     stageOneCount: 7, placementRoleMasks: Array(14).fill(0xfn) };

@@ -21,8 +21,8 @@
   $: standard = (key: Parameters<typeof workspaceMessage>[1]) => workspaceMessage(language, key);
   $: horizon = recoveryPlacementHorizon(request);
   $: earlyLimit = availableEarlyPlacementCount(request);
-  $: earlyOptions = Array.from({ length: earlyLimit + 1 }, (_, count) => count);
-  $: roleCount = Number.isInteger(horizon) && horizon >= 2 && horizon <= 42 ? horizon : 0;
+  $: earlyOptions = Array.from({ length: earlyLimit <= 128 ? earlyLimit + 1 : 0 }, (_, count) => count);
+  $: roleCount = Number.isInteger(horizon) && horizon >= 2 && horizon <= 65535 ? horizon : 0;
   function patch(value: Partial<BoundaryRecoveryRequest>) { dispatch('change', { ...request, ...value }); }
   function exactRoles(enabled: boolean) {
     if (!enabled) savedRoles = request.placementRoleMasks;
@@ -34,12 +34,12 @@
   <section class="workspace-control-section">
     <h2 class="workspace-control-heading"><Database size={16} strokeWidth={1.8} />{standard('source')}</h2>
     <label class="workspace-field"><span>{label('recoveryQueue')}</span>
-      <QueueTextInput class="workspace-queue-input" value={request.queue} maxlength="42" placeholder="IOTSZJL"
+      <QueueTextInput class="workspace-queue-input" value={request.queue} maxlength="65535" placeholder="IOTSZJL"
         spellcheck="false" on:value={(event) => dispatch('change', updateRecoveryQueue(request, event.detail))} />
     </label>
     <div class="workspace-field-grid">
       <label class="workspace-field"><span>{label('recoveryStageOneCount')}</span>
-        <input type="number" min="1" max="41" value={request.stageOneCount}
+        <input type="number" min="1" max={Math.max(1, roleCount - 1)} value={request.stageOneCount}
           on:input={(event) => patch({ stageOneCount: (event.currentTarget as HTMLInputElement).valueAsNumber, preserveB2BBags: [] })} />
       </label>
       <div class="workspace-field recovery-required-pieces" role="status">
@@ -55,6 +55,15 @@
     <h2 class="workspace-control-heading"><Gauge size={16} strokeWidth={1.8} />{standard('search')}</h2>
     <label class="workspace-field">
       <span>{label('recoveryMaxEarlyPlacements')}</span>
+      {#if earlyLimit > 128}
+        <WorkspaceToggle label={label('recoveryAutomaticEarly')} checked={request.maxEarlyPlacements === 'auto'}
+          on:change={(event) => patch({ maxEarlyPlacements: event.detail ? 'auto' : 0 })} />
+        {#if request.maxEarlyPlacements !== 'auto'}
+          <input type="number" min="0" max={earlyLimit} value={request.maxEarlyPlacements}
+            aria-label={label('recoveryMaxEarlyPlacements')}
+            on:input={(event) => patch({ maxEarlyPlacements: event.currentTarget.valueAsNumber })} />
+        {/if}
+      {:else}
       <select aria-label={label('recoveryMaxEarlyPlacements')} aria-description={label('recoveryEarlyCountHelp')}
         value={request.maxEarlyPlacements} aria-invalid={request.maxEarlyPlacements !== 'auto' && !earlyOptions.includes(request.maxEarlyPlacements)}
         disabled={earlyLimit === 0}
@@ -65,6 +74,7 @@
         {/if}
         {#each earlyOptions as count}<option value={count}>{count}</option>{/each}
       </select>
+      {/if}
       <small class="workspace-field-help">{label(request.maxEarlyPlacements === 'auto' ? 'recoveryAutomaticEarlyHelp' : 'recoveryEarlyCountHelp')}</small>
     </label>
     <div class="workspace-field-grid">
@@ -88,9 +98,15 @@
     <div class="workspace-field-grid">
       {#if request.placementRoleMasks.length > 0}
         <label class="workspace-field"><span>{label('recoveryRolePosition')}</span>
+          {#if request.placementRoleMasks.length > 128}
+            <input type="number" min="1" max={request.placementRoleMasks.length} value={selectedRolePosition}
+              on:input={(event) => dispatch('role', event.currentTarget.valueAsNumber)} />
+            <small>{request.queue.trim()[selectedRolePosition - 1]?.toUpperCase() ?? '?'}</small>
+          {:else}
           <select value={selectedRolePosition} on:change={(event) => dispatch('role', Number((event.currentTarget as HTMLSelectElement).value))}>
             {#each request.placementRoleMasks as _, i}<option value={i + 1}>{i + 1} · {request.queue.trim()[i]?.toUpperCase() ?? '?'}</option>{/each}
           </select>
+          {/if}
         </label>
       {/if}
 
