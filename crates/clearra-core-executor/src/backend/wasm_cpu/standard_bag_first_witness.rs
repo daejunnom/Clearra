@@ -102,7 +102,7 @@ impl StandardBagCoverage {
         self.flush_epoch_global()?;
         if self.global_covered_pattern_count != self.materialized_pattern_count {
             return Err(WasmExactSearchError::InvalidProblem(
-                "wasm_standard_bag_first_witness_coverage_incomplete",
+                "wasm_standard_bag_retirement_requires_complete_local_universe",
             ));
         }
         self.release_coverage_product_allocations();

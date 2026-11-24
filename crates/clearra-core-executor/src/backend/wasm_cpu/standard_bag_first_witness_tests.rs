@@ -360,6 +360,22 @@ fn first_witness_drops_full_storage_and_rejects_old_roots_without_losing_global_
             "wasm_standard_bag_first_witness_scope_invalid"
         ))
     ));
+    let partial_words = coverage.materialize_global().unwrap().to_owned_words();
+    let old_root_words = coverage.materialize_root(old).unwrap().to_owned_words();
+    assert!(matches!(
+        coverage.release_coverage_product_storage(),
+        Err(WasmExactSearchError::InvalidProblem(
+            "wasm_standard_bag_retirement_requires_complete_local_universe"
+        ))
+    ));
+    assert_eq!(
+        coverage.materialize_global().unwrap().to_owned_words(),
+        partial_words
+    );
+    assert_eq!(
+        coverage.materialize_root(old).unwrap().to_owned_words(),
+        old_root_words
+    );
     assert_eq!(
         coverage.product_memo_meaning,
         ProductMemoMeaning::CoverageRoot
