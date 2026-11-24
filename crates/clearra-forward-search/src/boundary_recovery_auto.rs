@@ -37,11 +37,13 @@ fn candidates(query: &BoundaryRecoveryQuery) -> Vec<usize> {
 pub(super) fn search(
     source: &BoundaryRecoveryQuery,
     control: &ExecutionControl,
+    parent: Option<Arc<StateBudget>>,
 ) -> Result<BoundaryRecoveryReport, BoundaryRecoveryError> {
     if control.is_cancelled() {
         return Err(BoundaryRecoveryError::Cancelled);
     }
     let horizons = candidates(source);
+    let budget = StateBudget::new(source.max_states, parent);
     let mut normal_states = 0_usize;
     let mut recovery_states = 0_usize;
     // Never classify recovery from an early horizon before ruling out a
@@ -57,52 +59,73 @@ pub(super) fn search(
                 2
             })
     {
-        for &count in &horizons {
-            if control.is_cancelled() {
-                return Err(BoundaryRecoveryError::Cancelled);
-            }
-            if recovery
-                && source
-                    .early_placement
-                    .selected()
-                    .is_some_and(|(index, _)| index >= count)
-            {
-                continue;
-            }
-            let mut query = source.clone();
-            query.required_placements = Some(count);
-            let borrowed = if recovery {
-                query.effective_max_early_placements()
-            } else {
-                0
-            };
-            // A policy on a future, unconsumed bag does not require consuming it.
-            if query.bag_count() < 64 {
-                query.preserve_b2b_bag_mask &= (1_u64 << query.bag_count()) - 1;
-            }
-            let used = normal_states.saturating_add(recovery_states);
-            query.max_states = source.max_states.map(|limit| limit.saturating_sub(used));
-            if query.max_states == Some(0) {
-                return Ok(report(
-                    PassResult::Incomplete,
-                    normal_states,
-                    recovery_states,
-                    borrowed > 0,
-                ));
-            }
-            let (outcome, states) = Pass::new(&query, control, borrowed)?.run()?;
-            if borrowed == 0 {
-                normal_states = normal_states.saturating_add(states);
-            } else {
+        let window = control.parallelism().max(1);
+        for counts in horizons.chunks(window) {
+            use clearra_core_domain::parallel_work::try_for_each_chunk;
+            use std::sync::Mutex;
+            let results: Vec<_> = (0..counts.len()).map(|_| Mutex::new(None)).collect();
+            try_for_each_chunk(
+                control,
+                counts.len(),
+                1,
+                || Ok(()),
+                |_, range| {
+                    for ordinal in range {
+                        let count = counts[ordinal];
+                        let result = if recovery
+                            && source
+                                .early_placement
+                                .selected()
+                                .is_some_and(|(index, _)| index >= count)
+                        {
+                            (PassResult::NoPath, 0)
+                        } else {
+                            let mut query = source.clone();
+                            query.required_placements = Some(count);
+                            // The shared parent owns the allowance across every
+                            // horizon and both normal/recovery passes.
+                            query.max_states = None;
+                            if query.bag_count() < 64 {
+                                query.preserve_b2b_bag_mask &= (1_u64 << query.bag_count()) - 1;
+                            }
+                            let borrowed = if recovery {
+                                query.effective_max_early_placements()
+                            } else {
+                                0
+                            };
+                            Pass::new(&query, control, borrowed)?
+                                .with_parent_budget(Some(Arc::clone(&budget)))
+                                .run()?
+                        };
+                        *results[ordinal]
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(result);
+                    }
+                    Ok(())
+                },
+            )
+            .map_err(parallel::map_error)?;
+            let completed = results
+                .into_iter()
+                .map(|result| {
+                    result
+                        .into_inner()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .ok_or(BoundaryRecoveryError::ParallelWorkerFailed)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let states = completed
+                .iter()
+                .fold(0_usize, |sum, (_, n)| sum.saturating_add(*n));
+            if recovery {
                 recovery_states = recovery_states.saturating_add(states);
+            } else {
+                normal_states = normal_states.saturating_add(states);
             }
-            if !matches!(outcome, PassResult::NoPath) {
-                return Ok(report(
-                    outcome,
-                    normal_states,
-                    recovery_states,
-                    borrowed > 0,
-                ));
+            for (outcome, _) in completed {
+                if !matches!(outcome, PassResult::NoPath) {
+                    return Ok(report(outcome, normal_states, recovery_states, recovery));
+                }
             }
         }
     }

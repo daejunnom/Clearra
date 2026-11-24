@@ -35,6 +35,14 @@ const MAX_QUEUE_PIECES: usize = MAX_BOUNDARY_QUEUE_PIECES;
 mod bits;
 use bits::RoleSet;
 
+#[path = "boundary_recovery_parallel.rs"]
+pub(crate) mod parallel;
+use parallel::StateBudget;
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc,
+};
+
 /// Which second-stage diagram roles may precede the first-stage checkpoint.
 /// The amount is owned by `max_early_placements`, independently of selection.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -125,6 +133,7 @@ pub enum BoundaryRecoveryError {
     InvalidStateLimit,
     InvalidBagPolicy,
     UnsupportedRuleProfile,
+    ParallelWorkerFailed,
     Cancelled,
 }
 
@@ -341,6 +350,8 @@ struct Pass<'a> {
     seen: HashSet<State>,
     max_borrowed: usize,
     incomplete: bool,
+    budget: Arc<StateBudget>,
+    cutoff: Option<(Arc<AtomicUsize>, usize)>,
 }
 
 impl BoundaryRecoveryQuery {
@@ -458,7 +469,7 @@ impl BoundaryRecoveryQuery {
             {
                 return Err(BoundaryRecoveryError::InvalidPlacementRoles);
             }
-            let mut counts = [0_i8; 7];
+            let mut counts = [0_i32; 7];
             for piece in self.queue.iter().take(self.placement_horizon()) {
                 counts[piece_index(*piece) as usize] += 1;
             }
@@ -504,11 +515,39 @@ impl BoundaryRecoveryQuery {
         &self,
         control: &ExecutionControl,
     ) -> Result<BoundaryRecoveryReport, BoundaryRecoveryError> {
+        let result = std::sync::Mutex::new(None);
+        clearra_core_domain::parallel_work::try_for_each_chunk(
+            control,
+            1,
+            1,
+            || Ok(()),
+            |_, _| {
+                let completed = self.search_with_parent_budget(control, None)?;
+                *result
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(completed);
+                Ok(())
+            },
+        )
+        .map_err(parallel::map_error)?;
+        result
+            .into_inner()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .ok_or(BoundaryRecoveryError::ParallelWorkerFailed)
+    }
+
+    pub(crate) fn search_with_parent_budget(
+        &self,
+        control: &ExecutionControl,
+        parent: Option<Arc<StateBudget>>,
+    ) -> Result<BoundaryRecoveryReport, BoundaryRecoveryError> {
         self.validate()?;
         if self.required_placements.is_none() {
-            return automatic::search(self, control);
+            return automatic::search(self, control, parent);
         }
-        let (normal, normal_states) = Pass::new(self, control, 0)?.run()?;
+        let (normal, normal_states) = Pass::new(self, control, 0)?
+            .with_parent_budget(parent.clone())
+            .run()?;
         if !matches!(normal, PassResult::NoPath) {
             return Ok(report(normal, normal_states, 0, false));
         }
@@ -530,6 +569,7 @@ impl BoundaryRecoveryQuery {
             control,
             self.effective_max_early_placements(),
         )?
+        .with_parent_budget(parent)
         .run()?;
         Ok(report(recovery, normal_states, recovery_states, true))
     }
@@ -618,7 +658,14 @@ impl<'a> Pass<'a> {
             seen: HashSet::new(),
             max_borrowed,
             incomplete: false,
+            budget: StateBudget::new(query.max_states, None),
+            cutoff: None,
         })
+    }
+
+    fn with_parent_budget(mut self, parent: Option<Arc<StateBudget>>) -> Self {
+        self.budget = StateBudget::new(self.query.max_states, parent);
+        self
     }
 
     fn run(mut self) -> Result<(PassResult, usize), BoundaryRecoveryError> {
@@ -644,6 +691,9 @@ impl<'a> Pass<'a> {
             borrowed_count: 0,
             b2b_active: self.query.initial_b2b,
         };
+        if self.control.parallelism() > 1 {
+            return parallel::run_pass(self, state);
+        }
         let mut path = Vec::with_capacity(self.query.queue.len());
         let found = self.visit(state, &mut path)?;
         let result = found.map_or_else(
@@ -674,6 +724,13 @@ impl<'a> Pass<'a> {
             if self.control.is_cancelled() {
                 return Err(BoundaryRecoveryError::Cancelled);
             }
+            if self
+                .cutoff
+                .as_ref()
+                .is_some_and(|(first, ordinal)| *ordinal > first.load(Ordering::Acquire))
+            {
+                return Ok(None);
+            }
             if !frame.entered {
                 if frame.state.placed_mask.count() == self.query.placement_horizon() {
                     let state = &frame.state;
@@ -702,11 +759,7 @@ impl<'a> Pass<'a> {
                     }
                     continue;
                 }
-                if self
-                    .query
-                    .max_states
-                    .is_some_and(|limit| self.seen.len() >= limit)
-                {
+                if !self.budget.acquire() {
                     self.incomplete = true;
                     stack.pop();
                     if !stack.is_empty() {

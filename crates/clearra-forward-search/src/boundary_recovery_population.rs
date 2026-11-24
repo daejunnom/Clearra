@@ -5,11 +5,14 @@
 //! completed without a path. Unsearched and state-limited queues retain
 //! unknown probability; neither becomes a proof of failure.
 
+use crate::boundary_recovery::parallel::StateBudget;
+use clearra_core_domain::parallel_work::{try_for_each_chunk, ParallelWorkError};
 use clearra_core_domain::{
     execution_cancellation::ExecutionControl, piece::piece_kind::PieceKind,
     probability::probability_value::ProbabilityValue,
 };
 use clearra_supply::pattern_universe::materialized_pattern_universe::MaterializedPatternUniverse;
+use std::sync::{Arc, Mutex};
 
 use crate::{
     BoundaryRecoveryError, BoundaryRecoveryQuery, BoundaryRecoveryReport, BoundaryRecoveryStatus,
@@ -33,6 +36,7 @@ pub enum BoundaryRecoveryPopulationError {
         cause: BoundaryRecoveryError,
     },
     Cancelled,
+    ParallelWorkerFailed,
 }
 
 #[derive(Clone, Debug)]
@@ -94,6 +98,7 @@ pub fn search_boundary_recovery_population(
     let mut states = 0_usize;
     let mut normal_example = None;
     let mut recovery_example = None;
+    let state_budget = StateBudget::new(limits.max_total_states, None);
     while evaluated < pattern_count
         && limits
             .max_pattern_evaluations
@@ -103,73 +108,132 @@ pub fn search_boundary_recovery_population(
         if control.is_cancelled() {
             return Err(BoundaryRecoveryPopulationError::Cancelled);
         }
-        let sequence = universe.sequence_at(evaluated);
-        let query = query_for_sequence(evaluated, &sequence).map_err(|cause| {
-            BoundaryRecoveryPopulationError::InvalidQuery {
-                pattern_index: evaluated,
-                cause,
+        // Keep the original mutable role adapter and canonical probability
+        // fold, while independent complete queues own the expensive search.
+        // A finite global cap is shared, rather than copied into every query.
+        let end = pattern_count.min(limits.max_pattern_evaluations.unwrap_or(usize::MAX));
+        let width = control
+            .parallelism()
+            .max(1)
+            .saturating_mul(4)
+            .min(end - evaluated)
+            .min(
+                limits
+                    .max_total_states
+                    .map_or(usize::MAX, |limit| limit.saturating_sub(states)),
+            );
+        let mut queries = Vec::with_capacity(width);
+        for index in evaluated..evaluated + width {
+            let sequence = universe.sequence_at(index);
+            let query = query_for_sequence(index, &sequence).map_err(|cause| {
+                BoundaryRecoveryPopulationError::InvalidQuery {
+                    pattern_index: index,
+                    cause,
+                }
+            })?;
+            if query
+                .as_ref()
+                .is_some_and(|query| query.queue != sequence.as_ref())
+            {
+                return Err(BoundaryRecoveryPopulationError::SequenceIdentityMismatch {
+                    pattern_index: index,
+                });
             }
-        })?;
-        let weight = universe.weight_at(evaluated).get();
-        let Some(mut query) = query else {
-            counts[3] += 1;
-            diagram_unavailable += 1;
-            no_path += weight;
-            evaluated += 1;
-            continue;
-        };
-        // The adapter may not substitute a different queue after seeing its
-        // pattern ID. Supply identity and probability must remain paired.
-        if query.queue != sequence.as_ref() {
-            return Err(BoundaryRecoveryPopulationError::SequenceIdentityMismatch {
-                pattern_index: evaluated,
-            });
+            queries.push(query);
         }
-        // None is unlimited, not zero. Intersect only actual finite budgets.
-        let remaining = limits
-            .max_total_states
-            .map(|limit| limit.saturating_sub(states));
-        query.max_states = match (query.max_states, remaining) {
-            (Some(local), Some(global)) => Some(local.min(global)),
-            (local, global) => local.or(global),
-        };
-        let report = query.search(control).map_err(|cause| match cause {
-            BoundaryRecoveryError::Cancelled => BoundaryRecoveryPopulationError::Cancelled,
-            cause => BoundaryRecoveryPopulationError::InvalidQuery {
-                pattern_index: evaluated,
-                cause,
+        let reports: Vec<_> = (0..width).map(|_| Mutex::new(None)).collect();
+        try_for_each_chunk(
+            control,
+            width,
+            1,
+            || Ok(()),
+            |_, range| {
+                for ordinal in range {
+                    let report = queries[ordinal]
+                        .as_ref()
+                        .map(|query| {
+                            query
+                                .search_with_parent_budget(control, Some(Arc::clone(&state_budget)))
+                                .map_err(|cause| match cause {
+                                    BoundaryRecoveryError::Cancelled => {
+                                        BoundaryRecoveryPopulationError::Cancelled
+                                    }
+                                    BoundaryRecoveryError::ParallelWorkerFailed => {
+                                        BoundaryRecoveryPopulationError::ParallelWorkerFailed
+                                    }
+                                    cause => BoundaryRecoveryPopulationError::InvalidQuery {
+                                        pattern_index: evaluated + ordinal,
+                                        cause,
+                                    },
+                                })
+                        })
+                        .transpose()?;
+                    *reports[ordinal]
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(report);
+                }
+                Ok(())
             },
+        )
+        .map_err(|error| match error {
+            ParallelWorkError::Worker(error) => error,
+            ParallelWorkError::Cancelled => BoundaryRecoveryPopulationError::Cancelled,
+            ParallelWorkError::ThreadSpawnFailed | ParallelWorkError::WorkerPanicked => {
+                BoundaryRecoveryPopulationError::ParallelWorkerFailed
+            }
         })?;
-        states = states.saturating_add(report.normal_states.saturating_add(report.recovery_states));
-        match report.status {
-            BoundaryRecoveryStatus::Normal => {
-                counts[0] += 1;
-                normal += weight;
-                if normal_example.is_none() {
-                    normal_example = Some((evaluated, sequence.to_vec(), report));
-                }
-            }
-            BoundaryRecoveryStatus::PcPreservingRecovery => {
-                counts[1] += 1;
-                pc_recovery += weight;
-                if recovery_example.is_none() {
-                    recovery_example = Some((evaluated, sequence.to_vec(), report));
-                }
-            }
-            BoundaryRecoveryStatus::NonPcRecovery => {
-                counts[2] += 1;
-                non_pc_recovery += weight;
-                if recovery_example.is_none() {
-                    recovery_example = Some((evaluated, sequence.to_vec(), report));
-                }
-            }
-            BoundaryRecoveryStatus::NoPath => {
+        states = state_budget.used();
+        for report in reports {
+            let report = report
+                .into_inner()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .ok_or(BoundaryRecoveryPopulationError::ParallelWorkerFailed)?;
+            let weight = universe.weight_at(evaluated).get();
+            let Some(report) = report else {
                 counts[3] += 1;
+                diagram_unavailable += 1;
                 no_path += weight;
+                evaluated += 1;
+                continue;
+            };
+            match report.status {
+                BoundaryRecoveryStatus::Normal => {
+                    counts[0] += 1;
+                    normal += weight;
+                    if normal_example.is_none() {
+                        normal_example =
+                            Some((evaluated, universe.sequence_at(evaluated).to_vec(), report));
+                    }
+                }
+                BoundaryRecoveryStatus::PcPreservingRecovery => {
+                    counts[1] += 1;
+                    pc_recovery += weight;
+                    if recovery_example.is_none() {
+                        recovery_example =
+                            Some((evaluated, universe.sequence_at(evaluated).to_vec(), report));
+                    }
+                }
+                BoundaryRecoveryStatus::NonPcRecovery => {
+                    counts[2] += 1;
+                    non_pc_recovery += weight;
+                    if recovery_example.is_none() {
+                        recovery_example =
+                            Some((evaluated, universe.sequence_at(evaluated).to_vec(), report));
+                    }
+                }
+                BoundaryRecoveryStatus::NoPath => {
+                    counts[3] += 1;
+                    no_path += weight;
+                }
+                BoundaryRecoveryStatus::Incomplete => counts[4] += 1,
             }
-            BoundaryRecoveryStatus::Incomplete => counts[4] += 1,
+            evaluated += 1;
         }
-        evaluated += 1;
+        control.report_progress(
+            "boundary-recovery-population",
+            evaluated as u64,
+            Some(end as u64),
+        );
     }
     let known = normal + pc_recovery + non_pc_recovery + no_path;
     let probability = |value: f64| {

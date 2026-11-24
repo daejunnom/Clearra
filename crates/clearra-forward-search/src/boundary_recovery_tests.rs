@@ -512,6 +512,9 @@ fn long_recovery_sources_cross_role_words_and_byte_indices() {
                 ])
             })
             .collect();
+        // Rebound bag/role sources must count long repeated inventories in a
+        // wider signed type as well as widening their public token indices.
+        query.placement_role_pieces = query.queue.clone();
         let result = query.search(&control()).unwrap();
         assert_eq!(
             result.status,
