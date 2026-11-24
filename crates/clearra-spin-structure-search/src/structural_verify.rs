@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use clearra_core_domain::piece::piece_kind::PieceKind;
+use clearra_core_domain::{execution_cancellation::ExecutionControl, piece::piece_kind::PieceKind};
 
 use crate::{
     board::{place_and_clear, StructureBoard},
@@ -22,6 +22,10 @@ pub(crate) struct StructuralVerificationMetrics {
 }
 
 const ENTRY_RESULT_CACHE_CAPACITY: usize = 4096;
+
+#[path = "structural_verify_cursor.rs"]
+mod cursor;
+pub(crate) use cursor::VerificationCursor;
 
 /// Every input that changes [`EntryCatalog::reachable_locks`] output belongs
 /// in this key. Height and rule profile are fixed by the owning verifier.
@@ -119,14 +123,20 @@ pub(crate) struct StructuralBuildVerifier {
     entry: EntryCatalog,
     entry_results: EntryResultCache,
     metrics: StructuralVerificationMetrics,
+    control: ExecutionControl,
 }
 
 impl StructuralBuildVerifier {
     pub(crate) fn new(query: &SpinStructureQuery) -> Self {
+        Self::new_with_control(query, &ExecutionControl::default())
+    }
+
+    pub(crate) fn new_with_control(query: &SpinStructureQuery, control: &ExecutionControl) -> Self {
         Self {
             entry: EntryCatalog::new(query.height, query.rule_profile),
             entry_results: EntryResultCache::new(ENTRY_RESULT_CACHE_CAPACITY),
             metrics: StructuralVerificationMetrics::default(),
+            control: control.clone(),
         }
     }
 
@@ -136,6 +146,7 @@ impl StructuralBuildVerifier {
             entry: EntryCatalog::new(query.height, query.rule_profile),
             entry_results: EntryResultCache::new(capacity),
             metrics: StructuralVerificationMetrics::default(),
+            control: ExecutionControl::default(),
         }
     }
 
@@ -250,6 +261,26 @@ impl StructuralBuildVerifier {
         target: StructureOperation,
         piece_order: &[PieceKind],
     ) -> bool {
+        self.accepts_piece_order_with_control(
+            query,
+            operations,
+            target,
+            piece_order,
+            &ExecutionControl::default(),
+        )
+    }
+
+    pub(crate) fn accepts_piece_order_with_control(
+        &mut self,
+        query: &SpinStructureQuery,
+        operations: &[StructureOperation],
+        target: StructureOperation,
+        piece_order: &[PieceKind],
+        control: &ExecutionControl,
+    ) -> bool {
+        if control.is_cancelled() {
+            return false;
+        }
         if piece_order.len() != operations.len()
             || piece_order.last().copied() != Some(target.piece())
         {
@@ -279,6 +310,7 @@ impl StructuralBuildVerifier {
             &piece_order[..piece_order.len() - 1],
             0,
             &mut failed,
+            control,
         )
     }
 
@@ -293,7 +325,11 @@ impl StructuralBuildVerifier {
         piece_order: &[PieceKind],
         cursor: usize,
         failed: &mut BTreeSet<BuildMemoKey>,
+        control: &ExecutionControl,
     ) -> bool {
+        if control.is_cancelled() {
+            return false;
+        }
         self.metrics.build_states += 1;
         if remaining.is_empty() {
             return cursor == piece_order.len()
@@ -359,6 +395,7 @@ impl StructuralBuildVerifier {
                     piece_order,
                     cursor + 1,
                     failed,
+                    control,
                 ) {
                     return true;
                 }
@@ -379,6 +416,9 @@ impl StructuralBuildVerifier {
         witness: &mut Vec<StructurePlacement>,
         failed: &mut BTreeSet<BuildMemoKey>,
     ) -> Option<SpinStructureOutcome> {
+        if self.control.is_cancelled() {
+            return None;
+        }
         self.metrics.build_states += 1;
         if remaining.is_empty() {
             return self.lock_target(query, position, target, canonical_operations, witness);
@@ -394,6 +434,9 @@ impl StructuralBuildVerifier {
         }
 
         for operation_index in 0..remaining.len() {
+            if self.control.is_cancelled() {
+                return None;
+            }
             if operation_index != 0 && remaining[operation_index] == remaining[operation_index - 1]
             {
                 continue;

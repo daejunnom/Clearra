@@ -10,6 +10,10 @@ use crate::{
 
 const PIECE_KIND_COUNT: usize = 7;
 
+#[path = "operation_catalog_cursor.rs"]
+mod cursor;
+pub(crate) use cursor::CatalogCursor;
+
 /// A stable index into [`LogicalOperationCatalog::operations`].
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub(crate) struct CatalogOperationId(u32);

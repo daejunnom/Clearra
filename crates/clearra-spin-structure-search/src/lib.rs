@@ -7,6 +7,17 @@
 
 mod board;
 mod build;
+mod cooperative_sort;
+mod source_parallel;
+mod source_worker;
+pub use source_parallel::{
+    SpinStructureParallelCoordinator, SpinStructureParallelError, SpinStructureParallelProduce,
+    SpinStructureParallelProgress, SpinStructureParallelWorker,
+};
+pub use source_worker::{
+    SpinStructureSourceCompletion, SpinStructureSourceMergeCursor, SpinStructureSourceMerger,
+    SpinStructureSourcePlan, SpinStructureSourcePreparation, SpinStructureSourceWorker,
+};
 mod corner;
 mod entry;
 mod fill;
@@ -15,6 +26,7 @@ mod minimal;
 mod model;
 mod operation_catalog;
 mod order_coverage;
+mod stage_timer;
 mod structural_expand;
 mod structural_fill;
 mod structural_search;
@@ -35,7 +47,8 @@ pub use model::{
     StructurePlacement,
 };
 pub use order_coverage::{
-    analyze_spin_structure_coverage, guaranteed_spin_structure_family,
-    SpinStructureCoverageAnalysis, SpinStructureCoverageRow, SpinStructureOrderCoverageError,
-    DEFAULT_SPIN_STRUCTURE_MAX_PATTERNS,
+    analyze_spin_structure_coverage, analyze_spin_structure_coverage_with_control,
+    guaranteed_spin_structure_family, guaranteed_spin_structure_family_with_control,
+    InventoryOrderSource, SpinStructureCoverageAnalysis, SpinStructureCoverageRow,
+    SpinStructureOrderCoverageError, DEFAULT_SPIN_STRUCTURE_MAX_PATTERNS,
 };

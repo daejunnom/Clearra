@@ -1,3 +1,9 @@
+use clearra_core_domain::execution_cancellation::ExecutionControl;
+
+#[path = "structural_fill_cursor.rs"]
+mod cursor;
+pub(crate) use cursor::FillCursor;
+
 use crate::{
     board::StructureBoard,
     model::{PieceInventory, SpinStructureQuery, StructureOperation},
@@ -26,6 +32,10 @@ impl FillSeed {
 
     pub(crate) fn operations(&self) -> &[StructureOperation] {
         &self.operations
+    }
+
+    pub(crate) fn into_operations(self) -> Vec<StructureOperation> {
+        self.operations.into_vec()
     }
 
     #[cfg(test)]
@@ -96,11 +106,27 @@ pub(crate) fn enumerate_fill_seeds(
     target: StructureOperation,
     metrics: Option<&mut FillSeedMetrics>,
 ) -> Vec<FillSeed> {
+    enumerate_fill_seeds_with_control(
+        query,
+        catalog,
+        target,
+        metrics,
+        &ExecutionControl::default(),
+    )
+}
+
+pub(crate) fn enumerate_fill_seeds_with_control(
+    query: &SpinStructureQuery,
+    catalog: &LogicalOperationCatalog,
+    target: StructureOperation,
+    metrics: Option<&mut FillSeedMetrics>,
+    control: &ExecutionControl,
+) -> Vec<FillSeed> {
     let mut local_metrics = FillSeedMetrics {
         targets_considered: 1,
         ..FillSeedMetrics::default()
     };
-    let mut seeds = enumerate_fill_seeds_inner(query, catalog, target, &mut local_metrics);
+    let mut seeds = enumerate_fill_seeds_inner(query, catalog, target, &mut local_metrics, control);
     seeds.sort_unstable_by(|left, right| left.operations.cmp(&right.operations));
     let before = seeds.len();
     seeds.dedup_by(|left, right| left.operations == right.operations);
@@ -116,6 +142,7 @@ fn enumerate_fill_seeds_inner(
     catalog: &LogicalOperationCatalog,
     target: StructureOperation,
     metrics: &mut FillSeedMetrics,
+    control: &ExecutionControl,
 ) -> Vec<FillSeed> {
     if query.validate().is_err()
         || catalog.height() != query.height
@@ -156,6 +183,9 @@ fn enumerate_fill_seeds_inner(
     let mut seeds = Vec::new();
 
     loop {
+        if control.is_cancelled() {
+            break;
+        }
         let new_full_rows = forced_new_rows | selected_variable_rows;
         metrics.row_subsets_considered += 1;
         let target_full_rows = new_full_rows & target_rows;
@@ -181,6 +211,7 @@ fn enumerate_fill_seeds_inner(
                 placement_limit,
                 metrics,
                 seeds: &mut seeds,
+                control,
             };
             search.visit(
                 target_base,
@@ -210,6 +241,7 @@ struct FillSearch<'a> {
     placement_limit: usize,
     metrics: &'a mut FillSeedMetrics,
     seeds: &'a mut Vec<FillSeed>,
+    control: &'a ExecutionControl,
 }
 
 impl FillSearch<'_> {
@@ -220,6 +252,9 @@ impl FillSearch<'_> {
         remaining: PieceInventory,
         selected: &mut Vec<StructureOperation>,
     ) {
+        if self.control.is_cancelled() {
+            return;
+        }
         self.metrics.search_nodes += 1;
         if uncovered.is_empty() {
             self.accept_exact_cover(occupied, remaining, selected);
@@ -267,6 +302,9 @@ impl FillSearch<'_> {
     ) -> Option<Vec<StructureOperation>> {
         let mut best: Option<Vec<StructureOperation>> = None;
         for y in 0..self.query.height {
+            if self.control.is_cancelled() {
+                return None;
+            }
             let row = uncovered.row_bits(y);
             for x in 0..StructureBoard::WIDTH {
                 if row & (1_u16 << x) == 0 {

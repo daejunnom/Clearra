@@ -1,5 +1,6 @@
-use std::{sync::Arc, time::Instant};
+use std::sync::Arc;
 
+use clearra_core_domain::execution_cancellation::ExecutionControl;
 use clearra_core_domain::piece::piece_kind::PieceKind;
 
 use crate::{
@@ -9,9 +10,11 @@ use crate::{
         SpinStructureStageMetrics, SpinStructureTimingMetrics, StructureOperation,
     },
     operation_catalog::LogicalOperationCatalog,
-    structural_expand::{expand_and_verify, StructuralExpansionMetrics},
-    structural_fill::{enumerate_fill_seeds, FillSeedMetrics},
+    stage_timer::StageTimer,
+    structural_expand::{expand_and_verify_with_control, StructuralExpansionMetrics},
+    structural_fill::{enumerate_fill_seeds_with_control, FillSeedMetrics},
     structural_verify::StructuralBuildVerifier,
+    SpinStructureError,
 };
 
 pub(crate) fn compile_catalog(query: &SpinStructureQuery) -> Arc<LogicalOperationCatalog> {
@@ -45,27 +48,53 @@ pub(crate) fn run_target(
     catalog: &LogicalOperationCatalog,
     target: StructureOperation,
 ) -> SpinStructureReport {
+    run_target_with_control(query, catalog, target, &ExecutionControl::default())
+        .expect("serial target search has no cancellation or worker failure")
+}
+
+pub(crate) fn run_target_with_control(
+    query: SpinStructureQuery,
+    catalog: &LogicalOperationCatalog,
+    target: StructureOperation,
+    control: &ExecutionControl,
+) -> Result<SpinStructureReport, SpinStructureError> {
+    if control.is_cancelled() {
+        return Err(SpinStructureError::Cancelled);
+    }
     let mut fill_metrics = FillSeedMetrics::default();
-    let fill_started = Instant::now();
-    let fill_seeds = enumerate_fill_seeds(&query, catalog, target, Some(&mut fill_metrics));
-    let fill_ns = duration_ns(fill_started.elapsed());
+    let fill_started = StageTimer::start();
+    let fill_seeds = enumerate_fill_seeds_with_control(
+        &query,
+        catalog,
+        target,
+        Some(&mut fill_metrics),
+        control,
+    );
+    let fill_ns = fill_started.elapsed_ns();
+    if control.is_cancelled() {
+        return Err(SpinStructureError::Cancelled);
+    }
     let seeds = fill_seeds
         .iter()
         .map(|seed| seed.operations().to_vec())
         .collect::<Vec<_>>();
 
-    let mut verifier = StructuralBuildVerifier::new(&query);
+    let mut verifier = StructuralBuildVerifier::new_with_control(&query, control);
     let mut expansion_metrics = StructuralExpansionMetrics::default();
-    let expansion_started = Instant::now();
-    let outcomes = expand_and_verify(
+    let expansion_started = StageTimer::start();
+    let outcomes = expand_and_verify_with_control(
         &query,
         catalog,
         target,
         seeds,
         &mut verifier,
         &mut expansion_metrics,
+        control,
     );
-    let expansion_ns = duration_ns(expansion_started.elapsed());
+    let expansion_ns = expansion_started.elapsed_ns();
+    if control.is_cancelled() {
+        return Err(SpinStructureError::Cancelled);
+    }
     let verifier_metrics = verifier.metrics();
 
     let mut report = SpinStructureReport {
@@ -93,18 +122,14 @@ pub(crate) fn run_target(
     };
     partition_outcomes(&mut report, outcomes);
     report.layers = layers(&query, &expansion_metrics);
-    let finalization_started = Instant::now();
-    let mut report = minimal::finalize(report);
+    let finalization_started = StageTimer::start();
+    let mut report = minimal::finalize_with_control(report, control)?;
     refresh_layer_acceptance(&mut report);
     report.timings.finalization_ns = report
         .timings
         .finalization_ns
-        .saturating_add(duration_ns(finalization_started.elapsed()));
-    report
-}
-
-fn duration_ns(duration: std::time::Duration) -> u64 {
-    u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX)
+        .saturating_add(finalization_started.elapsed_ns());
+    Ok(report)
 }
 
 fn partition_outcomes(
@@ -120,7 +145,10 @@ fn partition_outcomes(
     }
 }
 
-fn layers(query: &SpinStructureQuery, metrics: &StructuralExpansionMetrics) -> Vec<LayerMetrics> {
+pub(crate) fn layers(
+    query: &SpinStructureQuery,
+    metrics: &StructuralExpansionMetrics,
+) -> Vec<LayerMetrics> {
     (1..=usize::from(query.placement_limit()))
         .filter(|depth| {
             metrics.candidates_by_depth[*depth] != 0

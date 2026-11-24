@@ -1,6 +1,17 @@
+use std::sync::atomic::{AtomicBool, Ordering};
+
+#[path = "minimal_cursor.rs"]
+mod cursor;
+pub(crate) use cursor::MinimumCursor;
+
+use clearra_core_domain::{
+    execution_cancellation::ExecutionControl,
+    parallel_work::{try_for_each_chunk, ParallelWorkError},
+};
+
 use crate::model::{
-    MinimalityPolicy, SpinStructureOutcome, SpinStructureReport, SpinStructureStageMetrics,
-    StructureOperation,
+    MinimalityPolicy, SpinStructureError, SpinStructureOutcome, SpinStructureReport,
+    SpinStructureStageMetrics, StructureOperation,
 };
 
 #[cfg(test)]
@@ -27,7 +38,18 @@ impl KeyedOutcome {
     }
 }
 
-pub(crate) fn finalize(mut report: SpinStructureReport) -> SpinStructureReport {
+pub(crate) fn finalize(report: SpinStructureReport) -> SpinStructureReport {
+    finalize_with_control(report, &ExecutionControl::default())
+        .expect("serial finalization has no cancellation or worker failure")
+}
+
+pub(crate) fn finalize_with_control(
+    mut report: SpinStructureReport,
+    control: &ExecutionControl,
+) -> Result<SpinStructureReport, SpinStructureError> {
+    if control.is_cancelled() {
+        return Err(SpinStructureError::Cancelled);
+    }
     let minimality = report
         .query
         .as_ref()
@@ -39,10 +61,15 @@ pub(crate) fn finalize(mut report: SpinStructureReport) -> SpinStructureReport {
         .map(KeyedOutcome::new)
         .collect::<Vec<_>>();
     outcomes.sort_by(|left, right| {
-        left.outcome
-            .build
-            .len()
-            .cmp(&right.outcome.build.len())
+        left.key
+            .target
+            .cmp(&right.key.target)
+            .then_with(|| {
+                left.key
+                    .target_cleared_rows
+                    .cmp(&right.key.target_cleared_rows)
+            })
+            .then_with(|| left.outcome.build.len().cmp(&right.outcome.build.len()))
             .then_with(|| left.key.cmp(&right.key))
             .then_with(|| left.outcome.mini.cmp(&right.outcome.mini))
     });
@@ -57,19 +84,65 @@ pub(crate) fn finalize(mut report: SpinStructureReport) -> SpinStructureReport {
             }
         }
         MinimalityPolicy::SubsetMinimal => {
-            let mut retained: Vec<KeyedOutcome> = Vec::new();
-            for candidate in outcomes {
-                if retained.iter().any(|known| {
-                    known.key.target == candidate.key.target
-                        && known.key.target_cleared_rows == candidate.key.target_cleared_rows
-                        && multiset_subset(&known.key.operations, &candidate.key.operations)
-                }) {
-                    report.stages.exact_outcome_deduplications += 1;
-                } else {
-                    retained.push(candidate);
+            let mut starts = Vec::with_capacity(outcomes.len());
+            let mut start = 0;
+            for (index, candidate) in outcomes.iter().enumerate() {
+                if index != 0
+                    && (outcomes[index - 1].key.target != candidate.key.target
+                        || outcomes[index - 1].key.target_cleared_rows
+                            != candidate.key.target_cleared_rows)
+                {
+                    start = index;
                 }
+                starts.push(start);
             }
-            outcomes = retained;
+            let retained = (0..outcomes.len())
+                .map(|_| AtomicBool::new(true))
+                .collect::<Vec<_>>();
+            try_for_each_chunk(
+                control,
+                outcomes.len(),
+                1,
+                || Ok::<_, SpinStructureError>(()),
+                |_, range| {
+                    for index in range {
+                        let candidate = &outcomes[index];
+                        // A subset of a discarded subset is still a subset of this
+                        // candidate. Comparing all prior keys in this target group
+                        // is exactly equivalent to the sequential retained frontier,
+                        // while making every candidate independently schedulable.
+                        for known in &outcomes[starts[index]..index] {
+                            if control.is_cancelled() {
+                                return Err(SpinStructureError::Cancelled);
+                            }
+                            if multiset_subset(&known.key.operations, &candidate.key.operations) {
+                                retained[index].store(false, Ordering::Relaxed);
+                                break;
+                            }
+                        }
+                    }
+                    Ok(())
+                },
+            )
+            .map_err(|error| match error {
+                ParallelWorkError::Worker(error) => error,
+                ParallelWorkError::Cancelled => SpinStructureError::Cancelled,
+                ParallelWorkError::ThreadSpawnFailed => {
+                    SpinStructureError::ParallelExecutionFailed("spin_minimum_worker_spawn_failed")
+                }
+                ParallelWorkError::WorkerPanicked => {
+                    SpinStructureError::ParallelExecutionFailed("spin_minimum_worker_panicked")
+                }
+            })?;
+            let mut index = 0;
+            outcomes.retain(|_| {
+                let keep = retained[index].load(Ordering::Relaxed);
+                index += 1;
+                if !keep {
+                    report.stages.exact_outcome_deduplications += 1;
+                }
+                keep
+            });
         }
     }
 
@@ -87,7 +160,10 @@ pub(crate) fn finalize(mut report: SpinStructureReport) -> SpinStructureReport {
     report
         .mini
         .extend(mini.into_iter().map(|keyed| keyed.outcome));
-    report
+    if control.is_cancelled() {
+        return Err(SpinStructureError::Cancelled);
+    }
+    Ok(report)
 }
 
 pub(crate) fn merge_stage_metrics(

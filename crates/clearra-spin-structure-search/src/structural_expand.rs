@@ -1,8 +1,10 @@
-use std::{
-    collections::{BTreeSet, VecDeque},
-    time::Instant,
-};
+use std::collections::{BTreeSet, VecDeque};
 
+#[path = "structural_expand_cursor.rs"]
+mod cursor;
+pub(crate) use cursor::ExpansionCursor;
+
+use clearra_core_domain::execution_cancellation::ExecutionControl;
 use clearra_core_domain::piece::{piece_kind::PieceKind, rotation::RotationState};
 use clearra_piece_registry::standard::tetromino_registry::standard_tetromino_registry;
 
@@ -10,6 +12,7 @@ use crate::{
     board::StructureBoard,
     model::{PieceInventory, SpinStructureOutcome, SpinStructureQuery, StructureOperation},
     operation_catalog::LogicalOperationCatalog,
+    stage_timer::StageTimer,
     structural_verify::StructuralBuildVerifier,
 };
 
@@ -82,9 +85,32 @@ pub(crate) fn expand_and_verify(
     verifier: &mut StructuralBuildVerifier,
     metrics: &mut StructuralExpansionMetrics,
 ) -> Vec<SpinStructureOutcome> {
+    expand_and_verify_with_control(
+        query,
+        catalog,
+        target,
+        seeds,
+        verifier,
+        metrics,
+        &ExecutionControl::default(),
+    )
+}
+
+pub(crate) fn expand_and_verify_with_control(
+    query: &SpinStructureQuery,
+    catalog: &LogicalOperationCatalog,
+    target: StructureOperation,
+    seeds: impl IntoIterator<Item = Vec<StructureOperation>>,
+    verifier: &mut StructuralBuildVerifier,
+    metrics: &mut StructuralExpansionMetrics,
+    control: &ExecutionControl,
+) -> Vec<SpinStructureOutcome> {
     let mut initial_candidates = Vec::new();
     let mut visited = BTreeSet::new();
     for mut operations in seeds {
+        if control.is_cancelled() {
+            return Vec::new();
+        }
         operations.sort_unstable();
         operations.dedup();
         let full_rows_without_target = full_rows(
@@ -127,8 +153,11 @@ pub(crate) fn expand_and_verify(
     let mut accepted_sets: Vec<AcceptedSet> = Vec::new();
     let mut outcomes = Vec::new();
     for depth in 0..=placement_limit {
-        let layer_started = Instant::now();
+        let layer_started = StageTimer::start();
         while let Some(candidate) = queues[depth].pop_front() {
+            if control.is_cancelled() {
+                return Vec::new();
+            }
             metrics.candidates += 1;
             let metric_depth = depth.min(255);
             metrics.candidates_by_depth[metric_depth] += 1;
@@ -299,14 +328,10 @@ pub(crate) fn expand_and_verify(
             }
         }
         let metric_depth = depth.min(255);
-        metrics.elapsed_ns_by_depth[metric_depth] = metrics.elapsed_ns_by_depth[metric_depth]
-            .saturating_add(duration_ns(layer_started.elapsed()));
+        metrics.elapsed_ns_by_depth[metric_depth] =
+            metrics.elapsed_ns_by_depth[metric_depth].saturating_add(layer_started.elapsed_ns());
     }
     outcomes
-}
-
-fn duration_ns(duration: std::time::Duration) -> u64 {
-    u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX)
 }
 
 #[allow(clippy::too_many_arguments)]

@@ -512,6 +512,8 @@ pub enum SpinStructureError {
     InvalidFillWindow { bottom: u8, top: u8 },
     UnsupportedRuleProfile(RuleProfileId),
     IncompatibleTaskReports,
+    Cancelled,
+    ParallelExecutionFailed(&'static str),
 }
 
 impl fmt::Display for SpinStructureError {

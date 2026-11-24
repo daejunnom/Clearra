@@ -1,4 +1,9 @@
-use std::time::Instant;
+use clearra_core_domain::execution_cancellation::ExecutionControl;
+use clearra_core_domain::parallel_work::{try_for_each_chunk, ParallelWorkError};
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Mutex,
+};
 
 #[cfg(test)]
 use clearra_core_domain::piece::piece_kind::PieceKind;
@@ -7,6 +12,7 @@ use crate::{
     board::place_and_clear,
     minimal,
     model::{SpinStructureError, SpinStructureQuery, SpinStructureReport, SpinStructureTask},
+    stage_timer::StageTimer,
     structural_search,
 };
 
@@ -113,16 +119,85 @@ impl SpinStructureSearcher {
     }
 
     pub fn run(query: SpinStructureQuery) -> Result<SpinStructureReport, SpinStructureError> {
-        let query = Self::normalize_query(query)?;
-        let tasks = partition_prepared(query.clone());
-        if tasks.is_empty() {
-            return Ok(empty_report(query));
+        Self::run_with_control(query, &ExecutionControl::default())
+    }
+
+    /// Runs every target on the shared request budget and merges only in
+    /// original target order. The host calling thread remains a coordinator.
+    pub fn run_with_control(
+        query: SpinStructureQuery,
+        control: &ExecutionControl,
+    ) -> Result<SpinStructureReport, SpinStructureError> {
+        if control.is_cancelled() {
+            return Err(SpinStructureError::Cancelled);
         }
-        let reports = tasks
+        let query = Self::normalize_query(query)?;
+        let prepared = Mutex::new(None);
+        try_for_each_chunk(
+            control,
+            1,
+            1,
+            || Ok::<_, SpinStructureError>(()),
+            |_, _| {
+                *prepared.lock().map_err(|_| {
+                    SpinStructureError::ParallelExecutionFailed("spin_source_prepare_poisoned")
+                })? = Some(partition_prepared(query.clone()));
+                Ok(())
+            },
+        )
+        .map_err(parallel_error)?;
+        let tasks = prepared
+            .into_inner()
+            .map_err(|_| {
+                SpinStructureError::ParallelExecutionFailed("spin_source_prepare_poisoned")
+            })?
+            .ok_or(SpinStructureError::ParallelExecutionFailed(
+                "spin_source_prepare_missing",
+            ))?;
+        if tasks.is_empty() {
+            return Ok(empty_report(query)
+                .with_workers_used(control.parallelism().min(u16::MAX as usize) as u16));
+        }
+        let reports = (0..tasks.len())
+            .map(|_| Mutex::new(None))
+            .collect::<Vec<_>>();
+        let done = AtomicU64::new(0);
+        try_for_each_chunk(
+            control,
+            tasks.len(),
+            1,
+            || Ok::<_, SpinStructureError>(()),
+            |_, range| {
+                for index in range {
+                    let report = Self::run_task_with_control(tasks[index].clone(), control)?;
+                    *reports[index].lock().map_err(|_| {
+                        SpinStructureError::ParallelExecutionFailed("spin_source_report_poisoned")
+                    })? = Some(report);
+                    let completed = done.fetch_add(1, Ordering::Relaxed) + 1;
+                    control.report_progress("spin-structure", completed, Some(tasks.len() as u64));
+                }
+                Ok(())
+            },
+        )
+        .map_err(parallel_error)?;
+        let reports = reports
             .into_iter()
-            .map(Self::run_task)
+            .map(|report| {
+                report
+                    .into_inner()
+                    .map_err(|_| {
+                        SpinStructureError::ParallelExecutionFailed("spin_source_report_poisoned")
+                    })?
+                    .ok_or(SpinStructureError::ParallelExecutionFailed(
+                        "spin_source_report_missing",
+                    ))
+            })
             .collect::<Result<Vec<_>, _>>()?;
-        Self::merge_task_reports(reports, 1)
+        Self::merge_task_reports_with_control(
+            reports,
+            control.parallelism().min(u16::MAX as usize) as u16,
+            control,
+        )
     }
 
     pub fn partition(
@@ -132,18 +207,32 @@ impl SpinStructureSearcher {
     }
 
     pub fn run_task(task: SpinStructureTask) -> Result<SpinStructureReport, SpinStructureError> {
+        Self::run_task_with_control(task, &ExecutionControl::default())
+    }
+
+    pub fn run_task_with_control(
+        task: SpinStructureTask,
+        control: &ExecutionControl,
+    ) -> Result<SpinStructureReport, SpinStructureError> {
         task.query.validate()?;
-        Ok(structural_search::run_target(
-            task.query,
-            &task.catalog,
-            task.target,
-        ))
+        structural_search::run_target_with_control(task.query, &task.catalog, task.target, control)
     }
 
     pub fn merge_task_reports(
         reports: impl IntoIterator<Item = SpinStructureReport>,
         workers_used: u16,
     ) -> Result<SpinStructureReport, SpinStructureError> {
+        Self::merge_task_reports_with_control(reports, workers_used, &ExecutionControl::default())
+    }
+
+    pub fn merge_task_reports_with_control(
+        reports: impl IntoIterator<Item = SpinStructureReport>,
+        workers_used: u16,
+        control: &ExecutionControl,
+    ) -> Result<SpinStructureReport, SpinStructureError> {
+        if control.is_cancelled() {
+            return Err(SpinStructureError::Cancelled);
+        }
         let mut reports = reports.into_iter();
         let Some(mut merged) = reports.next() else {
             return Ok(SpinStructureReport {
@@ -153,17 +242,33 @@ impl SpinStructureSearcher {
             });
         };
         for report in reports {
+            if control.is_cancelled() {
+                return Err(SpinStructureError::Cancelled);
+            }
             merged = merge_reports(merged, report, workers_used)?;
         }
         merged.workers_used = workers_used.max(1);
-        let finalization_started = Instant::now();
-        let mut merged = minimal::finalize(merged);
+        let finalization_started = StageTimer::start();
+        let mut merged = minimal::finalize_with_control(merged, control)?;
         structural_search::refresh_layer_acceptance(&mut merged);
         merged.timings.finalization_ns = merged
             .timings
             .finalization_ns
-            .saturating_add(duration_ns(finalization_started.elapsed()));
+            .saturating_add(finalization_started.elapsed_ns());
         Ok(merged)
+    }
+}
+
+fn parallel_error(error: ParallelWorkError<SpinStructureError>) -> SpinStructureError {
+    match error {
+        ParallelWorkError::Worker(error) => error,
+        ParallelWorkError::Cancelled => SpinStructureError::Cancelled,
+        ParallelWorkError::ThreadSpawnFailed => {
+            SpinStructureError::ParallelExecutionFailed("spin_source_worker_spawn_failed")
+        }
+        ParallelWorkError::WorkerPanicked => {
+            SpinStructureError::ParallelExecutionFailed("spin_source_worker_panicked")
+        }
     }
 }
 
@@ -413,10 +518,6 @@ fn merge_reports(
     left.complete &= right.complete;
     left.workers_used = workers_used.max(1);
     Ok(left)
-}
-
-fn duration_ns(duration: std::time::Duration) -> u64 {
-    u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX)
 }
 
 fn empty_report(query: SpinStructureQuery) -> SpinStructureReport {

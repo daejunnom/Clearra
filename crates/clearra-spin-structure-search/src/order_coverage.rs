@@ -1,14 +1,25 @@
-use clearra_core_domain::piece::piece_kind::PieceKind;
+use std::sync::{
+    atomic::{AtomicBool, AtomicU64, Ordering},
+    Mutex,
+};
+
+use clearra_core_domain::{
+    execution_cancellation::ExecutionControl,
+    parallel_work::{try_for_each_chunk, ParallelWorkError},
+    piece::piece_kind::PieceKind,
+};
 
 use crate::{
     model::{PieceInventory, SpinStructureOutcome, SpinStructureQuery, SpinStructureReport},
     structural_verify::StructuralBuildVerifier,
 };
 
-/// Default hard ceiling for exact no-hold order materialization. Seven-piece
-/// bags (7! = 5,040) and eight distinct pieces (40,320) fit; factorial inputs
-/// beyond the governed ceiling fail closed before becoming a coverage claim.
-pub const DEFAULT_SPIN_STRUCTURE_MAX_PATTERNS: usize = 100_000;
+/// The public coverage rows use `u32` pattern identities. Orders are decoded
+/// lazily from their canonical rank; there is no factorial queue allocation or
+/// smaller product-only pattern ceiling.
+pub const DEFAULT_SPIN_STRUCTURE_MAX_PATTERNS: usize = u32::MAX as usize;
+
+const ORDER_TILE: usize = 64;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SpinStructureCoverageRow {
@@ -52,6 +63,8 @@ pub enum SpinStructureOrderCoverageError {
     PatternIndexOverflow,
     ReportIncomplete,
     QueryIdentityMismatch,
+    Cancelled,
+    WorkerFailed(&'static str),
 }
 
 /// Computes each structure's exact no-hold coverage over every unique order of
@@ -63,36 +76,138 @@ pub fn analyze_spin_structure_coverage(
     report: &SpinStructureReport,
     max_patterns: usize,
 ) -> Result<SpinStructureCoverageAnalysis, SpinStructureOrderCoverageError> {
+    analyze_spin_structure_coverage_with_control(
+        query,
+        report,
+        max_patterns,
+        &ExecutionControl::default(),
+    )
+}
+
+/// Runs the exact candidate × order matrix on the request's shared compute
+/// budget. Splitting both dimensions also distributes a single heavy candidate.
+/// Every accepted index is the original rank, independent of worker order.
+pub fn analyze_spin_structure_coverage_with_control(
+    query: &SpinStructureQuery,
+    report: &SpinStructureReport,
+    max_patterns: usize,
+    control: &ExecutionControl,
+) -> Result<SpinStructureCoverageAnalysis, SpinStructureOrderCoverageError> {
     validate_report(query, report)?;
-    let patterns = enumerate_inventory_orders(query.inventory, max_patterns)?;
-    let mut verifier = StructuralBuildVerifier::new(query);
-    let mut rows = Vec::with_capacity(report.outcome_count());
-    let mut covered = vec![false; patterns.len()];
-    for outcome in report.outcomes() {
-        let operation_count = outcome.logical_operations().len();
-        let mut covered_pattern_indices = Vec::new();
-        for (pattern_index, pattern) in patterns.iter().enumerate() {
-            if operation_count <= pattern.len()
-                && verifier.accepts_piece_order(
-                    query,
-                    outcome.logical_operations(),
-                    outcome.logical_spin(),
-                    &pattern[..operation_count],
-                )
-            {
-                let pattern_index = u32::try_from(pattern_index)
-                    .map_err(|_| SpinStructureOrderCoverageError::PatternIndexOverflow)?;
-                covered_pattern_indices.push(pattern_index);
-                covered[pattern_index as usize] = true;
-            }
-        }
-        rows.push(SpinStructureCoverageRow {
-            covered_pattern_indices,
+    check_cancelled(control)?;
+    let source = InventoryOrderSource::new(query.inventory, max_patterns)?;
+    let outcomes = report.outcomes().collect::<Vec<_>>();
+    if outcomes.is_empty() {
+        return Ok(SpinStructureCoverageAnalysis {
+            pattern_count: source.len(),
+            covered_pattern_count: 0,
+            rows: Vec::new(),
         });
     }
+    let tiles_per_candidate = source.len().div_ceil(ORDER_TILE);
+    let tile_count = outcomes
+        .len()
+        .checked_mul(tiles_per_candidate)
+        .ok_or(SpinStructureOrderCoverageError::PatternCountOverflow)?;
+    let rows = (0..outcomes.len())
+        .map(|_| Mutex::new(Vec::<u32>::new()))
+        .collect::<Vec<_>>();
+    let covered = (0..tiles_per_candidate)
+        .map(|_| AtomicU64::new(0))
+        .collect::<Vec<_>>();
+    let completed = AtomicU64::new(0);
+    try_for_each_chunk(
+        control,
+        tile_count,
+        1,
+        || Ok((StructuralBuildVerifier::new(query), Vec::new())),
+        |(verifier, pattern), tasks| {
+            for task in tasks {
+                let candidate = task / tiles_per_candidate;
+                let tile = task % tiles_per_candidate;
+                let first = tile * ORDER_TILE;
+                let end = (first + ORDER_TILE).min(source.len());
+                let outcome = outcomes[candidate];
+                let operation_count = outcome.logical_operations().len();
+                let mut indices = Vec::new();
+                let mut bits = 0_u64;
+                for rank in first..end {
+                    check_cancelled(control)?;
+                    source.decode(rank, pattern);
+                    if operation_count <= pattern.len()
+                        && verifier.accepts_piece_order_with_control(
+                            query,
+                            outcome.logical_operations(),
+                            outcome.logical_spin(),
+                            &pattern[..operation_count],
+                            control,
+                        )
+                    {
+                        indices.push(rank as u32);
+                        bits |= 1_u64 << (rank - first);
+                    }
+                }
+                check_cancelled(control)?;
+                if !indices.is_empty() {
+                    rows[candidate]
+                        .lock()
+                        .map_err(|_| {
+                            SpinStructureOrderCoverageError::WorkerFailed("spin_order_row_poisoned")
+                        })?
+                        .extend(indices);
+                    covered[tile].fetch_or(bits, Ordering::Relaxed);
+                }
+                let done = completed.fetch_add(1, Ordering::Relaxed) + 1;
+                control.report_progress(
+                    "spin-structure-order-coverage",
+                    done,
+                    Some(tile_count as u64),
+                );
+            }
+            Ok(())
+        },
+    )
+    .map_err(parallel_error)?;
+    // Completion may arrive in any order. Canonicalize separate rows in the
+    // same pool instead of moving the entire terminal sort onto one caller.
+    try_for_each_chunk(
+        control,
+        rows.len(),
+        1,
+        || Ok(()),
+        |_, range| {
+            for index in range {
+                rows[index]
+                    .lock()
+                    .map_err(|_| {
+                        SpinStructureOrderCoverageError::WorkerFailed("spin_order_row_poisoned")
+                    })?
+                    .sort_unstable();
+            }
+            Ok(())
+        },
+    )
+    .map_err(parallel_error)?;
+    check_cancelled(control)?;
+    let covered_pattern_count = covered
+        .iter()
+        .map(|word| word.load(Ordering::Relaxed).count_ones() as usize)
+        .sum();
+    let rows = rows
+        .into_iter()
+        .map(|row| {
+            row.into_inner()
+                .map(|covered_pattern_indices| SpinStructureCoverageRow {
+                    covered_pattern_indices,
+                })
+                .map_err(|_| {
+                    SpinStructureOrderCoverageError::WorkerFailed("spin_order_row_poisoned")
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     Ok(SpinStructureCoverageAnalysis {
-        pattern_count: patterns.len(),
-        covered_pattern_count: covered.into_iter().filter(|value| *value).count(),
+        pattern_count: source.len(),
+        covered_pattern_count,
         rows,
     })
 }
@@ -107,14 +222,36 @@ pub fn guaranteed_spin_structure_family(
     final_piece: PieceKind,
     max_patterns: usize,
 ) -> Result<SpinStructureReport, SpinStructureOrderCoverageError> {
+    guaranteed_spin_structure_family_with_control(
+        query,
+        report,
+        final_piece,
+        max_patterns,
+        &ExecutionControl::default(),
+    )
+}
+
+pub fn guaranteed_spin_structure_family_with_control(
+    query: &SpinStructureQuery,
+    report: &SpinStructureReport,
+    final_piece: PieceKind,
+    max_patterns: usize,
+    control: &ExecutionControl,
+) -> Result<SpinStructureReport, SpinStructureOrderCoverageError> {
     validate_report(query, report)?;
+    check_cancelled(control)?;
     if max_patterns == 0 {
         return Err(SpinStructureOrderCoverageError::InvalidPatternLimit);
     }
-    let mut verifier = StructuralBuildVerifier::new(query);
-    let mut retained = |outcome: &SpinStructureOutcome| {
+    let outcomes = report.outcomes().collect::<Vec<_>>();
+    let mut sources = Vec::with_capacity(outcomes.len());
+    let mut tile_ends = Vec::with_capacity(outcomes.len());
+    let mut total_tiles = 0_usize;
+    for outcome in &outcomes {
         if outcome.logical_spin().piece() != final_piece {
-            return Ok(false);
+            sources.push(None);
+            tile_ends.push(total_tiles);
+            continue;
         }
         let mut inventory = PieceInventory::EMPTY;
         for operation in outcome.logical_operations() {
@@ -133,42 +270,74 @@ pub fn guaranteed_spin_structure_family(
                 .ok_or(SpinStructureOrderCoverageError::PatternCountOverflow)?;
             inventory = PieceInventory::from_counts(counts);
         }
-        let orders = enumerate_inventory_orders(inventory, max_patterns)?;
-        let mut full_order = Vec::with_capacity(outcome.logical_operations().len());
-        for order in orders {
-            full_order.clear();
-            full_order.extend(order);
-            full_order.push(final_piece);
-            if !verifier.accepts_piece_order(
-                query,
-                outcome.logical_operations(),
-                outcome.logical_spin(),
-                &full_order,
-            ) {
-                return Ok(false);
+        let source = InventoryOrderSource::new(inventory, max_patterns)?;
+        total_tiles = total_tiles
+            .checked_add(source.len().div_ceil(ORDER_TILE))
+            .ok_or(SpinStructureOrderCoverageError::PatternCountOverflow)?;
+        sources.push(Some(source));
+        tile_ends.push(total_tiles);
+    }
+    let retained = sources
+        .iter()
+        .map(|source| AtomicBool::new(source.is_some()))
+        .collect::<Vec<_>>();
+    try_for_each_chunk(
+        control,
+        total_tiles,
+        1,
+        || Ok((StructuralBuildVerifier::new(query), Vec::new())),
+        |(verifier, full_order), tasks| {
+            for task in tasks {
+                let candidate = tile_ends.partition_point(|end| *end <= task);
+                if !retained[candidate].load(Ordering::Relaxed) {
+                    continue;
+                }
+                let source = sources[candidate]
+                    .as_ref()
+                    .expect("task belongs to a source");
+                let first_tile = candidate.checked_sub(1).map_or(0, |index| tile_ends[index]);
+                let first = (task - first_tile) * ORDER_TILE;
+                let end = (first + ORDER_TILE).min(source.len());
+                let outcome = outcomes[candidate];
+                for rank in first..end {
+                    check_cancelled(control)?;
+                    if !retained[candidate].load(Ordering::Relaxed) {
+                        break;
+                    }
+                    source.decode(rank, full_order);
+                    full_order.push(final_piece);
+                    if !verifier.accepts_piece_order_with_control(
+                        query,
+                        outcome.logical_operations(),
+                        outcome.logical_spin(),
+                        full_order,
+                        control,
+                    ) {
+                        check_cancelled(control)?;
+                        retained[candidate].store(false, Ordering::Relaxed);
+                        break;
+                    }
+                }
             }
-        }
-        Ok(true)
-    };
-
+            Ok(())
+        },
+    )
+    .map_err(parallel_error)?;
+    check_cancelled(control)?;
     let regular = report
         .regular
         .iter()
-        .filter_map(|outcome| match retained(outcome) {
-            Ok(true) => Some(Ok(outcome.clone())),
-            Ok(false) => None,
-            Err(error) => Some(Err(error)),
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+        .enumerate()
+        .filter(|(index, _)| retained[*index].load(Ordering::Relaxed))
+        .map(|(_, outcome)| outcome.clone())
+        .collect::<Vec<_>>();
     let mini = report
         .mini
         .iter()
-        .filter_map(|outcome| match retained(outcome) {
-            Ok(true) => Some(Ok(outcome.clone())),
-            Ok(false) => None,
-            Err(error) => Some(Err(error)),
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+        .enumerate()
+        .filter(|(index, _)| retained[report.regular.len() + *index].load(Ordering::Relaxed))
+        .map(|(_, outcome)| outcome.clone())
+        .collect::<Vec<_>>();
     let minimum_placements = regular
         .iter()
         .chain(&mini)
@@ -188,6 +357,111 @@ pub fn guaranteed_spin_structure_family(
     })
 }
 
+fn check_cancelled(control: &ExecutionControl) -> Result<(), SpinStructureOrderCoverageError> {
+    if control.is_cancelled() {
+        Err(SpinStructureOrderCoverageError::Cancelled)
+    } else {
+        Ok(())
+    }
+}
+
+fn parallel_error(
+    error: ParallelWorkError<SpinStructureOrderCoverageError>,
+) -> SpinStructureOrderCoverageError {
+    match error {
+        ParallelWorkError::Worker(error) => error,
+        ParallelWorkError::Cancelled => SpinStructureOrderCoverageError::Cancelled,
+        ParallelWorkError::ThreadSpawnFailed => {
+            SpinStructureOrderCoverageError::WorkerFailed("spin_order_worker_spawn_failed")
+        }
+        ParallelWorkError::WorkerPanicked => {
+            SpinStructureOrderCoverageError::WorkerFailed("spin_order_worker_panicked")
+        }
+    }
+}
+
+/// Canonical multiset permutations with exact rank decoding. Only seven
+/// multiplicities and one reusable queue are retained, independent of N!.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct InventoryOrderSource {
+    inventory: PieceInventory,
+    count: usize,
+}
+
+impl InventoryOrderSource {
+    pub fn new(
+        inventory: PieceInventory,
+        max_patterns: usize,
+    ) -> Result<Self, SpinStructureOrderCoverageError> {
+        if max_patterns == 0 {
+            return Err(SpinStructureOrderCoverageError::InvalidPatternLimit);
+        }
+        let limit = max_patterns.min(u32::MAX as usize);
+        let mut count = 1_u128;
+        let mut length = 0_u128;
+        for multiplicity in inventory.counts() {
+            for add in 1..=u128::from(multiplicity) {
+                // C(length + multiplicity, multiplicity) is folded into the
+                // previous multiset count without any factorial intermediate.
+                count = count
+                    .checked_mul(length + add)
+                    .ok_or(SpinStructureOrderCoverageError::PatternCountOverflow)?
+                    / add;
+                if count > limit as u128 {
+                    return Err(if max_patterns > u32::MAX as usize {
+                        SpinStructureOrderCoverageError::PatternIndexOverflow
+                    } else {
+                        SpinStructureOrderCoverageError::PatternLimitExceeded {
+                            limit: max_patterns,
+                        }
+                    });
+                }
+            }
+            length += u128::from(multiplicity);
+        }
+        Ok(Self {
+            inventory,
+            count: count as usize,
+        })
+    }
+
+    pub const fn len(self) -> usize {
+        self.count
+    }
+
+    pub const fn is_empty(self) -> bool {
+        false
+    }
+
+    pub fn decode(self, rank: usize, output: &mut Vec<PieceKind>) -> bool {
+        if rank >= self.count {
+            return false;
+        }
+        output.clear();
+        let mut counts = self.inventory.counts();
+        let mut remaining = usize::from(self.inventory.total());
+        let mut permutations = self.count as u128;
+        let mut rank = rank as u128;
+        while remaining != 0 {
+            for (index, piece) in PieceKind::STANDARD_TETROMINOES.into_iter().enumerate() {
+                if counts[index] == 0 {
+                    continue;
+                }
+                let branch = permutations * u128::from(counts[index]) / remaining as u128;
+                if rank < branch {
+                    output.push(piece);
+                    counts[index] -= 1;
+                    remaining -= 1;
+                    permutations = branch;
+                    break;
+                }
+                rank -= branch;
+            }
+        }
+        true
+    }
+}
+
 fn validate_report(
     query: &SpinStructureQuery,
     report: &SpinStructureReport,
@@ -201,6 +475,7 @@ fn validate_report(
     Ok(())
 }
 
+#[cfg(test)]
 fn enumerate_inventory_orders(
     inventory: PieceInventory,
     max_patterns: usize,
@@ -221,6 +496,7 @@ fn enumerate_inventory_orders(
     Ok(orders)
 }
 
+#[cfg(test)]
 fn enumerate_orders_recursive(
     mut counts: [u8; 7],
     length: usize,
@@ -304,6 +580,109 @@ mod tests {
         assert_eq!(
             enumerate_inventory_orders(inventory, 1),
             Err(SpinStructureOrderCoverageError::PatternLimitExceeded { limit: 1 })
+        );
+    }
+
+    #[test]
+    fn ranked_inventory_orders_preserve_recursive_identity_without_the_product_ceiling() {
+        for pieces in [
+            vec![],
+            vec![PieceKind::I, PieceKind::O, PieceKind::I],
+            PieceKind::STANDARD_TETROMINOES.to_vec(),
+        ] {
+            let inventory = PieceInventory::from_pieces(pieces).unwrap();
+            let expected = enumerate_inventory_orders(inventory, 5040).unwrap();
+            let source = InventoryOrderSource::new(inventory, 5040).unwrap();
+            assert_eq!(source.len(), expected.len());
+            let mut actual = Vec::new();
+            for (rank, order) in expected.iter().enumerate() {
+                assert!(source.decode(rank, &mut actual));
+                assert_eq!(&actual, order);
+            }
+            assert!(!source.decode(source.len(), &mut actual));
+        }
+        let inventory = PieceInventory::from_counts([2, 2, 1, 1, 1, 1, 2]);
+        let source =
+            InventoryOrderSource::new(inventory, DEFAULT_SPIN_STRUCTURE_MAX_PATTERNS).unwrap();
+        assert_eq!(source.len(), 453_600);
+        let mut first = Vec::new();
+        let mut last = Vec::new();
+        assert!(source.decode(0, &mut first));
+        assert!(source.decode(source.len() - 1, &mut last));
+        first.reverse();
+        assert_eq!(first, last);
+    }
+
+    #[test]
+    fn parallel_order_matrix_and_guaranteed_filter_preserve_original_rows() {
+        let mut query = one_piece_query();
+        query.inventory = PieceInventory::from_counts([1, 1, 1, 0, 0, 0, 0]);
+        query.max_placements = Some(1);
+        let query = SpinStructureSearcher::normalize_query(query).unwrap();
+        let report = SpinStructureSearcher::run(query.clone()).unwrap();
+        assert!(report.outcome_count() > 0);
+        let patterns = enumerate_inventory_orders(query.inventory, 8).unwrap();
+        let mut verifier = StructuralBuildVerifier::new(&query);
+        let expected = report
+            .outcomes()
+            .map(|outcome| {
+                patterns
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(rank, pattern)| {
+                        let count = outcome.logical_operations().len();
+                        verifier
+                            .accepts_piece_order(
+                                &query,
+                                outcome.logical_operations(),
+                                outcome.logical_spin(),
+                                &pattern[..count],
+                            )
+                            .then_some(rank as u32)
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        for workers in [1, 2, 4, 8] {
+            let control = ExecutionControl::default().with_parallelism(workers);
+            let actual =
+                analyze_spin_structure_coverage_with_control(&query, &report, 8, &control).unwrap();
+            assert_eq!(actual.pattern_count(), patterns.len());
+            assert_eq!(
+                actual
+                    .rows()
+                    .iter()
+                    .map(|row| row.covered_pattern_indices().to_vec())
+                    .collect::<Vec<_>>(),
+                expected
+            );
+            let guaranteed = guaranteed_spin_structure_family_with_control(
+                &query,
+                &report,
+                PieceKind::T,
+                8,
+                &control,
+            )
+            .unwrap();
+            assert_eq!(guaranteed.regular, report.regular);
+            assert_eq!(guaranteed.mini, report.mini);
+        }
+        let cancelled = ExecutionControl::default().with_parallelism(8);
+        cancelled.cancellation.handle().cancel();
+        assert_eq!(
+            analyze_spin_structure_coverage_with_control(&query, &report, 8, &cancelled),
+            Err(SpinStructureOrderCoverageError::Cancelled)
+        );
+        let mut wrong = query.clone();
+        wrong.fill_bottom = 1;
+        assert_eq!(
+            analyze_spin_structure_coverage_with_control(
+                &wrong,
+                &report,
+                8,
+                &ExecutionControl::default()
+            ),
+            Err(SpinStructureOrderCoverageError::QueryIdentityMismatch)
         );
     }
 }
