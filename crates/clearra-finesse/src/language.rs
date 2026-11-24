@@ -18,6 +18,9 @@ const UNREACHABLE: u32 = u32::MAX;
 const VISIBLE_COUNT: usize = 7;
 const DENSE_LANES: usize = 64;
 
+#[path = "language_parallel.rs"]
+mod parallel;
+
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct GeometryNodeId(u32);
 

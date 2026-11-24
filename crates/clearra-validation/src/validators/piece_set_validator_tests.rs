@@ -39,12 +39,13 @@ fn duplicate_piece_set_is_rejected() {
 }
 
 #[test]
-fn oversized_budget_is_rejected() {
-    let budget = PieceBudget::standard_7_bag(8);
-    let report = validate_piece_budget(&budget);
-
-    assert!(report.has_errors());
-    assert!(report.contains_code(DiagnosticCode::EPieceSetUnsupportedMvp));
+fn standard_piece_budget_is_not_limited_to_one_bag() {
+    for maximum in [8, 14, 60, u8::MAX] {
+        let budget = PieceBudget::standard_7_bag(maximum);
+        let report = validate_piece_budget(&budget);
+        assert!(!report.has_errors(), "piece budget {maximum}");
+        assert!(report.contains_code(DiagnosticCode::IPieceSetMvpSupported));
+    }
 }
 
 #[test]

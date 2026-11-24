@@ -4,6 +4,10 @@ use std::collections::{BTreeMap, VecDeque};
 #[path = "build_probability_parallel.rs"]
 mod native_parallel;
 
+#[cfg(all(feature = "parallel", not(target_family = "wasm")))]
+#[path = "finesse_parallel.rs"]
+mod finesse_parallel;
+
 use clearra_core_domain::{
     board::board_size::BoardSize,
     execution_cancellation::ExecutionControl,
@@ -4832,10 +4836,18 @@ pub(super) fn attach_finesse_report_with_memory_guard(
     let material_bytes = checked_finesse_material_vec_retained_bytes(&materials).ok_or(
         WasmExactSearchError::InvalidProblem("wasm_finesse_report_memory_projection_overflow"),
     )?;
-    let report_build_future =
-        checked_finesse_report_build_future_upper_bound(&materials, pattern_knowledge).ok_or(
-            WasmExactSearchError::InvalidProblem("wasm_finesse_report_memory_projection_overflow"),
-        )?;
+    let report_build_future = checked_finesse_report_build_future_with_workers(
+        &materials,
+        pattern_knowledge,
+        if cfg!(all(feature = "parallel", not(target_family = "wasm"))) {
+            control.parallelism()
+        } else {
+            1
+        },
+    )
+    .ok_or(WasmExactSearchError::InvalidProblem(
+        "wasm_finesse_report_memory_projection_overflow",
+    ))?;
     let borrowed_fields = [
         ("finesse_metric_requested", metric.as_str()),
         (
@@ -4914,9 +4926,18 @@ pub(super) fn checked_finesse_material_vec_retained_bytes(
     Some(bytes)
 }
 
+#[cfg(test)]
 fn checked_finesse_report_build_future_upper_bound(
     materials: &[FinesseSearchMaterial],
     pattern_knowledge: FinessePatternKnowledge,
+) -> Option<u128> {
+    checked_finesse_report_build_future_with_workers(materials, pattern_knowledge, 1)
+}
+
+fn checked_finesse_report_build_future_with_workers(
+    materials: &[FinesseSearchMaterial],
+    pattern_knowledge: FinessePatternKnowledge,
+    workers: usize,
 ) -> Option<u128> {
     const TREE_ENTRY_OVERHEAD_UPPER_BOUND: u128 = 256;
     const PRODUCT_STATE_BYTES_UPPER_BOUND: u128 = 1_024;
@@ -5058,23 +5079,31 @@ fn checked_finesse_report_build_future_upper_bound(
         .checked_add(core::mem::size_of::<QueueCostTable>() as u128)?;
     // An empty solution catalog never constructs a product evaluator:
     // `evaluate_finesse_policy` materializes only the one unreachable cost
-    // table counted below. In particular, a large Visible-7 class set must not
-    // be projected as `2^class_count` when there is no language to evaluate.
+    // table counted below.
     let (oracle_product_peak, visible_product_peak) = if language_count == 0 {
         (0, 0)
     } else {
+        // Oracle's existing vector DP retains at most 64 lanes per state,
+        // independently of the original universe's total class count.
+        let oracle_vector_bytes =
+            64_u128.checked_mul(core::mem::size_of::<Option<u32>>() as u128)?;
         let oracle = scalar_state_count
-            .checked_mul(PRODUCT_STATE_BYTES_UPPER_BOUND.checked_add(cost_vector_bytes)?)?;
+            .checked_mul(PRODUCT_STATE_BYTES_UPPER_BOUND.checked_add(oracle_vector_bytes)?)?;
         let visible = if first.fixed_queue
             || first.classes.fully_revealed_by_visible_seven()
             || matches!(pattern_knowledge, FinessePatternKnowledge::Oracle)
         {
             0
         } else {
-            let shift = u32::try_from(class_count).ok()?;
+            // Members only refine by observations. Every draw advances at
+            // most two positions, less than the seven visible pieces, so the
+            // revealed intervals form one contiguous prefix. For each cursor
+            // those prefix classes partition the original queues; they are
+            // not arbitrary subsets. Account all classes and the sparse
+            // 64-lane outcome buckets, memo keys and transient DP clones.
             scalar_state_count
-                .checked_mul(1_u128.checked_shl(shift)?)?
-                .checked_mul(PRODUCT_STATE_BYTES_UPPER_BOUND.checked_add(cost_vector_bytes)?)?
+                .checked_mul(class_count)?
+                .checked_mul(PRODUCT_STATE_BYTES_UPPER_BOUND.checked_mul(4)?)?
         };
         (oracle, visible)
     };
@@ -5084,10 +5113,19 @@ fn checked_finesse_report_build_future_upper_bound(
         .checked_mul(evaluated_policy_count)?;
     let movement_peak =
         checked_finesse_movement_witness_peak_bytes(materials, route_inputs, max_depth)?;
+    let parallel_carriers = language_count
+        .checked_mul(256)?
+        .checked_add(class_count.checked_mul(64)?)?
+        .checked_add((workers.max(1) as u128).checked_mul(2048)?)?;
 
     grouping_bytes
         .checked_add(union_peak)?
-        .checked_add(oracle_product_peak.max(visible_product_peak))?
+        .checked_add(
+            oracle_product_peak
+                .max(visible_product_peak)
+                .checked_mul(workers.max(1) as u128)?,
+        )?
+        .checked_add(parallel_carriers)?
         .checked_add(retained_cost_tables)?
         .checked_add(report_bytes.checked_mul(2)?)?
         .checked_add(movement_peak)
@@ -5498,47 +5536,30 @@ pub(super) fn build_finesse_report(
     } else {
         visible.as_ref()
     };
-    // Oracle already selected the same strict minimum (cost, solution,
-    // class) while evaluating its cost tables. Its selected-language replay
-    // also serves a fixed queue, without reevaluating every solution's DP.
-    // Keep the established fixed Visible-7 reconstruction path unchanged.
-    let representative_witness = if fixed_queue && classes.classes().len() == 1 && !oracle_requested
-    {
-        fixed_queue_representative_witness(
-            "visible-7",
-            &languages,
-            &classes,
-            initial_hold,
-            hold_enabled,
-            terminal_hold_release,
-            spawn_profile,
-            &kick_profile,
-            control,
-        )?
-    } else {
-        selected_policy
-            .and_then(|evaluated| evaluated.representative)
-            .map(|selection| {
-                pattern_representative_witness(
-                    if oracle_requested {
-                        "oracle"
-                    } else {
-                        "visible-7"
-                    },
-                    selection,
-                    &languages,
-                    &classes,
-                    initial_hold,
-                    hold_enabled,
-                    terminal_hold_release,
-                    spawn_profile,
-                    &kick_profile,
-                    control,
-                )
-            })
-            .transpose()?
-            .flatten()
-    };
+    // Both policies already selected the same strict (cost, solution, class)
+    // minimum. Replay only that language, including a fixed Visible-7 queue.
+    let representative_witness = selected_policy
+        .and_then(|evaluated| evaluated.representative)
+        .map(|selection| {
+            pattern_representative_witness(
+                if oracle_requested {
+                    "oracle"
+                } else {
+                    "visible-7"
+                },
+                selection,
+                &languages,
+                &classes,
+                initial_hold,
+                hold_enabled,
+                terminal_hold_release,
+                spawn_profile,
+                &kick_profile,
+                control,
+            )
+        })
+        .transpose()?
+        .flatten();
     if let Some(exact_total_inputs) = exact_total_inputs.as_deref() {
         if representative_witness
             .as_ref()
@@ -5875,52 +5896,78 @@ fn evaluate_finesse_policy(
     control: &ExecutionControl,
 ) -> Result<EvaluatedFinessePolicy, WasmExactSearchError> {
     let product_span = SearchStageSpan::begin(ExecutorSearchStage::FinesseProductDp);
-    let mut oracle_overall_costs = (policy == "oracle")
-        .then(|| QueueCostTable::unreachable(classes.classes().len()))
-        .transpose()
-        .map_err(|_| {
-            WasmExactSearchError::InvalidProblem("wasm_finesse_overall_cost_storage_unavailable")
-        })?;
-    let mut solutions = Vec::new();
-    solutions.try_reserve_exact(languages.len()).map_err(|_| {
-        WasmExactSearchError::InvalidProblem("wasm_finesse_solution_cost_storage_unavailable")
-    })?;
-    for (solution_key, language) in languages {
-        ensure_finesse_not_cancelled(control)?;
-        let evaluator = QueueClassProductEvaluator::new(language)
-            .with_spawn_profile(spawn_profile)
-            .with_hold_enabled(hold_enabled)
-            .with_terminal_hold_release_enabled(terminal_hold_release);
-        let costs = finesse_policy_costs(
-            &evaluator,
+    #[cfg(all(feature = "parallel", not(target_family = "wasm")))]
+    let (solutions, oracle_overall_costs) = {
+        let solutions = finesse_parallel::solution_costs(
             policy,
+            languages,
             classes,
             fixed_queue,
             initial_hold,
+            hold_enabled,
+            terminal_hold_release,
+            spawn_profile,
             control,
-            "wasm_finesse_policy_evaluation_failed",
         )?;
-        if let Some(overall) = &mut oracle_overall_costs {
-            // With the entire queue known, min over the union of accepted
-            // routes equals min of the already evaluated solution costs.
-            // Fold per queue before aggregation; min of solution averages
-            // would choose one solution for all queues and is not equivalent.
-            for class_index in 0..classes.classes().len() {
-                if class_index % 64 == 0 {
-                    ensure_finesse_not_cancelled(control)?;
-                }
-                if let Some(cost) = costs.get(class_index).flatten() {
-                    overall.set_min(class_index, cost).map_err(|error| {
-                        map_finesse_product_error(
-                            error,
-                            "wasm_finesse_overall_policy_evaluation_failed",
-                        )
-                    })?;
+        let overall = (policy == "oracle")
+            .then(|| {
+                finesse_parallel::oracle_union_costs(&solutions, classes.classes().len(), control)
+            })
+            .transpose()?;
+        (solutions, overall)
+    };
+    #[cfg(not(all(feature = "parallel", not(target_family = "wasm"))))]
+    let (solutions, oracle_overall_costs) = {
+        let mut oracle_overall_costs = (policy == "oracle")
+            .then(|| QueueCostTable::unreachable(classes.classes().len()))
+            .transpose()
+            .map_err(|_| {
+                WasmExactSearchError::InvalidProblem(
+                    "wasm_finesse_overall_cost_storage_unavailable",
+                )
+            })?;
+        let mut solutions = Vec::new();
+        solutions.try_reserve_exact(languages.len()).map_err(|_| {
+            WasmExactSearchError::InvalidProblem("wasm_finesse_solution_cost_storage_unavailable")
+        })?;
+        for (solution_key, language) in languages {
+            ensure_finesse_not_cancelled(control)?;
+            let evaluator = QueueClassProductEvaluator::new(language)
+                .with_spawn_profile(spawn_profile)
+                .with_hold_enabled(hold_enabled)
+                .with_terminal_hold_release_enabled(terminal_hold_release);
+            let costs = finesse_policy_costs(
+                &evaluator,
+                policy,
+                classes,
+                fixed_queue,
+                initial_hold,
+                control,
+                "wasm_finesse_policy_evaluation_failed",
+            )?;
+            if let Some(overall) = &mut oracle_overall_costs {
+                // With the entire queue known, min over the union of accepted
+                // routes equals min of the already evaluated solution costs.
+                // Fold per queue before aggregation; min of solution averages
+                // would choose one solution for all queues and is not equivalent.
+                for class_index in 0..classes.classes().len() {
+                    if class_index % 64 == 0 {
+                        ensure_finesse_not_cancelled(control)?;
+                    }
+                    if let Some(cost) = costs.get(class_index).flatten() {
+                        overall.set_min(class_index, cost).map_err(|error| {
+                            map_finesse_product_error(
+                                error,
+                                "wasm_finesse_overall_policy_evaluation_failed",
+                            )
+                        })?;
+                    }
                 }
             }
+            solutions.push((solution_key.clone(), costs));
         }
-        solutions.push((solution_key.clone(), costs));
-    }
+        (solutions, oracle_overall_costs)
+    };
     let overall_costs = if let Some(costs) = oracle_overall_costs {
         costs
     } else if languages.is_empty() {
@@ -5962,55 +6009,62 @@ fn evaluate_finesse_policy(
     product_span.finish(policy_evaluations.saturating_mul(classes.classes().len()) as u64);
 
     let aggregation_span = SearchStageSpan::begin(ExecutorSearchStage::FinesseAggregation);
-    let mut solution_averages = Vec::new();
-    solution_averages
-        .try_reserve_exact(solutions.len())
-        .map_err(|_| {
-            WasmExactSearchError::InvalidProblem("wasm_finesse_average_storage_unavailable")
-        })?;
-    for (solution_key, costs) in &solutions {
-        ensure_finesse_not_cancelled(control)?;
-        let aggregation = aggregate_unique_queue_costs(classes, costs).map_err(|_| {
-            WasmExactSearchError::InvalidProblem("wasm_finesse_solution_aggregation_failed")
-        })?;
-        solution_averages.push(FinesseSolutionAverage::new(
-            solution_key,
-            finesse_average_text(aggregation.conditional_mean_inputs),
-            aggregation.complete,
-        ));
-    }
+    #[cfg(all(feature = "parallel", not(target_family = "wasm")))]
+    let (solution_averages, representative) =
+        finesse_parallel::summarize_solutions(&solutions, classes, control)?;
+    #[cfg(not(all(feature = "parallel", not(target_family = "wasm"))))]
+    let (solution_averages, representative) = {
+        let mut solution_averages = Vec::new();
+        solution_averages
+            .try_reserve_exact(solutions.len())
+            .map_err(|_| {
+                WasmExactSearchError::InvalidProblem("wasm_finesse_average_storage_unavailable")
+            })?;
+        for (solution_key, costs) in &solutions {
+            ensure_finesse_not_cancelled(control)?;
+            let aggregation = aggregate_unique_queue_costs(classes, costs).map_err(|_| {
+                WasmExactSearchError::InvalidProblem("wasm_finesse_solution_aggregation_failed")
+            })?;
+            solution_averages.push(FinesseSolutionAverage::new(
+                solution_key,
+                finesse_average_text(aggregation.conditional_mean_inputs),
+                aggregation.complete,
+            ));
+        }
+        let mut representative = None;
+        for (solution_index, (_, costs)) in solutions.iter().enumerate() {
+            for class_index in 0..classes.classes().len() {
+                let Some(expected_cost) = costs.get(class_index).flatten() else {
+                    continue;
+                };
+                let candidate = FinesseRepresentativeSelection {
+                    solution_index,
+                    class_index,
+                    expected_cost,
+                };
+                if representative
+                    .as_ref()
+                    .is_none_or(|current: &FinesseRepresentativeSelection| {
+                        (
+                            candidate.expected_cost,
+                            candidate.solution_index,
+                            candidate.class_index,
+                        ) < (
+                            current.expected_cost,
+                            current.solution_index,
+                            current.class_index,
+                        )
+                    })
+                {
+                    representative = Some(candidate);
+                }
+            }
+        }
+        (solution_averages, representative)
+    };
     let aggregation = aggregate_unique_queue_costs(classes, &overall_costs).map_err(|_| {
         WasmExactSearchError::InvalidProblem("wasm_finesse_overall_aggregation_failed")
     })?;
-    let mut representative = None;
-    for (solution_index, (_, costs)) in solutions.iter().enumerate() {
-        for class_index in 0..classes.classes().len() {
-            let Some(expected_cost) = costs.get(class_index).flatten() else {
-                continue;
-            };
-            let candidate = FinesseRepresentativeSelection {
-                solution_index,
-                class_index,
-                expected_cost,
-            };
-            if representative
-                .as_ref()
-                .is_none_or(|current: &FinesseRepresentativeSelection| {
-                    (
-                        candidate.expected_cost,
-                        candidate.solution_index,
-                        candidate.class_index,
-                    ) < (
-                        current.expected_cost,
-                        current.solution_index,
-                        current.class_index,
-                    )
-                })
-            {
-                representative = Some(candidate);
-            }
-        }
-    }
     let report = FinessePolicyResult::new(
         policy,
         finesse_average_text(aggregation.conditional_mean_inputs),
@@ -6058,6 +6112,18 @@ pub(super) fn finesse_policy_costs(
         }
         return Ok(costs);
     }
+    #[cfg(all(feature = "parallel", not(target_family = "wasm")))]
+    return match policy {
+        "oracle" => evaluator
+            .oracle_with_control(classes, initial_hold, control)
+            .map(|result| result.costs),
+        "visible-7" => evaluator
+            .visible_seven_with_control(classes, initial_hold, control)
+            .map(|result| result.costs),
+        _ => unreachable!("finesse policy is selected internally"),
+    }
+    .map_err(|error| finesse_parallel::product_error(error, fallback));
+    #[cfg(not(all(feature = "parallel", not(target_family = "wasm"))))]
     match policy {
         "oracle" => evaluator
             .oracle_with_cancel(classes, initial_hold, || control.is_cancelled())
@@ -7921,6 +7987,46 @@ mod finesse_integration_tests {
             .is_some(),
             "fully visible queues must not project the unreachable 2^class-count policy space",
         );
+    }
+
+    #[test]
+    fn finesse_hidden_queue_projection_counts_revealed_prefix_classes_not_arbitrary_subsets() {
+        let query = PcScenarioQuery::new(
+            PcScenarioBoard::standard_10(4, 0),
+            PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::I])),
+            PieceWindow::new(1),
+        )
+        .with_exact_pieces(Some(1));
+        let problem = ProblemCompiler::compile_scenario_pc(&query).unwrap();
+        let language = costed_finesse_language(&one_piece_language(PieceKind::I, 1)).unwrap();
+        let mut material =
+            FinesseSearchMaterial::new(&problem, vec![("one".into(), language)], true).unwrap();
+        material.fixed_queue = false;
+        let patterns = (0..128)
+            .map(|index| {
+                let mut queue = vec![PieceKind::I; 7];
+                queue.extend(
+                    [index % 7, (index / 7) % 7, index / 49]
+                        .map(|piece| PieceKind::STANDARD_TETROMINOES[piece]),
+                );
+                QueuePattern::new(PatternId::new(index), queue, probability(1.0 / 128.0))
+            })
+            .collect::<Vec<_>>();
+        material.classes = QueueClassSet::group(&patterns, true).unwrap();
+        assert!(!material.classes.fully_revealed_by_visible_seven());
+        let one = checked_finesse_report_build_future_with_workers(
+            std::slice::from_ref(&material),
+            FinessePatternKnowledge::Both,
+            1,
+        )
+        .expect("128 hidden queues have a finite prefix-class product");
+        let eight = checked_finesse_report_build_future_with_workers(
+            &[material],
+            FinessePatternKnowledge::Both,
+            8,
+        )
+        .unwrap();
+        assert!(eight > one, "private concurrent workspaces remain admitted");
     }
 
     #[test]

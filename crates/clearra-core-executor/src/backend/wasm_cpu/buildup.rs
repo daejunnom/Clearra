@@ -1366,6 +1366,48 @@ impl BuildUpWorkspace {
         Ok(())
     }
 
+    #[cfg(all(feature = "parallel", not(target_family = "wasm")))]
+    pub fn checked_observation_import_future_bytes(&self, source: &Self) -> Option<u128> {
+        if source.observation_language_roots.is_empty() {
+            return Some(0);
+        }
+        // Exact node interning may grow every destination Vec while retaining
+        // its previous backing. Include the source-ID map and root carriers.
+        (self.piece_order_languages.retained_bytes() as u128)
+            .checked_add(source.piece_order_languages.retained_bytes() as u128)?
+            .checked_mul(4)?
+            .checked_add((source.piece_order_languages.node_count() as u128).checked_mul(16)?)?
+            .checked_add(
+                ((self.observation_language_roots.len() + source.observation_language_roots.len())
+                    as u128)
+                    .checked_mul(16)?,
+            )?
+            .checked_add(4096)
+    }
+
+    #[cfg(all(feature = "parallel", not(target_family = "wasm")))]
+    pub fn import_observation_languages(
+        &mut self,
+        source: &Self,
+    ) -> Result<(), WasmExactSearchError> {
+        if source.observation_language_roots.is_empty() {
+            return Ok(());
+        }
+        let roots = self.piece_order_languages.import_roots(
+            &source.piece_order_languages,
+            &source.observation_language_roots,
+        )?;
+        self.observation_language_roots
+            .try_reserve(roots.len())
+            .map_err(|_| {
+                WasmExactSearchError::InvalidProblem(
+                    "wasm_observation_language_root_storage_unavailable",
+                )
+            })?;
+        self.observation_language_roots.extend(roots);
+        Ok(())
+    }
+
     pub fn evaluate_observation_language(
         &mut self,
         problem: &SearchProblem,

@@ -38,6 +38,10 @@ pub use compact_pc_failed_queue::WasmCompactPcFailedQueueSession;
 #[path = "scoring_graph_parallel.rs"]
 pub(super) mod scoring_graph_parallel;
 
+#[cfg(all(feature = "parallel", not(target_family = "wasm")))]
+#[path = "candidate_window_parallel.rs"]
+mod candidate_window_parallel;
+
 use crate::{
     pc_chance_coverage_evidence::{
         strict_coverage_pattern_bitset_from_words, PcChanceCoverageEvidence, PcScoreProblemEvidence,
@@ -62,7 +66,7 @@ use super::{
     buildup::{
         checked_candidate_verification_peak_upper_bound, exact_scoring_execution_graph,
         exact_scoring_execution_graph_memory_projection, verify_candidate, BuildUpWorkspace,
-        CandidateIlcWork, CandidateWitnessMode,
+        CandidateBuildResult, CandidateIlcWork, CandidateWitnessMode,
     },
     catalog::GeometryCatalog,
     coverage_product::CoverageProductEvaluator,
@@ -793,10 +797,24 @@ fn exact_execution_evidence_requested(problem: &SearchProblem) -> bool {
             .retains_pc_path_v2_evidence()
 }
 
+fn native_candidate_window_accounting(problem: &SearchProblem) -> bool {
+    cfg!(all(feature = "parallel", not(target_family = "wasm")))
+        && problem.objective().kind() != ObjectiveKind::Tiling
+        && (problem
+            .queue_observation_policy()
+            .requires_observation_policy()
+            || problem.budget().max_nodes() != 0
+            || problem.backend_request().max_candidates() != 0
+            || problem.backend_request().max_frontier_states() != 0
+            || problem.backend_request().max_memory_mib().is_some())
+}
+
 fn preflight_and_acquire_execution_resources(
     problem: &SearchProblem,
 ) -> Result<ExecutionAdmission, WasmExactSearchError> {
-    let admission = if exact_execution_evidence_requested(problem) {
+    let admission = if exact_execution_evidence_requested(problem)
+        || native_candidate_window_accounting(problem)
+    {
         // Every rich execution graph (Path, Save, constraints and Score) owns
         // its real request cap. A one-bitset lease cannot admit N concurrent
         // graph builders or the returned graph family.
@@ -983,6 +1001,7 @@ pub(crate) struct WasmExactSearchSession {
     total_reachability_states: usize,
     peak_cpu_bytes: usize,
     parallel_worker_retained_bytes: usize,
+    parallel_coexisting_bytes: u128,
     #[cfg(feature = "parallel")]
     parallel_worker_memory_components: Option<super::parallel_worker::WorkerMemoryComponents>,
     #[cfg(all(feature = "parallel", any(test, feature = "local-search-ab")))]
@@ -1062,6 +1081,7 @@ impl WasmExactSearchSession {
     }
 
     fn checked_initialization_retained_bytes(
+        problem: &SearchProblem,
         problem_retention: SearchProblemRetention,
         catalog: &GeometryCatalog,
         tablebase_retained_bytes: usize,
@@ -1071,7 +1091,16 @@ impl WasmExactSearchSession {
                 checked_external_retained_upper_bound_bytes,
             } => checked_external_retained_upper_bound_bytes,
             SearchProblemRetention::SessionOwnedCloneUnaccounted
-            | SearchProblemRetention::CallerOwnedSharedInputWithoutParentAuthority => 0,
+            | SearchProblemRetention::CallerOwnedSharedInputWithoutParentAuthority => {
+                if native_candidate_window_accounting(problem) {
+                    super::extended_pc_search::checked_pc_family_problem_nested_retained_bytes(
+                        problem,
+                    )?
+                    .checked_add(core::mem::size_of::<SearchProblem>() as u128 + 32)?
+                } else {
+                    0
+                }
+            }
         };
         external
             .checked_add(core::mem::size_of::<Self>() as u128)?
@@ -1543,10 +1572,24 @@ impl WasmExactSearchSession {
         execution_admission: ExecutionAdmission,
     ) -> Result<Self, WasmExactSearchError> {
         let dense_pattern_preflight = execution_admission.dense_preflight;
-        if let SearchProblemRetention::ParentAuthorizedSharedInput {
-            checked_external_retained_upper_bound_bytes,
-        } = problem_retention
-        {
+        let retained_input = match problem_retention {
+            SearchProblemRetention::ParentAuthorizedSharedInput {
+                checked_external_retained_upper_bound_bytes,
+            } => Some(checked_external_retained_upper_bound_bytes),
+            _ if native_candidate_window_accounting(&problem) => Some(
+                super::extended_pc_search::checked_pc_family_problem_nested_retained_bytes(
+                    &problem,
+                )
+                .and_then(|bytes| {
+                    bytes.checked_add(core::mem::size_of::<SearchProblem>() as u128 + 32)
+                })
+                .ok_or_else(|| {
+                    Self::initialization_memory_projection_unavailable(&execution_admission)
+                })?,
+            ),
+            _ => None,
+        };
+        if let Some(checked_external_retained_upper_bound_bytes) = retained_input {
             let catalog_peak = GeometryCatalog::checked_compile_peak_upper_bound(problem.as_ref())
                 .ok_or_else(|| {
                     Self::initialization_memory_projection_unavailable(&execution_admission)
@@ -1646,6 +1689,7 @@ impl WasmExactSearchSession {
             WasmExactSearchError::InvalidProblem("wasm_piece_source_not_materialized"),
         )?;
         let retained_before_family = Self::checked_initialization_retained_bytes(
+            &problem,
             problem_retention,
             catalog.as_ref(),
             tablebase_retained_bytes,
@@ -1654,7 +1698,8 @@ impl WasmExactSearchSession {
         let multiset_family = if matches!(
             problem_retention,
             SearchProblemRetention::ParentAuthorizedSharedInput { .. }
-        ) {
+        ) || native_candidate_window_accounting(&problem)
+        {
             universe
                 .packing_multiset_family_for_execution_with_workers_and_memory_limit(
                     target_piece_count,
@@ -1698,7 +1743,8 @@ impl WasmExactSearchSession {
         if matches!(
             problem_retention,
             SearchProblemRetention::ParentAuthorizedSharedInput { .. }
-        ) {
+        ) || native_candidate_window_accounting(&problem)
+        {
             let bitset_peak = PatternBitSet::checked_all_projection(universe.pattern_count())
                 .map(|projection| projection.constructor_peak_bytes)
                 .ok_or_else(|| {
@@ -1738,7 +1784,8 @@ impl WasmExactSearchSession {
             problem_retention,
             SearchProblemRetention::ParentAuthorizedSharedInput { .. }
         );
-        if parent_authorized {
+        let geometry_bounded = parent_authorized || native_candidate_window_accounting(&problem);
+        if geometry_bounded {
             let target_peak = checked_target_group_build_peak_additional_bytes(
                 universe,
                 &multiset_family,
@@ -1756,13 +1803,13 @@ impl WasmExactSearchSession {
                 universe,
                 &multiset_family,
                 !omits_geometry_pattern_indices,
-                parent_authorized.then_some((
+                geometry_bounded.then_some((
                     retained_before_geometry,
                     execution_admission.memory_cap_bytes(),
                 )),
             )?
         } else {
-            if parent_authorized {
+            if geometry_bounded {
                 GeometrySearch::new_with_memory_limit(
                     universe,
                     &multiset_family,
@@ -1893,6 +1940,7 @@ impl WasmExactSearchSession {
             total_reachability_states: 0,
             peak_cpu_bytes,
             parallel_worker_retained_bytes: 0,
+            parallel_coexisting_bytes: 0,
             #[cfg(feature = "parallel")]
             parallel_worker_memory_components: None,
             #[cfg(all(feature = "parallel", any(test, feature = "local-search-ab")))]
@@ -2108,6 +2156,10 @@ impl WasmExactSearchSession {
         {
             self.parallel_decision_reason = "legacy-target-family-area-mismatch";
             return Ok(None);
+        }
+        #[cfg(not(target_family = "wasm"))]
+        if native_candidate_window_accounting(&self.problem) {
+            return self.execute_candidate_windows(worker_count, control);
         }
         if self
             .problem
@@ -2438,6 +2490,11 @@ impl WasmExactSearchSession {
                 self.count_complete = false;
                 return self.complete();
             }
+            let frontier_limit = self.problem.backend_request().max_frontier_states();
+            if frontier_limit != 0 && self.geometry.peak_frontier() > frontier_limit {
+                self.mark_truncated("frontier_budget_exceeded");
+                return self.complete();
+            }
             let candidate_budget = self.problem.backend_request().max_candidates();
             if candidate_budget != 0 && self.packing_candidate_count >= candidate_budget {
                 self.mark_truncated("candidate_budget_exceeded");
@@ -2458,7 +2515,8 @@ impl WasmExactSearchSession {
             let geometry_advance = if matches!(
                 self.problem_retention,
                 SearchProblemRetention::ParentAuthorizedSharedInput { .. }
-            ) {
+            ) || native_candidate_window_accounting(&self.problem)
+            {
                 // Geometry may return one owned row-id vector. Keep that live
                 // candidate inside the same request surface while the compiler
                 // or traversal frontier grows.
@@ -2801,6 +2859,7 @@ impl WasmExactSearchSession {
     /// workers have already been joined and dropped.
     fn checked_executor_retained_bytes(&self) -> Option<u128> {
         let mut bytes = core::mem::size_of::<Self>() as u128;
+        bytes = bytes.checked_add(self.parallel_coexisting_bytes)?;
         bytes = bytes.checked_add(
             self.execution_control
                 .compute_budget()
@@ -2875,13 +2934,17 @@ impl WasmExactSearchSession {
         let executor = self.checked_executor_retained_bytes()?;
         match self.checked_external_retained_upper_bound_bytes() {
             Some(external) => executor.checked_add(external),
-            None if exact_execution_evidence_requested(&self.problem) => executor
-                .checked_add(
-                    super::extended_pc_search::checked_pc_family_problem_nested_retained_bytes(
-                        &self.problem,
-                    )?,
-                )?
-                .checked_add(core::mem::size_of::<SearchProblem>() as u128 + 32),
+            None if exact_execution_evidence_requested(&self.problem)
+                || native_candidate_window_accounting(&self.problem) =>
+            {
+                executor
+                    .checked_add(
+                        super::extended_pc_search::checked_pc_family_problem_nested_retained_bytes(
+                            &self.problem,
+                        )?,
+                    )?
+                    .checked_add(core::mem::size_of::<SearchProblem>() as u128 + 32)
+            }
             None => Some(executor),
         }
     }
@@ -2966,7 +3029,8 @@ impl WasmExactSearchSession {
         if !matches!(
             self.problem_retention,
             SearchProblemRetention::ParentAuthorizedSharedInput { .. }
-        ) {
+        ) && !native_candidate_window_accounting(&self.problem)
+        {
             return Ok(None);
         }
         let retained = self
@@ -3492,7 +3556,8 @@ impl WasmExactSearchSession {
         if matches!(
             self.problem_retention,
             SearchProblemRetention::ParentAuthorizedSharedInput { .. }
-        ) {
+        ) || native_candidate_window_accounting(&self.problem)
+        {
             let future = checked_candidate_verification_peak_upper_bound(
                 &self.problem,
                 &self.catalog,
@@ -3528,10 +3593,29 @@ impl WasmExactSearchSession {
             }
             Err(error) => return Err(error),
         };
+        self.apply_verified_candidate(candidate, candidate_ordinal, result, profile_scale)
+    }
+
+    fn apply_verified_candidate(
+        &mut self,
+        candidate: GeometryCandidate,
+        candidate_ordinal: u64,
+        result: CandidateBuildResult,
+        profile_scale: u64,
+    ) -> Result<Option<ExactSearchAdvance>, WasmExactSearchError> {
+        let solution_coverage_required = self.problem.solution_probability_policy().requested()
+            || self.problem.objective().kind() == ObjectiveKind::MinimumCover
+            || self.problem.objective().execution_constraints().requested();
+        let failed_queue_rows = self
+            .problem
+            .pc_chance_evidence_policy()
+            .pc_failed_queue_example_limit()
+            .is_some();
         if matches!(
             self.problem_retention,
             SearchProblemRetention::ParentAuthorizedSharedInput { .. }
-        ) {
+        ) || native_candidate_window_accounting(&self.problem)
+        {
             let universe = self.problem.piece_source().materialized_universe().ok_or(
                 WasmExactSearchError::InvalidProblem("wasm_piece_source_not_materialized"),
             )?;
@@ -3699,6 +3783,13 @@ impl WasmExactSearchSession {
                 )?;
             }
             self.buildup_workspace.merge_standard_bag_coverage(root)?;
+            self.coverage_row_count = self.coverage_row_count.saturating_add(1);
+            self.pattern_verified_execution_count = self
+                .pattern_verified_execution_count
+                .saturating_add(result.symbolic_covered_pattern_count);
+        } else if result.symbolic_covered_pattern_count != 0 {
+            // Native window workers retain the symbolic aggregate in their
+            // original arena; its global bits transfer once after the family.
             self.coverage_row_count = self.coverage_row_count.saturating_add(1);
             self.pattern_verified_execution_count = self
                 .pattern_verified_execution_count

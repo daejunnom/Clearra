@@ -44,18 +44,6 @@ pub(super) fn standard_piece_set_unsupported_diagnostic(
     ))
 }
 
-pub(super) fn oversized_piece_budget_diagnostic(max_piece_count: usize) -> Diagnostic {
-    Diagnostic::new(
-        DiagnosticCode::EPieceSetUnsupportedMvp,
-        "setup piece budget exceeds the MVP1 standard 7-bag depth",
-    )
-    .with_location(EvidenceLocation::new("setup.piece_budget.max_piece_count"))
-    .with_evidence(ValidationEvidence::new(
-        "max_piece_count",
-        max_piece_count.to_string(),
-    ))
-}
-
 pub(super) fn custom_piece_runtime_guard_diagnostic(
     piece_set: &MixedPieceSet,
     custom_ids: String,

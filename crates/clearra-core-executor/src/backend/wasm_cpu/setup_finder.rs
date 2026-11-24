@@ -5,9 +5,7 @@
 use std::{cmp::Ordering, sync::Arc};
 
 #[cfg(not(target_family = "wasm"))]
-use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
-#[cfg(all(test, not(target_family = "wasm")))]
-use std::sync::{atomic::AtomicUsize, Barrier};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering};
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::Instant;
 
@@ -80,7 +78,6 @@ enum ObservationParallelTestInjection {
 struct ObservationParallelTestHook {
     injection: ObservationParallelTestInjection,
     worker_count: usize,
-    worker_barrier: Barrier,
     active_workers: AtomicUsize,
 }
 
@@ -91,7 +88,6 @@ impl ObservationParallelTestHook {
         Arc::new(Self {
             injection,
             worker_count,
-            worker_barrier: Barrier::new(worker_count),
             active_workers: AtomicUsize::new(0),
         })
     }
@@ -2662,54 +2658,64 @@ impl SetupCoverageSession {
         // Build coverage is target-specific and never shares memo states. Run
         // every build first so switching to the terminal-aware joint oracle
         // cannot invalidate its shared target-independent suffix cache.
-        #[cfg(not(target_arch = "wasm32"))]
-        let mut diagnostic_ordinal = 0;
-        for shape_index in shape_indexes.iter().copied() {
-            if control.is_cancelled() {
-                return Err(WasmExactSearchError::Cancelled);
-            }
-            let target_shape = u32::try_from(shape_index).map_err(|_| {
-                WasmExactSearchError::InvalidProblem("setup_observation_shape_index_overflow")
-            })?;
-            let reachability = SetupTargetLanguageReachability::compile(
-                &self.coverage_graph,
-                target_shape,
-                control,
-            )?;
-            let build_language = SetupTargetBuildLanguage::compile(
-                &self.coverage_graph,
-                target_shape,
-                &reachability,
-                control,
-            )?;
+        #[cfg(not(target_family = "wasm"))]
+        let parallel_build = self.observation_worker_count > 1 && shape_indexes.len() > 1;
+        #[cfg(target_family = "wasm")]
+        let parallel_build = false;
+        #[cfg(not(target_family = "wasm"))]
+        if parallel_build {
+            self.apply_build_observation_policy_parallel(&shape_indexes, diagnostics, control)?;
+        }
+        if !parallel_build {
             #[cfg(not(target_arch = "wasm32"))]
-            let started = diagnostics.then(Instant::now);
-            let build = {
-                let evaluator = self.observation_evaluator.as_mut().ok_or(
-                    WasmExactSearchError::InvalidProblem("setup_observation_evaluator_missing"),
+            let mut diagnostic_ordinal = 0;
+            for shape_index in shape_indexes.iter().copied() {
+                if control.is_cancelled() {
+                    return Err(WasmExactSearchError::Cancelled);
+                }
+                let target_shape = u32::try_from(shape_index).map_err(|_| {
+                    WasmExactSearchError::InvalidProblem("setup_observation_shape_index_overflow")
+                })?;
+                let reachability = SetupTargetLanguageReachability::compile(
+                    &self.coverage_graph,
+                    target_shape,
+                    control,
                 )?;
-                evaluator.evaluate(&build_language, control)?
-            };
-            #[cfg(not(target_arch = "wasm32"))]
-            if let Some(started) = started {
-                report_setup_policy_diagnostics(
-                    "build",
-                    diagnostic_ordinal,
-                    shape_indexes.len(),
-                    shape_index,
-                    started,
-                    &build,
-                );
-                diagnostic_ordinal += 1;
+                let build_language = SetupTargetBuildLanguage::compile(
+                    &self.coverage_graph,
+                    target_shape,
+                    &reachability,
+                    control,
+                )?;
+                #[cfg(not(target_arch = "wasm32"))]
+                let started = diagnostics.then(Instant::now);
+                let build = {
+                    let evaluator = self.observation_evaluator.as_mut().ok_or(
+                        WasmExactSearchError::InvalidProblem("setup_observation_evaluator_missing"),
+                    )?;
+                    evaluator.evaluate(&build_language, control)?
+                };
+                #[cfg(not(target_arch = "wasm32"))]
+                if let Some(started) = started {
+                    report_setup_policy_diagnostics(
+                        "build",
+                        diagnostic_ordinal,
+                        shape_indexes.len(),
+                        shape_index,
+                        started,
+                        &build,
+                    );
+                    diagnostic_ordinal += 1;
+                }
+                let accumulator = &mut self.accumulators[shape_index];
+                accumulator.build_covered_patterns = build.covered_pattern_count;
+                accumulator.build_weight = build.covered_weight;
+                accumulator.min_covered_locks = build.min_accepted_depth.unwrap_or(u8::MAX);
+                accumulator.max_covered_locks = build.max_accepted_depth.unwrap_or(0);
+                accumulator.joint_covered_patterns = 0;
+                accumulator.joint_weight = 0.0;
+                accumulator.witness = None;
             }
-            let accumulator = &mut self.accumulators[shape_index];
-            accumulator.build_covered_patterns = build.covered_pattern_count;
-            accumulator.build_weight = build.covered_weight;
-            accumulator.min_covered_locks = build.min_accepted_depth.unwrap_or(u8::MAX);
-            accumulator.max_covered_locks = build.max_accepted_depth.unwrap_or(0);
-            accumulator.joint_covered_patterns = 0;
-            accumulator.joint_weight = 0.0;
-            accumulator.witness = None;
         }
 
         // Joint coverage is a subset of visible build coverage. Targets with
@@ -2795,6 +2801,87 @@ impl SetupCoverageSession {
     }
 
     #[cfg(not(target_family = "wasm"))]
+    fn apply_build_observation_policy_parallel(
+        &mut self,
+        shape_indexes: &[usize],
+        diagnostics: bool,
+        control: &ExecutionControl,
+    ) -> Result<(), WasmExactSearchError> {
+        let worker_count = self
+            .observation_worker_count
+            .max(1)
+            .min(if control.has_parallelism_binding() {
+                control.parallelism()
+            } else {
+                usize::MAX
+            })
+            .min(shape_indexes.len());
+        self.observation_workers_used = self.observation_workers_used.max(worker_count);
+        let failed = Arc::new(AtomicBool::new(false));
+        let mut workers = Vec::new();
+        workers.try_reserve_exact(worker_count).map_err(|_| {
+            WasmExactSearchError::InvalidProblem(
+                "setup_observation_parallel_worker_storage_unavailable",
+            )
+        })?;
+        let evaluator =
+            self.observation_evaluator
+                .as_ref()
+                .ok_or(WasmExactSearchError::InvalidProblem(
+                    "setup_observation_evaluator_missing",
+                ))?;
+        for _ in 0..worker_count {
+            let mut worker = evaluator.fork_empty()?;
+            worker.set_terminal_supply_target(None);
+            worker.set_peer_abort(Arc::clone(&failed));
+            workers.push(worker);
+        }
+        let graph = self.coverage_graph.as_ref();
+        let completed = run_setup_observation_worker_jobs(
+            workers,
+            shape_indexes.len(),
+            failed,
+            control,
+            #[cfg(test)]
+            None,
+            |_, evaluator, ordinal| {
+                let shape_index = shape_indexes[ordinal];
+                let target = u32::try_from(shape_index).map_err(|_| {
+                    WasmExactSearchError::InvalidProblem("setup_observation_shape_index_overflow")
+                })?;
+                let reachability =
+                    SetupTargetLanguageReachability::compile(graph, target, control)?;
+                let language =
+                    SetupTargetBuildLanguage::compile(graph, target, &reachability, control)?;
+                let started = diagnostics.then(Instant::now);
+                let coverage = evaluator.evaluate(&language, control)?;
+                if let Some(started) = started {
+                    report_setup_policy_diagnostics(
+                        "build",
+                        ordinal,
+                        shape_indexes.len(),
+                        shape_index,
+                        started,
+                        &coverage,
+                    );
+                }
+                Ok((shape_index, coverage))
+            },
+        )?;
+        for (_, (shape_index, build)) in completed {
+            let accumulator = &mut self.accumulators[shape_index];
+            accumulator.build_covered_patterns = build.covered_pattern_count;
+            accumulator.build_weight = build.covered_weight;
+            accumulator.min_covered_locks = build.min_accepted_depth.unwrap_or(u8::MAX);
+            accumulator.max_covered_locks = build.max_accepted_depth.unwrap_or(0);
+            accumulator.joint_covered_patterns = 0;
+            accumulator.joint_weight = 0.0;
+            accumulator.witness = None;
+        }
+        Ok(())
+    }
+
+    #[cfg(not(target_family = "wasm"))]
     fn apply_joint_observation_policy_parallel(
         &mut self,
         shape_indexes: Vec<usize>,
@@ -2805,6 +2892,11 @@ impl SetupCoverageSession {
         let worker_count = self
             .observation_worker_count
             .max(1)
+            .min(if control.has_parallelism_binding() {
+                control.parallelism()
+            } else {
+                usize::MAX
+            })
             .min(shape_indexes.len());
         self.observation_workers_used = self.observation_workers_used.max(worker_count);
         let failed = Arc::new(AtomicBool::new(false));
@@ -3077,77 +3169,82 @@ where
             ));
         }
     }
-    let batches = std::thread::scope(|scope| {
-        let mut handles = Vec::with_capacity(worker_count);
-        for (worker_index, mut worker) in workers.into_iter().enumerate() {
-            let failed = Arc::clone(&failed);
-            let run_job = &run_job;
-            #[cfg(test)]
-            let test_hook = test_hook.as_ref().map(Arc::clone);
-            handles.push(scope.spawn(move || {
+    use clearra_core_domain::parallel_work::{try_for_each_chunk, ParallelWorkError};
+    use std::sync::Mutex;
+    let control = control.clone().with_parallelism_if_unbound(worker_count);
+    let workers = workers
+        .into_iter()
+        .map(|worker| Mutex::new(Some(worker)))
+        .collect::<Vec<_>>();
+    let next = AtomicUsize::new(0);
+    let outcomes = Mutex::new(Vec::new());
+    struct AbortPeersOnUnwind<'a>(&'a AtomicBool);
+    impl Drop for AbortPeersOnUnwind<'_> {
+        fn drop(&mut self) {
+            if std::thread::panicking() {
+                self.0.store(true, AtomicOrdering::Release);
+            }
+        }
+    }
+    let execution = try_for_each_chunk(
+        &control,
+        worker_count,
+        1,
+        || Ok(()),
+        |_, range| {
+            for worker_index in range {
+                let _abort = AbortPeersOnUnwind(&failed);
+                let mut worker = workers[worker_index]
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take()
+                    .expect("each setup workspace has one owner");
                 #[cfg(test)]
                 let _active_worker = test_hook.as_ref().map(ObservationParallelTestHook::enter);
-                let guarded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    #[cfg(test)]
-                    if let Some(test_hook) = test_hook.as_ref() {
-                        test_hook.worker_barrier.wait();
-                        if test_hook.injection == ObservationParallelTestInjection::Panic
-                            && worker_index == 0
-                        {
-                            failed.store(true, AtomicOrdering::Release);
-                            panic!("injected setup observation worker panic");
-                        }
-                        if test_hook.injection == ObservationParallelTestInjection::CancelBarrier {
-                            while !control.is_cancelled() {
-                                std::thread::yield_now();
-                            }
+                #[cfg(test)]
+                if let Some(test_hook) = test_hook.as_ref() {
+                    if test_hook.injection == ObservationParallelTestInjection::Panic
+                        && worker_index == 0
+                    {
+                        failed.store(true, AtomicOrdering::Release);
+                        panic!("injected setup observation worker panic");
+                    }
+                    if test_hook.injection == ObservationParallelTestInjection::CancelBarrier {
+                        while !control.is_cancelled() {
+                            std::thread::yield_now();
                         }
                     }
-                    let mut outcomes = Vec::new();
-                    let mut ordinal = worker_index;
-                    while ordinal < target_count {
-                        if failed.load(AtomicOrdering::Acquire) || control.is_cancelled() {
-                            break;
-                        }
-                        let result = run_job(worker_index, &mut worker, ordinal);
-                        if result.is_err() {
-                            failed.store(true, AtomicOrdering::Release);
-                        }
-                        outcomes.push((ordinal, result));
-                        if failed.load(AtomicOrdering::Acquire) {
-                            break;
-                        }
-                        ordinal = ordinal.saturating_add(worker_count);
-                    }
-                    outcomes
-                }));
-                if guarded.is_err() {
-                    failed.store(true, AtomicOrdering::Release);
                 }
-                guarded
-            }));
-        }
-        handles
-            .into_iter()
-            .map(|handle| handle.join())
-            .collect::<Vec<_>>()
-    });
-
-    let mut outcomes = Vec::new();
-    for batch in batches {
-        let batch = batch.map_err(|_| {
-            WasmExactSearchError::InvalidProblem("setup_observation_parallel_worker_panicked")
-        })?;
-        let batch = batch.map_err(|_| {
-            WasmExactSearchError::InvalidProblem("setup_observation_parallel_worker_panicked")
-        })?;
-        outcomes.try_reserve(batch.len()).map_err(|_| {
-            WasmExactSearchError::InvalidProblem(
-                "setup_observation_parallel_result_storage_unavailable",
-            )
-        })?;
-        outcomes.extend(batch);
-    }
+                while !failed.load(AtomicOrdering::Acquire) && !control.is_cancelled() {
+                    let ordinal = match next.fetch_update(
+                        AtomicOrdering::AcqRel,
+                        AtomicOrdering::Acquire,
+                        |index| (index < target_count).then(|| index + 1),
+                    ) {
+                        Ok(index) => index,
+                        Err(_) => break,
+                    };
+                    let result = run_job(worker_index, &mut worker, ordinal);
+                    if result.is_err() {
+                        failed.store(true, AtomicOrdering::Release);
+                    }
+                    let mut outcomes = outcomes
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    outcomes.try_reserve(1).map_err(|_| {
+                        WasmExactSearchError::InvalidProblem(
+                            "setup_observation_parallel_result_storage_unavailable",
+                        )
+                    })?;
+                    outcomes.push((ordinal, result));
+                }
+            }
+            Ok(())
+        },
+    );
+    let mut outcomes = outcomes
+        .into_inner()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     outcomes.sort_by_key(|(ordinal, _)| *ordinal);
     let mut completed = Vec::new();
     let mut substantive_error = None;
@@ -3166,8 +3263,28 @@ where
     if let Some(error) = substantive_error {
         return Err(error);
     }
+    match execution {
+        Ok(()) => {}
+        Err(ParallelWorkError::Worker(error)) => return Err(error),
+        Err(ParallelWorkError::Cancelled) => cancelled = true,
+        Err(ParallelWorkError::ThreadSpawnFailed) => {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "setup_observation_parallel_worker_spawn_failed",
+            ))
+        }
+        Err(ParallelWorkError::WorkerPanicked) => {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "setup_observation_parallel_worker_panicked",
+            ))
+        }
+    }
     if cancelled || control.is_cancelled() {
         return Err(WasmExactSearchError::Cancelled);
+    }
+    if completed.len() != target_count {
+        return Err(WasmExactSearchError::InvalidProblem(
+            "setup_observation_parallel_result_incomplete",
+        ));
     }
     Ok(completed)
 }

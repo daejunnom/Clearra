@@ -15,7 +15,7 @@ use clearra_pc_graph::request::{
 };
 use clearra_problem::{
     BuildProbabilityAggregation, BuildProbabilityField, BuildProbabilityFinesseRequest,
-    ProblemCompiler,
+    FinessePatternKnowledge, ProblemCompiler,
 };
 
 // Each request retains the same physical process resource authority. Test
@@ -208,4 +208,91 @@ fn batch_reversed(result: &CoreExecutionResult) -> Vec<clearra_replay::ExactScor
     let mut batches = result.exact_scoring_execution_batches().to_vec();
     batches.reverse();
     batches
+}
+
+#[test]
+fn compact_and_full_height_finesse_reports_preserve_source_order_at_all_widths() {
+    use clearra_core_domain::piece::piece_kind::PieceKind;
+    use clearra_supply::queue::fixed_sequence::FixedSequence;
+    let _request = REQUESTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    for height in [4, 8] {
+        let mut baseline = None;
+        for workers in [1, 2, 4, 8] {
+            let query = PcScenarioQuery::new(
+                PcScenarioBoard::standard_10(height, 0),
+                PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::O, PieceKind::O])),
+                PieceWindow::new(2),
+            )
+            .with_exact_pieces(Some(2))
+            .with_execution_policy(policy(workers));
+            let problem = ProblemCompiler::compile_scenario_pc(&query).unwrap();
+            let field = BuildProbabilityField::from_words_preserving_height(
+                height as u8,
+                [0; 4],
+                [0xf | (0xf << 10), 0, 0, 0],
+            )
+            .unwrap();
+            let result = WasmBuildProbabilityBackend::execute_with_control(
+                &problem,
+                field,
+                BuildProbabilityAggregation::Buildability,
+                BuildProbabilityFinesseRequest::Search {
+                    pattern_knowledge: FinessePatternKnowledge::Both,
+                },
+                &ExecutionControl::default().with_parallelism(workers),
+            )
+            .unwrap();
+            let report = result.finesse_report().expect("computed finesse report");
+            assert!(report.complete());
+            if let Some(expected) = &baseline {
+                assert_eq!(report, expected);
+            } else {
+                baseline = Some(report.clone());
+            }
+        }
+    }
+}
+
+#[test]
+fn compact_pc_keeps_finite_request_caps_and_visible_policy_at_all_widths() {
+    let _request = REQUESTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    for visible in [false, true] {
+        let mut baseline = None;
+        for workers in [1, 2, 4, 8] {
+            let mut query = source(2, 0x300 | (0x300 << 10), workers)
+                .with_count_policy(PcCountPolicy::CountUnique)
+                .with_objective(ObjectivePolicy::unique())
+                .with_execution_policy(
+                    policy(workers)
+                        .with_max_memory_mib(Some(1024))
+                        .with_max_nodes(1_000_000)
+                        .with_max_candidates(100_000)
+                        .with_max_frontier_states(100_000),
+                );
+            if visible {
+                query = query.with_queue_observation_policy(
+                    clearra_supply::QueueObservationPolicy::VisibleSeven,
+                );
+            }
+            let problem = ProblemCompiler::compile_scenario_pc(&query).unwrap();
+            let result = WasmCpuSearchBackend::execute_with_control(
+                &problem,
+                &ExecutionControl::default().with_parallelism(workers),
+            )
+            .unwrap_or_else(|error| panic!("visible={visible}, workers={workers}: {error:?}"));
+            if workers > 1 {
+                assert_eq!(result.usize_field("workers_used"), Some(workers));
+                assert_eq!(result.bool_field("cpu_parallel_execution"), Some(true));
+            }
+            if let Some(expected) = &baseline {
+                same_family(&result, expected);
+            } else {
+                baseline = Some(result);
+            }
+        }
+    }
 }
