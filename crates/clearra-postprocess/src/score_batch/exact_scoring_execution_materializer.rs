@@ -33,6 +33,9 @@ use super::{
     },
 };
 
+#[path = "parallel_score_cells.rs"]
+mod parallel_score_cells;
+
 #[cfg(feature = "stage-profiling")]
 const PROFILE_SAMPLE_INTERVAL: u64 = 256;
 
@@ -342,6 +345,7 @@ pub struct ExactScoreCellMemoryReport {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ExactScoreCellMaterializationError {
     Cancelled,
+    ParallelWorkerFailed,
     ProfileMismatch,
     ProjectionOverflow,
     LimitExceeded {
@@ -474,6 +478,7 @@ pub enum ExactReplayMaterializationError {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExactScoredExecution {
+    source_ordinal: usize,
     candidate_identity: StandardBoard64TilingIdentity,
     pattern_id: usize,
     trace_identity: String,
@@ -862,6 +867,30 @@ impl ExactScoringExecutionMaterializer {
         )
     }
 
+    /// Includes every simultaneously live private traversal workspace. Source
+    /// graphs, pattern storage and the score profile remain borrowed once.
+    pub fn checked_score_cell_memory_projection_with_parallelism(
+        batch: &ExactScoringExecutionBatch,
+        profile_storage_bytes: u128,
+        parallelism: usize,
+    ) -> Option<ExactScoreCellMemoryProjection> {
+        let mut projection = Self::checked_score_cell_memory_projection_with_profile_bytes(
+            batch,
+            profile_storage_bytes,
+        )?;
+        let workers = parallel_score_cells::workspace_count(projection.cell_capacity, parallelism);
+        let extra = projection
+            .path_scratch_bytes
+            .checked_add(projection.hold_scratch_bytes)?
+            .checked_mul(workers.saturating_sub(1) as u128)?;
+        projection.path_scratch_bytes =
+            projection.path_scratch_bytes.checked_mul(workers as u128)?;
+        projection.hold_scratch_bytes =
+            projection.hold_scratch_bytes.checked_mul(workers as u128)?;
+        projection.required_peak_bytes = projection.required_peak_bytes.checked_add(extra)?;
+        Some(projection)
+    }
+
     pub fn materialize_score_cells_with_memory_limit(
         batch: &ExactScoringExecutionBatch,
         score_policy: ScoreObjectivePolicy,
@@ -875,8 +904,14 @@ impl ExactScoringExecutionMaterializer {
         if control.is_cancelled() {
             return Err(ExactScoreCellMaterializationError::Cancelled);
         }
-        let projection = Self::checked_score_cell_memory_projection_for_policy(batch, score_policy)
-            .ok_or(ExactScoreCellMaterializationError::ProjectionOverflow)?;
+        let projection = Self::checked_score_cell_memory_projection_with_parallelism(
+            batch,
+            crate::checked_score_profile_memory_projection(score_policy)
+                .ok_or(ExactScoreCellMaterializationError::ProjectionOverflow)?
+                .required_memory_bytes,
+            control.parallelism(),
+        )
+        .ok_or(ExactScoreCellMaterializationError::ProjectionOverflow)?;
         let required_memory_bytes = already_retained_bytes
             .checked_add(projection.required_peak_bytes)
             .ok_or(ExactScoreCellMaterializationError::ProjectionOverflow)?;
@@ -934,9 +969,10 @@ impl ExactScoringExecutionMaterializer {
         if !crate::score_profile_selection::score_profile_matches_policy(profile, score_policy) {
             return Err(ExactScoreCellMaterializationError::ProfileMismatch);
         }
-        let projection = Self::checked_score_cell_memory_projection_with_profile_bytes(
+        let projection = Self::checked_score_cell_memory_projection_with_parallelism(
             batch,
             profile_retained_bytes,
+            control.parallelism(),
         )
         .ok_or(ExactScoreCellMaterializationError::ProjectionOverflow)?;
         let required_memory_bytes = already_retained_bytes
@@ -972,6 +1008,19 @@ impl ExactScoringExecutionMaterializer {
         (ExactScoreCellMaterialization, ExactScoreCellMemoryReport),
         ExactScoreCellMaterializationError,
     > {
+        if parallel_score_cells::workspace_count(projection.cell_capacity, control.parallelism())
+            > 1
+        {
+            return parallel_score_cells::materialize(
+                batch,
+                score_policy,
+                profile,
+                projection,
+                control,
+                already_retained_bytes,
+                max_memory_bytes,
+            );
+        }
         let evaluation_policy = ScoreEvaluationPolicy::tetrio_pc(score_policy.initial_b2b());
         let mut scored_executions = Vec::new();
         scored_executions
@@ -1024,6 +1073,7 @@ impl ExactScoringExecutionMaterializer {
                     let trace_identity =
                         compact_score_cell_trace_identity(graph.candidate_id(), pattern_id)?;
                     scored_executions.push(ExactScoredExecution {
+                        source_ordinal: graph_index * batch.patterns().len() + pattern_id,
                         candidate_identity: graph.identity(),
                         pattern_id,
                         trace_identity,
@@ -1159,6 +1209,7 @@ impl ExactScoringExecutionMaterializer {
                         None
                     };
                     scored_executions.push(ExactScoredExecution {
+                        source_ordinal: graph_index * batch.patterns().len() + pattern_id,
                         candidate_identity: graph.identity(),
                         pattern_id,
                         trace_identity: best.trace_identity.clone(),
@@ -2061,6 +2112,66 @@ mod score_cell_memory_tests {
             ScoringLockEvidence::no_rotation(RotationState::Zero),
         )
         .with_perfect_clear(perfect_clear)
+    }
+
+    #[test]
+    fn parallel_score_cells_preserve_source_order_and_exact_memory_admission() {
+        let source = batch();
+        let source = ExactScoringExecutionBatch::new(
+            source.layout(),
+            source.initial_occupied(),
+            vec![vec![PieceKind::I]; 129],
+            source.initial_cursor(),
+            source.initial_hold(),
+            source.hold_enabled(),
+            source.projects_unplaced_lookahead(),
+            source.projects_standard_bag_lookahead(),
+            source.kick_table_id(),
+            source.rule_profile_id(),
+            source.graphs().to_vec(),
+            source.complete(),
+        );
+        let policy = ScoreObjectivePolicy::summary();
+        let (expected, _) =
+            ExactScoringExecutionMaterializer::materialize_score_cells_with_memory_limit(
+                &source,
+                policy,
+                &ExecutionControl::default(),
+                0,
+                u128::MAX,
+            )
+            .unwrap();
+        assert_eq!(expected.scored_executions().len(), 129);
+        for workers in [2, 4, 8] {
+            let control = ExecutionControl::default().with_parallelism(workers);
+            let profile_bytes = crate::checked_score_profile_memory_projection(policy)
+                .unwrap()
+                .required_memory_bytes;
+            let projection = ExactScoringExecutionMaterializer::checked_score_cell_memory_projection_with_parallelism(
+                &source, profile_bytes, workers,
+            ).unwrap();
+            let (actual, _) =
+                ExactScoringExecutionMaterializer::materialize_score_cells_with_memory_limit(
+                    &source,
+                    policy,
+                    &control,
+                    0,
+                    projection.required_peak_bytes,
+                )
+                .unwrap();
+            assert_eq!(actual.scored_executions(), expected.scored_executions());
+            assert_eq!(actual.complete(), expected.complete());
+            assert!(matches!(
+                ExactScoringExecutionMaterializer::materialize_score_cells_with_memory_limit(
+                    &source,
+                    policy,
+                    &control,
+                    0,
+                    projection.required_peak_bytes - 1,
+                ),
+                Err(ExactScoreCellMaterializationError::LimitExceeded { .. })
+            ));
+        }
     }
 
     #[test]

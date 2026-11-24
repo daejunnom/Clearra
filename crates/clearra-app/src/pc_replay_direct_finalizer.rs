@@ -38,15 +38,23 @@ impl AppContext {
                 .ok_or(CoreExecutionError::RuntimeUnavailable {
                     component: "pc.path core source missing",
                 })?;
-            let mut preparation = self
+            let preparation = self
                 .services()
                 .core_executor()
                 .prepare_pc_replay_page_source(&problem, core, reserve)?;
-            while !preparation
-                .advance(8192, control)
-                .map_err(replay_core_error)?
-            {}
-            let source = preparation.complete().map_err(replay_core_error)?;
+            #[cfg(not(target_family = "wasm"))]
+            let source = preparation
+                .complete_parallel(control)
+                .map_err(replay_core_error)?;
+            #[cfg(target_family = "wasm")]
+            let source = {
+                let mut preparation = preparation;
+                while !preparation
+                    .advance(8192, control)
+                    .map_err(replay_core_error)?
+                {}
+                preparation.complete().map_err(replay_core_error)?
+            };
             // Only a completed manifest, whose constructor verified the Core
             // source proof, enters the public typed result validator.
             ProductCapabilityResult::validate_with_pc_replay_source(contract, &response, source)

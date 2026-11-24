@@ -465,11 +465,13 @@ fn apply_execution_constraints_inner(
             })?;
         memory_guard(&result, filtered_live)?;
         let materialization_projection =
-            TSpinCoverageOnlyMaterializer::checked_target_memory_projection(&filtered).ok_or(
-                CoreExecutionError::RuntimeUnavailable {
-                    component: "b2b_preservation_memory_projection_overflow",
-                },
-            )?;
+            TSpinCoverageOnlyMaterializer::checked_target_memory_projection_with_parallelism(
+                &filtered,
+                control.parallelism(),
+            )
+            .ok_or(CoreExecutionError::RuntimeUnavailable {
+                component: "b2b_preservation_memory_projection_overflow",
+            })?;
         let materialization_cap = filtered_live
             .checked_add(materialization_projection.required_peak_bytes)
             .ok_or(CoreExecutionError::RuntimeUnavailable {
@@ -552,11 +554,13 @@ fn apply_execution_constraints_inner(
             })?;
         memory_guard(&result, filtered_live)?;
         let materialization_projection =
-            TSpinCoverageOnlyMaterializer::checked_spin_batch_memory_projection(&filtered).ok_or(
-                CoreExecutionError::RuntimeUnavailable {
-                    component: "b2b_preservation_memory_projection_overflow",
-                },
-            )?;
+            TSpinCoverageOnlyMaterializer::checked_spin_batch_memory_projection_with_parallelism(
+                &filtered,
+                control.parallelism(),
+            )
+            .ok_or(CoreExecutionError::RuntimeUnavailable {
+                component: "b2b_preservation_memory_projection_overflow",
+            })?;
         let materialization_cap = filtered_live
             .checked_add(materialization_projection.required_peak_bytes)
             .ok_or(CoreExecutionError::RuntimeUnavailable {
@@ -1871,6 +1875,16 @@ fn core_error_from_b2b_materialization(
 ) -> CoreExecutionError {
     match error {
         TSpinCoverageMaterializationError::Cancelled => CoreExecutionError::Cancelled,
+        TSpinCoverageMaterializationError::AllocationFailed => {
+            CoreExecutionError::RuntimeUnavailable {
+                component: "b2b_preservation_allocation_failed",
+            }
+        }
+        TSpinCoverageMaterializationError::ParallelWorkerFailed => {
+            CoreExecutionError::RuntimeUnavailable {
+                component: "b2b_preservation_parallel_worker_failed",
+            }
+        }
         TSpinCoverageMaterializationError::ProjectionOverflow => {
             CoreExecutionError::RuntimeUnavailable {
                 component: "b2b_preservation_memory_projection_overflow",

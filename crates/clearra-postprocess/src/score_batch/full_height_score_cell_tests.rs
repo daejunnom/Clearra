@@ -139,6 +139,62 @@ fn multiple_physical_graphs_for_one_colored_family_do_not_duplicate_score_cells(
 }
 
 #[test]
+fn parallel_full_height_cells_keep_candidate_and_pattern_order_and_exact_cap() {
+    let patterns = (0..133)
+        .map(|index| {
+            vec![
+                if index % 3 == 0 {
+                    PieceKind::O
+                } else {
+                    PieceKind::I
+                };
+                2
+            ]
+        })
+        .collect();
+    let batch = batch_with_patterns(&[1, 1], false, true, patterns);
+    let policy = ScoreObjectivePolicy::summary();
+    let (profile, memory) = crate::score_profile_with_memory_guard(policy, 0, 1024 * 1024).unwrap();
+    let serial = materialize(&batch).unwrap();
+    for workers in [2, 4, 8] {
+        let projection =
+            FullHeightScoreCellMaterializer::checked_memory_projection_with_parallelism(
+                &batch,
+                memory.retained_bytes,
+                workers,
+            )
+            .unwrap();
+        let maximum = 4096 + projection.required_peak_bytes;
+        let control = ExecutionControl::default().with_parallelism(workers);
+        let actual = FullHeightScoreCellMaterializer::materialize_with_profile_and_memory_limit(
+            &batch,
+            policy,
+            &profile,
+            memory.retained_bytes,
+            &control,
+            4096,
+            maximum,
+        )
+        .unwrap();
+        assert_eq!(actual.cells(), serial.cells());
+        assert_eq!(actual.complete(), serial.complete());
+        assert!(actual.admitted_peak_bytes() <= maximum);
+        assert!(matches!(
+            FullHeightScoreCellMaterializer::materialize_with_profile_and_memory_limit(
+                &batch,
+                policy,
+                &profile,
+                memory.retained_bytes,
+                &control,
+                4096,
+                maximum - 1,
+            ),
+            Err(FullHeightScoreCellError::MemoryLimitExceeded { .. })
+        ));
+    }
+}
+
+#[test]
 fn full_height_score_reuses_one_candidate_shape_for_each_original_pattern() {
     let single = materialize(&batch(&[1], false, true)).unwrap();
     let expected = &single.cells()[0];

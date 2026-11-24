@@ -21,6 +21,9 @@ use super::{
     },
 };
 
+#[path = "parallel_coverage_words.rs"]
+mod parallel_coverage_words;
+
 #[derive(Clone, Debug)]
 pub struct TSpinCoverageOnlyMaterialization {
     covered_patterns: PatternBitSet,
@@ -57,6 +60,8 @@ pub struct TSpinCoverageMemoryReport {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TSpinCoverageMaterializationError {
     Cancelled,
+    AllocationFailed,
+    ParallelWorkerFailed,
     ProjectionOverflow,
     MemoryCapacityExceeded {
         required_memory_bytes: u128,
@@ -204,6 +209,8 @@ impl TSpinCoverageOnlyMaterialization {
 enum SpinBatchRef<'a> {
     Scoring(&'a ExactScoringExecutionBatch),
     Coverage(&'a SpinCoverageExecutionBatch),
+    ScoringRange(&'a ExactScoringExecutionBatch, usize, usize),
+    CoverageRange(&'a SpinCoverageExecutionBatch, usize, usize),
 }
 
 impl<'a> SpinBatchRef<'a> {
@@ -211,41 +218,60 @@ impl<'a> SpinBatchRef<'a> {
         match self {
             Self::Scoring(batch) => batch.patterns(),
             Self::Coverage(batch) => batch.patterns(),
+            Self::ScoringRange(batch, start, end) => &batch.patterns()[start..end],
+            Self::CoverageRange(batch, start, end) => &batch.patterns()[start..end],
+        }
+    }
+
+    fn with_pattern_range(self, start: usize, end: usize) -> Self {
+        match self {
+            Self::Scoring(batch) => Self::ScoringRange(batch, start, end),
+            Self::Coverage(batch) => Self::CoverageRange(batch, start, end),
+            Self::ScoringRange(batch, offset, _) => {
+                Self::ScoringRange(batch, offset + start, offset + end)
+            }
+            Self::CoverageRange(batch, offset, _) => {
+                Self::CoverageRange(batch, offset + start, offset + end)
+            }
         }
     }
 
     const fn initial_cursor(self) -> u16 {
         match self {
-            Self::Scoring(batch) => batch.initial_cursor(),
-            Self::Coverage(batch) => batch.initial_cursor(),
+            Self::Scoring(batch) | Self::ScoringRange(batch, ..) => batch.initial_cursor(),
+            Self::Coverage(batch) | Self::CoverageRange(batch, ..) => batch.initial_cursor(),
         }
     }
 
     const fn initial_hold(self) -> Option<PieceKind> {
         match self {
-            Self::Scoring(batch) => batch.initial_hold(),
-            Self::Coverage(batch) => batch.initial_hold(),
+            Self::Scoring(batch) | Self::ScoringRange(batch, ..) => batch.initial_hold(),
+            Self::Coverage(batch) | Self::CoverageRange(batch, ..) => batch.initial_hold(),
         }
     }
 
     const fn complete(self) -> bool {
         match self {
-            Self::Scoring(batch) => batch.complete(),
-            Self::Coverage(batch) => batch.complete(),
+            Self::Scoring(batch) | Self::ScoringRange(batch, ..) => batch.complete(),
+            Self::Coverage(batch) | Self::CoverageRange(batch, ..) => batch.complete(),
         }
     }
 
     fn graph_count(self) -> usize {
         match self {
-            Self::Scoring(batch) => batch.graphs().len(),
-            Self::Coverage(batch) => batch.graphs().len(),
+            Self::Scoring(batch) | Self::ScoringRange(batch, ..) => batch.graphs().len(),
+            Self::Coverage(batch) | Self::CoverageRange(batch, ..) => batch.graphs().len(),
         }
     }
 
     fn graph(self, index: usize) -> Option<SpinGraphRef<'a>> {
         match self {
-            Self::Scoring(batch) => batch.graphs().get(index).map(SpinGraphRef::Scoring),
-            Self::Coverage(batch) => batch.graphs().get(index).map(SpinGraphRef::Coverage),
+            Self::Scoring(batch) | Self::ScoringRange(batch, ..) => {
+                batch.graphs().get(index).map(SpinGraphRef::Scoring)
+            }
+            Self::Coverage(batch) | Self::CoverageRange(batch, ..) => {
+                batch.graphs().get(index).map(SpinGraphRef::Coverage)
+            }
         }
     }
 
@@ -254,7 +280,11 @@ impl<'a> SpinBatchRef<'a> {
         let graph_count = self.graph_count();
         let word_count = pattern_count.div_ceil(u64::BITS as usize) as u128;
         let word_bytes = word_count.checked_mul(core::mem::size_of::<u64>() as u128)?;
-        let max_sequence_len = self.patterns().iter().map(Vec::len).max().unwrap_or(0);
+        let source_patterns = match self {
+            Self::Scoring(batch) | Self::ScoringRange(batch, ..) => batch.patterns(),
+            Self::Coverage(batch) | Self::CoverageRange(batch, ..) => batch.patterns(),
+        };
+        let max_sequence_len = source_patterns.iter().map(Vec::len).max().unwrap_or(0);
         let max_graph_node_count = (0..graph_count)
             .filter_map(|index| self.graph(index))
             .map(SpinGraphRef::node_count)
@@ -376,22 +406,30 @@ impl<'a> SpinBatchRef<'a> {
 impl ExecutionSupplyBatch for SpinBatchRef<'_> {
     fn hold_enabled(&self) -> bool {
         match self {
-            Self::Scoring(batch) => batch.hold_enabled(),
-            Self::Coverage(batch) => batch.hold_enabled(),
+            Self::Scoring(batch) | Self::ScoringRange(batch, ..) => batch.hold_enabled(),
+            Self::Coverage(batch) | Self::CoverageRange(batch, ..) => batch.hold_enabled(),
         }
     }
 
     fn projects_unplaced_lookahead(&self) -> bool {
         match self {
-            Self::Scoring(batch) => batch.projects_unplaced_lookahead(),
-            Self::Coverage(batch) => batch.projects_unplaced_lookahead(),
+            Self::Scoring(batch) | Self::ScoringRange(batch, ..) => {
+                batch.projects_unplaced_lookahead()
+            }
+            Self::Coverage(batch) | Self::CoverageRange(batch, ..) => {
+                batch.projects_unplaced_lookahead()
+            }
         }
     }
 
     fn projects_standard_bag_lookahead(&self) -> bool {
         match self {
-            Self::Scoring(batch) => batch.projects_standard_bag_lookahead(),
-            Self::Coverage(batch) => batch.projects_standard_bag_lookahead(),
+            Self::Scoring(batch) | Self::ScoringRange(batch, ..) => {
+                batch.projects_standard_bag_lookahead()
+            }
+            Self::Coverage(batch) | Self::CoverageRange(batch, ..) => {
+                batch.projects_standard_bag_lookahead()
+            }
         }
     }
 }
@@ -665,6 +703,19 @@ fn branch_words(
 pub struct TSpinCoverageOnlyMaterializer;
 
 impl TSpinCoverageOnlyMaterializer {
+    pub fn checked_target_memory_projection_with_parallelism(
+        batch: &ExactScoringExecutionBatch,
+        parallelism: usize,
+    ) -> Option<TSpinCoverageMemoryProjection> {
+        parallel_coverage_words::projection(SpinBatchRef::Scoring(batch), parallelism)
+    }
+
+    pub fn checked_spin_batch_memory_projection_with_parallelism(
+        batch: &SpinCoverageExecutionBatch,
+        parallelism: usize,
+    ) -> Option<TSpinCoverageMemoryProjection> {
+        parallel_coverage_words::projection(SpinBatchRef::Coverage(batch), parallelism)
+    }
     pub fn checked_target_memory_projection(
         batch: &ExactScoringExecutionBatch,
     ) -> Option<TSpinCoverageMemoryProjection> {
@@ -834,13 +885,26 @@ impl TSpinCoverageOnlyMaterializer {
         pattern_range: Range<usize>,
         control: &ExecutionControl,
     ) -> Result<TSpinCoverageOnlyMaterialization, ExactScoringExecutionCancelled> {
-        let projection = batch
-            .checked_memory_projection()
+        let projection = parallel_coverage_words::projection(batch, control.parallelism())
             .expect("materializable batch has a checked address-space projection");
         Self::materialize_batch_with_projection(batch, target, pattern_range, control, &projection)
     }
 
     fn materialize_batch_with_projection(
+        batch: SpinBatchRef<'_>,
+        target: Option<SpinCoverageTarget>,
+        pattern_range: Range<usize>,
+        control: &ExecutionControl,
+        projection: &TSpinCoverageMemoryProjection,
+    ) -> Result<TSpinCoverageOnlyMaterialization, ExactScoringExecutionCancelled> {
+        if parallel_coverage_words::applies(batch, control.parallelism()) {
+            return parallel_coverage_words::materialize(batch, target, pattern_range, control)
+                .map_err(|_| ExactScoringExecutionCancelled);
+        }
+        Self::materialize_batch_serial(batch, target, pattern_range, control, projection)
+    }
+
+    fn materialize_batch_serial(
         batch: SpinBatchRef<'_>,
         target: Option<SpinCoverageTarget>,
         pattern_range: Range<usize>,
@@ -954,8 +1018,7 @@ impl TSpinCoverageOnlyMaterializer {
         (TSpinCoverageOnlyMaterialization, TSpinCoverageMemoryReport),
         TSpinCoverageMaterializationError,
     > {
-        let projection = batch
-            .checked_memory_projection()
+        let projection = parallel_coverage_words::projection(batch, control.parallelism())
             .ok_or(TSpinCoverageMaterializationError::ProjectionOverflow)?;
         let required_memory_bytes = already_retained_bytes
             .checked_add(projection.required_peak_bytes)
@@ -966,14 +1029,18 @@ impl TSpinCoverageOnlyMaterializer {
                 max_memory_bytes,
             });
         }
-        let materialized = Self::materialize_batch_with_projection(
-            batch,
-            target,
-            pattern_range,
-            control,
-            &projection,
-        )
-        .map_err(|_| TSpinCoverageMaterializationError::Cancelled)?;
+        let materialized = if parallel_coverage_words::applies(batch, control.parallelism()) {
+            parallel_coverage_words::materialize(batch, target, pattern_range, control)?
+        } else {
+            Self::materialize_batch_with_projection(
+                batch,
+                target,
+                pattern_range,
+                control,
+                &projection,
+            )
+            .map_err(|_| TSpinCoverageMaterializationError::Cancelled)?
+        };
         let retained_bytes = materialized
             .checked_retained_bytes()
             .ok_or(TSpinCoverageMaterializationError::ProjectionOverflow)?;
@@ -1300,5 +1367,124 @@ mod memory_projection_tests {
                 max_memory_bytes,
             }) if required_memory_bytes == exact_cap && max_memory_bytes == exact_cap - 1
         ));
+    }
+
+    #[test]
+    fn parallel_windows_preserve_supply_state_duplicate_keys_and_partial_words() {
+        use clearra_core_domain::piece::rotation::RotationState;
+        use clearra_replay::ScoringLockEvidence;
+        let identity = StandardBoard64TilingIdentity::from_placements(
+            0,
+            [PiecePlacementMask::new(PieceKind::I, 0xf)],
+        )
+        .unwrap();
+        let graph = |id| {
+            ExactScoringExecutionGraph::new(
+                id,
+                identity,
+                0,
+                vec![
+                    ScoringExecutionNode::new(0, 1, false),
+                    ScoringExecutionNode::new(1, 0, true),
+                ],
+                vec![ScoringExecutionEdge::new(
+                    1,
+                    0,
+                    PieceKind::I,
+                    RotationState::Zero,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    ScoringLockEvidence::no_rotation(RotationState::Zero),
+                )],
+            )
+        };
+        let patterns = (0..1103)
+            .map(|index| match index % 3 {
+                0 => vec![PieceKind::O, PieceKind::I],
+                1 => vec![PieceKind::O, PieceKind::O],
+                _ => vec![PieceKind::O, PieceKind::I, PieceKind::T],
+            })
+            .collect();
+        let batch = ExactScoringExecutionBatch::new(
+            Board64Layout::standard_10_by_lines(4).unwrap(),
+            0,
+            patterns,
+            1,
+            Some(PieceKind::I),
+            true,
+            false,
+            false,
+            31,
+            37,
+            vec![graph(7), graph(3)],
+            true,
+        );
+        let view = SpinBatchRef::Scoring(&batch);
+        let reference = TSpinCoverageOnlyMaterializer::materialize_batch_serial(
+            view,
+            None,
+            61..1099,
+            &ExecutionControl::default(),
+            &view.checked_memory_projection().unwrap(),
+        )
+        .unwrap();
+        assert!(reference.covered_patterns().count_ones() > 0);
+        assert_eq!(reference.candidate_ids().collect::<Vec<_>>(), vec![3]);
+        for workers in [1, 2, 4, 8] {
+            let control = ExecutionControl::default().with_parallelism(workers);
+            let projection =
+                TSpinCoverageOnlyMaterializer::checked_target_memory_projection_with_parallelism(
+                    &batch, workers,
+                )
+                .unwrap();
+            let exact_cap = 17 + projection.required_peak_bytes;
+            let (actual, report) =
+                TSpinCoverageOnlyMaterializer::materialize_all_paths_with_memory_limit(
+                    &batch,
+                    61..1099,
+                    &control,
+                    17,
+                    exact_cap,
+                )
+                .unwrap();
+            assert_eq!(
+                actual.covered_patterns, reference.covered_patterns,
+                "worker count {workers}"
+            );
+            assert_eq!(actual.candidate_ids, reference.candidate_ids);
+            assert_eq!(actual.candidate_keys, reference.candidate_keys);
+            assert_eq!(
+                actual.witnessed_pattern_count,
+                reference.witnessed_pattern_count
+            );
+            assert_eq!(actual.complete, reference.complete);
+            assert_eq!(
+                actual.candidate_coverages.len(),
+                reference.candidate_coverages.len()
+            );
+            for (actual, expected) in actual
+                .candidate_coverages
+                .iter()
+                .zip(&reference.candidate_coverages)
+            {
+                assert_eq!(actual.candidate_id, expected.candidate_id);
+                assert_eq!(actual.candidate_key, expected.candidate_key);
+                assert_eq!(actual.covered_patterns, expected.covered_patterns);
+            }
+            assert!(report.retained_bytes <= projection.required_peak_bytes);
+            assert!(matches!(
+                TSpinCoverageOnlyMaterializer::materialize_all_paths_with_memory_limit(
+                    &batch,
+                    61..1099,
+                    &control,
+                    17,
+                    exact_cap - 1,
+                ),
+                Err(TSpinCoverageMaterializationError::MemoryCapacityExceeded { .. })
+            ));
+        }
     }
 }

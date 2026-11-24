@@ -113,6 +113,39 @@ impl AppContext {
             file_policy,
             product_capability_contract,
         ) = execution_parts;
+        // All computational stages of this product share one CPU budget. The
+        // management thread only coordinates the admitted compute workers.
+        // A composed child keeps its parent's owner instead of creating a
+        // second pool from the child's standalone defaults.
+        let request_workers = match &command {
+            crate::AppCommand::Pc(command) => command.query().execution_policy().workers(),
+            crate::AppCommand::Scenario(command) => command.query().execution_policy().workers(),
+            crate::AppCommand::Path(command) => command.query().execution_policy().workers(),
+            crate::AppCommand::Percent(command) => command
+                .query()
+                .map(|query| query.execution_policy().workers())
+                .or_else(|| {
+                    command
+                        .opening_query()
+                        .map(|query| query.execution_policy().workers())
+                })
+                .unwrap_or(usize::from(resource_budget.workers())),
+            crate::AppCommand::BuildProbability(command) => {
+                command.query().core_query().execution_policy().workers()
+            }
+            crate::AppCommand::BuildV2(command) => command
+                .request_profile_query()
+                .core_query()
+                .execution_policy()
+                .workers(),
+            _ => usize::from(resource_budget.workers()),
+        };
+        let product_control = if execution_control.parallelism() == 1 {
+            execution_control.clone().with_parallelism(request_workers)
+        } else {
+            execution_control.clone()
+        };
+        let execution_control = &product_control;
         let command_kind = command.kind();
         let file_policy = file_policy.as_ref().unwrap_or(&self.file_policy);
         let language = self

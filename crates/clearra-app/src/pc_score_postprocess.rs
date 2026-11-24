@@ -325,9 +325,10 @@ pub(crate) fn apply_pc_postprocess_with_derivation_and_memory_guard(
             )
         } else if let Some(batch) = full_batch {
             let projection =
-                FullHeightScoreCellMaterializer::checked_memory_projection_with_profile_bytes(
+                FullHeightScoreCellMaterializer::checked_memory_projection_with_parallelism(
                     batch,
                     profile_retained_bytes,
+                    control.parallelism(),
                 )
                 .ok_or(CoreExecutionError::RuntimeUnavailable {
                     component: "pc_score_cell_memory_projection_overflow",
@@ -367,9 +368,10 @@ pub(crate) fn apply_pc_postprocess_with_derivation_and_memory_guard(
             let batch = compact_batch.ok_or(CoreExecutionError::RuntimeUnavailable {
                 component: "pc_score_exact_batch_missing",
             })?;
-            let materialization_projection = ExactScoringExecutionMaterializer::checked_score_cell_memory_projection_with_profile_bytes(
+            let materialization_projection = ExactScoringExecutionMaterializer::checked_score_cell_memory_projection_with_parallelism(
                 batch,
                 profile_retained_bytes,
+                control.parallelism(),
             )
             .ok_or(CoreExecutionError::RuntimeUnavailable {
                 component: "pc_score_cell_memory_projection_overflow",
@@ -1490,6 +1492,11 @@ fn map_score_cell_materialization_error(
 ) -> CoreExecutionError {
     match error {
         ExactScoreCellMaterializationError::Cancelled => CoreExecutionError::Cancelled,
+        ExactScoreCellMaterializationError::ParallelWorkerFailed => {
+            CoreExecutionError::RuntimeUnavailable {
+                component: "pc_score_parallel_worker_failed",
+            }
+        }
         ExactScoreCellMaterializationError::ProfileMismatch => {
             CoreExecutionError::RuntimeUnavailable {
                 component: "pc_score_cell_profile_mismatch",
@@ -1519,6 +1526,7 @@ fn map_full_height_score_cell_error(error: FullHeightScoreCellError) -> CoreExec
         FullHeightScoreCellError::InvalidEvidence => "pc_score_full_height_cell_evidence_invalid",
         FullHeightScoreCellError::ProjectionOverflow => "pc_score_cell_memory_projection_overflow",
         FullHeightScoreCellError::AllocationFailed => "pc_score_cell_allocation_failed",
+        FullHeightScoreCellError::ParallelWorkerFailed => "pc_score_parallel_worker_failed",
         FullHeightScoreCellError::MemoryLimitExceeded { .. } => {
             "pc_score_cell_memory_limit_exceeded"
         }

@@ -16,7 +16,7 @@ use clearra_postprocess::{
 use clearra_problem::SearchProblem;
 use clearra_replay::ExactScoringExecutionBatch;
 use sha2::{Digest, Sha256};
-use std::sync::Arc;
+use std::{collections::VecDeque, sync::Arc};
 
 #[path = "pc_replay_source_batches.rs"]
 mod batches;
@@ -26,11 +26,16 @@ use batches::{PreparedReplayBatches, ReplayBatches, ReplayLanguage};
 mod store;
 pub use store::{PcReplayPageAdvance, PcReplayPageStore};
 
+#[cfg(not(target_family = "wasm"))]
+#[path = "pc_replay_parallel_manifest.rs"]
+mod parallel_manifest;
+
 pub const PC_REPLAY_MEMBER_PAGE_CONTRACT: &str = "pc-replay-member-page.v2";
 pub const PC_REPLAY_MEMBER_PAGE_SIZE: usize = 100;
 const REPLAY_PUBLIC_PAGE_RESERVE: u128 = 16;
-// Preserve the previous raw cell-path and replay-depth limits.
-const MAX_GEOMETRY_EXECUTIONS: usize = 1_000_000;
+// Counts use the actual rank address space. Allocation and physical replay
+// depth remain checked independently; there is no product witness-count cap.
+const MAX_GEOMETRY_EXECUTIONS: usize = usize::MAX;
 // A caller may amortize transport over useful work, but never drain the whole
 // manifest in one turn. The clock bounds the batch between atomic primitives;
 // an allocation/hash probe within a primitive can still exceed that quantum.
@@ -90,6 +95,9 @@ pub struct PcReplaySourceBuildSession {
     first_rank: usize,
     hasher: Sha256,
     complete: bool,
+    // Bounded native receipts, in original geometry/pattern order. They are
+    // produced only from this session's private, already verified source.
+    ready_counts: VecDeque<usize>,
 }
 
 fn bytes<T>(capacity: usize) -> ReplayResult<u128> {
@@ -286,6 +294,7 @@ impl PcReplaySourceBuildSession {
             first_rank: 0,
             hasher,
             complete: false,
+            ready_counts: VecDeque::new(),
         };
         session.guard_additional(0)?;
         Ok(session)
@@ -324,6 +333,17 @@ impl PcReplaySourceBuildSession {
                 return Ok(true);
             }
             if self.language.is_none() {
+                if let Some(&count) = self.ready_counts.front() {
+                    if count == 0
+                        || !self.source.geometries.is_empty()
+                        || self.source.first_members.len() == PC_REPLAY_MEMBER_PAGE_SIZE
+                    {
+                        self.accept_count(count)?;
+                        continue;
+                    }
+                }
+            }
+            if self.language.is_none() {
                 let additional = self
                     .checked_retained_capacity_bytes()
                     .and_then(|n| n.checked_sub(self.source.checked_retained_capacity_bytes()?))
@@ -352,6 +372,13 @@ impl PcReplaySourceBuildSession {
             let count = language
                 .count()
                 .ok_or("pc replay incomplete language count")?;
+            if self
+                .ready_counts
+                .front()
+                .is_some_and(|&expected| expected != count)
+            {
+                return Err("complete_replay_source_count_mismatch".into());
+            }
             if self.source.geometries.is_empty()
                 && self.source.first_members.len() < PC_REPLAY_MEMBER_PAGE_SIZE
                 && self.first_rank < count
@@ -411,37 +438,43 @@ impl PcReplaySourceBuildSession {
                 continue;
             }
             drop(language);
-            if count != 0 {
-                self.current_witness_count = self
-                    .current_witness_count
-                    .checked_add(count)
-                    .ok_or("pc replay geometry witness count overflow")?;
-                self.source.witness_count = self
-                    .source
-                    .witness_count
-                    .checked_add(count as u128)
-                    .ok_or("pc replay witness count overflow")?;
-                self.guard_additional(bytes::<PatternManifest>(
-                    self.current_patterns.len().checked_add(1).ok_or(OVERFLOW)?,
-                )?)?;
-                self.current_patterns
-                    .try_reserve_exact(1)
-                    .map_err(|_| "complete_replay_allocation_failed")?;
-                self.current_patterns.push(PatternManifest {
-                    pattern_id: self.next_pattern,
-                    witness_count: count,
-                    end_offset: self.current_witness_count,
-                });
-            }
-            self.first_rank = 0;
-            self.next_pattern += 1;
-            if self.next_pattern == self.source.materialized_pattern_count {
-                self.finish_geometry()?;
-            }
-            self.guard_additional(0)?;
+            self.accept_count(count)?;
         }
         self.report_progress(control);
         Ok(false)
+    }
+
+    fn accept_count(&mut self, count: usize) -> ReplayResult<()> {
+        self.ready_counts.pop_front();
+        if count != 0 {
+            self.current_witness_count = self
+                .current_witness_count
+                .checked_add(count)
+                .ok_or("pc replay geometry witness count overflow")?;
+            self.source.witness_count = self
+                .source
+                .witness_count
+                .checked_add(count as u128)
+                .ok_or("pc replay witness count overflow")?;
+            self.guard_additional(bytes::<PatternManifest>(
+                self.current_patterns.len().checked_add(1).ok_or(OVERFLOW)?,
+            )?)?;
+            self.current_patterns
+                .try_reserve_exact(1)
+                .map_err(|_| "complete_replay_allocation_failed")?;
+            self.current_patterns.push(PatternManifest {
+                pattern_id: self.next_pattern,
+                witness_count: count,
+                end_offset: self.current_witness_count,
+            });
+        }
+        self.first_rank = 0;
+        self.next_pattern += 1;
+        if self.next_pattern == self.source.materialized_pattern_count {
+            self.finish_geometry()?;
+        }
+        self.guard_additional(0)?;
+        Ok(())
     }
 
     fn report_progress(&self, control: &ExecutionControl) {
@@ -538,6 +571,7 @@ impl PcReplaySourceBuildSession {
                 bytes::<(u64, Vec<ExactReplayGraphLocation>)>(self.pending.capacity()).ok()?,
             )?
             .checked_add(self.pending_location_bytes)?
+            .checked_add(bytes::<usize>(self.ready_counts.capacity()).ok()?)?
             .checked_add(match &self.language {
                 Some(language) => language.checked_retained_bytes()?,
                 None => 0,
@@ -724,6 +758,32 @@ mod memory_tests {
         .unwrap();
         assert!(!result.exact_scoring_execution_batches().is_empty());
         (problem, result)
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    #[test]
+    fn native_parallel_replay_manifest_has_the_same_hash_counts_and_first_page() {
+        let _resource_guard =
+            crate::execution_resource_test_support::execution_resource_test_guard();
+        let (problem, result) = tiny_replay_source();
+        let cap = 128 * 1024 * 1024;
+        let mut reference = PcReplaySourceBuildSession::new(&problem, &result, cap).unwrap();
+        while !reference
+            .advance(8192, &ExecutionControl::default())
+            .unwrap()
+        {}
+        let reference = reference.complete().unwrap();
+        for workers in [1, 2, 4, 8] {
+            let actual = PcReplaySourceBuildSession::new(&problem, &result, cap)
+                .unwrap()
+                .complete_parallel(&ExecutionControl::default().with_parallelism(workers))
+                .unwrap();
+            assert_eq!(actual.as_ref(), reference.as_ref(), "workers {workers}");
+            assert_eq!(
+                actual.checked_retained_capacity_bytes(),
+                actual.checked_full_capacity_recount()
+            );
+        }
     }
 
     #[test]

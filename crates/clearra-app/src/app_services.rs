@@ -862,7 +862,11 @@ impl AppCoreExecutorService {
         let mut complete = !result.exact_scoring_execution_batches().is_empty()
             || !result.spin_coverage_execution_batches().is_empty();
         for batch in result.exact_scoring_execution_batches() {
-            let projection = TSpinCoverageOnlyMaterializer::checked_target_memory_projection(batch)
+            let projection =
+                TSpinCoverageOnlyMaterializer::checked_target_memory_projection_with_parallelism(
+                    batch,
+                    control.parallelism(),
+                )
                 .ok_or(CoreExecutionError::RuntimeUnavailable {
                     component: "build_probability_postprocess_memory_projection_overflow",
                 })?;
@@ -902,8 +906,9 @@ impl AppCoreExecutorService {
             complete &= materialized_complete;
         }
         for batch in result.spin_coverage_execution_batches() {
-            let projection = TSpinCoverageOnlyMaterializer::checked_spin_batch_memory_projection(
+            let projection = TSpinCoverageOnlyMaterializer::checked_spin_batch_memory_projection_with_parallelism(
                 batch,
+                control.parallelism(),
             )
             .ok_or(CoreExecutionError::RuntimeUnavailable {
                 component: "build_probability_postprocess_memory_projection_overflow",
@@ -1004,6 +1009,16 @@ fn core_error_from_spin_materialization(
 ) -> CoreExecutionError {
     match error {
         TSpinCoverageMaterializationError::Cancelled => CoreExecutionError::Cancelled,
+        TSpinCoverageMaterializationError::AllocationFailed => {
+            CoreExecutionError::RuntimeUnavailable {
+                component: "build_probability_postprocess_allocation_failed",
+            }
+        }
+        TSpinCoverageMaterializationError::ParallelWorkerFailed => {
+            CoreExecutionError::RuntimeUnavailable {
+                component: "build_probability_postprocess_parallel_worker_failed",
+            }
+        }
         TSpinCoverageMaterializationError::ProjectionOverflow => {
             CoreExecutionError::RuntimeUnavailable {
                 component: "build_probability_postprocess_memory_projection_overflow",
@@ -2142,7 +2157,11 @@ fn apply_build_spin_postprocess_with_memory_guard(
     let mut materialization_complete = true;
     if shards.is_empty() {
         for (batch_index, batch) in batches.iter().enumerate() {
-            let projection = TSpinCoverageOnlyMaterializer::checked_target_memory_projection(batch)
+            let projection =
+                TSpinCoverageOnlyMaterializer::checked_target_memory_projection_with_parallelism(
+                    batch,
+                    control.parallelism(),
+                )
                 .ok_or(CoreExecutionError::RuntimeUnavailable {
                     component: "build_probability_postprocess_memory_projection_overflow",
                 })?;
@@ -2175,8 +2194,9 @@ fn apply_build_spin_postprocess_with_memory_guard(
         }
         for (batch_offset, batch) in spin_batches.iter().enumerate() {
             let batch_index = batches.len() + batch_offset;
-            let projection = TSpinCoverageOnlyMaterializer::checked_spin_batch_memory_projection(
+            let projection = TSpinCoverageOnlyMaterializer::checked_spin_batch_memory_projection_with_parallelism(
                 batch,
+                control.parallelism(),
             )
             .ok_or(CoreExecutionError::RuntimeUnavailable {
                 component: "build_probability_postprocess_memory_projection_overflow",

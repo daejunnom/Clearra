@@ -16,6 +16,9 @@ use clearra_scoring::{
 };
 use std::fmt::Write;
 
+#[path = "parallel_full_height_score_cells.rs"]
+mod parallel_cells;
+
 use super::{
     exact_scoring_execution_materializer::{
         compact_score_cell_trace_identity, COMPACT_SCORE_CELL_TRACE_ID_BYTES,
@@ -33,6 +36,7 @@ pub enum FullHeightScoreCellError {
     InvalidEvidence,
     ProjectionOverflow,
     AllocationFailed,
+    ParallelWorkerFailed,
     MemoryLimitExceeded {
         required_memory_bytes: u128,
         max_memory_bytes: u128,
@@ -174,6 +178,30 @@ impl FullHeightScoreCellMaterializer {
         })
     }
 
+    pub fn checked_memory_projection_with_parallelism(
+        batch: &FullHeightExecutionBatch,
+        profile_storage_bytes: u128,
+        parallelism: usize,
+    ) -> Option<FullHeightScoreCellMemoryProjection> {
+        let mut projection =
+            Self::checked_memory_projection_with_profile_bytes(batch, profile_storage_bytes)?;
+        let workers = parallel_cells::workspace_count(projection.cell_capacity, parallelism);
+        if workers > 1 {
+            projection.scratch_bytes = projection
+                .scratch_bytes
+                .checked_mul(workers as u128)?
+                .checked_add(parallel_cells::checked_control_bytes(
+                    projection.candidate_count,
+                    workers,
+                )?)?;
+            projection.required_peak_bytes = projection
+                .cell_storage_bytes
+                .checked_add(projection.scratch_bytes)?
+                .checked_add(profile_storage_bytes)?;
+        }
+        Some(projection)
+    }
+
     pub fn materialize_with_memory_limit(
         batch: &FullHeightExecutionBatch,
         policy: ScoreObjectivePolicy,
@@ -187,8 +215,15 @@ impl FullHeightScoreCellMaterializer {
         // checked_memory_projection is allocation-free. A malformed graph
         // family is invalid evidence, not a resource limit or negative proof.
         validated_shape(batch)?;
-        let projection = Self::checked_memory_projection(batch, policy)
-            .ok_or(FullHeightScoreCellError::ProjectionOverflow)?;
+        let profile_bytes = crate::checked_score_profile_memory_projection(policy)
+            .ok_or(FullHeightScoreCellError::ProjectionOverflow)?
+            .required_memory_bytes;
+        let projection = Self::checked_memory_projection_with_parallelism(
+            batch,
+            profile_bytes,
+            control.parallelism(),
+        )
+        .ok_or(FullHeightScoreCellError::ProjectionOverflow)?;
         let peak = already_retained_bytes
             .checked_add(projection.required_peak_bytes)
             .ok_or(FullHeightScoreCellError::ProjectionOverflow)?;
@@ -243,13 +278,27 @@ impl FullHeightScoreCellMaterializer {
             return Err(FullHeightScoreCellError::InvalidEvidence);
         }
         validated_shape(batch)?;
-        let projection =
-            Self::checked_memory_projection_with_profile_bytes(batch, profile_storage_bytes)
-                .ok_or(FullHeightScoreCellError::ProjectionOverflow)?;
+        let projection = Self::checked_memory_projection_with_parallelism(
+            batch,
+            profile_storage_bytes,
+            control.parallelism(),
+        )
+        .ok_or(FullHeightScoreCellError::ProjectionOverflow)?;
         let mut peak = already_retained_bytes
             .checked_add(projection.required_peak_bytes)
             .ok_or(FullHeightScoreCellError::ProjectionOverflow)?;
         ensure_limit(peak, max_memory_bytes)?;
+        if parallel_cells::workspace_count(projection.cell_capacity, control.parallelism()) > 1 {
+            return parallel_cells::materialize(
+                batch,
+                policy,
+                profile,
+                projection,
+                control,
+                already_retained_bytes,
+                max_memory_bytes,
+            );
+        }
         let mut cells = Vec::new();
         let mut path = Vec::new();
         let mut holds = Vec::new();
@@ -305,75 +354,25 @@ impl FullHeightScoreCellMaterializer {
                     required_operations: (1_u64 << identity.placement_count()) - 1,
                 }
             };
-            for (pattern_id, sequence) in execution.patterns().iter().enumerate() {
-                let mut best: Option<BestExecution> = None;
-                for graph in &graphs[start..end] {
-                    path.clear();
-                    holds.clear();
-                    let mut terminal_error = None;
-                    let traversal = visit_score_cell_paths(
-                        execution,
-                        graph,
-                        sequence,
-                        SupplyState {
-                            node: graph.root(),
-                            cursor: execution.initial_cursor(),
-                            hold: execution.initial_hold(),
-                        },
-                        PhysicalState {
-                            board: batch.initial(),
-                            operations: 0,
-                        },
-                        &physical,
-                        &mut path,
-                        &mut holds,
-                        projection.max_path_len,
-                        profile,
-                        ScoreModelEvaluator::initial_state(ScoreEvaluationPolicy::tetrio_pc(
-                            policy.initial_b2b(),
-                        )),
-                        &mut |path, holds, score: ScoreState| {
-                            if best.as_ref().is_some_and(|best| score.score() < best.score) {
-                                return Ok(());
-                            }
-                            let candidate = make_best(
-                                batch,
-                                path,
-                                holds,
-                                score,
-                                &mut selected_path,
-                                projection.max_path_len,
-                                &mut peak,
-                                &mut scratch_slack_peak,
-                                max_memory_bytes,
-                                control,
-                            )
-                            .map_err(|error| {
-                                terminal_error = Some(error);
-                                ScoreCellTraversalError::InvalidEvidence
-                            })?;
-                            if best.as_ref().is_none_or(|current| {
-                                candidate.score > current.score
-                                    || (candidate.score == current.score
-                                        && candidate.canonical_trace < current.canonical_trace)
-                            }) {
-                                best = Some(candidate);
-                            }
-                            Ok(())
-                        },
-                        control,
-                    );
-                    if let Some(error) = terminal_error {
-                        return Err(error);
-                    }
-                    complete &= traversal.map_err(|error| match error {
-                        ScoreCellTraversalError::Cancelled => FullHeightScoreCellError::Cancelled,
-                        ScoreCellTraversalError::InvalidEvidence
-                        | ScoreCellTraversalError::ScratchCapacity => {
-                            FullHeightScoreCellError::InvalidEvidence
-                        }
-                    })?;
-                }
+            for pattern_id in 0..execution.patterns().len() {
+                let (best, cell_complete) = visit_cell(
+                    batch,
+                    policy,
+                    profile,
+                    start..end,
+                    pattern_id,
+                    &physical,
+                    &mut path,
+                    &mut holds,
+                    &mut selected_path,
+                    projection.max_path_len,
+                    &mut peak,
+                    &mut scratch_slack_peak,
+                    max_memory_bytes,
+                    control,
+                    &mut |_| Ok(()),
+                )?;
+                complete &= cell_complete;
                 if let Some(best) = best {
                     let trace = compact_score_cell_trace_identity(id, pattern_id)
                         .map_err(|_| FullHeightScoreCellError::AllocationFailed)?;
@@ -412,6 +411,99 @@ impl FullHeightScoreCellMaterializer {
             admitted_peak_bytes: peak,
         })
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn visit_cell(
+    batch: &FullHeightExecutionBatch,
+    policy: ScoreObjectivePolicy,
+    profile: &clearra_scoring::profile::ScoreProfile,
+    graph_range: std::ops::Range<usize>,
+    pattern_id: usize,
+    physical: &PhysicalProjection,
+    path: &mut Vec<ScoringExecutionEdge>,
+    holds: &mut Vec<HoldDecision>,
+    selected_path: &mut Vec<(ScoringExecutionEdge, HoldDecision)>,
+    max_path_len: usize,
+    peak: &mut u128,
+    scratch_slack_peak: &mut u128,
+    max_memory_bytes: u128,
+    control: &ExecutionControl,
+    external_guard: &mut impl FnMut(u128) -> Result<(), FullHeightScoreCellError>,
+) -> Result<(Option<BestExecution>, bool), FullHeightScoreCellError> {
+    let execution = batch.execution();
+    let sequence = &execution.patterns()[pattern_id];
+    let mut best: Option<BestExecution> = None;
+    let mut complete = true;
+    for graph in &execution.graphs()[graph_range] {
+        path.clear();
+        holds.clear();
+        let mut terminal_error = None;
+        let traversal = visit_score_cell_paths(
+            execution,
+            graph,
+            sequence,
+            SupplyState {
+                node: graph.root(),
+                cursor: execution.initial_cursor(),
+                hold: execution.initial_hold(),
+            },
+            PhysicalState {
+                board: batch.initial(),
+                operations: 0,
+            },
+            physical,
+            path,
+            holds,
+            max_path_len,
+            profile,
+            ScoreModelEvaluator::initial_state(ScoreEvaluationPolicy::tetrio_pc(
+                policy.initial_b2b(),
+            )),
+            &mut |path, holds, score: ScoreState| {
+                if best.as_ref().is_some_and(|best| score.score() < best.score) {
+                    return Ok(());
+                }
+                let candidate = make_best(
+                    batch,
+                    path,
+                    holds,
+                    score,
+                    selected_path,
+                    max_path_len,
+                    peak,
+                    scratch_slack_peak,
+                    max_memory_bytes,
+                    control,
+                    external_guard,
+                )
+                .map_err(|error| {
+                    terminal_error = Some(error);
+                    ScoreCellTraversalError::InvalidEvidence
+                })?;
+                if best.as_ref().is_none_or(|current| {
+                    candidate.score > current.score
+                        || (candidate.score == current.score
+                            && candidate.canonical_trace < current.canonical_trace)
+                }) {
+                    best = Some(candidate);
+                }
+                Ok(())
+            },
+            control,
+        );
+        if let Some(error) = terminal_error {
+            return Err(error);
+        }
+        complete &= traversal.map_err(|error| match error {
+            ScoreCellTraversalError::Cancelled => FullHeightScoreCellError::Cancelled,
+            ScoreCellTraversalError::InvalidEvidence | ScoreCellTraversalError::ScratchCapacity => {
+                FullHeightScoreCellError::InvalidEvidence
+            }
+        })?;
+    }
+
+    Ok((best, complete))
 }
 
 fn validated_shape(
@@ -460,6 +552,7 @@ fn make_best(
     scratch_slack_peak: &mut u128,
     max_memory_bytes: u128,
     control: &ExecutionControl,
+    external_guard: &mut impl FnMut(u128) -> Result<(), FullHeightScoreCellError>,
 ) -> Result<BestExecution, FullHeightScoreCellError> {
     if path.len() != holds.len() || path.len() > selected_path.capacity() {
         return Err(FullHeightScoreCellError::InvalidEvidence);
@@ -478,11 +571,11 @@ fn make_best(
         control,
         |bytes| {
             trace_slack = trace_slack.max(bytes.saturating_sub(step_credit));
-            ensure_limit(
-                peak.checked_add(bytes.saturating_sub(step_credit))
-                    .ok_or(FullHeightScoreCellError::ProjectionOverflow)?,
-                max_memory_bytes,
-            )
+            let required = peak
+                .checked_add(bytes.saturating_sub(step_credit))
+                .ok_or(FullHeightScoreCellError::ProjectionOverflow)?;
+            ensure_limit(required, max_memory_bytes)?;
+            external_guard(required)
         },
     )
     .map_err(|error| match error {
@@ -513,6 +606,7 @@ fn make_best(
         *scratch_slack_peak = scratch_slack;
     }
     ensure_limit(*peak, max_memory_bytes)?;
+    external_guard(*peak)?;
     trace
         .write_canonical_key(&mut key)
         .map_err(|_| FullHeightScoreCellError::InvalidEvidence)?;
