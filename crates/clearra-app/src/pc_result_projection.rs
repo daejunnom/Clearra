@@ -34,21 +34,17 @@ use crate::{
 const EXACT_WITNESS_CONTRACT: &str = "pc-b2b-preserving-witness.v1";
 const PATTERN_PROBABILITY_CONTRACT: &str = "pc-b2b-preservation-probability.v1";
 
-/// Product-owned structural limits for `pc.score`. These are independently
-/// enforced after parsing so typed callers cannot bypass the ingress envelope.
-pub const PC_SCORE_MAX_PATTERN_BYTES: usize = 128;
-pub const PC_SCORE_MAX_SOURCE_PIECES: usize = 16;
-/// The extended 10x24 domain has at most sixty placements plus one hold
-/// lookahead. Keep the compact ingress envelope unchanged.
-pub const fn pc_score_max_source_pieces_for_lines(lines: u16) -> usize {
-    if lines > 6 {
-        61
-    } else {
-        PC_SCORE_MAX_SOURCE_PIECES
-    }
+/// Typed ingress remains within its measured owner envelope. Source queues
+/// use the real supply-cursor representation, independently of the number of
+/// physical placements required to clear the field.
+pub const PC_SCORE_MAX_PATTERN_BYTES: usize = 1024 * 1024;
+pub const PC_SCORE_MAX_SOURCE_PIECES: usize = u16::MAX as usize;
+pub const fn pc_score_max_source_pieces_for_lines(_lines: u16) -> usize {
+    PC_SCORE_MAX_SOURCE_PIECES
 }
-pub const PC_SCORE_MAX_PATTERNS: usize = 1_066_867_200;
-const PC_SCORE_MAX_EXPLICIT_PATTERNS: usize = 4_096;
+// The source compiler validates its actual index representation and checked
+// allocation projection. Product ingress adds no separate pattern-count cap.
+pub const PC_SCORE_MAX_PATTERNS: usize = usize::MAX;
 const PC_SCORE_MAX_QUERY_QUEUE_RETAINED_BYTES: u128 = 1024 * 1024;
 
 /// Closed product ceiling for every request-owned allocation retained outside
@@ -1047,7 +1043,7 @@ fn validate_pc_score_execution_policy(policy: &PcExecutionPolicy) -> Result<(), 
         || policy.max_frontier_states() != baseline.max_frontier_states()
         || policy.max_candidates() != baseline.max_candidates()
     {
-        return Err("pc score requires its fixed-cap CPU execution policy");
+        return Err("pc score requires its exact CPU execution policy");
     }
     Ok(())
 }
@@ -1059,11 +1055,7 @@ fn validate_pc_score_queue_contract(
     match queue {
         PcQueueInput::FixedSequence(sequence) => {
             if sequence.len() > max_source_pieces {
-                return Err(if max_source_pieces == PC_SCORE_MAX_SOURCE_PIECES {
-                    "pc score accepts at most 16 fixed source pieces"
-                } else {
-                    "pc score accepts at most 61 fixed source pieces in 7..=24L"
-                });
+                return Err("pc score fixed source queue exceeds the supply cursor representation");
             }
             if sequence
                 .checked_retained_capacity_bytes()
@@ -1082,10 +1074,7 @@ fn validate_pc_score_queue_contract(
                     .checked_retained_capacity_bytes()
                     .is_some_and(|bytes| bytes <= PC_SCORE_MAX_QUERY_QUEUE_RETAINED_BYTES)
                 && expression.explicit_sequences().is_none_or(|sequences| {
-                    sequences.len() <= PC_SCORE_MAX_EXPLICIT_PATTERNS
-                        && sequences
-                            .iter()
-                            .all(|sequence| sequence.len() <= max_source_pieces)
+                    sequences.iter().all(|sequence| sequence.len() <= max_source_pieces)
                 }) =>
         {
             Ok(())
@@ -1114,11 +1103,7 @@ fn validate_pc_score_supply_window(
         .saturating_add(usize::from(hold_enabled))
         .saturating_sub(initial_hold_pieces);
     if automatic_source_pieces > max_source_pieces {
-        return Err(if max_source_pieces == PC_SCORE_MAX_SOURCE_PIECES {
-            "pc score automatic source window exceeds 16 pieces"
-        } else {
-            "pc score automatic source window exceeds 61 pieces"
-        });
+        return Err("pc score automatic source window exceeds the supply cursor representation");
     }
 
     let finite_queue_len = match queue {

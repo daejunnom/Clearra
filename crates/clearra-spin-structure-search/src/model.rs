@@ -264,10 +264,9 @@ impl SpinStructureQuery {
                 self.line_requirement.lower_bound(),
             ));
         }
-        let total = self.inventory.total();
-        if total > u16::from(u8::MAX) {
-            return Err(SpinStructureError::InventoryTooLarge(total));
-        }
+        // Each of the seven multiplicities has its own u8 identity. Unused
+        // supply does not consume a placement index, so their u16 sum is not
+        // restricted by the independent u8 placement-count representation.
         if self.max_placements.is_some_and(|limit| limit == 0) {
             return Err(SpinStructureError::ZeroPlacementLimit);
         }
@@ -472,6 +471,28 @@ pub struct SpinStructureReport {
 }
 
 impl SpinStructureReport {
+    /// Heap owned by this complete report, measured from allocator capacities.
+    /// The query and metrics have no heap owners and are inline in the report.
+    pub fn checked_retained_capacity_bytes(&self) -> Option<u128> {
+        let outcomes = (self.regular.capacity() as u128)
+            .checked_add(self.mini.capacity() as u128)?
+            .checked_mul(core::mem::size_of::<SpinStructureOutcome>() as u128)?;
+        let layers = (self.layers.capacity() as u128)
+            .checked_mul(core::mem::size_of::<LayerMetrics>() as u128)?;
+        self.outcomes()
+            .try_fold(outcomes.checked_add(layers)?, |bytes, outcome| {
+                bytes
+                    .checked_add(
+                        (outcome.build.capacity() as u128)
+                            .checked_mul(core::mem::size_of::<StructurePlacement>() as u128)?,
+                    )?
+                    .checked_add(
+                        (outcome.logical_operations.capacity() as u128)
+                            .checked_mul(core::mem::size_of::<StructureOperation>() as u128)?,
+                    )
+            })
+    }
+
     pub fn outcomes(&self) -> impl Iterator<Item = &SpinStructureOutcome> {
         self.regular.iter().chain(&self.mini)
     }
@@ -505,7 +526,6 @@ pub enum SpinStructureError {
     InvalidHeight(u8),
     InitialBoardOutsideHeight,
     InvalidLineRequirement(u8),
-    InventoryTooLarge(u16),
     PieceMultiplicityOverflow(PieceKind),
     UnknownPiece(char),
     ZeroPlacementLimit,

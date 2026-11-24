@@ -29,6 +29,7 @@ clearra-coverage = { path = "../clearra-coverage" }
 clearra-ctk3 = { path = "../clearra-ctk3" }
 clearra-forward-search = { path = "../clearra-forward-search" }
 clearra-fumen = { path = "../clearra-fumen" }
+clearra-geometry = { path = "../clearra-geometry" }
 clearra-host-contract = { path = "../clearra-host-contract", default-features = false }
 clearra-i18n = { path = "../clearra-i18n" }
 clearra-output = { path = "../clearra-output", default-features = false }

@@ -10,7 +10,7 @@ pub struct ProductRetentionBudget {
 }
 
 impl ProductRetentionBudget {
-    pub const MAXIMUM_BYTES: u64 = 1024 * 1024 * 1024;
+    pub const MAXIMUM_BYTES: u64 = isize::MAX as u64;
 
     pub const fn new(maximum_bytes: u64) -> Option<Self> {
         if maximum_bytes == 0 || maximum_bytes > Self::MAXIMUM_BYTES {

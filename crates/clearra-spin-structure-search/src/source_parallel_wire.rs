@@ -8,7 +8,8 @@ pub(super) const INIT: u32 = u32::from_le_bytes(*b"SSIN");
 const TASK: u32 = u32::from_le_bytes(*b"SSTK");
 const MANIFEST: u32 = u32::from_le_bytes(*b"SSMF");
 const RESULT: u32 = u32::from_le_bytes(*b"SSRS");
-const VERSION: u32 = 1;
+const ORDERS: u32 = u32::from_le_bytes(*b"SSOR");
+const VERSION: u32 = 2;
 
 pub(super) fn is_init(input: &[u8]) -> bool {
     input.get(..4) == Some(INIT.to_le_bytes().as_slice())
@@ -35,6 +36,10 @@ pub(super) fn task(query: &SpinStructureQuery, task: Task) -> Vec<u8> {
             put_u64(&mut out, ordinal as u64);
             put_operation(&mut out, target);
         }
+        Task::Orders(task) => {
+            out.push(2);
+            put_order_task(&mut out, &task);
+        }
     }
     out
 }
@@ -48,10 +53,44 @@ pub(super) fn read_task(bytes: &[u8], query: &SpinStructureQuery) -> Result<Task
             ordinal: read.index()?,
             target: read.operation()?,
         },
+        2 => Task::Orders(read.order_task(query)?),
         _ => return Err(wire_error("spin_task_kind_invalid")),
     };
     read.end()?;
     Ok(task)
+}
+
+pub(super) fn order_completion(query: &SpinStructureQuery, completion: OrderCompletion) -> Vec<u8> {
+    let mut out = header(ORDERS);
+    put_query(&mut out, query);
+    put_order_task(&mut out, &completion.task);
+    put_u64(&mut out, completion.covered);
+    out
+}
+fn put_order_task(out: &mut Vec<u8>, task: &OrderTask) {
+    match task.mode {
+        SpinStructureParallelMode::Search => unreachable!("order task mode"),
+        SpinStructureParallelMode::Cover { max_patterns } => {
+            out.push(0);
+            put_u64(out, max_patterns as u64);
+        }
+        SpinStructureParallelMode::Guaranteed {
+            final_piece,
+            max_patterns,
+        } => {
+            out.push(1);
+            put_u64(out, max_patterns as u64);
+            out.push(final_piece.as_ascii() as u8);
+        }
+    }
+    put_u64(out, task.candidate as u64);
+    put_u64(out, task.first as u64);
+    out.push(task.count as u8);
+    put_operation(out, task.target);
+    put_u64(out, task.operations.len() as u64);
+    for operation in &task.operations {
+        put_operation(out, *operation);
+    }
 }
 
 pub(super) struct ManifestEncoder {
@@ -127,8 +166,10 @@ impl CompletionEncoder {
 pub(super) enum Decoded {
     Manifest(Vec<StructureOperation>),
     Completion(SpinStructureSourceCompletion),
+    Orders(OrderCompletion),
 }
 enum DecodeKind {
+    Orders(OrderCompletion),
     Manifest {
         count: usize,
         targets: Vec<StructureOperation>,
@@ -155,6 +196,11 @@ impl Decoder {
         }
         read.require_query(query)?;
         let kind = match magic {
+            ORDERS => {
+                let task = read.order_task(query)?;
+                let covered = read.u64()?;
+                DecodeKind::Orders(OrderCompletion { task, covered })
+            }
             MANIFEST => {
                 let count = read.count(40)?;
                 DecodeKind::Manifest {
@@ -213,6 +259,7 @@ impl Decoder {
             cursor: self.cursor,
         };
         let done = match &mut self.kind {
+            DecodeKind::Orders(_) => true,
             DecodeKind::Manifest { count, targets } => {
                 if targets.len() == *count {
                     true
@@ -262,6 +309,7 @@ impl Decoder {
     }
     pub(super) fn finish(self) -> Decoded {
         match self.kind {
+            DecodeKind::Orders(completion) => Decoded::Orders(completion),
             DecodeKind::Manifest { targets, .. } => Decoded::Manifest(targets),
             DecodeKind::Completion {
                 ordinal,
@@ -521,6 +569,53 @@ impl<'a> Reader<'a> {
         } else {
             Ok(())
         }
+    }
+    fn order_task(&mut self, query: &SpinStructureQuery) -> Result<OrderTask, Error> {
+        let mode = self.u8()?;
+        let max_patterns = self.index()?;
+        if max_patterns == 0 || max_patterns > u32::MAX as usize {
+            return Err(wire_error("spin_order_pattern_limit_invalid"));
+        }
+        let mode = match mode {
+            0 => SpinStructureParallelMode::Cover { max_patterns },
+            1 => SpinStructureParallelMode::Guaranteed {
+                final_piece: self.piece()?,
+                max_patterns,
+            },
+            _ => return Err(wire_error("spin_order_mode_invalid")),
+        };
+        let candidate = self.index()?;
+        let first = self.index()?;
+        let count = usize::from(self.u8()?);
+        if count == 0 || count > 64 {
+            return Err(wire_error("spin_order_rank_count_invalid"));
+        }
+        let target = self.operation()?;
+        validate_operation(target, query)?;
+        let length = self.count(40)?;
+        if length == 0 || length > usize::from(query.placement_limit()) {
+            return Err(wire_error("spin_order_operation_count_invalid"));
+        }
+        let mut operations = Vec::with_capacity(length);
+        for _ in 0..length {
+            let operation = self.operation()?;
+            validate_operation(operation, query)?;
+            if operations.last().is_some_and(|last| *last >= operation) {
+                return Err(wire_error("spin_order_operation_order_invalid"));
+            }
+            operations.push(operation);
+        }
+        if !operations.contains(&target) {
+            return Err(wire_error("spin_order_target_missing"));
+        }
+        Ok(OrderTask {
+            mode,
+            candidate,
+            first,
+            count,
+            target,
+            operations,
+        })
     }
     fn query(&mut self) -> Result<SpinStructureQuery, Error> {
         let initial_board = self.board()?;

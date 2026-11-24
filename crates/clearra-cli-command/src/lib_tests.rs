@@ -3,7 +3,7 @@ use clearra_app::{
     PcMinimalsIngressOrigin, PcPathIngressOrigin, PcResultProjection, PcSaveIngressOrigin,
     PcScoreIngressOrigin, PcScoreMinimalsIngressOrigin, PcTilingIngressOrigin,
     ProductCapabilityContract, SpinStructureProductMode, PC_SCORE_MAX_PATTERNS,
-    PC_SCORE_MAX_PATTERN_BYTES, PC_SCORE_MAX_SOURCE_PIECES,
+    PC_SCORE_MAX_SOURCE_PIECES,
 };
 use clearra_core_domain::{
     objective::{objective_kind::ObjectiveKind, tie_policy::TiePolicy, trace_policy::TracePolicy},
@@ -3360,7 +3360,7 @@ fn pc_score_bounds_internal_compatibility_before_translation_clones() {
         &exact_byte_limit,
         WebCompatibilityAuthority::InternalTypedCandidate,
     )
-    .expect("exactly 2048 internal score argument bytes remain inside the clone boundary");
+    .expect("the exact owned-input byte envelope remains inside the clone boundary");
 
     for prefix in [["score"].as_slice(), ["sfinder", "score"].as_slice()] {
         let mut too_many = prefix
@@ -3405,92 +3405,62 @@ fn pc_score_bounds_internal_compatibility_before_translation_clones() {
 }
 
 #[test]
-fn pc_score_bounds_pattern_and_fixed_queue_sources() {
-    let pattern_at_limit = format!("P1{}", ",".repeat(PC_SCORE_MAX_PATTERN_BYTES - 2));
-    assert_eq!(pattern_at_limit.len(), PC_SCORE_MAX_PATTERN_BYTES);
-    CliCommandParser::parse(&format!(
-        "clearra pc score --lines 2 --patterns {pattern_at_limit}"
+fn pc_score_uses_supply_representation_and_owned_input_bounds() {
+    // These requests only validate ingress; they do not enumerate a large solve.
+    let source = format!("P1{}", ",".repeat(256));
+    CliCommandParser::parse(&format!("clearra pc score --lines 2 --patterns {source}"))
+        .expect("an expression beyond the former 128-byte cap is admitted");
+    let oversized = "I".repeat(PC_SCORE_MAX_ARGUMENT_BYTES + 1);
+    assert!(
+        CliCommandParser::parse(&format!("clearra pc score --lines 2 --queue {oversized}"))
+            .is_err()
+    );
+    for length in [17, 62, 257, PC_SCORE_MAX_SOURCE_PIECES] {
+        let queue = "I".repeat(length);
+        CliCommandParser::parse(&format!("clearra pc score --lines 2 --queue {queue}"))
+            .expect("source length is independent of target placements");
+    }
+    let separated = std::iter::repeat_n("I", PC_SCORE_MAX_SOURCE_PIECES)
+        .collect::<Vec<_>>()
+        .join(",");
+    CliCommandParser::parse(&format!("clearra pc score --lines 2 --queue {separated}"))
+        .expect("queue separators do not consume supply cursor positions");
+    let beyond_cursor = "I".repeat(PC_SCORE_MAX_SOURCE_PIECES + 1);
+    let error = CliCommandParser::parse(&format!(
+        "clearra pc score --lines 2 --queue {beyond_cursor}"
     ))
-    .expect("128-byte single factorized expression");
-
-    let pattern_over_limit = format!("{pattern_at_limit},");
-    let pattern_error = CliCommandParser::parse(&format!(
-        "clearra pc score --lines 2 --patterns {pattern_over_limit}"
-    ))
-    .expect_err("129-byte pattern must be rejected");
-    assert_eq!(pattern_error.code(), CliCommandErrorCode::InvalidValue);
-    assert!(pattern_error.message().contains("128 UTF-8 bytes"));
-
+    .expect_err("the supply cursor representation is finite");
+    assert_eq!(error.code(), CliCommandErrorCode::InvalidValue);
     let alternatives = CliCommandParser::parse("clearra pc score --lines 2 --patterns P7;P7")
-        .expect_err("score accepts one factorized expression");
-    assert_eq!(alternatives.code(), CliCommandErrorCode::InvalidValue);
+        .expect_err("one input expression still binds one original universe");
     assert!(alternatives.message().contains("without alternatives"));
-
-    let queue_at_limit = "IOTSZJLIOTSZJLIO";
-    assert_eq!(queue_at_limit.len(), PC_SCORE_MAX_SOURCE_PIECES);
-    CliCommandParser::parse(&format!(
-        "clearra pc score --lines 2 --queue {queue_at_limit}"
-    ))
-    .expect("16-piece fixed source");
-    let queue_error = CliCommandParser::parse(&format!(
-        "clearra pc score --lines 2 --queue {queue_at_limit}T"
-    ))
-    .expect_err("17-piece fixed source must be rejected");
-    assert_eq!(queue_error.code(), CliCommandErrorCode::InvalidValue);
-    assert!(queue_error.message().contains("16 source pieces"));
-
-    let window_error =
-        CliCommandParser::parse("clearra pc score --lines 2 --patterns P7 --source-pieces 17")
-            .expect_err("17-piece source window must be rejected");
-    assert_eq!(window_error.code(), CliCommandErrorCode::InvalidValue);
-    assert!(window_error.message().contains("16 source pieces"));
 }
 
 #[test]
-fn pc_score_extended_source_bound_matches_target_before_and_after_translation() {
-    // Admission only: these sixty-piece requests are never enumerated here.
+fn pc_score_source_bound_does_not_depend_on_target_option_order() {
     for product in ["score", "score-minimals", "score-finder"] {
-        for source_pieces in [60, 61] {
-            let queue = "I".repeat(source_pieces);
+        for length in [60, 61, 62] {
+            let queue = "I".repeat(length);
             for target_first in [true, false] {
                 let options = if target_first {
                     format!("--lines 24 --queue {queue}")
                 } else {
                     format!("--queue {queue} --lines 24")
                 };
-                let command = format!(
+                let request = CliCommandParser::parse(&format!(
                     "clearra pc {product} {options} --height 24 --board-mask 0 --pieces 60 --workers 1"
-                );
-                let request = CliCommandParser::parse(&command)
-                    .expect("extended bounded pre-translation envelope")
-                    .to_app_request()
-                    .expect("the same envelope must hold at the typed App boundary");
+                )).expect("extended source input").to_app_request().expect("typed source authority");
                 let AppCommand::Scenario(command) = request.command() else {
-                    panic!("explicit full-height score board must be a scenario");
+                    panic!("scenario");
                 };
-                assert_eq!(command.query().initial_board().visible_height(), 24);
                 assert_eq!(command.query().exact_pieces(), Some(60));
-                assert_eq!(
-                    command.query().execution_policy().worker_policy(),
-                    WorkerPolicy::Fixed(1)
-                );
             }
         }
-        let oversized = format!(
-            "clearra pc {product} --queue {} --lines 24 --height 24 --board-mask 0 --pieces 60",
-            "I".repeat(62)
-        );
-        let error = CliCommandParser::parse(&oversized).expect_err("62 exceeds the extended cap");
-        assert!(error.message().contains("61 source pieces"));
-        let error = CliCommandParser::parse(&format!(
-            "clearra pc {product} --lines 24 --queue {} --source-pieces 62",
-            "I".repeat(61)
+        CliCommandParser::parse(&format!(
+            "clearra pc {product} --lines 6 --queue {}",
+            "I".repeat(17)
         ))
-        .expect_err("the explicit source window has the same finite cap");
-        assert!(error.message().contains("61 source pieces"));
-        let compact = format!("clearra pc {product} --lines 6 --queue {}", "I".repeat(17));
-        let error = CliCommandParser::parse(&compact).expect_err("compact cap stays sixteen");
-        assert!(error.message().contains("16 source pieces"));
+        .expect("the old sixteen-piece input cap is removed");
     }
 }
 
@@ -3505,10 +3475,7 @@ fn pc_score_accepts_six_line_factorized_source_with_product_cpu_policy() {
     };
     let query = command.query();
     assert_eq!(query.queue().mode(), "standard-7-bag");
-    assert_eq!(
-        query.supply_window_size(),
-        Some(SupplyWindowSize::new(PC_SCORE_MAX_SOURCE_PIECES))
-    );
+    assert_eq!(query.supply_window_size(), Some(SupplyWindowSize::new(16)));
     let policy = query.execution_policy();
     assert_eq!(policy.requested_backend(), RequestedSearchBackend::Cpu);
     assert_eq!(policy.worker_policy(), WorkerPolicy::Auto);
@@ -5536,7 +5503,7 @@ fn spin_structure_product_routes_reject_cross_route_and_ungoverned_options() {
         "clearra spin-structure cover --pieces T --dependency-report",
         "clearra spin-structure cover --pieces T --objective score",
         "clearra spin-structure cover --pieces T --max-patterns 0",
-        "clearra spin-structure cover --pieces T --max-patterns 100001",
+        "clearra spin-structure cover --pieces T --max-patterns 4294967296",
         "clearra spin-structure guaranteed --pieces T --objective min-cover",
         "clearra spin-structure guaranteed --pieces I --final-piece T",
         "clearra spin-structure guaranteed --pieces IO --spin-profile t-spins --final-piece I",
@@ -5545,6 +5512,8 @@ fn spin_structure_product_routes_reject_cross_route_and_ungoverned_options() {
         let error = CliCommandParser::parse(command).expect_err(command);
         assert_eq!(error.code(), CliCommandErrorCode::InvalidValue, "{command}");
     }
+    CliCommandParser::parse("clearra spin-structure cover --pieces T --max-patterns 100001")
+        .expect("the former rank cap is not a product limit");
 }
 
 #[test]

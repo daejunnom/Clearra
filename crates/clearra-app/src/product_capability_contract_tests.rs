@@ -3521,10 +3521,10 @@ fn pc_score_final_binding_shares_the_maximum_fixed_sequence_and_matches_fieldwis
 }
 
 #[test]
-fn pc_score_contract_rejects_a_fixed_sequence_above_the_product_bound() {
+fn pc_score_contract_rejects_a_fixed_sequence_above_the_supply_cursor_bound() {
     let query = PcScenarioQuery::new(
         PcScenarioBoard::standard_10(1, 0x3f0),
-        PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::I; 17])),
+        PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::I; usize::from(u16::MAX) + 1])),
         PieceWindow::new(1),
     )
     .with_exact_pieces(Some(1))
@@ -3538,8 +3538,8 @@ fn pc_score_contract_rejects_a_fixed_sequence_above_the_product_bound() {
     assert_eq!(
         command
             .validate_result_projection()
-            .expect_err("17 source pieces exceed the closed score product bound"),
-        "pc score accepts at most 16 fixed source pieces"
+            .expect_err("source cursor overflow is rejected before execution"),
+        "pc score fixed source queue exceeds the supply cursor representation"
     );
 }
 
@@ -3660,7 +3660,7 @@ fn pc_score_contract_rejects_stale_queries_profiles_and_memory_without_generic_i
     assert!(matches!(
         rejection,
         ProductCapabilityContractError::RequestContractRejected(reason)
-            if reason.contains("fixed-cap CPU execution policy")
+            if reason.contains("exact CPU execution policy")
     ));
 
     let generic = AppRequest::new(AppCommand::Scenario(ScenarioAppCommand::new(capped)));
@@ -3721,7 +3721,7 @@ fn pc_score_native_worker_policies_reserve_their_effective_compute_width() {
             ))
             .validate_result_projection()
             .expect_err("a zero-width fixed policy remains invalid"),
-        "pc score requires its fixed-cap CPU execution policy"
+        "pc score requires its exact CPU execution policy"
     );
 }
 

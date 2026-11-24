@@ -266,13 +266,174 @@ impl MinimumRemoteMemory {
     }
 }
 
+/// Existing atomic completion ABI. The transport lifecycle and resource
+/// owner are shared; each variant runs its own already validated algorithm.
 pub struct WasmMinimumParallelWorker {
+    kind: CompletionWorkerKind,
+}
+
+#[allow(clippy::large_enum_variant)]
+enum CompletionWorkerKind {
+    Minimum(ExactMinimumParallelWorker),
+    Replay(ReplayParallelWorker),
+}
+
+struct ReplayParallelWorker {
+    worker: clearra_app::PcReplayParallelWorker,
+    memory: MinimumRemoteMemory,
+}
+
+impl WasmMinimumParallelWorker {
+    pub fn initialize(query: &[u8]) -> Result<Self, WasmCommandRuntimeError> {
+        Self::initialize_guarded(query, query.len() as u128, 0)
+    }
+    pub fn initialize_guarded(
+        query: &[u8],
+        outer_bytes: u128,
+        physical_floor: u128,
+    ) -> Result<Self, WasmCommandRuntimeError> {
+        if !minimum_parallel_wire::is_replay_query(query) {
+            return ExactMinimumParallelWorker::initialize_guarded(
+                query,
+                outer_bytes,
+                physical_floor,
+            )
+            .map(|worker| Self {
+                kind: CompletionWorkerKind::Minimum(worker),
+            });
+        }
+        let memory = MinimumRemoteMemory::acquire(
+            minimum_parallel_wire::query_memory_cap(query)?,
+            outer_bytes,
+            physical_floor,
+        )?;
+        let query = minimum_parallel_wire::decode_replay_query(query, &mut |bytes| {
+            memory.ensure_wire(outer_bytes, bytes)
+        })?;
+        let worker = clearra_app::PcReplayParallelWorker::new(query, memory.limit)
+            .map_err(replay_runtime_error)?;
+        memory.ensure_wire(
+            outer_bytes,
+            worker
+                .checked_retained_bytes()
+                .ok_or_else(|| remote_memory_error("replay worker owner overflow"))?,
+        )?;
+        Ok(Self {
+            kind: CompletionWorkerKind::Replay(ReplayParallelWorker { worker, memory }),
+        })
+    }
+    pub fn ensure_outer_capacity(&self, outer_bytes: u128) -> Result<(), WasmCommandRuntimeError> {
+        match &self.kind {
+            CompletionWorkerKind::Minimum(worker) => worker.ensure_outer_capacity(outer_bytes),
+            CompletionWorkerKind::Replay(worker) => worker.memory.ensure_wire(
+                outer_bytes,
+                worker
+                    .worker
+                    .checked_retained_bytes()
+                    .ok_or_else(|| remote_memory_error("replay worker owner overflow"))?,
+            ),
+        }
+    }
+    pub fn has_active_shard(&self) -> bool {
+        match &self.kind {
+            CompletionWorkerKind::Minimum(worker) => worker.has_active_shard(),
+            CompletionWorkerKind::Replay(worker) => worker.worker.has_active_task(),
+        }
+    }
+    pub fn start(&mut self, task: &[u8]) -> Result<(), WasmCommandRuntimeError> {
+        self.start_guarded(task, task.len() as u128)
+    }
+    pub fn start_guarded(
+        &mut self,
+        task: &[u8],
+        outer_bytes: u128,
+    ) -> Result<(), WasmCommandRuntimeError> {
+        match &mut self.kind {
+            CompletionWorkerKind::Minimum(worker) => worker.start_guarded(task, outer_bytes),
+            CompletionWorkerKind::Replay(worker) => {
+                let task = minimum_parallel_wire::decode_replay_task(task)?;
+                worker
+                    .worker
+                    .start(task, &mut |bytes| {
+                        worker.memory.ensure(outer_bytes, bytes).is_ok()
+                    })
+                    .map_err(replay_runtime_error)
+            }
+        }
+    }
+    pub fn advance(&mut self, work: usize) -> Result<Option<Vec<u8>>, WasmCommandRuntimeError> {
+        self.advance_guarded(work, 0)
+    }
+    pub fn advance_guarded(
+        &mut self,
+        work: usize,
+        outer_bytes: u128,
+    ) -> Result<Option<Vec<u8>>, WasmCommandRuntimeError> {
+        match &mut self.kind {
+            CompletionWorkerKind::Minimum(worker) => worker.advance_guarded(work, outer_bytes),
+            CompletionWorkerKind::Replay(worker) => worker.advance(work, false, outer_bytes),
+        }
+    }
+    pub fn cancel(&mut self) -> Result<Vec<u8>, WasmCommandRuntimeError> {
+        self.cancel_guarded(0)
+    }
+    pub fn cancel_guarded(
+        &mut self,
+        outer_bytes: u128,
+    ) -> Result<Vec<u8>, WasmCommandRuntimeError> {
+        match &mut self.kind {
+            CompletionWorkerKind::Minimum(worker) => worker.cancel_guarded(outer_bytes),
+            CompletionWorkerKind::Replay(worker) => worker
+                .advance(0, true, outer_bytes)?
+                .ok_or_else(|| remote_memory_error("cancelled replay task has no receipt")),
+        }
+    }
+}
+
+fn replay_runtime_error(error: clearra_app::PcReplayPageError) -> WasmCommandRuntimeError {
+    WasmCommandRuntimeError::new("E_WASM_COMPLETION_REPLAY", error.to_string())
+}
+
+impl ReplayParallelWorker {
+    fn advance(
+        &mut self,
+        work: usize,
+        cancelled: bool,
+        outer_bytes: u128,
+    ) -> Result<Option<Vec<u8>>, WasmCommandRuntimeError> {
+        let Some(receipt) = self
+            .worker
+            .advance(work, cancelled, &mut |bytes| {
+                self.memory.ensure(outer_bytes, bytes).is_ok()
+            })
+            .map_err(replay_runtime_error)?
+        else {
+            return Ok(None);
+        };
+        let retained = self
+            .worker
+            .checked_retained_bytes()
+            .and_then(|bytes| bytes.checked_add(receipt.checked_retained_bytes()?))
+            .ok_or_else(|| remote_memory_error("replay receipt owner overflow"))?;
+        minimum_parallel_wire::encode_replay_receipt(&receipt, &mut |bytes| {
+            self.memory.ensure_wire(
+                outer_bytes,
+                retained
+                    .checked_add(bytes)
+                    .ok_or_else(|| remote_memory_error("replay receipt packet overflow"))?,
+            )
+        })
+        .map(Some)
+    }
+}
+
+struct ExactMinimumParallelWorker {
     query: ExactAtMostQuery,
     shard: Option<ExactAtMostShardSession>,
     memory: MinimumRemoteMemory,
 }
 
-impl WasmMinimumParallelWorker {
+impl ExactMinimumParallelWorker {
     /// Admit an ABI buffer replacement while the old capacity is still live.
     /// The caller includes both old and prospective new carrier capacities in
     /// `outer_bytes`; this method adds the unchanged complete worker owner.
@@ -287,10 +448,6 @@ impl WasmMinimumParallelWorker {
 
     pub fn has_active_shard(&self) -> bool {
         self.shard.is_some()
-    }
-
-    pub fn initialize(query: &[u8]) -> Result<Self, WasmCommandRuntimeError> {
-        Self::initialize_guarded(query, query.len() as u128, 0)
     }
 
     /// `outer_bytes` includes the detached packet capacity and all ABI/runtime
@@ -317,10 +474,6 @@ impl WasmMinimumParallelWorker {
             shard: None,
             memory,
         })
-    }
-
-    pub fn start(&mut self, task: &[u8]) -> Result<(), WasmCommandRuntimeError> {
-        self.start_guarded(task, task.len() as u128)
     }
 
     pub fn start_guarded(
@@ -365,23 +518,12 @@ impl WasmMinimumParallelWorker {
     }
 
     /// Pending owns no output; terminal returns only a core-minted receipt.
-    pub fn advance(
-        &mut self,
-        maximum_work: usize,
-    ) -> Result<Option<Vec<u8>>, WasmCommandRuntimeError> {
-        self.advance_guarded(maximum_work, 0)
-    }
-
     pub fn advance_guarded(
         &mut self,
         maximum_work: usize,
         outer_bytes: u128,
     ) -> Result<Option<Vec<u8>>, WasmCommandRuntimeError> {
         self.advance_controlled(maximum_work, false, outer_bytes)
-    }
-
-    pub fn cancel(&mut self) -> Result<Vec<u8>, WasmCommandRuntimeError> {
-        self.cancel_guarded(0)
     }
 
     pub fn cancel_guarded(

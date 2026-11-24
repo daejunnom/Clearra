@@ -207,6 +207,20 @@ pub(crate) fn apply_pc_postprocess_with_derivation_and_memory_guard(
             derivation: None,
         });
     }
+    // Core's session owned this shared allocation during search. Its result
+    // does not retain the control; the terminal stage now keeps it alive.
+    // Charge it here once, rather than duplicating it in the App search base.
+    let compute_budget_bytes = control.compute_budget().shared_allocation_retained_bytes();
+    let mut memory_guard = |result: &CoreExecutionResult, future: u128| {
+        memory_guard(
+            result,
+            future.checked_add(compute_budget_bytes).ok_or(
+                CoreExecutionError::RuntimeUnavailable {
+                    component: "pc_score_compute_owner_projection_overflow",
+                },
+            )?,
+        )
+    };
     let distributed_score_available = match (
         result.postprocess_score_profile_id(),
         result.pc_score_distributed_merge_evidence(),

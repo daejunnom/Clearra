@@ -1,7 +1,8 @@
-use clearra_core_domain::piece::piece_kind::PieceKind;
+use clearra_core_domain::{execution_cancellation::ExecutionControl, piece::piece_kind::PieceKind};
 use clearra_spin_structure_search::{
-    analyze_spin_structure_coverage, guaranteed_spin_structure_family, SpinStructureError,
-    SpinStructureQuery, SpinStructureSearcher, DEFAULT_SPIN_STRUCTURE_MAX_PATTERNS,
+    analyze_spin_structure_coverage_with_control, guaranteed_spin_structure_family_with_control,
+    SpinStructureError, SpinStructureQuery, SpinStructureSearcher,
+    DEFAULT_SPIN_STRUCTURE_MAX_PATTERNS,
 };
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -86,6 +87,10 @@ impl SpinStructureAppCommand {
 
 impl RunnableAppCommand for SpinStructureAppCommand {
     fn run(self, context: &AppExecutionContext<'_>) -> AppResponse {
+        let control = context
+            .execution_control
+            .clone()
+            .with_parallelism_if_unbound(usize::from(context.resource_budget().workers()).max(1));
         let product_mode = self.product_mode;
         let query = match SpinStructureSearcher::normalize_query(self.query) {
             Ok(query) => query,
@@ -101,14 +106,14 @@ impl RunnableAppCommand for SpinStructureAppCommand {
         let result = run_native_spin_structure_search(
             query.clone(),
             usize::from(context.resource_budget().workers()).max(1),
-            context.execution_control,
+            &control,
         );
 
         #[cfg(target_arch = "wasm32")]
-        return render_result(&query, product_mode, result);
+        return render_result(&query, product_mode, result, &control);
         #[cfg(not(target_arch = "wasm32"))]
         match result {
-            Ok(report) => promote_result(&query, product_mode, report),
+            Ok(report) => promote_result(&query, product_mode, report, &control),
             Err(error) if error.is_cancelled() => AppResponse::failed(
                 AppStatus::ExecutionFailed,
                 AppError::new(
@@ -118,7 +123,13 @@ impl RunnableAppCommand for SpinStructureAppCommand {
             ),
             Err(crate::native_spin_structure_execution::NativeSpinStructureError::Search(
                 error,
-            )) => render_error(error),
+            )) if !matches!(
+                error,
+                SpinStructureError::Cancelled | SpinStructureError::ParallelExecutionFailed(_)
+            ) =>
+            {
+                render_error(error)
+            }
             Err(error) => AppResponse::failed(
                 AppStatus::ExecutionFailed,
                 AppError::new(
@@ -135,32 +146,41 @@ fn render_result(
     query: &SpinStructureQuery,
     product_mode: SpinStructureProductMode,
     result: Result<clearra_spin_structure_search::SpinStructureReport, SpinStructureError>,
+    control: &ExecutionControl,
 ) -> AppResponse {
     match result {
-        Ok(report) => promote_result(query, product_mode, report),
+        Ok(report) => promote_result(query, product_mode, report, control),
         Err(error) => render_error(error),
     }
 }
 
-fn promote_result(
+pub(crate) fn promote_result(
     query: &SpinStructureQuery,
     product_mode: SpinStructureProductMode,
     report: clearra_spin_structure_search::SpinStructureReport,
+    control: &ExecutionControl,
 ) -> AppResponse {
     match product_mode {
         SpinStructureProductMode::Search => promote_search_result(query, report),
         SpinStructureProductMode::Cover { max_patterns } => {
-            promote_coverage_result(query, report, max_patterns)
+            promote_coverage_result(query, report, max_patterns, control)
         }
         SpinStructureProductMode::Guaranteed {
             final_piece,
             max_patterns,
             dependency_report,
-        } => promote_guaranteed_result(query, report, final_piece, max_patterns, dependency_report),
+        } => promote_guaranteed_result(
+            query,
+            report,
+            final_piece,
+            max_patterns,
+            dependency_report,
+            control,
+        ),
     }
 }
 
-fn promote_search_result(
+pub(crate) fn promote_search_result(
     query: &SpinStructureQuery,
     report: clearra_spin_structure_search::SpinStructureReport,
 ) -> AppResponse {
@@ -192,19 +212,21 @@ fn promote_coverage_result(
     query: &SpinStructureQuery,
     report: clearra_spin_structure_search::SpinStructureReport,
     max_patterns: usize,
+    control: &ExecutionControl,
 ) -> AppResponse {
-    let coverage = match analyze_spin_structure_coverage(query, &report, max_patterns) {
-        Ok(coverage) => coverage,
-        Err(error) => {
-            return AppResponse::failed(
-                AppStatus::ExecutionFailed,
-                AppError::new(
-                    AppErrorCode::ExecutionFailed,
-                    format!("spin-structure exact coverage failed: {error:?}"),
-                ),
-            );
-        }
-    };
+    let coverage =
+        match analyze_spin_structure_coverage_with_control(query, &report, max_patterns, control) {
+            Ok(coverage) => coverage,
+            Err(error) => {
+                return AppResponse::failed(
+                    AppStatus::ExecutionFailed,
+                    AppError::new(
+                        AppErrorCode::ExecutionFailed,
+                        format!("spin-structure exact coverage failed: {error:?}"),
+                    ),
+                );
+            }
+        };
     let result = match SpinStructureSearchResult::promote(query, report) {
         Ok(result) => result,
         Err(error) => {
@@ -217,7 +239,7 @@ fn promote_coverage_result(
             );
         }
     };
-    let projected = match project_spin_structure_coverage(&result, &coverage) {
+    let projected = match project_spin_structure_coverage(&result, &coverage, control) {
         Ok(projected) => projected,
         Err(error) => {
             return AppResponse::failed(
@@ -237,8 +259,15 @@ fn promote_guaranteed_result(
     final_piece: PieceKind,
     max_patterns: usize,
     dependency_report: bool,
+    control: &ExecutionControl,
 ) -> AppResponse {
-    let report = match guaranteed_spin_structure_family(query, &report, final_piece, max_patterns) {
+    let report = match guaranteed_spin_structure_family_with_control(
+        query,
+        &report,
+        final_piece,
+        max_patterns,
+        control,
+    ) {
         Ok(report) => report,
         Err(error) => {
             return AppResponse::failed(
@@ -250,6 +279,15 @@ fn promote_guaranteed_result(
             );
         }
     };
+    promote_guaranteed_family_result(query, report, final_piece, dependency_report)
+}
+
+pub(crate) fn promote_guaranteed_family_result(
+    query: &SpinStructureQuery,
+    report: clearra_spin_structure_search::SpinStructureReport,
+    final_piece: PieceKind,
+    dependency_report: bool,
+) -> AppResponse {
     match SpinStructureSearchResult::promote(query, report) {
         Ok(result) => {
             match project_spin_structure_guaranteed_family(&result, final_piece, dependency_report)

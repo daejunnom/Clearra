@@ -73,6 +73,15 @@ impl RunnableAppCommand for BoundaryRecoveryAppCommand {
                     AppError::new(AppErrorCode::ExecutionFailed, "boundary recovery cancelled"),
                 )
             }
+            Err(BoundaryRecoveryError::ParallelWorkerFailed) => {
+                return AppResponse::failed(
+                    AppStatus::ExecutionFailed,
+                    AppError::new(
+                        AppErrorCode::ExecutionFailed,
+                        "boundary recovery worker failed",
+                    ),
+                )
+            }
             Err(error) => {
                 return AppResponse::failed(
                     AppStatus::ValidationFailed,
@@ -113,7 +122,7 @@ impl RunnableAppCommand for BoundaryRecoveryAppCommand {
                 .query
                 .early_placement
                 .selected()
-                .map(|(index, _)| index as u8),
+                .map(|(index, _)| index as u16),
             borrow_placement_mask: self
                 .query
                 .early_placement
@@ -296,6 +305,17 @@ impl BoundaryRecoveryAppCommand {
                     AppError::new(AppErrorCode::ExecutionFailed, "boundary recovery cancelled"),
                 );
             }
+            Err(BoundaryRecoveryPatternError::Population(
+                BoundaryRecoveryPopulationError::ParallelWorkerFailed,
+            )) => {
+                return AppResponse::failed(
+                    AppStatus::ExecutionFailed,
+                    AppError::new(
+                        AppErrorCode::ExecutionFailed,
+                        "boundary recovery worker failed",
+                    ),
+                );
+            }
             Err(error) => {
                 return AppResponse::failed(
                     AppStatus::ValidationFailed,
@@ -354,7 +374,7 @@ impl BoundaryRecoveryAppCommand {
                 .query
                 .early_placement
                 .selected()
-                .map(|(index, _)| index as u8),
+                .map(|(index, _)| index as u16),
             borrow_placement_mask: self
                 .query
                 .early_placement
@@ -425,8 +445,8 @@ impl BoundaryRecoveryAppCommand {
 
 fn public_step(step: &BoundaryRecoveryStep) -> BoundaryRecoveryStepPayload {
     BoundaryRecoveryStepPayload {
-        source_queue_index: step.source_queue_index as u8,
-        placement_role_index: step.placement_role_index as u8,
+        source_queue_index: step.source_queue_index as u16,
+        placement_role_index: step.placement_role_index as u16,
         piece: step.piece.as_ascii().to_string(),
         rotation: step.rotation.quarter_turns(),
         x: step.x,

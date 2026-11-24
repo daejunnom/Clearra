@@ -18,6 +18,10 @@ const QUERY: u32 = 1;
 const TASK: u32 = 2;
 const RECEIPT: u32 = 3;
 const GUARDED_QUERY: u32 = 4;
+const REPLAY_QUERY: u32 = 5;
+const GUARDED_REPLAY_QUERY: u32 = 6;
+const REPLAY_TASK: u32 = 7;
+const REPLAY_RECEIPT: u32 = 8;
 const DIGEST_BYTES: usize = 32;
 const MAX_BYTES: usize = 512 * 1024 * 1024;
 
@@ -684,9 +688,9 @@ fn query_reader(bytes: &[u8]) -> Result<(Reader<'_>, Option<u128>), WasmCommandR
         .map(u32::from_le_bytes)
         .ok_or_else(|| error("parallel query header is truncated"))?;
     match kind {
-        QUERY => Ok((Reader::new(bytes, QUERY)?, None)),
-        GUARDED_QUERY => {
-            let mut reader = Reader::new(bytes, GUARDED_QUERY)?;
+        QUERY | REPLAY_QUERY => Ok((Reader::new(bytes, kind)?, None)),
+        GUARDED_QUERY | GUARDED_REPLAY_QUERY => {
+            let mut reader = Reader::new(bytes, kind)?;
             let cap = reader.u128()?;
             if cap == 0 {
                 return Err(error("parallel worker memory cap is zero"));
@@ -701,6 +705,163 @@ fn query_reader(bytes: &[u8]) -> Result<(Reader<'_>, Option<u128>), WasmCommandR
 /// identity are covered by the same digest, never supplied as separate advice.
 pub(crate) fn query_memory_cap(bytes: &[u8]) -> Result<Option<u128>, WasmCommandRuntimeError> {
     query_reader(bytes).map(|(_, cap)| cap)
+}
+
+pub(crate) fn is_replay_query(bytes: &[u8]) -> bool {
+    bytes
+        .get(8..12)
+        .and_then(|b| <[u8; 4]>::try_from(b).ok())
+        .map(u32::from_le_bytes)
+        .is_some_and(|kind| matches!(kind, REPLAY_QUERY | GUARDED_REPLAY_QUERY))
+}
+
+fn replay_error(error: clearra_app::PcReplayPageError) -> WasmCommandRuntimeError {
+    WasmCommandRuntimeError::new("E_WASM_COMPLETION_REPLAY", error.to_string())
+}
+
+pub(crate) fn checked_replay_query_bytes(
+    query: &clearra_app::PcReplayParallelQuery,
+) -> Result<usize, WasmCommandRuntimeError> {
+    query
+        .checked_wire_bytes()
+        .map_err(replay_error)?
+        .checked_add(8 + 4 + 16 + DIGEST_BYTES)
+        .ok_or_else(|| error("replay query packet overflow"))
+}
+
+pub(crate) fn encode_replay_query(
+    query: &clearra_app::PcReplayParallelQuery,
+    cap: Option<u128>,
+    guard: &mut impl FnMut(u128) -> Result<(), WasmCommandRuntimeError>,
+) -> Result<Vec<u8>, WasmCommandRuntimeError> {
+    let mut failure = None;
+    let body = query
+        .encode(&mut |bytes| match guard(bytes) {
+            Ok(()) => true,
+            Err(error) => {
+                failure = Some(error);
+                false
+            }
+        })
+        .map_err(|error| failure.take().unwrap_or_else(|| replay_error(error)))?;
+    wrap_replay_packet(
+        if cap.is_some() {
+            GUARDED_REPLAY_QUERY
+        } else {
+            REPLAY_QUERY
+        },
+        cap,
+        body,
+        guard,
+    )
+}
+
+fn wrap_replay_packet(
+    kind: u32,
+    cap: Option<u128>,
+    body: Vec<u8>,
+    guard: &mut impl FnMut(u128) -> Result<(), WasmCommandRuntimeError>,
+) -> Result<Vec<u8>, WasmCommandRuntimeError> {
+    let size = body
+        .len()
+        .checked_add(8 + 4 + DIGEST_BYTES + if cap.is_some() { 16 } else { 0 })
+        .ok_or_else(|| error("replay packet overflow"))?;
+    if size > MAX_BYTES {
+        return Err(error("replay packet exceeds transport capacity"));
+    }
+    guard(
+        (body.capacity() as u128)
+            .checked_add(size as u128)
+            .ok_or_else(|| error("replay packet overlap overflow"))?,
+    )?;
+    let mut bytes = Vec::new();
+    bytes
+        .try_reserve_exact(size)
+        .map_err(|_| error("replay packet allocation failed"))?;
+    guard(
+        (body.capacity() as u128)
+            .checked_add(bytes.capacity() as u128)
+            .ok_or_else(|| error("replay packet overlap overflow"))?,
+    )?;
+    bytes.extend_from_slice(MAGIC);
+    let mut writer = Writer(bytes);
+    writer.u32(kind);
+    if let Some(cap) = cap {
+        if cap == 0 {
+            return Err(error("replay worker cap is zero"));
+        }
+        writer.u128(cap);
+    }
+    writer.0.extend_from_slice(&body);
+    writer.finish()
+}
+
+pub(crate) fn decode_replay_query(
+    bytes: &[u8],
+    guard: &mut impl FnMut(u128) -> Result<(), WasmCommandRuntimeError>,
+) -> Result<clearra_app::PcReplayParallelQuery, WasmCommandRuntimeError> {
+    if !is_replay_query(bytes) {
+        return Err(error("completion packet is not a replay query"));
+    }
+    let (reader, _) = query_reader(bytes)?;
+    let mut failure = None;
+    clearra_app::PcReplayParallelQuery::decode(&reader.bytes[reader.offset..], &mut |bytes| {
+        match guard(bytes) {
+            Ok(()) => true,
+            Err(error) => {
+                failure = Some(error);
+                false
+            }
+        }
+    })
+    .map_err(|error| failure.take().unwrap_or_else(|| replay_error(error)))
+}
+
+pub(crate) fn encode_replay_task(
+    task: &clearra_app::PcReplayParallelTask,
+    guard: &mut impl FnMut(u128) -> Result<(), WasmCommandRuntimeError>,
+) -> Result<Vec<u8>, WasmCommandRuntimeError> {
+    guard(512)?;
+    wrap_replay_packet(REPLAY_TASK, None, task.encode(), guard)
+}
+pub(crate) fn decode_replay_task(
+    bytes: &[u8],
+) -> Result<clearra_app::PcReplayParallelTask, WasmCommandRuntimeError> {
+    let reader = Reader::new(bytes, REPLAY_TASK)?;
+    clearra_app::PcReplayParallelTask::decode(&reader.bytes[reader.offset..]).map_err(replay_error)
+}
+pub(crate) fn encode_replay_receipt(
+    receipt: &clearra_app::PcReplayParallelReceipt,
+    guard: &mut impl FnMut(u128) -> Result<(), WasmCommandRuntimeError>,
+) -> Result<Vec<u8>, WasmCommandRuntimeError> {
+    let mut failure = None;
+    let body = receipt
+        .encode(&mut |bytes| match guard(bytes) {
+            Ok(()) => true,
+            Err(error) => {
+                failure = Some(error);
+                false
+            }
+        })
+        .map_err(|error| failure.take().unwrap_or_else(|| replay_error(error)))?;
+    wrap_replay_packet(REPLAY_RECEIPT, None, body, guard)
+}
+pub(crate) fn decode_replay_receipt(
+    bytes: &[u8],
+    guard: &mut impl FnMut(u128) -> Result<(), WasmCommandRuntimeError>,
+) -> Result<clearra_app::PcReplayParallelReceipt, WasmCommandRuntimeError> {
+    let reader = Reader::new(bytes, REPLAY_RECEIPT)?;
+    let mut failure = None;
+    clearra_app::PcReplayParallelReceipt::decode(&reader.bytes[reader.offset..], &mut |bytes| {
+        match guard(bytes) {
+            Ok(()) => true,
+            Err(error) => {
+                failure = Some(error);
+                false
+            }
+        }
+    })
+    .map_err(|error| failure.take().unwrap_or_else(|| replay_error(error)))
 }
 
 #[cfg(test)]

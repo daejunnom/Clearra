@@ -65,6 +65,8 @@ export type SpinStructureValidationCode =
   | 'worker_count_invalid';
 
 export const EMPTY_SPIN_BOARD_MASK_V1 = '0'.repeat(60);
+export const SPIN_STRUCTURE_MAX_PATTERNS = 0xffff_ffff;
+export const SPIN_STRUCTURE_MAX_PIECE_MULTIPLICITY = 255;
 
 export function createDefaultSpinStructureRequest(): SpinStructureRequest {
   return {
@@ -79,7 +81,7 @@ export function createDefaultSpinStructureRequest(): SpinStructureRequest {
     rule: 'srs-plus',
     maxPlacements: 1,
     minimality: 'subset-minimal',
-    maxPatterns: 100_000,
+    maxPatterns: SPIN_STRUCTURE_MAX_PATTERNS,
     finalPiece: 'T',
     dependencyReport: false,
     workers: defaultWorkerCount(),
@@ -103,7 +105,12 @@ export function spinStructureValidationCodes(
   } else if (/^[0-9a-f]{60}$/u.test(mask) && spinBoardMinimumHeight(mask) > request.visibleHeight) {
     errors.push('board_outside_height');
   }
-  if (!inventory || !/^[IOTSZJL]+$/u.test(inventory) || inventory.length > 255) {
+  const multiplicities = new Map<string, number>();
+  for (const piece of inventory) {
+    multiplicities.set(piece, (multiplicities.get(piece) ?? 0) + 1);
+  }
+  if (!inventory || !/^[IOTSZJL]+$/u.test(inventory) ||
+      [...multiplicities.values()].some(count => count > SPIN_STRUCTURE_MAX_PIECE_MULTIPLICITY)) {
     errors.push('inventory_invalid');
   }
   if (
@@ -126,7 +133,7 @@ export function spinStructureValidationCodes(
     request.mode !== 'search' &&
     (!Number.isInteger(request.maxPatterns) ||
       request.maxPatterns < 1 ||
-      request.maxPatterns > 100_000)
+      request.maxPatterns > SPIN_STRUCTURE_MAX_PATTERNS)
   ) {
     errors.push('max_patterns_invalid');
   }

@@ -8,7 +8,7 @@ pub use crate::{
     CoveragePortfolioAlternativeSet, PcScoreSolutionIdentity, PortfolioAlternativeSetIdentity,
 };
 
-pub const PC_SCORE_MAX_PATTERNS: usize = 1_066_867_200;
+pub const PC_SCORE_MAX_PATTERNS: usize = crate::PC_SCORE_MAX_PATTERNS;
 pub const PC_SCORE_CANONICAL_SELECTION: &str = "smallest-canonical-candidate-id";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

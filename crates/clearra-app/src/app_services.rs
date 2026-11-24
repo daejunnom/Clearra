@@ -209,6 +209,10 @@ impl AppCoreExecutorService {
         self.product_retention_budget = budget;
         self
     }
+
+    pub(crate) const fn product_retention_budget(&self) -> Option<crate::ProductRetentionBudget> {
+        self.product_retention_budget
+    }
 }
 
 fn append_materialized_replays(
@@ -281,9 +285,9 @@ const COMPLETE_REPLAY_PORTABLE_WHOLE_LIVE_BYTES: u128 = 16_u128 * 1024_u128 * 10
 // requested source window; this guard only prevents an unbounded/malformed DAG
 // from growing traversal scratch without limit.
 const COMPLETE_REPLAY_MAX_PATH_STEPS: usize = 256;
-// This is the same explicit exhaustive-family ceiling used by the separator
-// joiner. Memory admission normally becomes authoritative first.
-const COMPLETE_REPLAY_MAX_EXECUTIONS: usize = 1_000_000;
+// The retained-memory authority bounds actual execution owners. A separate
+// million-witness product ceiling rejected otherwise representable results.
+const COMPLETE_REPLAY_MAX_EXECUTIONS: usize = usize::MAX;
 // A retained Core replay is expanded into a typed App witness, a string-heavy
 // Host DTO, an optional canonical witness, and the JSON transfer buffer while
 // earlier owners are still live. Reserving sixteen retained-output bytes for
@@ -354,6 +358,75 @@ impl CompleteReplayWholeLiveBudget {
             .ok_or(CoreExecutionError::RuntimeUnavailable {
                 component: "complete_replay_whole_live_limit_exceeded",
             })
+    }
+
+    fn with_control_reserve(
+        mut self,
+        control: &ExecutionControl,
+    ) -> Result<Self, CoreExecutionError> {
+        let reserve = (core::mem::size_of_val(control) as u128)
+            .checked_add(control.compute_budget().shared_allocation_retained_bytes())
+            .ok_or(CoreExecutionError::RuntimeUnavailable {
+                component: "complete_replay_memory_projection_overflow",
+            })?;
+        self.maximum_bytes = self.maximum_bytes.checked_sub(reserve).ok_or(
+            CoreExecutionError::RuntimeUnavailable {
+                component: "complete_replay_whole_live_limit_exceeded",
+            },
+        )?;
+        self.checked_output_allowance()?;
+        Ok(self)
+    }
+
+    /// The borrowed source, cloned weights and earlier output stay live while
+    /// one bounded parallel materializer owns its traversal scratch.
+    fn checked_materializer_external_bytes(
+        self,
+        executions: &[CorePostProcessExecution],
+        capacity: usize,
+    ) -> Result<u128, CoreExecutionError> {
+        self.source_retained_bytes
+            .checked_mul(COMPLETE_REPLAY_SOURCE_TRANSIENT_COPIES)
+            .and_then(|bytes| {
+                bytes.checked_add(checked_materialized_replay_bytes(executions, capacity)?)
+            })
+            .ok_or(CoreExecutionError::RuntimeUnavailable {
+                component: "complete_replay_memory_projection_overflow",
+            })
+    }
+
+    /// Check the future flat Core vector before allocating it. Replay owners
+    /// move out of the aggregates; their strings and traces are never cloned.
+    fn enforce_append(
+        self,
+        executions: &[CorePostProcessExecution],
+        capacity: usize,
+        materialized: &ExactScoringExecutionMaterialization,
+    ) -> Result<(), CoreExecutionError> {
+        let projected = || -> Option<u128> {
+            let mut count = executions.len();
+            let mut nested = executions.iter().try_fold(0_u128, |bytes, execution| {
+                bytes.checked_add(execution.checked_nested_retained_bytes()?)
+            })?;
+            for aggregate in materialized.aggregates() {
+                count = count.checked_add(aggregate.executions().len())?;
+                for execution in aggregate.executions() {
+                    nested = nested.checked_add(execution.checked_nested_retained_bytes()?)?;
+                }
+            }
+            (capacity.max(count) as u128)
+                .checked_mul(core::mem::size_of::<CorePostProcessExecution>() as u128)?
+                .checked_add(nested)
+        };
+        let required = projected().ok_or(CoreExecutionError::RuntimeUnavailable {
+            component: "complete_replay_memory_projection_overflow",
+        })?;
+        if required > self.checked_output_allowance()? {
+            return Err(CoreExecutionError::RuntimeUnavailable {
+                component: "complete_replay_whole_live_limit_exceeded",
+            });
+        }
+        Ok(())
     }
 
     fn enforce_output(
@@ -430,6 +503,11 @@ fn core_error_from_complete_replay_materialization(
 ) -> CoreExecutionError {
     match error {
         ExactReplayMaterializationError::Cancelled => CoreExecutionError::Cancelled,
+        ExactReplayMaterializationError::ParallelWorkerFailed => {
+            CoreExecutionError::RuntimeUnavailable {
+                component: "complete_replay_worker_failed",
+            }
+        }
         ExactReplayMaterializationError::InvalidEvidence => {
             CoreExecutionError::RuntimeUnavailable {
                 component: "complete_replay_evidence_invalid",
@@ -583,14 +661,11 @@ impl AppCoreExecutorService {
         if !save_requested && !complete_path_requested {
             return Ok(result);
         }
-        let complete_replay_budget = complete_path_requested
-            .then(|| {
-                CompleteReplayWholeLiveBudget::from_result_with_host(
-                    &result,
-                    self.product_retention_budget,
-                )
-            })
-            .transpose()?;
+        let complete_replay_budget = CompleteReplayWholeLiveBudget::from_result_with_host(
+            &result,
+            self.product_retention_budget,
+        )?
+        .with_control_reserve(control)?;
         let pattern_weights =
             try_clone_replay_pattern_weights(result.postprocess_pattern_weights())?;
         let mut executions = Vec::new();
@@ -601,7 +676,7 @@ impl AppCoreExecutorService {
                     batch,
                     control,
                     remaining_complete_replay_limits(
-                        complete_replay_budget.expect("complete path owns a replay budget"),
+                        complete_replay_budget,
                         &executions,
                         executions.capacity(),
                     )?,
@@ -609,18 +684,28 @@ impl AppCoreExecutorService {
                 .map(|(materialized, _)| materialized)
                 .map_err(core_error_from_complete_replay_materialization)?
             } else {
-                ExactScoringExecutionMaterializer::materialize_terminal_replays(batch, control)
-                    .map_err(|_| CoreExecutionError::Cancelled)?
+                ExactScoringExecutionMaterializer::materialize_terminal_replays_with_memory_limit(
+                    batch,
+                    control,
+                    complete_replay_budget
+                        .checked_materializer_external_bytes(&executions, executions.capacity())?,
+                    complete_replay_budget.maximum_bytes,
+                )
+                .map(|(materialized, _)| materialized)
+                .map_err(core_error_from_complete_replay_materialization)?
             };
             complete &= materialized.complete();
+            complete_replay_budget.enforce_append(
+                &executions,
+                executions.capacity(),
+                &materialized,
+            )?;
             append_materialized_replays(&mut executions, materialized)?;
-            if complete_path_requested {
-                enforce_complete_replay_output_limits(
-                    complete_replay_budget.expect("complete path owns a replay budget"),
-                    &executions,
-                    executions.capacity(),
-                )?;
-            }
+            enforce_complete_replay_output_limits(
+                complete_replay_budget,
+                &executions,
+                executions.capacity(),
+            )?;
         }
         sort_materialized_replays(&mut executions);
         if complete_path_requested {
@@ -652,7 +737,8 @@ impl AppCoreExecutorService {
         let complete_replay_budget = CompleteReplayWholeLiveBudget::from_result_with_host(
             &result,
             self.product_retention_budget,
-        )?;
+        )?
+        .with_control_reserve(control)?;
         let pattern_weights =
             try_clone_replay_pattern_weights(result.postprocess_pattern_weights())?;
         let mut executions = Vec::new();
@@ -670,6 +756,11 @@ impl AppCoreExecutorService {
                 )
                 .map_err(core_error_from_complete_replay_materialization)?;
             complete &= materialized.complete();
+            complete_replay_budget.enforce_append(
+                &executions,
+                executions.capacity(),
+                &materialized,
+            )?;
             append_materialized_replays(&mut executions, materialized)?;
             enforce_complete_replay_output_limits(
                 complete_replay_budget,
@@ -1519,6 +1610,38 @@ impl AppCoreExecutorService {
             )?;
         loop {
             let mut memory_failure = None;
+            #[cfg(not(target_family = "wasm"))]
+            {
+                let outer = crate::app_context::pc_minimum_direct_finalizer::checked_parallel_preparation_outer_bytes(
+                    core::mem::size_of_val(&preparation),
+                    preparation.checked_retained_capacity_bytes(),
+                    preparation.parallel_work(),
+                ).ok_or(CoreExecutionError::RuntimeUnavailable {
+                    component: "pc_score_minimum_native_memory_projection_overflow",
+                })?;
+                preparation
+                    .parallel_work_mut()
+                    .drive_native_parallel_tasks(
+                        control,
+                        &mut |peak| {
+                            let peak = outer.checked_add(peak).ok_or(
+                                clearra_coverage::cover::ExactMinimumCoverError::ProjectionOverflow,
+                            )?;
+                            memory_guard(&result, peak).map_err(|error| {
+                                memory_failure = Some(error);
+                                clearra_coverage::cover::ExactMinimumCoverError::MemoryGuardRejected
+                            })
+                        },
+                        &mut || control.is_cancelled(),
+                    )
+                    .map_err(|error| {
+                        memory_failure
+                            .take()
+                            .unwrap_or(CoreExecutionError::RuntimeUnavailable {
+                                component: error.as_str(),
+                            })
+                    })?;
+            }
             let advance = preparation
                 .advance_with_memory_guard(
                     1_024,

@@ -4,9 +4,9 @@
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct BoundaryRecoveryStepPayload {
     /// Actual supply token index, distinct from the role when identical pieces cross stages.
-    pub source_queue_index: u8,
+    pub source_queue_index: u16,
     /// The exact lock-time role filled by this supply token.
-    pub placement_role_index: u8,
+    pub placement_role_index: u16,
     pub piece: String,
     pub rotation: u8,
     pub x: i8,
@@ -48,7 +48,7 @@ pub struct BoundaryRecoveryPayload {
     )]
     pub early_placement_limit_mode: Option<String>,
     /// Both fields are null when every eligible second-stage role may be early.
-    pub borrow_role_index: Option<u8>,
+    pub borrow_role_index: Option<u16>,
     pub borrow_placement_mask: Option<String>,
     pub normal_states: usize,
     pub recovery_states: usize,

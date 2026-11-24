@@ -8,9 +8,7 @@ use clearra_core_domain::resource::{
     ResourceLeaseRequest, ResourceReport, SharedResourceLeaseAuthority,
 };
 
-use super::dense_pattern_preflight::{
-    NATIVE_DENSE_PATTERN_BYTE_LIMIT, WASM32_LINEAR_ADDRESS_SPACE_BYTES,
-};
+use super::dense_pattern_preflight::WASM32_LINEAR_ADDRESS_SPACE_BYTES;
 
 static SHARED_EXECUTION_AUTHORITY: OnceLock<SharedResourceLeaseAuthority> = OnceLock::new();
 static NEXT_EXECUTION_OWNER: AtomicU64 = AtomicU64::new(1);
@@ -135,13 +133,19 @@ fn host_compute_capacity_from_hard_limit(hard_limit: usize) -> u32 {
     u32::try_from(hard_limit).unwrap_or(u32::MAX).max(1)
 }
 
-const fn host_memory_capacity() -> u64 {
-    let capacity = if cfg!(target_pointer_width = "32") {
-        WASM32_LINEAR_ADDRESS_SPACE_BYTES
+fn host_memory_capacity() -> u64 {
+    if cfg!(target_family = "wasm") {
+        WASM32_LINEAR_ADDRESS_SPACE_BYTES as u64
     } else {
-        NATIVE_DENSE_PATTERN_BYTE_LIMIT
-    };
-    capacity as u64
+        clearra_core_ffi::system_memory::native_memory_capacity_bytes()
+            .unwrap_or(1024 * 1024 * 1024)
+    }
+}
+
+/// Read-only capacity for a native product host's terminal projection budget.
+/// This does not acquire an execution lease or grant allocation credit.
+pub fn product_memory_capacity_bytes() -> u64 {
+    shared_execution_resource_capacity().memory_bytes
 }
 
 #[cfg(test)]

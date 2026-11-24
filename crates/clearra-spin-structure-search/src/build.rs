@@ -141,7 +141,7 @@ impl SpinStructureSearcher {
             |_, _| {
                 *prepared.lock().map_err(|_| {
                     SpinStructureError::ParallelExecutionFailed("spin_source_prepare_poisoned")
-                })? = Some(partition_prepared(query.clone()));
+                })? = Some(partition_prepared_with_control(query.clone(), control)?);
                 Ok(())
             },
         )
@@ -292,6 +292,28 @@ fn partition_prepared(query: SpinStructureQuery) -> Vec<SpinStructureTask> {
             target,
         })
         .collect()
+}
+
+fn partition_prepared_with_control(
+    query: SpinStructureQuery,
+    control: &ExecutionControl,
+) -> Result<Vec<SpinStructureTask>, SpinStructureError> {
+    let catalog = std::sync::Arc::new(
+        crate::operation_catalog::LogicalOperationCatalog::compile_with_control(
+            query.height,
+            query.initial_board,
+            query.inventory,
+            control,
+        )?,
+    );
+    Ok(structural_search::target_operations(&query, &catalog)
+        .into_iter()
+        .map(|target| SpinStructureTask {
+            query: query.clone(),
+            catalog: catalog.clone(),
+            target,
+        })
+        .collect())
 }
 
 /// Slow exact forward oracle retained for small structural regression fixtures.

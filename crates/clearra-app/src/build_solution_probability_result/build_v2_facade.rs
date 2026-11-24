@@ -546,11 +546,34 @@ impl BuildSetupV1Request {
     }
 
     pub(crate) fn setup_score_max_patterns(&self) -> usize {
-        self.request
-            .query
-            .core_query()
-            .execution_policy()
-            .max_patterns()
+        let query = self.request.query.core_query();
+        let requested = query.execution_policy().max_patterns();
+        let actual_upper = match query.remaining_queue() {
+            clearra_pc_graph::request::PcQueueInput::FixedSequence(_) => 1,
+            clearra_pc_graph::request::PcQueueInput::PatternExpression(expression) => {
+                expression.pattern_count()
+            }
+            clearra_pc_graph::request::PcQueueInput::Standard7Bag => {
+                let placed = query
+                    .exact_pieces()
+                    .unwrap_or_else(|| query.piece_window().max_pieces());
+                let held = usize::from(query.allow_hold() && query.hold_state().piece().is_some());
+                let source = query.supply_window_size().map_or_else(
+                    || {
+                        placed
+                            .saturating_add(usize::from(query.allow_hold()))
+                            .saturating_sub(held)
+                    },
+                    |window| window.source_pieces(),
+                );
+                (0..source)
+                    .try_fold(1_usize, |count, index| count.checked_mul(7 - index % 7))
+                    .unwrap_or(usize::MAX)
+            }
+            // These queue kinds are rejected by this finite Setup ingress.
+            _ => requested,
+        };
+        actual_upper.min(requested)
     }
 }
 

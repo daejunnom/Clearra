@@ -1217,6 +1217,20 @@ pub extern "C" fn clearra_wasm_distributed_worker_count() -> u32 {
     })
 }
 
+/// The validated request width survives source phases with fewer independent
+/// roots. Completion workers must not inherit that earlier phase's task count.
+#[no_mangle]
+pub extern "C" fn clearra_wasm_distributed_completion_worker_count() -> u32 {
+    ABI_STATE.with(|state| {
+        state
+            .borrow()
+            .distributed_coordinator
+            .as_ref()
+            .and_then(|coordinator| u32::try_from(coordinator.requested_compute_workers()).ok())
+            .unwrap_or(1)
+    })
+}
+
 #[no_mangle]
 pub extern "C" fn clearra_wasm_distributed_worker_count_available() -> u32 {
     // The legacy contract defines a serial/default worker count of one even when there is no

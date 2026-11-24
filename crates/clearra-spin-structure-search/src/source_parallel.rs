@@ -2,6 +2,10 @@
 //! The first compute worker prepares the canonical target manifest. The
 //! management coordinator never builds a geometry catalog or explores a target.
 use crate::{
+    order_parallel::{OrderCompletion, OrderCoordinator, OrderProduce, OrderTask, OrderWorker},
+    SpinStructureCoverageAnalysis, SpinStructureOrderCoverageError, SpinStructureParallelMode,
+};
+use crate::{
     SpinStructureError, SpinStructureQuery, SpinStructureReport, SpinStructureSearcher,
     SpinStructureSourceCompletion, SpinStructureSourceMergeCursor, SpinStructureSourceMerger,
     SpinStructureSourcePlan, SpinStructureSourcePreparation, SpinStructureSourceWorker,
@@ -16,8 +20,14 @@ mod wire;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SpinStructureParallelError {
     Search(SpinStructureError),
+    Orders(SpinStructureOrderCoverageError),
     InvalidWire(&'static str),
     InvalidState(&'static str),
+}
+impl From<SpinStructureOrderCoverageError> for Error {
+    fn from(error: SpinStructureOrderCoverageError) -> Self {
+        Self::Orders(error)
+    }
 }
 type Error = SpinStructureParallelError;
 impl From<SpinStructureError> for Error {
@@ -28,11 +38,16 @@ impl From<SpinStructureError> for Error {
 impl Error {
     pub fn reason(&self) -> &'static str {
         match self {
-            Self::Search(SpinStructureError::Cancelled) => "spin_structure_cancelled",
+            Self::Search(SpinStructureError::Cancelled)
+            | Self::Orders(SpinStructureOrderCoverageError::Cancelled) => {
+                "spin_structure_cancelled"
+            }
             Self::Search(SpinStructureError::ParallelExecutionFailed(reason))
             | Self::InvalidWire(reason)
             | Self::InvalidState(reason) => reason,
             Self::Search(_) => "spin_structure_search_invalid",
+            Self::Orders(SpinStructureOrderCoverageError::WorkerFailed(reason)) => reason,
+            Self::Orders(_) => "spin_structure_order_analysis_invalid",
         }
     }
 }
@@ -54,13 +69,30 @@ pub struct SpinStructureParallelProgress {
     pub finalizing: bool,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum Task {
     Bootstrap,
     Target {
         ordinal: usize,
         target: StructureOperation,
     },
+    Orders(OrderTask),
+}
+
+/// A complete source and any exact order analysis produced by its own tasks.
+/// Hosts can consume it but cannot manufacture a completed analysis receipt.
+pub struct SpinStructureParallelResult {
+    mode: SpinStructureParallelMode,
+    report: SpinStructureReport,
+    coverage: Option<SpinStructureCoverageAnalysis>,
+}
+impl SpinStructureParallelResult {
+    pub fn mode(&self) -> SpinStructureParallelMode {
+        self.mode
+    }
+    pub fn into_parts(self) -> (SpinStructureReport, Option<SpinStructureCoverageAnalysis>) {
+        (self.report, self.coverage)
+    }
 }
 
 pub struct SpinStructureParallelCoordinator {
@@ -73,11 +105,21 @@ pub struct SpinStructureParallelCoordinator {
     incoming: VecDeque<wire::Decoder>,
     finalizer: Option<SpinStructureSourceMergeCursor>,
     result: Option<SpinStructureReport>,
+    mode: SpinStructureParallelMode,
+    orders: Option<OrderCoordinator>,
+    coverage: Option<SpinStructureCoverageAnalysis>,
     progress: SpinStructureParallelProgress,
 }
 
 impl SpinStructureParallelCoordinator {
     pub fn new(query: SpinStructureQuery, workers: usize) -> Result<Self, Error> {
+        Self::new_with_mode(query, workers, SpinStructureParallelMode::Search)
+    }
+    pub fn new_with_mode(
+        query: SpinStructureQuery,
+        workers: usize,
+        mode: SpinStructureParallelMode,
+    ) -> Result<Self, Error> {
         let query = SpinStructureSearcher::normalize_query(query)?;
         Ok(Self {
             query,
@@ -89,6 +131,9 @@ impl SpinStructureParallelCoordinator {
             incoming: VecDeque::new(),
             finalizer: None,
             result: None,
+            mode,
+            orders: None,
+            coverage: None,
             progress: SpinStructureParallelProgress {
                 preparing: true,
                 ..SpinStructureParallelProgress::default()
@@ -99,6 +144,9 @@ impl SpinStructureParallelCoordinator {
         wire::initialization(&self.query)
     }
     pub fn waiting_for_results(&self) -> bool {
+        if let Some(orders) = &self.orders {
+            return self.incoming.is_empty() && orders.waiting_for_results();
+        }
         self.incoming.is_empty()
             && self.finalizer.is_none()
             && self.result.is_none()
@@ -109,7 +157,14 @@ impl SpinStructureParallelCoordinator {
                 }))
     }
     pub fn progress(&self) -> SpinStructureParallelProgress {
-        self.progress
+        let mut progress = self.progress;
+        if let Some(orders) = &self.orders {
+            let (dispatched, completed, count) = orders.progress();
+            progress.tasks_dispatched += dispatched;
+            progress.tasks_completed += completed;
+            progress.task_count += count;
+        }
+        progress
     }
     pub fn produce(
         &mut self,
@@ -152,17 +207,52 @@ impl SpinStructureParallelCoordinator {
                         self.pending.remove(&ordinal);
                         self.progress.tasks_completed += 1;
                     }
+                    wire::Decoded::Orders(completion) => {
+                        self.orders
+                            .as_mut()
+                            .ok_or(Error::InvalidState("spin_orders_not_pending"))?
+                            .absorb(completion)?;
+                    }
                 }
             }
         }
         if self.result.is_some() {
             return Ok((SpinStructureParallelProduce::Completed, Vec::new()));
         }
+        if let Some(orders) = self.orders.as_mut() {
+            return match orders.produce(budget, control)? {
+                OrderProduce::Pending => Ok((SpinStructureParallelProduce::Pending, Vec::new())),
+                OrderProduce::Task(task) => Ok((
+                    SpinStructureParallelProduce::Batch,
+                    wire::task(&self.query, Task::Orders(task)),
+                )),
+                OrderProduce::Completed => {
+                    let (dispatched, completed, count) = orders.progress();
+                    self.progress.tasks_dispatched += dispatched;
+                    self.progress.tasks_completed += completed;
+                    self.progress.task_count += count;
+                    let (report, coverage) = self.orders.take().unwrap().finish()?;
+                    self.result = Some(report);
+                    self.coverage = coverage;
+                    self.progress.finalizing = false;
+                    Ok((SpinStructureParallelProduce::Completed, Vec::new()))
+                }
+            };
+        }
         if let Some(finalizer) = self.finalizer.as_mut() {
             if finalizer.advance(budget, control)? {
-                self.result = Some(self.finalizer.take().unwrap().finish()?);
-                self.progress.finalizing = false;
-                return Ok((SpinStructureParallelProduce::Completed, Vec::new()));
+                let report = self.finalizer.take().unwrap().finish()?;
+                if self.mode == SpinStructureParallelMode::Search {
+                    self.result = Some(report);
+                    self.progress.finalizing = false;
+                    return Ok((SpinStructureParallelProduce::Completed, Vec::new()));
+                }
+                self.orders = Some(OrderCoordinator::new(
+                    self.query.clone(),
+                    report,
+                    self.mode,
+                    self.workers,
+                )?);
             }
             return Ok((SpinStructureParallelProduce::Pending, Vec::new()));
         }
@@ -199,7 +289,7 @@ impl SpinStructureParallelCoordinator {
         if control.is_cancelled() {
             return Err(SpinStructureError::Cancelled.into());
         }
-        if self.incoming.len() > self.workers.saturating_mul(4) {
+        if self.incoming.len() >= self.workers.saturating_mul(4) {
             return Err(Error::InvalidState("spin_result_window_exceeded"));
         }
         self.incoming
@@ -209,6 +299,15 @@ impl SpinStructureParallelCoordinator {
     pub fn finish(self) -> Result<SpinStructureReport, Error> {
         self.result
             .ok_or(Error::InvalidState("spin_source_not_complete"))
+    }
+    pub fn finish_with_analysis(self) -> Result<SpinStructureParallelResult, Error> {
+        Ok(SpinStructureParallelResult {
+            mode: self.mode,
+            report: self
+                .result
+                .ok_or(Error::InvalidState("spin_source_not_complete"))?,
+            coverage: self.coverage,
+        })
     }
 }
 
@@ -224,6 +323,7 @@ pub struct SpinStructureParallelWorker {
     task: Option<Task>,
     source: Option<SpinStructureSourceWorker>,
     encoder: Option<Encoder>,
+    orders: Option<OrderWorker>,
 }
 
 impl SpinStructureParallelWorker {
@@ -240,10 +340,14 @@ impl SpinStructureParallelWorker {
             task: None,
             source: None,
             encoder: None,
+            orders: None,
         })
     }
     pub fn has_pending_work(&self) -> bool {
-        self.task.is_some() || self.source.is_some() || self.encoder.is_some()
+        self.task.is_some()
+            || self.source.is_some()
+            || self.encoder.is_some()
+            || self.orders.is_some()
     }
     pub fn consume(
         &mut self,
@@ -263,6 +367,21 @@ impl SpinStructureParallelWorker {
     ) -> Result<Option<Vec<u8>>, Error> {
         if control.is_cancelled() {
             return Err(SpinStructureError::Cancelled.into());
+        }
+        if matches!(self.task, Some(Task::Orders(_))) {
+            let Some(Task::Orders(task)) = self.task.take() else {
+                unreachable!()
+            };
+            self.orders = Some(OrderWorker::new(self.query.clone(), task, control)?);
+        }
+        if let Some(orders) = self.orders.as_mut() {
+            if orders.advance(budget, control)? {
+                return Ok(Some(wire::order_completion(
+                    &self.query,
+                    self.orders.take().unwrap().finish()?,
+                )));
+            }
+            return Ok(None);
         }
         if self.preparation.is_some() && self.task.is_some() {
             if !self
@@ -308,6 +427,7 @@ impl SpinStructureParallelWorker {
                 .as_ref()
                 .ok_or(Error::InvalidState("spin_worker_catalog_missing"))?;
             match task {
+                Task::Orders(_) => unreachable!("order tasks do not require a catalog"),
                 Task::Bootstrap => {
                     self.encoder = Some(Encoder::Manifest(wire::ManifestEncoder::new(plan)))
                 }
@@ -401,5 +521,81 @@ mod tests {
             )
             .is_err());
         assert!(worker.plan.is_none());
+    }
+
+    #[test]
+    fn source_and_order_wire_preserve_cover_and_guaranteed_products() {
+        let query = query();
+        let source = SpinStructureSearcher::run(query.clone()).unwrap();
+        assert!(source.outcome_count() > 0);
+        let expected_coverage = crate::analyze_spin_structure_coverage(&query, &source, 6).unwrap();
+        let guaranteed =
+            crate::guaranteed_spin_structure_family(&query, &source, PieceKind::T, 6).unwrap();
+        for mode in [
+            SpinStructureParallelMode::Cover { max_patterns: 6 },
+            SpinStructureParallelMode::Guaranteed {
+                final_piece: PieceKind::T,
+                max_patterns: 6,
+            },
+        ] {
+            for count in [1, 2, 4, 8] {
+                let control = ExecutionControl::default();
+                let mut coordinator =
+                    SpinStructureParallelCoordinator::new_with_mode(query.clone(), count, mode)
+                        .unwrap();
+                let initialization = coordinator.worker_initialization();
+                let mut workers = (0..count)
+                    .map(|_| SpinStructureParallelWorker::new(&initialization).unwrap())
+                    .collect::<Vec<_>>();
+                let mut pending = Vec::new();
+                let mut order_receipts = 0;
+                let mut ticks = 0;
+                loop {
+                    let (status, bytes) = coordinator.produce(31, &control).unwrap();
+                    if status == SpinStructureParallelProduce::Completed {
+                        break;
+                    }
+                    if status == SpinStructureParallelProduce::Batch {
+                        let index = (coordinator.progress().tasks_dispatched - 1) % count;
+                        let worker = &mut workers[index];
+                        assert!(worker.consume(&bytes, &control).unwrap().is_none());
+                        let output = loop {
+                            if let Some(output) = worker.advance(41, &control).unwrap() {
+                                break output;
+                            }
+                        };
+                        order_receipts += usize::from(output.starts_with(b"SSOR"));
+                        pending.push(output);
+                    }
+                    if pending.len() >= count || status == SpinStructureParallelProduce::Pending {
+                        while let Some(output) = pending.pop() {
+                            coordinator.absorb(&output, &control).unwrap();
+                        }
+                    }
+                    ticks += 1;
+                    assert!(ticks < 1_000_000);
+                }
+                assert!(
+                    order_receipts > 0,
+                    "the product used real order worker packets"
+                );
+                let result = coordinator.finish_with_analysis().unwrap();
+                assert_eq!(result.mode(), mode);
+                let (actual, coverage) = result.into_parts();
+                let mut expected = match mode {
+                    SpinStructureParallelMode::Cover { .. } => {
+                        assert_eq!(coverage.as_ref(), Some(&expected_coverage));
+                        source.clone()
+                    }
+                    _ => {
+                        assert!(coverage.is_none());
+                        guaranteed.clone()
+                    }
+                }
+                .with_workers_used(count as u16);
+                expected.timings = Default::default();
+                assert_eq!(actual, expected, "mode={mode:?}, N={count}");
+            }
+        }
     }
 }

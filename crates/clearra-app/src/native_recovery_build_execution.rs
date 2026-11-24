@@ -3,7 +3,9 @@
 //! fixed-pair searches. No worker-count reduction or serial retry is hidden.
 use clearra_core_domain::{
     execution_cancellation::ExecutionControl,
-    parallel_work::{try_for_each_chunk, with_compute_worker, ParallelWorkError},
+    parallel_work::{
+        try_for_each_chunk, with_compute_coordinator, with_compute_worker, ParallelWorkError,
+    },
 };
 use clearra_forward_search::{
     RecoveryBuildError, RecoveryBuildParallelCoordinator as Coordinator,
@@ -19,9 +21,23 @@ use std::{
 
 type WorkerCompletion = (usize, Result<Vec<u8>, Error>);
 
-fn try_ready_completion(
-    receiver: &mpsc::Receiver<WorkerCompletion>,
-) -> Result<Option<WorkerCompletion>, Error> {
+enum WorkerRequest {
+    Consume(Vec<u8>),
+    Produce {
+        coordinator: Box<Coordinator>,
+        completed: Vec<Vec<u8>>,
+    },
+}
+
+enum PoolCompletion {
+    Consumed(WorkerCompletion),
+    Produced {
+        index: usize,
+        result: Result<(Box<Coordinator>, Produce, Vec<u8>), Error>,
+    },
+}
+
+fn try_ready_completion<T>(receiver: &mpsc::Receiver<T>) -> Result<Option<T>, Error> {
     match receiver.try_recv() {
         Ok(completion) => Ok(Some(completion)),
         Err(mpsc::TryRecvError::Empty) => Ok(None),
@@ -31,10 +47,10 @@ fn try_ready_completion(
     }
 }
 
-fn wait_for_completion(
-    receiver: &mpsc::Receiver<WorkerCompletion>,
+fn wait_for_completion<T>(
+    receiver: &mpsc::Receiver<T>,
     timeout: Duration,
-) -> Result<Option<WorkerCompletion>, Error> {
+) -> Result<Option<T>, Error> {
     match receiver.recv_timeout(timeout) {
         Ok(completion) => Ok(Some(completion)),
         Err(mpsc::RecvTimeoutError::Timeout) => Ok(None),
@@ -44,31 +60,14 @@ fn wait_for_completion(
     }
 }
 
-fn can_advance_preparation(idle: &[bool], preparing: bool, waiting_for_results: bool) -> bool {
-    idle.iter().any(|free| *free) && preparing && !waiting_for_results
-}
-
-fn absorb_completion(
-    coordinator: &mut Coordinator,
-    idle: &mut [bool],
-    (index, packet): WorkerCompletion,
-    control: &ExecutionControl,
-) -> Result<(), Error> {
-    if index >= idle.len() || idle[index] {
-        return Err(Error::InvalidState("recovery worker completion repeated"));
-    }
-    coordinator.absorb(&packet?, control)?;
-    idle[index] = true;
-    Ok(())
-}
-
 pub(crate) fn run_native_recovery_build(
     query: RecoveryBuildQuery,
     workers: usize,
     control: &ExecutionControl,
 ) -> Result<RecoveryBuildPopulation, Error> {
-    let owned_control = control.clone().with_parallelism(workers.max(1));
+    let owned_control = control.clone().with_parallelism_if_unbound(workers.max(1));
     let control = &owned_control;
+    let workers = control.parallelism();
     if control.is_cancelled() {
         return Err(RecoveryBuildError::Cancelled.into());
     }
@@ -100,146 +99,201 @@ pub(crate) fn run_native_recovery_build(
             .map_err(|_| Error::InvalidState("recovery result poisoned"))?
             .ok_or(Error::InvalidState("recovery result missing"));
     }
-    let mut coordinator = Coordinator::new_with_control(query, workers, control)?;
+    let coordinator = Coordinator::new_with_control(query, workers, control)?;
     let init = std::sync::Arc::new(coordinator.worker_initialization());
     if control.is_cancelled() {
         return Err(RecoveryBuildError::Cancelled.into());
     }
-    let (sender, receiver) = mpsc::channel();
-    let mut senders = Vec::new();
-    let mut handles: Vec<thread::JoinHandle<()>> = Vec::new();
-    for index in 0..workers {
-        let (tx, rx) = mpsc::sync_channel::<Vec<u8>>(1);
-        let completion = sender.clone();
-        let worker_control = control.clone();
-        let init = init.clone();
-        let Some(permit) = control
-            .compute_budget()
-            .acquire_worker(&control.cancellation)
-        else {
-            drop(senders);
-            drop(sender);
-            for handle in handles {
-                let _ = handle.join();
-            }
-            return Err(RecoveryBuildError::Cancelled.into());
-        };
-        let spawn = thread::Builder::new()
-            .name(format!("clearra-recovery-{index}"))
-            .spawn(move || {
-                let panic = catch_unwind(AssertUnwindSafe(|| {
-                    with_compute_worker(permit, || {
-                        let mut worker = match Worker::new(&init) {
-                            Ok(worker) => worker,
-                            Err(error) => {
-                                let _ = completion.send((index, Err(error)));
-                                return;
-                            }
-                        };
-                        while let Ok(packet) = rx.recv() {
-                            let result = catch_unwind(AssertUnwindSafe(|| {
-                                let mut output = worker.consume(&packet, &worker_control)?;
-                                while worker.has_pending_work() {
-                                    output = worker.advance(&worker_control)?;
-                                }
-                                output.ok_or(Error::InvalidState("recovery worker omitted result"))
-                            }))
-                            .unwrap_or(Err(Error::InvalidState("recovery worker panicked")));
-                            let failed = result.is_err();
-                            if completion.send((index, result)).is_err() || failed {
-                                break;
-                            }
-                        }
-                    })
-                }));
-                if panic.is_err() {
-                    let _ = completion
-                        .send((index, Err(Error::InvalidState("recovery worker panicked"))));
-                }
-            });
-        match spawn {
-            Ok(handle) => {
-                senders.push(tx);
-                handles.push(handle);
-            }
-            Err(_) => {
-                control.cancellation.handle().cancel();
+    let coordinator = with_compute_coordinator(control, || {
+        let (sender, receiver) = mpsc::channel::<PoolCompletion>();
+        let mut senders = Vec::new();
+        let mut handles: Vec<thread::JoinHandle<()>> = Vec::new();
+        for index in 0..workers {
+            let (tx, rx) = mpsc::sync_channel::<WorkerRequest>(1);
+            let completion = sender.clone();
+            let worker_control = control.clone();
+            let init = init.clone();
+            let Some(permit) = control
+                .compute_budget()
+                .acquire_worker(&control.cancellation)
+            else {
                 drop(senders);
                 drop(sender);
                 for handle in handles {
                     let _ = handle.join();
                 }
-                return Err(Error::InvalidState("recovery worker spawn failed"));
+                return Err(RecoveryBuildError::Cancelled.into());
+            };
+            let spawn = thread::Builder::new()
+                .name(format!("clearra-recovery-{index}"))
+                .spawn(move || {
+                    let panic = catch_unwind(AssertUnwindSafe(|| {
+                        with_compute_worker(permit, || {
+                            let mut worker = match Worker::new(&init) {
+                                Ok(worker) => worker,
+                                Err(error) => {
+                                    let _ = completion
+                                        .send(PoolCompletion::Consumed((index, Err(error))));
+                                    return;
+                                }
+                            };
+                            while let Ok(request) = rx.recv() {
+                                let (result, failed) = match request {
+                                    WorkerRequest::Consume(packet) => {
+                                        let result = catch_unwind(AssertUnwindSafe(|| {
+                                            let mut output =
+                                                worker.consume(&packet, &worker_control)?;
+                                            while worker.has_pending_work() {
+                                                output = worker.advance(&worker_control)?;
+                                            }
+                                            output.ok_or(Error::InvalidState(
+                                                "recovery worker omitted result",
+                                            ))
+                                        }))
+                                        .unwrap_or(Err(Error::InvalidState(
+                                            "recovery worker panicked",
+                                        )));
+                                        let failed = result.is_err();
+                                        (PoolCompletion::Consumed((index, result)), failed)
+                                    }
+                                    WorkerRequest::Produce {
+                                        mut coordinator,
+                                        completed,
+                                    } => {
+                                        let result = catch_unwind(AssertUnwindSafe(|| {
+                                            for packet in completed {
+                                                coordinator.absorb(&packet, &worker_control)?;
+                                            }
+                                            let (status, packet) =
+                                                coordinator.produce(32, &worker_control)?;
+                                            Ok((coordinator, status, packet))
+                                        }))
+                                        .unwrap_or(Err(Error::InvalidState(
+                                            "recovery producer panicked",
+                                        )));
+                                        let failed = result.is_err();
+                                        (PoolCompletion::Produced { index, result }, failed)
+                                    }
+                                };
+                                if completion.send(result).is_err() || failed {
+                                    break;
+                                }
+                            }
+                        })
+                    }));
+                    if panic.is_err() {
+                        let _ = completion.send(PoolCompletion::Consumed((
+                            index,
+                            Err(Error::InvalidState("recovery worker panicked")),
+                        )));
+                    }
+                });
+            match spawn {
+                Ok(handle) => {
+                    senders.push(tx);
+                    handles.push(handle);
+                }
+                Err(_) => {
+                    control.cancellation.handle().cancel();
+                    drop(senders);
+                    drop(sender);
+                    for handle in handles {
+                        let _ = handle.join();
+                    }
+                    return Err(Error::InvalidState("recovery worker spawn failed"));
+                }
             }
         }
-    }
-    drop(sender);
-    let result = (|| {
-        let mut idle = vec![true; senders.len()];
-        loop {
-            if control.is_cancelled() {
-                return Err(RecoveryBuildError::Cancelled.into());
-            }
-            // Merge ready work before producing another bounded geometry
-            // quantum, so completions cannot starve while preparation runs.
-            if let Some(completion) = try_ready_completion(&receiver)? {
-                absorb_completion(&mut coordinator, &mut idle, completion, control)?;
-                continue;
-            }
-            let mut producer_pending = false;
-            for (index, free) in idle.iter_mut().enumerate() {
-                if !*free {
+        drop(sender);
+        let result = (|| {
+            // Exactly one owner moves the coordinator between management and a
+            // currently idle compute worker. Catalog preparation and result
+            // reduction share the requested N slots with fixed-pair search.
+            let mut coordinator = Some(Box::new(coordinator));
+            let mut idle = vec![true; senders.len()];
+            let mut completed = Vec::new();
+            let mut waiting_for_results = false;
+            let mut next_completion = None;
+            loop {
+                if control.is_cancelled() {
+                    return Err(RecoveryBuildError::Cancelled.into());
+                }
+                let completion = match next_completion.take() {
+                    Some(completion) => Some(completion),
+                    None => try_ready_completion(&receiver)?,
+                };
+                if let Some(completion) = completion {
+                    match completion {
+                        PoolCompletion::Consumed((index, packet)) => {
+                            if index >= idle.len() || idle[index] {
+                                return Err(Error::InvalidState(
+                                    "recovery worker completion repeated",
+                                ));
+                            }
+                            completed.push(packet?);
+                            idle[index] = true;
+                        }
+                        PoolCompletion::Produced { index, result } => {
+                            if index >= idle.len() || idle[index] || coordinator.is_some() {
+                                return Err(Error::InvalidState(
+                                    "recovery producer completion repeated",
+                                ));
+                            }
+                            let (returned, status, packet) = result?;
+                            idle[index] = true;
+                            waiting_for_results = returned.waiting_for_results();
+                            match status {
+                                Produce::Batch => {
+                                    senders[index]
+                                        .send(WorkerRequest::Consume(packet))
+                                        .map_err(|_| {
+                                            Error::InvalidState("recovery worker disconnected")
+                                        })?;
+                                    idle[index] = false;
+                                }
+                                Produce::Completed => return Ok(returned),
+                                Produce::Cancelled => {
+                                    return Err(RecoveryBuildError::Cancelled.into())
+                                }
+                                Produce::Pending => {}
+                            }
+                            coordinator = Some(returned);
+                        }
+                    }
                     continue;
                 }
-                let (status, packet) = coordinator.produce(32, control)?;
-                match status {
-                    Produce::Batch => {
+                if coordinator.is_some() && (!waiting_for_results || !completed.is_empty()) {
+                    if let Some(index) = idle.iter().position(|free| *free) {
                         senders[index]
-                            .send(packet)
-                            .map_err(|_| Error::InvalidState("recovery worker disconnected"))?;
-                        *free = false;
-                    }
-                    Produce::Completed => return coordinator.finish(control),
-                    Produce::Cancelled => return Err(RecoveryBuildError::Cancelled.into()),
-                    Produce::Pending => {
-                        producer_pending = true;
-                        break;
+                            .send(WorkerRequest::Produce {
+                                coordinator: coordinator.take().unwrap(),
+                                completed: std::mem::take(&mut completed),
+                            })
+                            .map_err(|_| Error::InvalidState("recovery producer disconnected"))?;
+                        idle[index] = false;
                     }
                 }
+                if idle.iter().all(|free| *free) {
+                    return Err(Error::InvalidState("recovery coordinator stalled"));
+                }
+                // A bounded wait checks cancellation even if a worker is silent.
+                next_completion = wait_for_completion(&receiver, Duration::from_millis(25))?;
             }
-            if producer_pending
-                && can_advance_preparation(
-                    &idle,
-                    coordinator.has_pending_preparation(),
-                    coordinator.waiting_for_results(),
-                )
-            {
-                // Pending can mean a geometry quantum ended, not that a
-                // worker result is needed. Keep the remaining slots supplied.
-                thread::yield_now();
-                continue;
-            }
-            if idle.iter().all(|free| *free) {
-                return Err(Error::InvalidState("recovery coordinator stalled"));
-            }
-            // A bounded wait checks cancellation even if a worker is silent.
-            if let Some(completion) = wait_for_completion(&receiver, Duration::from_millis(25))? {
-                absorb_completion(&mut coordinator, &mut idle, completion, control)?;
-            }
+        })();
+        if result.is_err() {
+            control.cancellation.handle().cancel();
         }
-    })();
-    if result.is_err() {
-        control.cancellation.handle().cancel();
-    }
-    drop(senders);
-    let mut joined = true;
-    for handle in handles {
-        joined &= handle.join().is_ok();
-    }
-    if !joined {
-        return Err(Error::InvalidState("recovery worker join failed"));
-    }
-    result
+        drop(senders);
+        let mut joined = true;
+        for handle in handles {
+            joined &= handle.join().is_ok();
+        }
+        if !joined {
+            return Err(Error::InvalidState("recovery worker join failed"));
+        }
+        result
+    })?;
+    coordinator.finish(control)
 }
 
 #[cfg(test)]
@@ -277,17 +331,8 @@ mod tests {
     }
 
     #[test]
-    fn pending_preparation_only_advances_when_a_slot_and_local_work_exist() {
-        assert!(can_advance_preparation(&[false, true], true, false));
-        assert!(can_advance_preparation(&[true, true], true, false));
-        assert!(!can_advance_preparation(&[false, false], true, false));
-        assert!(!can_advance_preparation(&[false, true], false, false));
-        assert!(!can_advance_preparation(&[false, true], true, true));
-    }
-
-    #[test]
     fn ready_completion_precedes_preparation_and_closed_channels_fail() {
-        let (sender, receiver) = mpsc::channel();
+        let (sender, receiver) = mpsc::channel::<WorkerCompletion>();
         assert!(try_ready_completion(&receiver).unwrap().is_none());
         sender.send((1, Ok(vec![7]))).unwrap();
         let (index, bytes) = try_ready_completion(&receiver).unwrap().unwrap();

@@ -1,10 +1,8 @@
 use clearra_core_domain::resource::{ExecutionAvailability, ExecutionAvailabilityReason};
 
-/// Product safety ceiling for one native dense pattern representation.
-///
-/// This is a representation capability boundary, not a request budget. A
-/// caller-provided memory budget is checked separately and reports Exhausted.
-pub(crate) const NATIVE_DENSE_PATTERN_BYTE_LIMIT: u128 = 1024 * 1024 * 1024;
+/// The native allocation address domain. Physical/request memory admission is
+/// checked separately; an arbitrary one-GiB ceiling is not a representation limit.
+pub(crate) const NATIVE_DENSE_PATTERN_BYTE_LIMIT: u128 = isize::MAX as u128;
 pub(crate) const WASM32_LINEAR_ADDRESS_SPACE_BYTES: u128 = (u32::MAX as u128) + 1;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -142,7 +140,8 @@ mod tests {
     const SIX_LINE_DENSE_BYTES: u128 = 4_423_053_600;
 
     #[test]
-    fn native_six_line_dense_preflight_fails_before_allocation() {
+    #[cfg(target_pointer_width = "64")]
+    fn native_six_line_representation_is_governed_by_actual_memory_admission() {
         let report = preflight_dense_pattern_execution(
             SIX_LINE_PATTERN_COUNT,
             SIX_LINE_PATTERN_COUNT,
@@ -153,12 +152,24 @@ mod tests {
         assert_eq!(report.required_dense_bytes, SIX_LINE_DENSE_BYTES);
         assert_eq!(
             report.availability.state(),
-            ExecutionAvailabilityState::Unavailable
+            ExecutionAvailabilityState::Available
+        );
+        assert_eq!(report.availability.reason(), None);
+        let limited = preflight_dense_pattern_execution(
+            SIX_LINE_PATTERN_COUNT,
+            SIX_LINE_PATTERN_COUNT,
+            DensePatternExecutionSurface::Native,
+            Some(SIX_LINE_DENSE_BYTES - 1),
         );
         assert_eq!(
-            report.availability.reason(),
-            Some(ExecutionAvailabilityReason::DensePatternRepresentationUnavailable)
+            limited.availability.state(),
+            ExecutionAvailabilityState::Exhausted
         );
+        assert_eq!(
+            limited.availability.reason(),
+            Some(ExecutionAvailabilityReason::MemoryBudgetExceeded)
+        );
+        // Both are projections only; neither test allocates the dense bitset.
     }
 
     #[test]

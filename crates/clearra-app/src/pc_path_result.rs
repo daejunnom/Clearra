@@ -82,24 +82,24 @@ impl PcPathCompletenessEvidence {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PcPathStepV2 {
-    step_index: usize,
-    operation_id: u16,
-    active_piece: PieceKind,
-    input_cursor: usize,
-    output_cursor: usize,
-    input_hold_piece: Option<PieceKind>,
-    output_hold_piece: Option<PieceKind>,
-    hold_decision: &'static str,
-    rotation: u8,
-    x: u16,
-    y: u16,
-    placement_mask: PcPathBoardMask,
-    board_before_mask: PcPathBoardMask,
-    board_after_placement_mask: PcPathBoardMask,
-    board_after_line_clear_mask: PcPathBoardMask,
-    cleared_row_mask: u64,
-    cleared_lines: u8,
-    line_clear_identity: String,
+    pub(crate) step_index: usize,
+    pub(crate) operation_id: u16,
+    pub(crate) active_piece: PieceKind,
+    pub(crate) input_cursor: usize,
+    pub(crate) output_cursor: usize,
+    pub(crate) input_hold_piece: Option<PieceKind>,
+    pub(crate) output_hold_piece: Option<PieceKind>,
+    pub(crate) hold_decision: &'static str,
+    pub(crate) rotation: u8,
+    pub(crate) x: u16,
+    pub(crate) y: u16,
+    pub(crate) placement_mask: PcPathBoardMask,
+    pub(crate) board_before_mask: PcPathBoardMask,
+    pub(crate) board_after_placement_mask: PcPathBoardMask,
+    pub(crate) board_after_line_clear_mask: PcPathBoardMask,
+    pub(crate) cleared_row_mask: u64,
+    pub(crate) cleared_lines: u8,
+    pub(crate) line_clear_identity: String,
 }
 
 impl PcPathStepV2 {
@@ -178,14 +178,14 @@ impl PcPathStepV2 {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PcPathWitnessV2 {
-    candidate_id: u64,
-    producer_candidate_id: u64,
-    pattern_id: usize,
-    trace_identity: String,
-    normalized_trace_key: String,
-    consumed_piece_count: usize,
-    terminal_hold_piece: Option<PieceKind>,
-    steps: Vec<PcPathStepV2>,
+    pub(crate) candidate_id: u64,
+    pub(crate) producer_candidate_id: u64,
+    pub(crate) pattern_id: usize,
+    pub(crate) trace_identity: String,
+    pub(crate) normalized_trace_key: String,
+    pub(crate) consumed_piece_count: usize,
+    pub(crate) terminal_hold_piece: Option<PieceKind>,
+    pub(crate) steps: Vec<PcPathStepV2>,
 }
 
 impl PcPathWitnessV2 {

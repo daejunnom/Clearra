@@ -26,7 +26,7 @@ pub(crate) use execution_admission::{
     admit_budget_bound_search_execution_under_terminal_authority, admit_search_execution,
     ExecutionAdmission, ExecutionAdmissionPlan, ExecutionMemoryBound,
 };
-pub use shared_execution_resource_authority::WasmCpuTerminalResourceAuthority;
+pub use shared_execution_resource_authority::{product_memory_capacity_bytes, WasmCpuTerminalResourceAuthority};
 pub(crate) use shared_execution_resource_authority::{
     acquire_shared_execution_resources, next_execution_resource_owner,
     shared_execution_resource_capacity,

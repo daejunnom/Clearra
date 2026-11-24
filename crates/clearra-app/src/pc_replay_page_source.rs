@@ -30,6 +30,10 @@ pub use store::{PcReplayPageAdvance, PcReplayPageStore};
 #[path = "pc_replay_parallel_manifest.rs"]
 mod parallel_manifest;
 
+#[path = "pc_replay_parallel.rs"]
+mod parallel;
+pub use parallel::{PcReplayParallelQuery, PcReplayParallelReceipt, PcReplayParallelTask, PcReplayParallelWorker};
+
 pub const PC_REPLAY_MEMBER_PAGE_CONTRACT: &str = "pc-replay-member-page.v2";
 pub const PC_REPLAY_MEMBER_PAGE_SIZE: usize = 100;
 const REPLAY_PUBLIC_PAGE_RESERVE: u128 = 16;
@@ -64,6 +68,9 @@ pub struct PcReplayPageSource {
     problem_id: String,
     projection: PcPathProjectionContext,
     batches: ReplayBatches,
+    // The original Core reservation already owns this shared proof backing.
+    // A negative membership bit is usable only after matches_source below.
+    supply_evidence: Option<Arc<clearra_core_executor::PcPathSupplyEvidence>>,
     retained_graph_bytes: u128,
     retained_manifest_nested_bytes: u128,
     retained_first_member_nested_bytes: u128,
@@ -97,7 +104,8 @@ pub struct PcReplaySourceBuildSession {
     complete: bool,
     // Bounded native receipts, in original geometry/pattern order. They are
     // produced only from this session's private, already verified source.
-    ready_counts: VecDeque<usize>,
+    ready_counts: VecDeque<(usize, usize)>,
+    parallel: Option<parallel::ReplayParallelCoordinator>,
 }
 
 fn bytes<T>(capacity: usize) -> ReplayResult<u128> {
@@ -174,6 +182,12 @@ impl PcReplaySourceBuildSession {
             return Err("pc replay empty pattern universe".into());
         }
         let projection = PcPathProjectionContext::from_problem(problem);
+        let supply_evidence = result.pc_path_supply_evidence().map(Arc::clone);
+        if supply_evidence.as_ref().is_some_and(|proof| {
+            !proof.matches_source(problem, result.exact_scoring_execution_batches())
+        }) {
+            return Err("complete_replay_supply_source_mismatch".into());
+        }
         let PreparedReplayBatches {
             batches,
             retained_graph_bytes,
@@ -272,6 +286,7 @@ impl PcReplaySourceBuildSession {
                 problem_id: problem.problem_id().as_str().to_owned(),
                 projection,
                 batches,
+                supply_evidence,
                 retained_graph_bytes,
                 retained_manifest_nested_bytes: 0,
                 retained_first_member_nested_bytes: 0,
@@ -295,6 +310,7 @@ impl PcReplaySourceBuildSession {
             hasher,
             complete: false,
             ready_counts: VecDeque::new(),
+            parallel: None,
         };
         session.guard_additional(0)?;
         Ok(session)
@@ -304,6 +320,9 @@ impl PcReplaySourceBuildSession {
     /// No operation drains an entire cell's terminal-path language. Cancellation
     /// is checked per primitive, not only when the clock is sampled.
     pub fn advance(&mut self, work: usize, control: &ExecutionControl) -> ReplayResult<bool> {
+        if self.parallel.is_some() {
+            return self.advance_parallel_reduction(control);
+        }
         if self.complete {
             return Ok(true);
         }
@@ -333,13 +352,27 @@ impl PcReplaySourceBuildSession {
                 return Ok(true);
             }
             if self.language.is_none() {
-                if let Some(&count) = self.ready_counts.front() {
+                if let Some(&(ordinal, count)) = self.ready_counts.front() {
+                    let geometry = ordinal / self.source.materialized_pattern_count;
+                    let pattern = ordinal % self.source.materialized_pattern_count;
+                    if geometry < self.next_geometry
+                        || (geometry == self.next_geometry && pattern < self.next_pattern)
+                    {
+                        return Err("complete_replay_source_count_mismatch".into());
+                    }
+                    while self.next_geometry < geometry { self.finish_geometry()?; }
+                    self.next_pattern = pattern;
                     if count == 0
                         || !self.source.geometries.is_empty()
                         || self.source.first_members.len() == PC_REPLAY_MEMBER_PAGE_SIZE
                     {
                         self.accept_count(count)?;
                         continue;
+                    }
+                } else {
+                    match self.source.next_possible_pattern(&self.pending[self.next_geometry].1, self.next_pattern)? {
+                        Some(pattern) => self.next_pattern = pattern,
+                        None => { self.finish_geometry()?; continue; }
                     }
                 }
             }
@@ -375,7 +408,7 @@ impl PcReplaySourceBuildSession {
             if self
                 .ready_counts
                 .front()
-                .is_some_and(|&expected| expected != count)
+                .is_some_and(|&(_, expected)| expected != count)
             {
                 return Err("complete_replay_source_count_mismatch".into());
             }
@@ -571,7 +604,8 @@ impl PcReplaySourceBuildSession {
                 bytes::<(u64, Vec<ExactReplayGraphLocation>)>(self.pending.capacity()).ok()?,
             )?
             .checked_add(self.pending_location_bytes)?
-            .checked_add(bytes::<usize>(self.ready_counts.capacity()).ok()?)?
+            .checked_add(bytes::<(usize, usize)>(self.ready_counts.capacity()).ok()?)?
+            .checked_add(self.parallel.as_ref().map_or(Some(0), |parallel| parallel.checked_additional_retained_bytes())?)?
             .checked_add(match &self.language {
                 Some(language) => language.checked_retained_bytes()?,
                 None => 0,
@@ -590,6 +624,26 @@ impl PcReplaySourceBuildSession {
 }
 
 impl PcReplayPageSource {
+    fn next_possible_pattern(&self, locations: &[ExactReplayGraphLocation], first: usize) -> ReplayResult<Option<usize>> {
+        if first >= self.materialized_pattern_count { return Ok(None); }
+        let (Some(proof), ReplayBatches::Compact(batches)) = (&self.supply_evidence, &self.batches) else {
+            return Ok(Some(first));
+        };
+        let mut next = None;
+        for location in locations {
+            let graph = batches.get(location.batch).and_then(|batch| batch.graphs().get(location.graph))
+                .ok_or("complete_replay_supply_source_mismatch")?;
+            let Some(patterns) = proof.patterns_for_identity(graph.identity()) else {
+                // Unknown is not negative evidence.
+                return Ok(Some(first));
+            };
+            if let Some(pattern) = patterns.covered_patterns_in_range(first, self.materialized_pattern_count).next() {
+                let index = pattern.index();
+                next = Some(next.map_or(index, |previous: usize| previous.min(index)));
+            }
+        }
+        Ok(next)
+    }
     fn retained_external_bytes(&self) -> Option<u128> {
         self.original_source_bytes
             .checked_add(self.external_reserve_bytes)
@@ -747,7 +801,9 @@ mod memory_tests {
         .with_execution_policy(PcExecutionPolicy::mvp_default().with_workers(1))
         .with_count_policy(PcCountPolicy::CountAll)
         .with_objective(ObjectivePolicy::all());
-        let problem = clearra_problem::ProblemCompiler::compile_scenario_pc(&query).unwrap();
+        let problem = clearra_problem::ProblemCompiler::compile_scenario_pc(&query)
+            .unwrap()
+            .with_pc_path_v2_evidence();
         let execution_problem = clearra_problem::ProblemCompiler::compile_scenario_pc(&query)
             .unwrap()
             .with_pc_path_v2_evidence();
@@ -784,6 +840,86 @@ mod memory_tests {
                 actual.checked_full_capacity_recount()
             );
         }
+    }
+
+    #[test]
+    fn portable_replay_workers_reduce_the_same_source_hash_counts_and_first_page() {
+        let _resource_guard = crate::execution_resource_test_support::execution_resource_test_guard();
+        let (problem, result) = tiny_replay_source();
+        let control = ExecutionControl::default();
+        let cap = 128 * 1024 * 1024;
+        let mut reference = PcReplaySourceBuildSession::new(&problem, &result, cap).unwrap();
+        while !reference.advance(8192, &control).unwrap() {}
+        let reference = reference.complete().unwrap();
+        for worker_count in [1, 2, 4, 8] {
+            let mut actual = PcReplaySourceBuildSession::new(&problem, &result, cap).unwrap();
+            actual.enable_parallel(worker_count).unwrap();
+            let query = actual.parallel_query().unwrap().encode(&mut |_| true).unwrap();
+            let mut workers = (0..worker_count).map(|_| PcReplayParallelWorker::new(PcReplayParallelQuery::decode(&query, &mut |_| true).unwrap(), cap).unwrap()).collect::<Vec<_>>();
+            let mut receipts = 0;
+            let mut worker_steps = 0;
+            loop {
+                let mut tasks = Vec::new();
+                while let Some(task) = actual.take_parallel_task(&control).unwrap() { tasks.push(task); }
+                if tasks.is_empty() {
+                    if actual.advance(1, &control).unwrap() { break; }
+                    continue;
+                }
+                // Complete in reverse source order; the manager only orders
+                // sealed counts and page members, never advances a language.
+                for (index, task) in tasks.into_iter().rev().enumerate() {
+                    let worker = &mut workers[index % worker_count];
+                    worker.start(PcReplayParallelTask::decode(&task.encode()).unwrap(), &mut |_| true).unwrap();
+                    let receipt = loop {
+                        worker_steps += 1;
+                        assert!(worker_steps < 100_000, "tiny replay must finish");
+                        if let Some(receipt) = worker.advance(128, false, &mut |_| true).unwrap() { break receipt; }
+                    };
+                    let bytes = receipt.encode(&mut |_| true).unwrap();
+                    actual.accept_parallel_receipt(PcReplayParallelReceipt::decode(&bytes, &mut |_| true).unwrap(), &control).unwrap();
+                    assert!(actual.accept_parallel_receipt(PcReplayParallelReceipt::decode(&bytes, &mut |_| true).unwrap(), &control).is_err(), "duplicate cannot close another obligation");
+                    receipts += 1;
+                }
+            }
+            assert!(receipts >= 2, "count and first-page work both execute on workers");
+            let actual = actual.complete().unwrap();
+            assert_eq!(actual.identity_sha256(), reference.identity_sha256(), "workers {worker_count}");
+            assert_eq!(actual.witness_count(), reference.witness_count());
+            assert_eq!(actual.geometries, reference.geometries);
+            assert_eq!(actual.first_members, reference.first_members);
+            assert_eq!(actual.checked_retained_capacity_bytes(), actual.checked_full_capacity_recount(), "decoded strings retain their actual capacity, not the sender's allocation slack");
+        }
+    }
+
+    #[test]
+    fn portable_replay_transport_binds_generation_and_obeys_allocation_guards() {
+        let _resource_guard = crate::execution_resource_test_support::execution_resource_test_guard();
+        let (problem, result) = tiny_replay_source();
+        let control = ExecutionControl::default();
+        let cap = 128 * 1024 * 1024;
+        let mut source = PcReplaySourceBuildSession::new(&problem, &result, cap).unwrap();
+        source.enable_parallel(2).unwrap();
+        let query = source.parallel_query().unwrap().encode(&mut |_| true).unwrap();
+        let mut peak = 0;
+        PcReplayParallelQuery::decode(&query, &mut |bytes| { peak = peak.max(bytes); true }).unwrap();
+        assert!(peak > 0);
+        assert!(PcReplayParallelQuery::decode(&query, &mut |bytes| bytes < peak).is_err());
+        let mut replaced_source = query.clone();
+        replaced_source[41] ^= 1; // original producer owner digest
+        let tail = replaced_source.len() - 32;
+        let digest = Sha256::digest(&replaced_source[..tail]); replaced_source[tail..].copy_from_slice(&digest);
+        assert!(PcReplayParallelQuery::decode(&replaced_source, &mut |_| true).is_err(), "packet checksum alone cannot rebind a source");
+        let task = source.take_parallel_task(&control).unwrap().unwrap();
+        let mut stale = task.encode();
+        stale[41] ^= 2; // generation, after the closed header and source digest
+        let tail = stale.len() - 32;
+        let digest = Sha256::digest(&stale[..tail]); stale[tail..].copy_from_slice(&digest);
+        let mut worker = PcReplayParallelWorker::new(PcReplayParallelQuery::decode(&query, &mut |_| true).unwrap(), cap).unwrap();
+        assert!(worker.start(PcReplayParallelTask::decode(&stale).unwrap(), &mut |_| true).is_err());
+        worker.start(task, &mut |_| true).unwrap();
+        let cancelled = worker.advance(0, true, &mut |_| true).unwrap().unwrap();
+        assert!(source.accept_parallel_receipt(cancelled, &control).is_err());
+        assert!(!source.advance(1, &control).unwrap(), "cancelled work never supplies an exact count");
     }
 
     #[test]

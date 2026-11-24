@@ -2257,6 +2257,25 @@ impl CooperativeAppExecution {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn from_prepared_spin_cover_minimum(
+        context: AppContext,
+        report: clearra_spin_structure_search::SpinStructureReport,
+        command_kind: AppCommandKind,
+        output_policy: AppOutputPolicy,
+        validation_report: DiagnosticReport,
+        resource_budget: ResourceBudget,
+        preparation: crate::portfolio_alternative_store::CoveragePortfolioAlternativeSetPreparation,
+    ) -> Self {
+        let response = AppResponse::success(AppRenderModel::SpinStructure(report))
+            .with_contract_context(command_kind)
+            .with_validation_diagnostics(validation_report);
+        Self::from_prepared_minimum(
+            context, response, command_kind, output_policy, resource_budget,
+            CooperativeMinimumPreparation::SpinCover(preparation),
+        )
+    }
+
     fn from_prepared_minimum(
         context: AppContext,
         response: AppResponse,
@@ -2284,6 +2303,10 @@ impl CooperativeAppExecution {
     /// Optional host scheduling of the same source-bound exact AtMost oracles
     /// used by the ordinary CLI product. No minimum cardinality enters here.
     pub fn enable_minimum_parallel(&mut self, partitions: usize) -> Result<(), &'static str> {
+        if let CooperativeExecutionState::PcReplayFinalize(finalize) = &mut self.state {
+            finalize.preparation.enable_parallel(partitions)
+                .map_err(|_| "replay parallel preparation rejected")?;
+        }
         if let CooperativeExecutionState::MinimumFinalize(finalize) = &mut self.state {
             finalize
                 .preparation
@@ -2298,17 +2321,13 @@ impl CooperativeAppExecution {
     /// memory authority and account for transport/shard owners; this projection
     /// is not itself an admission or permission to exceed either cap.
     pub fn minimum_parallel_memory_envelope(&self) -> Option<(Option<u128>, u128)> {
+        if let CooperativeExecutionState::PcReplayFinalize(finalize) = &self.state {
+            let (maximum, retained) = finalize.preparation.parallel_memory_envelope()?;
+            return Some((Some(maximum), retained));
+        }
         let CooperativeExecutionState::MinimumFinalize(finalize) = &self.state else {
             return None;
         };
-        #[cfg(test)]
-        if finalize.completed_work_steps == 0 {
-            eprintln!("minimum-envelope context={:?} response={:?} preparation={:?} finite={} generation={:?}",
-                self.context.as_ref().and_then(AppContext::checked_retained_capacity_bytes),
-                finalize.preparation.checked_response_heap(&finalize.response),
-                finalize.preparation.checked_retained_capacity_bytes(),
-                self.finite_caller_memory.is_some(), self.finite_caller_generation);
-        }
         // This non-finite PC path does not accept an unmeasured external caller
         // owner through the finite Build protocol.
         if self.finite_caller_memory.is_some() || self.finite_caller_generation.is_some() {
@@ -2345,6 +2364,39 @@ impl CooperativeAppExecution {
                 finalize.preparation.parallel_query_satisfied()
             }
             _ => false,
+        }
+    }
+
+    /// The retained pager owns query membership and promotion. Worker input
+    /// is immutable execution data, never a replacement product authority.
+    pub fn replay_parallel_query(&self) -> Option<&crate::PcReplayParallelQuery> {
+        match &self.state {
+            CooperativeExecutionState::PcReplayFinalize(finalize) => finalize.preparation.parallel_query(),
+            _ => None,
+        }
+    }
+
+    pub fn replay_parallel_preparation_memory(&self, partitions: usize) -> Option<(u128, u128, u128)> {
+        match &self.state {
+            CooperativeExecutionState::PcReplayFinalize(finalize) => {
+                let (cap, retained) = finalize.preparation.parallel_memory_envelope()?;
+                Some((cap, retained, finalize.preparation.checked_parallel_preparation_bytes(partitions)?))
+            }
+            _ => None,
+        }
+    }
+
+    pub fn take_replay_parallel_task(&mut self, control: &ExecutionControl) -> Result<Option<crate::PcReplayParallelTask>, crate::PcReplayPageError> {
+        match &mut self.state {
+            CooperativeExecutionState::PcReplayFinalize(finalize) => finalize.preparation.take_parallel_task(control),
+            _ => Ok(None),
+        }
+    }
+
+    pub fn accept_replay_parallel_receipt(&mut self, receipt: crate::PcReplayParallelReceipt, control: &ExecutionControl) -> Result<(), crate::PcReplayPageError> {
+        match &mut self.state {
+            CooperativeExecutionState::PcReplayFinalize(finalize) => finalize.preparation.accept_parallel_receipt(receipt, control),
+            _ => Err("complete_replay_parallel_finalizer_inactive".into()),
         }
     }
 
@@ -4079,7 +4131,8 @@ impl CooperativeAppExecution {
                                         crate::commands::build_v2_app_command::build_cover_success_response(report),
                                         finalize.command_kind, &finalize.output_policy, None,
                                     ),
-                                CooperativeMinimumCompletion::BuildScore(payload, owner) => self.context()
+                                CooperativeMinimumCompletion::BuildScore(payload, owner)
+                                | CooperativeMinimumCompletion::SpinCover(payload, owner) => self.context()
                                     .finalize_response_with_product_capability(
                                         finalize
                                             .response

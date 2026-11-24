@@ -62,8 +62,8 @@ Clearraの型付き構築テンプレートを評価します。Sfinderのcover�
         CliHelpTopic::Continue => r#"使い方: clearra continue <token>"#,
         CliHelpTopic::SpinStructure => {
             r#"使い方: clearra spin-structure search --pieces IOTSZ [共通オプション]
-  または: clearra spin-structure cover --pieces IOTSZ [--objective min-cover] [--max-patterns 1..100000] [共通オプション] [--ties --tie-snapshot PATH]
-  または: clearra spin-structure guaranteed --pieces IOTSZ [--final-piece T] [--max-patterns 1..100000] [--dependency-report|--no-dependency-report] [共通オプション]
+  または: clearra spin-structure cover --pieces IOTSZ [--objective min-cover] [--max-patterns 1..4294967295] [共通オプション] [--ties --tie-snapshot PATH]
+  または: clearra spin-structure guaranteed --pieces IOTSZ [--final-piece T] [--max-patterns 1..4294967295] [--dependency-report|--no-dependency-report] [共通オプション]
 共通オプション: [--board-mask-v1 HEX | --board-mask HEX] [--height 4..24] [--fill-bottom N --fill-top N] [--lines any|0..4|1+..4+] [--spin-profile t-spins|t-spins-plus|all-mini|all-mini-plus|all-spin|all-spin-plus] [--minimality subset-minimal|minimum-piece-count] [--rule srs-plus|srs|srs-x|jstris-180|no-kick] [--workers N|--auto-workers N] [--use-all-cpu-threads]
 すべての経路で、順序のないミノの集合をホールドなしでCPU検索します。バックエンドの代替使用は無効です。ミノ順・パターン、ホールド、GPU、tablebase、明示的なメモリ上限のオプションは利用できません。searchは通常のスピン構造群を返します。coverは正確な最小スピン構造集合を返します。--tiesを省略すると、一定の規則で並べた最初の集合を表示します。--ties --tie-snapshot PATHを明示すると、同じ最小個数を持つすべての最適集合をページ単位で取得できます。guaranteedは最後のミノを固定したうえで、それ以外のミノのすべての異なる順序に対応できる通常の保証付きスピン構造群を返します。通常スピンとミニスピンは別々に扱い、同じミノの文字を複数指定した場合はその個数を維持します。"#
         }
@@ -89,7 +89,7 @@ pub(super) fn product_help_body(topic: ProductHelpTopic) -> &'static str {
         ProductHelpTopic::BoundaryRecovery => {
             r#"使い方: clearra recovery boundary --initial-board-mask HEX --target-board-mask HEX --height 1..25 --queue REFERENCE --stage-one-count N [--placements N|auto] [--stage-one-board-mask HEX] [--role-mask POSITION:HEX ...] [--queue-pattern PATTERN --max-pattern-evaluations N|unlimited --max-total-states N|unlimited] [--max-early-placements N|auto] [--borrow-role-position N --borrow-placement-mask HEX] [--hold|--no-hold] [--rule RULE] [--spin-profile PROFILE] [--initial-b2b 0|1] [--preserve-b2b] [--preserve-b2b-bag N ...] [--preserve-b2b-stage-one] [--preserve-b2b-stage-two] [--max-states N|unlimited]
 先行配置数 N は0から第2段階の役割数まで指定でき、消去された配置も数えます。borrow指定を省略するとすべての適合する第2段階役割が対象です。--preserve-b2b は遅れて完成する第1段階配置も含む実行全体を検証します。配置数の省略または auto は、ライン消去とセル数保存に整合するすべての供給 prefix を探索し、残りを先読みとして保持します。正確な配置役割は個数を確定します。状態数制限の省略または unlimited はアルゴリズム上の打ち切りなしを意味し、キャンセルとホストのリソース保護は維持されます。
-連続した2～42ミノの供給順を扱います。--role-maskで必要な各供給位置のロック時4マスを指定できます。先行配置を許す場合は第2段階の供給位置を選びます。--queue-patternでは完全な7ミノバッグ、全配置役割、最大100000の供給パターンを対象に通常成功・追加リカバリー・未確定の重み付き確率を計算します。順序が変わっても役割と先行配置はバッグとミノ種に結び付けます。どちらのモードも将来の全供給を知る場合の解析であり、観測制限下の実戦可能性は証明しません。"#
+連続した2～65535ミノの供給順を扱います。--role-maskで必要な各供給位置のロック時4マスを指定できます。先行配置を許す場合は第2段階の供給位置を選びます。--queue-patternでは完全な7ミノバッグ、全配置役割、最大100000の供給パターンを対象に通常成功・追加リカバリー・未確定の重み付き確率を計算します。順序が変わっても役割と先行配置はバッグとミノ種に結び付けます。どちらのモードも将来の全供給を知る場合の解析であり、観測制限下の実戦可能性は証明しません。"#
         }
         ProductHelpTopic::PcTiling => {
             r#"使い方: clearra pc tiling --lines 2 [--patterns PATTERN | --queue QUEUE] [--no-hold] [--backend auto|cpu|gpu|hybrid] [--gpu-device auto|N] [--workers N|--auto-workers N] [--use-all-cpu-threads] [--cpu-warmup] [--gpu-warmup] [--max-patterns N] [--max-nodes N] [--max-frontier-states N] [--max-candidates N] [--max-memory-mib N] [--allow-backend-fallback|--no-backend-fallback]
@@ -112,8 +112,8 @@ PC確率の専用検索を実行し、入力ミノ順全体に対する完全な
         }
         ProductHelpTopic::PcScore => {
             r#"使い方: clearra pc score --lines 2 [--patterns PATTERN | --queue IOTSZJL] [--hold|--no-hold] [--score-profile tetrio|guideline|jstris-ultra] [--spin-profile disabled|t-spin-simple|t-spins|t-spins-plus|all-spin|all-spin-plus|all-mini|all-mini-plus] [--initial-b2b N] [--rule srs-plus|srs|srs-x|jstris-180|no-kick] [--workers N|--auto-workers N] [--use-all-cpu-threads] [--cpu-warmup] [--tablebase|--no-tablebase]
-  または: clearra pc score --board-mask HEX --height 1..6 --pieces N --lines same-as-height [--patterns PATTERN | --queue QUEUE] [スコアオプション] [CPUワーカーオプション] [--tablebase|--no-tablebase]
-ネイティブCPU実行には通常のローカルワーカー設定を使用します。自動実行は--use-all-cpu-threadsがない限り論理プロセッサを1個予約し、--workersは固定並列数を指定します。ブラウザーでは管理側がNを保持し、分離された各WASM子処理を1ワーカーに正規化してワーカープールの入れ子を防ぎます。--tablebaseは適格化された完全候補ソースだけを置換し、このスコアreducerを維持します。オフライン探索は自動開始しません。入力は元のミノ16個以内と、因数分解されたパターン式1個に制限されます。P7P7P2は記号的に処理できます。PC盤面ごとの平均スコアを返します。スコアは基本的な近似値であり、プロファイルごとの厳密値ではありません。トップレベルのscoreとsfinder scoreは従来互換の汎用結果を返します。"#
+  または: clearra pc score --board-mask HEX --height 1..24 --pieces N --lines same-as-height [--patterns PATTERN | --queue QUEUE] [スコアオプション] [CPUワーカーオプション] [--tablebase|--no-tablebase]
+ネイティブCPU実行には通常のローカルワーカー設定を使用します。自動実行は--use-all-cpu-threadsがない限り論理プロセッサを1個予約し、--workersは固定並列数を指定します。ブラウザーでは管理側がNを保持し、分離された各WASM子処理を1ワーカーに正規化してワーカープールの入れ子を防ぎます。--tablebaseは適格化された完全候補ソースだけを置換し、このスコアreducerを維持します。オフライン探索は自動開始しません。供給は65,535ミノまでのキュー識別範囲と、因数分解されたパターン式1個を使用します。記号的なパターンは元の全供給集合を保持し、盤面の表現形式とメモリー受付条件に従って実行します。PC盤面ごとの平均スコアを返します。スコアは基本的な近似値であり、プロファイルごとの厳密値ではありません。トップレベルのscoreとsfinder scoreは従来互換の汎用結果を返します。"#
         }
         ProductHelpTopic::PcScoreFinder => {
             r#"使い方: clearra pc score-finder --lines 2|4|6 --queue QUEUE [--hold|--no-hold] [--initial-b2b 0|1] [--rule srs-plus|srs|srs-x|jstris-180|no-kick] [--workers N|--auto-workers N] [--use-all-cpu-threads] [--cpu-warmup] [--ties]

@@ -36,6 +36,9 @@ use super::{
 #[path = "parallel_score_cells.rs"]
 mod parallel_score_cells;
 
+#[path = "terminal_replay_parallel.rs"]
+mod terminal_replay_parallel;
+
 #[cfg(feature = "stage-profiling")]
 const PROFILE_SAMPLE_INTERVAL: u64 = 256;
 
@@ -461,6 +464,7 @@ impl ExactReplayMaterializationReport {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ExactReplayMaterializationError {
     Cancelled,
+    ParallelWorkerFailed,
     InvalidEvidence,
     ProjectionOverflow,
     ExecutionLimitExceeded {
@@ -565,48 +569,35 @@ impl ExactScoringExecutionMaterializer {
         batch: &ExactScoringExecutionBatch,
         control: &ExecutionControl,
     ) -> Result<ExactScoringExecutionMaterialization, ExactScoringExecutionCancelled> {
-        let mut aggregates = Vec::with_capacity(batch.graphs().len());
-        let mut complete = batch.complete();
+        Self::materialize_terminal_replays_with_memory_limit(batch, control, 0, u128::MAX)
+            .map(|(materialized, _)| materialized)
+            .map_err(|_| ExactScoringExecutionCancelled)
+    }
 
-        for (graph_index, graph) in batch.graphs().iter().enumerate() {
-            if control.is_cancelled() {
-                return Err(ExactScoringExecutionCancelled);
-            }
-            control.report_progress(
-                "save-terminal-execution",
-                graph_index as u64,
-                Some(batch.graphs().len() as u64),
-            );
-            let mut executions = Vec::new();
-            for (pattern_id, sequence) in batch.patterns().iter().enumerate() {
-                let (mut terminal_executions, cell_complete) =
-                    materialize_terminal_replays_for_cell(
-                        batch, graph, sequence, pattern_id, control,
-                    )?;
-                complete &= cell_complete;
-                executions.append(&mut terminal_executions);
-            }
-            aggregates.push(CandidateExecutionAggregate::new(
-                graph.candidate_id(),
-                executions,
-            ));
-        }
-        control.report_progress(
-            "save-terminal-execution",
-            batch.graphs().len() as u64,
-            Some(batch.graphs().len() as u64),
-        );
-
-        Ok(ExactScoringExecutionMaterialization {
-            aggregates,
-            scored_executions: Vec::new(),
-            t_spin_single_pattern_ids: BTreeSet::new(),
-            t_spin_single_candidate_ids: BTreeSet::new(),
-            t_spin_single_execution_count: 0,
-            complete,
-            #[cfg(feature = "stage-profiling")]
-            profile: None,
-        })
+    /// The same terminal-supply representatives, scheduled over bounded
+    /// original graph/pattern windows. The immutable batch and external owners
+    /// belong to `already_retained_bytes`; this call counts them once, along
+    /// with all live workspaces, pending results and returned replay storage.
+    /// The report's admitted peak includes that external byte count, while its
+    /// retained bytes describe only the returned materialization.
+    pub fn materialize_terminal_replays_with_memory_limit(
+        batch: &ExactScoringExecutionBatch,
+        control: &ExecutionControl,
+        already_retained_bytes: u128,
+        max_memory_bytes: u128,
+    ) -> Result<
+        (
+            ExactScoringExecutionMaterialization,
+            ExactReplayMaterializationReport,
+        ),
+        ExactReplayMaterializationError,
+    > {
+        terminal_replay_parallel::materialize(
+            batch,
+            control,
+            already_retained_bytes,
+            max_memory_bytes,
+        )
     }
 
     /// Materializes every distinct valid replay witness retained by the exact
@@ -1350,8 +1341,10 @@ impl ExactScoringExecutionMaterializer {
     }
 }
 
+#[cfg(test)]
 type TerminalSupplyKey = (u16, Option<PieceKind>);
 
+#[cfg(test)]
 #[derive(Clone, Debug)]
 struct RetainedTerminalPath {
     edges: Vec<ScoringExecutionEdge>,
@@ -1359,6 +1352,7 @@ struct RetainedTerminalPath {
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 fn materialize_terminal_replays_for_cell(
     batch: &ExactScoringExecutionBatch,
     graph: &ExactScoringExecutionGraph,
@@ -1497,6 +1491,7 @@ fn materialize_terminal_replays_for_cell(
     Ok((executions, complete))
 }
 
+#[cfg(test)]
 fn retain_terminal_successor(
     states: &mut BTreeMap<TerminalSupplyKey, RetainedTerminalPath>,
     next: SupplyState,
@@ -2682,6 +2677,133 @@ mod complete_replay_materialization_tests {
             ScoringLockEvidence::no_rotation(RotationState::Zero),
         )
         .with_perfect_clear(perfect_clear)
+    }
+
+    fn terminal_reference(batch: &ExactScoringExecutionBatch) -> Vec<CandidateExecutionAggregate> {
+        batch
+            .graphs()
+            .iter()
+            .map(|graph| {
+                let mut executions = Vec::new();
+                for (pattern_id, sequence) in batch.patterns().iter().enumerate() {
+                    let (mut cell, complete) = materialize_terminal_replays_for_cell(
+                        batch,
+                        graph,
+                        sequence,
+                        pattern_id,
+                        &ExecutionControl::default(),
+                    )
+                    .expect("original terminal representative DP");
+                    assert!(complete);
+                    executions.append(&mut cell);
+                }
+                CandidateExecutionAggregate::new(graph.candidate_id(), executions)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn terminal_arena_preserves_original_witnesses_and_sparse_ordinals_at_all_widths() {
+        let source = replay_collision_batch();
+        for hold_enabled in [false, true] {
+            for projected in [false, true] {
+                let patterns = (0..65)
+                    .map(|index| match index % 4 {
+                        0 => vec![PieceKind::O; 5],
+                        1 => vec![PieceKind::I; 5],
+                        2 => vec![PieceKind::O; 4],
+                        _ => vec![PieceKind::O; 6],
+                    })
+                    .collect();
+                let graphs = (0..3)
+                    .map(|index| {
+                        let graph = &source.graphs()[0];
+                        ExactScoringExecutionGraph::new(
+                            9 + index,
+                            graph.identity(),
+                            graph.root(),
+                            (0..graph.node_count())
+                                .map(|node| graph.node(node as u32).unwrap())
+                                .collect(),
+                            graph.all_edges().to_vec(),
+                        )
+                    })
+                    .collect();
+                let batch = ExactScoringExecutionBatch::new(
+                    source.layout(),
+                    source.initial_occupied(),
+                    patterns,
+                    source.initial_cursor(),
+                    hold_enabled.then_some(PieceKind::O),
+                    hold_enabled,
+                    projected,
+                    false,
+                    source.kick_table_id(),
+                    source.rule_profile_id(),
+                    graphs,
+                    true,
+                );
+                let expected = terminal_reference(&batch);
+                for width in [1, 2, 4, 8] {
+                    let control = ExecutionControl::default().with_parallelism(width);
+                    let (actual, report) = ExactScoringExecutionMaterializer::materialize_terminal_replays_with_memory_limit(
+                        &batch, &control, 1024, 16 * 1024 * 1024,
+                    ).expect("bounded terminal representatives");
+                    assert!(actual.complete());
+                    assert_eq!(
+                        actual.aggregates(),
+                        expected,
+                        "hold={hold_enabled} projected={projected} workers={width}"
+                    );
+                    assert_eq!(
+                        Some(report.retained_bytes()),
+                        actual.checked_replay_retained_bytes()
+                    );
+                    assert!(report.admitted_peak_bytes() >= 1024 + report.retained_bytes());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn terminal_memory_limit_counts_external_owner_once_and_rejects_one_byte_short() {
+        let batch = replay_collision_batch();
+        let control = ExecutionControl::default().with_parallelism(1);
+        let (expected, original) =
+            ExactScoringExecutionMaterializer::materialize_terminal_replays_with_memory_limit(
+                &batch,
+                &control,
+                0,
+                1024 * 1024,
+            )
+            .expect("baseline bounded DP");
+        let external = 13_579;
+        let cap = original.admitted_peak_bytes() + external;
+        let (actual, report) =
+            ExactScoringExecutionMaterializer::materialize_terminal_replays_with_memory_limit(
+                &batch, &control, external, cap,
+            )
+            .expect("exact aggregate cap");
+        assert_eq!(actual.aggregates(), expected.aggregates());
+        assert_eq!(report.retained_bytes(), original.retained_bytes());
+        assert_eq!(report.admitted_peak_bytes(), cap);
+        assert!(matches!(
+            ExactScoringExecutionMaterializer::materialize_terminal_replays_with_memory_limit(
+                &batch,
+                &control,
+                external,
+                cap - 1,
+            ),
+            Err(ExactReplayMaterializationError::MemoryLimitExceeded { .. })
+        ));
+        let cancelled = ExecutionControl::default().with_parallelism(8);
+        cancelled.cancellation.handle().cancel();
+        assert!(matches!(
+            ExactScoringExecutionMaterializer::materialize_terminal_replays_with_memory_limit(
+                &batch, &cancelled, external, cap,
+            ),
+            Err(ExactReplayMaterializationError::Cancelled)
+        ));
     }
 
     #[test]

@@ -804,6 +804,43 @@ impl AppResponse {
             .checked_add(core_heap)
     }
 
+    /// Heap retained by the closed Spin source response while its exact-cover
+    /// preparation owns the candidate identities and proof query. Product
+    /// payloads and page owners acquire their own authority after completion.
+    pub(crate) fn checked_spin_structure_retained_capacity_bytes(&self) -> Option<u128> {
+        if self.status != AppStatus::Success
+            || self.command != Some(AppCommandKind::SpinStructure)
+            || self.exit_code_hint != ExitCodeHint::Success
+            || self.error.is_some()
+            || self.continuation.is_some()
+            || self.pc_chance_execution_evidence.is_some()
+            || self.pc_failed_queue_execution_evidence.is_some()
+            || self.pc_save_execution_evidence.is_some()
+            || self.pc_score_execution_evidence.is_some()
+            || self.pc_score_portfolio_execution_evidence.is_some()
+            || self.pc_tiling_execution_evidence.is_some()
+            || self.product_capability_result.is_some()
+            || self.public_result_payload.is_some()
+            || self.public_page_source_owner.is_some()
+            || self.result.as_ref().map(AppResult::kind) != Some("spin-structure")
+        {
+            return None;
+        }
+        let Some(AppRenderModel::SpinStructure(report)) = &self.render_model else {
+            return None;
+        };
+        self.result.as_ref()?.checked_retained_capacity_bytes()?
+            .checked_add(self.diagnostics.validation().checked_retained_capacity_bytes()?)?
+            .checked_add(self.backend_report.checked_retained_capacity_bytes()?)?
+            .checked_add(self.resource_report.checked_retained_capacity_bytes()?)?
+            .checked_add(self.capability_report.checked_retained_capacity_bytes()?)?
+            .checked_add(checked_count_bytes(
+                self.effects.capacity() as u128,
+                core::mem::size_of::<AppEffect>() as u128,
+            )?)?
+            .checked_add(report.checked_retained_capacity_bytes()?)
+    }
+
     /// The replay source already reserves the original Core owner. Reuse the
     /// exact same closed ordinary-PC response shape, subtracting only that
     /// measured Core heap, not summary/diagnostic/report clones.

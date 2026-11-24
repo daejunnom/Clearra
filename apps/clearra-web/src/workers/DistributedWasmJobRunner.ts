@@ -60,16 +60,14 @@ export type MinimumManagerPolicy = 'auto' | 'shared' | 'dedicated';
 /** Pure topology choice; neither this decision nor a ready worker is a memory
  * admission. The guarded ABI must admit the actual whole-job lease first. */
 export function minimumManagerTopology(
-  computeWorkers: number, logicalProcessors: number, guarded: boolean,
-  localAvailable: boolean, policy: MinimumManagerPolicy = 'auto'
+  computeWorkers: number, _logicalProcessors: number, _guarded: boolean,
+  _localAvailable: boolean, _policy: MinimumManagerPolicy = 'auto'
 ): { controlOnly: boolean; remoteWorkers: number; partitions: number } {
   const workers = Math.max(1, Math.floor(computeWorkers));
-  const logical = Math.max(1, Math.floor(logicalProcessors));
-  const controlOnly = guarded && localAvailable && policy !== 'shared' && workers > 1 && workers < logical;
   return {
-    controlOnly,
-    remoteWorkers: Math.max(1, workers - Number(!controlOnly)),
-    partitions: Math.max(1, workers - Number(!localAvailable)) * 4
+    controlOnly: true,
+    remoteWorkers: workers,
+    partitions: workers * 4
   };
 }
 
@@ -612,16 +610,17 @@ export class DistributedWasmJobRunner {
         finalEvents = this.wasm.distributed_finish_start(this.jobId, workersUsed);
         const guardedExact = Boolean(this.wasm.distributed_finish_parallel_configure &&
           this.wasm.distributed_finish_parallel_admit && this.wasm.distributed_finish_parallel_guarded_query);
-        let minimumTopology = minimumManagerTopology(plan.workerCount,
+        const completionWorkerCount = plan.completionWorkerCount ?? plan.workerCount;
+        const minimumTopology = minimumManagerTopology(completionWorkerCount,
           this.hostCapabilities.logicalProcessorCount, guardedExact, localExactAvailable, this.minimumManagerPolicy);
         let minimumAdmitted = false;
         const minimumGrant = this.resourceLease!.token.grant;
-        if (guardedExact && plan.workerCount > 1 && finalEvents === null) {
+        if (guardedExact && completionWorkerCount > 0 && finalEvents === null) {
           this.wasm.distributed_finish_parallel_configure!(this.jobId,
             minimumGrant.computeUnits, minimumGrant.memoryBytes);
         }
         while (finalEvents === null) {
-          if (plan.workerCount > 1 &&
+          if (completionWorkerCount > 0 &&
             this.wasm.distributed_finish_parallel_prepare &&
             this.wasm.distributed_finish_parallel_task &&
             this.wasm.distributed_finish_parallel_merge) {
@@ -634,12 +633,6 @@ export class DistributedWasmJobRunner {
                 if (!minimumAdmitted) {
                   minimumAdmitted = this.wasm.distributed_finish_parallel_admit!(this.jobId,
                     minimumTopology.remoteWorkers, minimumTopology.controlOnly, minimumGrant.computeUnits, minimumGrant.memoryBytes);
-                  if (!minimumAdmitted && minimumTopology.controlOnly) {
-                    minimumTopology = minimumManagerTopology(plan.workerCount,
-                      this.hostCapabilities.logicalProcessorCount, true, localExactAvailable, 'shared');
-                    minimumAdmitted = this.wasm.distributed_finish_parallel_admit!(this.jobId,
-                      minimumTopology.remoteWorkers, false, minimumGrant.computeUnits, minimumGrant.memoryBytes);
-                  }
                   if (!minimumAdmitted) throw new Error('minimum parallel whole-job memory admission unavailable');
                 }
                 // A late remote initialization failure is fail-closed. Never
@@ -691,6 +684,7 @@ export class DistributedWasmJobRunner {
                   this.wasm.distributed_finish_parallel_redundant!(this.jobId, key));
               };
               const dispatchRemoteTasks = async () => {
+                let retriedAfterDrain = false;
                 for (;;) {
                   this.requireActive();
                   const admissionStarted = wave ? performance.now() : 0;
@@ -724,7 +718,18 @@ export class DistributedWasmJobRunner {
                     cancelSatisfiedSiblings();
                   }, idleAssistAvailable ? () => this.wasm.distributed_finish_parallel_last_task_key!(this.jobId) : undefined);
                   if (wave) wave.remote_admission_wait_ms += performance.now() - admissionStarted;
-                  if (!dispatched) break;
+                  if (dispatched) {
+                    retriedAfterDrain = false;
+                    continue;
+                  }
+                  if (retriedAfterDrain) break;
+                  // A bounded completion receipt window can temporarily close
+                  // issuance behind a slow earlier ordinal. Drain ownership,
+                  // then resume the SAME source and worker query. This also
+                  // opens the replay first-page tasks after count reduction.
+                  await this.pool.waitForIdle();
+                  this.requireActive();
+                  retriedAfterDrain = true;
                 }
               };
               const remoteTasks = (async () => {

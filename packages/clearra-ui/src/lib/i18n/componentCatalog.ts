@@ -314,7 +314,7 @@ export const COMPONENT_MESSAGES = {
   boardMaskV1MustBe60Lowercase: { en: "Board mask v1 must be 60 lowercase hexadecimal digits.", ko: "Board mask v1은 소문자 60자리 16진수여야 합니다.", ja: "盤面マスクv1には小文字の16進数60桁を指定してください。" },
   heightMustBeBetween4And24: { en: "Height must be between 4 and 24.", ko: "높이는 4..24여야 합니다.", ja: "高さは4〜24にしてください。" },
   theBoardMaskHasCellsOutsideThe: { en: "The board mask has cells outside the selected height.", ko: "Board mask에 선택 높이 밖의 셀이 있습니다.", ja: "盤面マスクに選択した高さの外側のセルが含まれています。" },
-  enterAnInventoryOf1255I: { en: "Enter an inventory of 1..255 I,O,T,S,Z,J,L pieces.", ko: "1..255개의 I,O,T,S,Z,J,L inventory를 입력하세요.", ja: "I、O、T、S、Z、J、Lで1〜255個の供給ミノを入力してください。" },
+  enterAnInventoryWithUpTo255EachPiece: { en: "Enter I,O,T,S,Z,J,L pieces, with at most 255 of each piece.", ko: "I,O,T,S,Z,J,L 공급을 입력하세요. 각 미노는 최대 255개까지 사용할 수 있습니다.", ja: "I、O、T、S、Z、J、Lの供給ミノを入力してください。各種類は最大255個です。" },
   theFillRangeMustSatisfy0Bottom: { en: "The fill range must satisfy 0 ≤ bottom < top ≤ height.", ko: "Fill 범위는 0 ≤ bottom < top ≤ height여야 합니다.", ja: "埋める範囲は0 ≤ bottom < top ≤ heightを満たす必要があります。" },
   maximumPlacementsMustBePositiveAndNo: { en: "Maximum placements must be positive and no greater than the inventory.", ko: "최대 배치는 1 이상이며 inventory 수를 넘을 수 없습니다.", ja: "最大設置数は1以上、供給ミノ数以下にしてください。" },
   theGuaranteedFinalPieceMustMatchThe: { en: "The guaranteed final piece must match the inventory and spin profile.", ko: "보장 마지막 조각은 inventory와 spin profile에 맞아야 합니다.", ja: "確定させる最後のミノは、供給ミノとスピンプロファイルに一致する必要があります。" },

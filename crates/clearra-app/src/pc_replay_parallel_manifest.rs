@@ -129,25 +129,44 @@ impl PcReplaySourceBuildSession {
                 .checked_mul(patterns)
                 .and_then(|n| n.checked_add(self.next_pattern))
                 .ok_or(OVERFLOW)?;
-            let count = wave_capacity.min(cells - first);
+            let capacity = wave_capacity.min(cells - first);
             let workspace_headers = bytes::<LanguageLease<'_>>(control.parallelism())?
                 .checked_add(core::mem::size_of::<Mutex<LiveMemory>>() as u128)
-                .and_then(|n| n.checked_add(core::mem::size_of::<Mutex<VecDeque<usize>>>() as u128))
+                .and_then(|n| n.checked_add(core::mem::size_of::<Mutex<VecDeque<(usize, usize)>>>() as u128))
                 .ok_or(OVERFLOW)?;
             self.guard_additional(
-                bytes::<usize>(count)?
+                bytes::<(usize, usize)>(capacity)?
                     .checked_add(workspace_headers)
                     .ok_or(OVERFLOW)?,
             )?;
             let mut counts = VecDeque::new();
             counts
-                .try_reserve_exact(count)
+                .try_reserve_exact(capacity)
                 .map_err(|_| "complete_replay_allocation_failed")?;
-            counts.resize(count, 0);
+            let mut geometry = self.next_geometry;
+            let mut pattern = self.next_pattern;
+            while counts.len() < capacity && geometry < self.pending.len() {
+                if control.is_cancelled() { return Err("complete_replay_cancelled".into()); }
+                match self.source.next_possible_pattern(&self.pending[geometry].1, pattern)? {
+                    Some(next) => {
+                        counts.push_back((geometry * patterns + next, 0));
+                        pattern = next + 1;
+                    }
+                    None => { geometry += 1; pattern = 0; }
+                }
+            }
+            if counts.is_empty() {
+                // Every remaining cell was rejected by the original source's
+                // necessary-supply proof. No successful queue was sampled away.
+                while self.next_geometry < self.pending.len() { self.finish_geometry()?; }
+                break;
+            }
+            let count = counts.len();
+            let proved_empty = counts.back().expect("nonempty wave").0 + 1 - first - count;
             let baseline = self
                 .checked_retained_capacity_bytes()
                 .and_then(|n| n.checked_add(self.source.retained_external_bytes()?))
-                .and_then(|n| n.checked_add(bytes::<usize>(counts.capacity()).ok()?))
+                .and_then(|n| n.checked_add(bytes::<(usize, usize)>(counts.capacity()).ok()?))
                 .and_then(|n| n.checked_add(workspace_headers))
                 .ok_or(OVERFLOW)?;
             ensure_peak(baseline, self.source.maximum_bytes, &mut |_| true)?;
@@ -170,7 +189,7 @@ impl PcReplaySourceBuildSession {
                 },
                 |lease, tasks| {
                     for offset in tasks {
-                        let ordinal = first + offset;
+                        let ordinal = counts.lock().map_err(|_| PcReplayPageError::from("complete_replay_worker_failed"))?[offset].0;
                         let geometry = ordinal / patterns;
                         let pattern = ordinal % patterns;
                         let locations = &self.pending[geometry].1;
@@ -220,11 +239,11 @@ impl PcReplaySourceBuildSession {
                         lease.map(admission)?;
                         counts.lock().map_err(|_| {
                             PcReplayPageError::from("complete_replay_worker_failed")
-                        })?[offset] = witnesses;
+                        })?[offset].1 = witnesses;
                         let done = completed.fetch_add(1, Ordering::AcqRel) + 1;
                         control.report_progress(
                             "execution-replay",
-                            (first + done) as u64,
+                            (first + proved_empty + done) as u64,
                             Some(cells as u64),
                         );
                     }

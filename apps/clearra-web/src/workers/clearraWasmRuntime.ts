@@ -131,6 +131,7 @@ export type ClearraWasmFailureDiagnostics = {
 export type ClearraDistributedPlan = {
   mode: 'serial' | 'cpu-multi' | 'gpu-multi' | 'ready';
   workerCount: number;
+  completionWorkerCount?: number;
   requestedBackend: 'auto' | 'cpu' | 'gpu' | 'hybrid';
   selectedBackend: 'wasm-cpu' | 'webgpu';
   fallbackUsed: boolean;
@@ -255,6 +256,7 @@ type ClearraRawWasmExports = {
   clearra_wasm_distributed_worker_initialization: () => number;
   clearra_wasm_distributed_worker_initialization_deferred: () => number;
   clearra_wasm_distributed_worker_count: () => number;
+  clearra_wasm_distributed_completion_worker_count?: () => number;
   clearra_wasm_distributed_worker_count_available: () => number;
   clearra_wasm_distributed_worker_count_exact: () => number;
   clearra_wasm_distributed_verification_required: () => number;
@@ -1221,6 +1223,9 @@ function wrapRawModule(
       return {
         mode: selectedMode,
         workerCount: Math.max(1, raw.clearra_wasm_distributed_worker_count()),
+        completionWorkerCount: Math.max(1,
+          raw.clearra_wasm_distributed_completion_worker_count?.() ??
+          raw.clearra_wasm_distributed_worker_count()),
         requestedBackend:
           requestedLabels[raw.clearra_wasm_distributed_requested_backend()] ?? 'auto',
         selectedBackend: selectedMode === 'gpu-multi' ? 'webgpu' : 'wasm-cpu',

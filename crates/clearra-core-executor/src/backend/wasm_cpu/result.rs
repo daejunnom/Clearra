@@ -7250,9 +7250,9 @@ mod tests {
     #[cfg(target_pointer_width = "64")]
     #[test]
     fn exact_six_line_session_fails_dense_preflight_before_catalog_allocation() {
-        let problem =
-            ProblemCompiler::compile_opening_pc(&OpeningPcSearchQuery::new(PcTarget::six_lines()))
-                .expect("lazy six-line descriptor");
+        let query = OpeningPcSearchQuery::new(PcTarget::six_lines())
+            .with_execution_policy(PcExecutionPolicy::default().with_max_memory_mib(Some(1024)));
+        let problem = ProblemCompiler::compile_opening_pc(&query).expect("lazy six-line descriptor");
         let universe = problem
             .piece_source()
             .materialized_universe()

@@ -2,6 +2,10 @@
 
 use std::sync::Arc;
 
+#[cfg(not(target_family = "wasm"))]
+#[path = "portfolio_native_parallel.rs"]
+mod native_parallel;
+
 use clearra_coverage::{
     cover::{
         ExactAtMostQuery, ExactAtMostReceipt, ExactAtMostTask, ExactMinimumCoverEnumerationStop,
@@ -3058,6 +3062,7 @@ fn try_clone_u64_slice_with_memory_guard(
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PortfolioAlternativeError {
+    NativeWorkerFailure { component: &'static str },
     InvalidIdentity { component: &'static str },
     CandidateMapLengthMismatch,
     CandidateMapNotCanonical,
@@ -3084,6 +3089,7 @@ pub enum PortfolioAlternativeError {
 impl PortfolioAlternativeError {
     pub const fn as_str(&self) -> &'static str {
         match self {
+            Self::NativeWorkerFailure { component } => component,
             Self::InvalidIdentity { .. } => "portfolio-identity-invalid",
             Self::CandidateMapLengthMismatch => "portfolio-candidate-map-length-mismatch",
             Self::CandidateMapNotCanonical => "portfolio-candidate-map-not-canonical",

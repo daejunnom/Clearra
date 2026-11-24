@@ -6499,9 +6499,9 @@ mod finesse_integration_tests {
     #[cfg(target_pointer_width = "64")]
     #[test]
     fn build_probability_six_line_descriptor_fails_before_compact_or_extended_allocation() {
-        let problem =
-            ProblemCompiler::compile_opening_pc(&OpeningPcSearchQuery::new(PcTarget::six_lines()))
-                .expect("lazy six-line descriptor");
+        let query = OpeningPcSearchQuery::new(PcTarget::six_lines())
+            .with_execution_policy(PcExecutionPolicy::default().with_max_memory_mib(Some(1024)));
+        let problem = ProblemCompiler::compile_opening_pc(&query).expect("lazy six-line descriptor");
         let compact =
             BuildProbabilityField::from_words_preserving_height(6, [0; 4], [0; 4]).unwrap();
         let extended =
@@ -6539,7 +6539,7 @@ mod finesse_integration_tests {
             assert_eq!(
                 report.execution_availability().reason(),
                 Some(
-                    clearra_core_domain::resource::ExecutionAvailabilityReason::DensePatternRepresentationUnavailable,
+                    clearra_core_domain::resource::ExecutionAvailabilityReason::MemoryBudgetExceeded,
                 )
             );
         }

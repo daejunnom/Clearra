@@ -118,11 +118,11 @@ for (const mode of ['search', 'cover', 'guaranteed'] as const satisfies readonly
     assert.equal(desktop.arguments.includes('--objective'), false);
     assert.equal(desktop.arguments.includes('--max-patterns'), false);
   } else if (mode === 'cover') {
-    assert.match(command, / --objective min-cover --max-patterns 100000 /u);
+    assert.match(command, / --objective min-cover --max-patterns 4294967295 /u);
     assert.equal(optionValue(desktop.arguments, '--objective'), 'min-cover');
     assert.equal(desktop.arguments.includes('--final-piece'), false);
   } else {
-    assert.match(command, / --final-piece T --max-patterns 100000 --no-dependency-report /u);
+    assert.match(command, / --final-piece T --max-patterns 4294967295 --no-dependency-report /u);
     assert.equal(optionValue(desktop.arguments, '--final-piece'), 'T');
     assert.equal(desktop.arguments.includes('--no-dependency-report'), true);
     assert.equal(desktop.arguments.includes('--objective'), false);
@@ -132,6 +132,17 @@ for (const mode of ['search', 'cover', 'guaranteed'] as const satisfies readonly
 const exactZeroLine = { ...createDefaultSpinStructureRequest(), lines: '0' as const };
 assert.deepEqual(spinStructureValidationCodes(exactZeroLine), []);
 assert.match(buildSpinStructureCommand(exactZeroLine), / --lines 0 /u);
+
+for (const inventory of ['I'.repeat(255) + 'T', 'IOTSZJL'.repeat(255)]) {
+  const request = { ...createDefaultSpinStructureRequest(), inventory };
+  assert.deepEqual(spinStructureValidationCodes(request), []);
+  assert.equal(optionValue(buildSpinStructureCommandArguments(request), '--pieces'), inventory);
+}
+assert.ok(spinStructureValidationCodes({ ...createDefaultSpinStructureRequest(), inventory: 'T'.repeat(256) }).includes('inventory_invalid'));
+for (const maxPatterns of [100_001, 0xffff_ffff]) {
+  assert.deepEqual(spinStructureValidationCodes({ ...createDefaultSpinStructureRequest(), mode: 'cover', maxPatterns }), []);
+}
+assert.ok(spinStructureValidationCodes({ ...createDefaultSpinStructureRequest(), mode: 'cover', maxPatterns: 0x1_0000_0000 }).includes('max_patterns_invalid'));
 
 const invalidGuaranteed = {
   ...createDefaultSpinStructureRequest(),

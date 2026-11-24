@@ -56,7 +56,7 @@ use crate::{
 pub struct WebCommandParser;
 
 pub(crate) const PC_SCORE_MAX_ARGUMENT_TOKENS: usize = 64;
-pub(crate) const PC_SCORE_MAX_ARGUMENT_BYTES: usize = 2_048;
+pub(crate) const PC_SCORE_MAX_ARGUMENT_BYTES: usize = 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum WebCompatibilityAuthority {
@@ -1031,7 +1031,8 @@ fn validate_pc_score_arguments(arguments: &[String]) -> Result<(), WebCommandErr
 
     // This is the bounded pre-translation admission, not a replacement for
     // the parser/App target validation. The declared target may occur after
-    // --queue. Keep the compact envelope for missing or malformed targets.
+    // --queue. The typed source parser checks actual piece counts; separators
+    // must not consume queue positions in this byte-level ingress guard.
     let target_lines = arguments
         .windows(2)
         .find(|pair| pair[0] == "--lines")
@@ -1065,7 +1066,14 @@ fn validate_pc_score_arguments(arguments: &[String]) -> Result<(), WebCommandErr
                 }
             }
             "--queue" => {
-                if value.len() > max_source_pieces {
+                let pieces = value
+                    .chars()
+                    .filter(|value| {
+                        !value.is_whitespace() && !matches!(value, ',' | '-' | '_' | '|')
+                    })
+                    .take(max_source_pieces.saturating_add(1))
+                    .count();
+                if pieces > max_source_pieces {
                     return Err(WebCommandError::new(
                         WebCommandErrorCode::InvalidValue,
                         format!(
@@ -2434,7 +2442,7 @@ fn parse_boundary_recovery_command(
     let mut max_total_states: Option<usize> = None;
     let mut stage_one_queue_len: Option<usize> = None;
     let mut required_placements: Option<usize> = None;
-    let mut max_early_placements: Option<u8> = None;
+    let mut max_early_placements: Option<usize> = None;
     let mut borrow_role_index = None;
     let mut borrow_placement_mask = None;
     let mut placement_roles = std::collections::BTreeMap::new();
@@ -2539,8 +2547,8 @@ fn parse_boundary_recovery_command(
                 max_early_placements = if value == "auto" {
                     None
                 } else {
-                    Some(value.parse::<u8>().ok()
-                        .filter(|value| usize::from(*value) < clearra_forward_search::MAX_BOUNDARY_QUEUE_PIECES)
+                    Some(value.parse::<usize>().ok()
+                        .filter(|value| *value < clearra_forward_search::MAX_BOUNDARY_QUEUE_PIECES)
                         .ok_or_else(|| WebCommandError::new(
                             WebCommandErrorCode::InvalidValue,
                             "--max-early-placements requires auto or a nonnegative integer within the second-stage role count",
@@ -2700,8 +2708,7 @@ fn parse_boundary_recovery_command(
         }
         placement_roles.into_values().collect()
     };
-    if max_early_placements
-        .is_some_and(|maximum| usize::from(maximum) > placement_horizon - stage_one_queue_len)
+    if max_early_placements.is_some_and(|maximum| maximum > placement_horizon - stage_one_queue_len)
     {
         return Err(WebCommandError::new(
             WebCommandErrorCode::InvalidValue,

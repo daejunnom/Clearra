@@ -23,7 +23,7 @@ const ORDER_TILE: usize = 64;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SpinStructureCoverageRow {
-    covered_pattern_indices: Vec<u32>,
+    pub(crate) covered_pattern_indices: Vec<u32>,
 }
 
 impl SpinStructureCoverageRow {
@@ -34,9 +34,9 @@ impl SpinStructureCoverageRow {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SpinStructureCoverageAnalysis {
-    pattern_count: usize,
-    covered_pattern_count: usize,
-    rows: Vec<SpinStructureCoverageRow>,
+    pub(crate) pattern_count: usize,
+    pub(crate) covered_pattern_count: usize,
+    pub(crate) rows: Vec<SpinStructureCoverageRow>,
 }
 
 impl SpinStructureCoverageAnalysis {
@@ -684,5 +684,37 @@ mod tests {
             ),
             Err(SpinStructureOrderCoverageError::QueryIdentityMismatch)
         );
+    }
+
+    #[test]
+    fn inventory_above_255_keeps_the_complete_source_and_original_rank() {
+        let mut query = one_piece_query();
+        query.inventory = PieceInventory::from_counts([255, 0, 1, 0, 0, 0, 0]);
+        query.max_placements = Some(1);
+        let query = SpinStructureSearcher::normalize_query(query).unwrap();
+        assert_eq!(query.inventory.total(), 256);
+        let source = InventoryOrderSource::new(query.inventory, 256).unwrap();
+        assert_eq!(source.len(), 256);
+        let mut last = Vec::new();
+        assert!(source.decode(255, &mut last));
+        assert_eq!(last.len(), 256);
+        assert_eq!(last[0], PieceKind::T);
+        let report = SpinStructureSearcher::run(query.clone()).unwrap();
+        assert!(report.outcome_count() > 0);
+        for workers in [1, 8] {
+            let coverage = analyze_spin_structure_coverage_with_control(
+                &query,
+                &report,
+                256,
+                &ExecutionControl::default().with_parallelism(workers),
+            )
+            .unwrap();
+            assert_eq!(coverage.pattern_count(), 256);
+            assert_eq!(coverage.covered_pattern_count(), 1);
+            assert!(coverage
+                .rows()
+                .iter()
+                .all(|row| row.covered_pattern_indices() == [255]));
+        }
     }
 }

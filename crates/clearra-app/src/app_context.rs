@@ -24,6 +24,10 @@ use crate::{
 #[path = "pc_replay_direct_finalizer.rs"]
 mod pc_replay_direct_finalizer;
 
+#[cfg(not(target_family = "wasm"))]
+#[path = "pc_minimum_direct_finalizer.rs"]
+pub(crate) mod pc_minimum_direct_finalizer;
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct AppContext {
     services: AppServices,
@@ -53,7 +57,19 @@ impl AppContext {
 
     /// Use the shared Rust CPU product service.
     pub fn rust_cpu_product() -> Self {
-        Self::default()
+        let context = Self::default();
+        #[cfg(not(target_family = "wasm"))]
+        {
+            // Native product hosts share the same stable physical/container
+            // capacity as search. A browser supplies its own host authority.
+            let mut context = context;
+            context.set_product_retention_budget(crate::ProductRetentionBudget::new(
+                clearra_core_executor::resource::product_memory_capacity_bytes(),
+            ));
+            context
+        }
+        #[cfg(target_family = "wasm")]
+        context
     }
 
     /// Use the independent C backend for explicit comparison.
@@ -140,12 +156,92 @@ impl AppContext {
                 .workers(),
             _ => usize::from(resource_budget.workers()),
         };
-        let product_control = if execution_control.parallelism() == 1 {
-            execution_control.clone().with_parallelism(request_workers)
-        } else {
-            execution_control.clone()
+        let product_control = execution_control
+            .clone()
+            .with_parallelism_if_unbound(request_workers);
+        let execution_parts = (
+            command,
+            output_policy,
+            resource_budget,
+            language,
+            file_policy,
+            product_capability_contract,
+        );
+        // Keep validation, serial preparation and terminal projection off the
+        // request thread as well. Nested bulk stages reuse this compute slot;
+        // explicit child pools suspend it only while managing and joining
+        // their own N compute workers.
+        #[cfg(not(target_family = "wasm"))]
+        return self.run_native_execution_parts(execution_parts, &product_control);
+        #[cfg(target_family = "wasm")]
+        self.run_bound_execution_parts(execution_parts, &product_control)
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    fn run_native_execution_parts(
+        &self,
+        execution_parts: AppExecutionParts,
+        control: &ExecutionControl,
+    ) -> AppResponse {
+        use clearra_core_domain::parallel_work::{try_for_each_chunk, ParallelWorkError};
+        use std::sync::Mutex;
+
+        let command_kind = execution_parts.0.kind();
+        let input = Mutex::new(Some(execution_parts));
+        let response = Mutex::new(None);
+        let result = try_for_each_chunk(
+            control,
+            1,
+            1,
+            || Ok::<(), ()>(()),
+            |_, _| {
+                let parts = input
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take()
+                    .ok_or(())?;
+                let completed = self.run_bound_execution_parts(parts, control);
+                *response
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(completed);
+                Ok(())
+            },
+        );
+        let component = match result {
+            Ok(()) => {
+                if let Some(completed) = response
+                    .into_inner()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                {
+                    return completed;
+                }
+                "product_compute_response_missing"
+            }
+            Err(ParallelWorkError::Cancelled) => "product_compute_cancelled",
+            Err(ParallelWorkError::ThreadSpawnFailed) => "product_compute_thread_spawn_failed",
+            Err(ParallelWorkError::WorkerPanicked) => "product_compute_worker_panicked",
+            Err(ParallelWorkError::Worker(())) => "product_compute_input_missing",
         };
-        let execution_control = &product_control;
+        AppResponse::failed(
+            AppStatus::ExecutionFailed,
+            AppError::new(AppErrorCode::ExecutionFailed, component),
+        )
+        .with_contract_context(command_kind)
+    }
+
+    fn run_bound_execution_parts(
+        &self,
+        execution_parts: AppExecutionParts,
+        execution_control: &ExecutionControl,
+    ) -> AppResponse {
+        let (
+            command,
+            output_policy,
+            resource_budget,
+            language,
+            file_policy,
+            product_capability_contract,
+        ) = execution_parts;
         let command_kind = command.kind();
         let file_policy = file_policy.as_ref().unwrap_or(&self.file_policy);
         let language = self
@@ -166,6 +262,7 @@ impl AppContext {
                 &validation_report,
                 &output_policy,
                 product_capability_contract.as_ref(),
+                execution_control.parallelism(),
             ) {
                 Ok(pc_score_external_retained_context_bytes) => {
                     let execution_context = AppExecutionContext {
@@ -208,6 +305,27 @@ impl AppContext {
                 command_kind,
                 &output_policy,
                 product_capability_contract.expect("checked pc.path contract"),
+                execution_control,
+            );
+        }
+        #[cfg(not(target_family = "wasm"))]
+        if response.status() == AppStatus::Success
+            && product_capability_contract
+                .as_ref()
+                .is_some_and(|contract| {
+                    matches!(
+                        contract.contract(),
+                        ProductCapabilityContract::PcMinimals
+                            | ProductCapabilityContract::PcPinnedMinimals
+                    )
+                })
+        {
+            return self.finalize_pc_minimum_response(
+                response,
+                command_kind,
+                &output_policy,
+                &resource_budget,
+                product_capability_contract.expect("checked pc.minimals contract"),
                 execution_control,
             );
         }
@@ -453,6 +571,7 @@ fn checked_score_direct_context_retained_bytes(
     validation_report: &DiagnosticReport,
     output_policy: &AppOutputPolicy,
     product_capability_contract: Option<&ValidatedProductCapabilityContract>,
+    parallelism: usize,
 ) -> Result<Option<u128>, &'static str> {
     if let Some(bytes) = checked_pc_score_direct_context_retained_bytes(
         validation_report,
@@ -467,7 +586,7 @@ fn checked_score_direct_context_retained_bytes(
     let bytes = checked_direct_score_context_base_bytes(validation_report, output_policy, false)?
         .checked_add(
             command
-                .checked_direct_external_retained_upper_bound_bytes()
+                .checked_direct_external_retained_upper_bound_bytes(parallelism)
                 .ok_or("setup_score_direct_external_retained_projection_unavailable")?,
         )
         .ok_or("setup_score_direct_external_retained_projection_unavailable")?;
@@ -480,7 +599,9 @@ fn checked_direct_score_context_base_bytes(
     include_pc_tiling_authority: bool,
 ) -> Result<u128, &'static str> {
     (core::mem::size_of::<AppExecutionParts>() as u128)
-        .checked_add(core::mem::size_of::<AppExecutionContext<'static>>() as u128)
+        .checked_add(native_compute_handoff_inline_bytes())
+        .and_then(|bytes| bytes.checked_add(core::mem::size_of::<ExecutionControl>() as u128))
+        .and_then(|bytes| bytes.checked_add(core::mem::size_of::<AppExecutionContext<'static>>() as u128))
         .and_then(|bytes| {
             bytes.checked_add(
                 core::mem::size_of::<std::sync::Arc<clearra_problem::SearchProblem>>() as u128,
@@ -519,6 +640,20 @@ fn checked_direct_score_context_base_bytes(
                 .and_then(|heap| bytes.checked_add(heap))
         })
         .ok_or("pc_score_direct_external_retained_projection_unavailable")
+}
+
+fn native_compute_handoff_inline_bytes() -> u128 {
+    #[cfg(not(target_family = "wasm"))]
+    {
+        // The input slot remains allocated after its value moves into the
+        // compute worker; the output slot is live during result construction.
+        (core::mem::size_of::<std::sync::Mutex<Option<AppExecutionParts>>>()
+            + core::mem::size_of::<std::sync::Mutex<Option<AppResponse>>>()) as u128
+    }
+    #[cfg(target_family = "wasm")]
+    {
+        0
+    }
 }
 
 #[cfg(test)]

@@ -1,41 +1,31 @@
-//! Native worker-ready driver for the independent spin-structure engine.
-
-use std::{
-    collections::VecDeque,
-    sync::mpsc::{self, Receiver, SyncSender},
-    thread::{self, JoinHandle},
-    time::Duration,
-};
+//! Native entry point for the spin engine's shared compute-budget driver.
 
 use clearra_core_domain::execution_cancellation::ExecutionControl;
 use clearra_spin_structure_search::{
     SpinStructureError, SpinStructureQuery, SpinStructureReport, SpinStructureSearcher,
-    SpinStructureTask,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum NativeSpinStructureError {
     Search(SpinStructureError),
     Cancelled,
-    WorkerSpawn,
-    WorkerChannelClosed,
-    WorkerPanicked,
-    MissingTaskResult,
 }
 
 impl NativeSpinStructureError {
     pub(crate) const fn is_cancelled(&self) -> bool {
-        matches!(self, Self::Cancelled)
+        matches!(
+            self,
+            Self::Cancelled | Self::Search(SpinStructureError::Cancelled)
+        )
     }
 
     pub(crate) const fn reason(&self) -> &'static str {
         match self {
+            Self::Search(SpinStructureError::Cancelled) | Self::Cancelled => {
+                "spin_structure_cancelled"
+            }
+            Self::Search(SpinStructureError::ParallelExecutionFailed(reason)) => reason,
             Self::Search(_) => "spin_structure_invalid_request",
-            Self::Cancelled => "spin_structure_cancelled",
-            Self::WorkerSpawn => "spin_structure_worker_spawn_failed",
-            Self::WorkerChannelClosed => "spin_structure_worker_channel_closed",
-            Self::WorkerPanicked => "spin_structure_worker_panicked",
-            Self::MissingTaskResult => "spin_structure_missing_task_result",
         }
     }
 }
@@ -46,28 +36,6 @@ impl From<SpinStructureError> for NativeSpinStructureError {
     }
 }
 
-enum WorkerRequest {
-    Search {
-        task_id: usize,
-        task: SpinStructureTask,
-    },
-}
-
-// The coordinator consumes completion reports directly from the channel; boxing
-// each successful worker event would add allocation in the result hot path.
-#[allow(clippy::large_enum_variant)]
-enum WorkerEvent {
-    Panicked,
-    Ready {
-        worker_index: usize,
-    },
-    Completed {
-        worker_index: usize,
-        task_id: usize,
-        result: Result<SpinStructureReport, SpinStructureError>,
-    },
-}
-
 pub(crate) fn run_native_spin_structure_search(
     query: SpinStructureQuery,
     requested_workers: usize,
@@ -76,196 +44,15 @@ pub(crate) fn run_native_spin_structure_search(
     if control.is_cancelled() {
         return Err(NativeSpinStructureError::Cancelled);
     }
-    let requested_workers = requested_workers.max(1);
-    if requested_workers == 1 {
-        return SpinStructureSearcher::run(query).map_err(Into::into);
-    }
-
-    let tasks = SpinStructureSearcher::partition(query.clone())?;
-    if tasks.is_empty() {
-        return SpinStructureSearcher::run(query).map_err(Into::into);
-    }
-    // Partitioning is complete before this pool starts. The caller only
-    // coordinates completions and therefore is not one of the requested
-    // search workers. Spawn the full requested count so an explicit
-    // all-logical-processors request does not silently run one search thread
-    // short; workers without an initial task simply remain idle until shutdown.
-    let worker_threads = requested_workers;
-    run_worker_ready(tasks, worker_threads, requested_workers, control)
-}
-
-fn run_worker_ready(
-    tasks: Vec<SpinStructureTask>,
-    worker_threads: usize,
-    requested_workers: usize,
-    control: &ExecutionControl,
-) -> Result<SpinStructureReport, NativeSpinStructureError> {
-    let task_count = tasks.len();
-    let (event_sender, event_receiver) = mpsc::channel();
-    let mut request_senders = Vec::with_capacity(worker_threads);
-    let mut handles = Vec::with_capacity(worker_threads);
-
-    for worker_index in 0..worker_threads {
-        let (request_sender, request_receiver) = mpsc::sync_channel(1);
-        let event_sender = event_sender.clone();
-        let handle = match thread::Builder::new()
-            .name(format!("clearra-spin-structure-{worker_index}"))
-            .spawn(move || {
-                let panic_sender = event_sender.clone();
-                run_worker_guarded(&panic_sender, || {
-                    worker_main(worker_index, request_receiver, event_sender);
-                });
-            }) {
-            Ok(handle) => handle,
-            Err(_) => {
-                drop(request_senders);
-                let _ = join_workers(handles);
-                return Err(NativeSpinStructureError::WorkerSpawn);
-            }
-        };
-        request_senders.push(request_sender);
-        handles.push(handle);
-    }
-    drop(event_sender);
-
-    let mut pending = tasks.into_iter().enumerate().collect::<VecDeque<_>>();
-    let mut results = std::iter::repeat_with(|| None)
-        .take(task_count)
-        .collect::<Vec<Option<SpinStructureReport>>>();
-    let drive_result = drive_workers(
-        &request_senders,
-        &event_receiver,
-        &mut pending,
-        &mut results,
-        control,
-    );
-    drop(request_senders);
-    let join_result = join_workers(handles);
-    drive_result?;
-    join_result?;
-
-    let ordered = results
-        .into_iter()
-        .collect::<Option<Vec<_>>>()
-        .ok_or(NativeSpinStructureError::MissingTaskResult)?;
-    SpinStructureSearcher::merge_task_reports(
-        ordered,
-        u16::try_from(requested_workers).unwrap_or(u16::MAX),
-    )
-    .map_err(Into::into)
-}
-
-fn drive_workers(
-    request_senders: &[SyncSender<WorkerRequest>],
-    event_receiver: &Receiver<WorkerEvent>,
-    pending: &mut VecDeque<(usize, SpinStructureTask)>,
-    results: &mut [Option<SpinStructureReport>],
-    control: &ExecutionControl,
-) -> Result<(), NativeSpinStructureError> {
-    let total = results.len() as u64;
-    let mut completed = 0_u64;
-    while completed != total {
-        if control.is_cancelled() {
-            return Err(NativeSpinStructureError::Cancelled);
-        }
-        let event = match event_receiver.recv_timeout(Duration::from_millis(25)) {
-            Ok(event) => event,
-            Err(mpsc::RecvTimeoutError::Timeout) => continue,
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                return Err(NativeSpinStructureError::WorkerChannelClosed);
-            }
-        };
-        match event {
-            WorkerEvent::Panicked => return Err(NativeSpinStructureError::WorkerPanicked),
-            WorkerEvent::Ready { worker_index } => {
-                dispatch_next(request_senders, worker_index, pending)?;
-            }
-            WorkerEvent::Completed {
-                worker_index,
-                task_id,
-                result,
-            } => {
-                results[task_id] = Some(result?);
-                completed += 1;
-                control.report_progress("spin-structure", completed, Some(total));
-                dispatch_next(request_senders, worker_index, pending)?;
-            }
-        }
-    }
-    Ok(())
-}
-
-fn run_worker_guarded(events: &mpsc::Sender<WorkerEvent>, worker: impl FnOnce()) {
-    if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(worker)) {
-        // Other workers may keep the channel open indefinitely. Notify the
-        // coordinator explicitly, even when a worker cannot send a result.
-        let _ = events.send(WorkerEvent::Panicked);
-        // Preserve join's panic result even if all task results arrived first.
-        std::panic::resume_unwind(payload);
-    }
-}
-
-fn dispatch_next(
-    request_senders: &[SyncSender<WorkerRequest>],
-    worker_index: usize,
-    pending: &mut VecDeque<(usize, SpinStructureTask)>,
-) -> Result<(), NativeSpinStructureError> {
-    let Some((task_id, task)) = pending.pop_front() else {
-        return Ok(());
-    };
-    request_senders[worker_index]
-        .send(WorkerRequest::Search { task_id, task })
-        .map_err(|_| NativeSpinStructureError::WorkerChannelClosed)
-}
-
-fn worker_main(
-    worker_index: usize,
-    requests: Receiver<WorkerRequest>,
-    events: mpsc::Sender<WorkerEvent>,
-) {
-    if events.send(WorkerEvent::Ready { worker_index }).is_err() {
-        return;
-    }
-    while let Ok(request) = requests.recv() {
-        match request {
-            WorkerRequest::Search { task_id, task } => {
-                let result = SpinStructureSearcher::run_task(task);
-                let failed = result.is_err();
-                if events
-                    .send(WorkerEvent::Completed {
-                        worker_index,
-                        task_id,
-                        result,
-                    })
-                    .is_err()
-                    || failed
-                {
-                    return;
-                }
-            }
-        }
-    }
-}
-
-fn join_workers(handles: Vec<JoinHandle<()>>) -> Result<(), NativeSpinStructureError> {
-    let mut panicked = false;
-    for handle in handles {
-        if handle.join().is_err() {
-            panicked = true;
-        }
-    }
-    if panicked {
-        Err(NativeSpinStructureError::WorkerPanicked)
-    } else {
-        Ok(())
-    }
+    let control = control
+        .clone()
+        .with_parallelism_if_unbound(requested_workers.max(1));
+    SpinStructureSearcher::run_with_control(query, &control).map_err(Into::into)
 }
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Mutex};
-    use std::time::Instant;
-
+    use super::*;
     use clearra_core_domain::{
         execution_cancellation::{ExecutionCancellationToken, ExecutionProgress, ProgressSink},
         piece::piece_kind::PieceKind,
@@ -273,115 +60,7 @@ mod tests {
     use clearra_spin_structure_search::{
         PieceInventory, SpinLineRequirement, SpinStructureMode, StructureBoard,
     };
-
-    use super::*;
-
-    #[test]
-    fn join_workers_waits_for_every_sibling_after_a_panic() {
-        let panicked = thread::spawn(|| panic!("intentional worker panic"));
-        let deadline = Instant::now() + Duration::from_secs(2);
-        while !panicked.is_finished() {
-            assert!(Instant::now() < deadline, "panic fixture did not finish");
-            thread::yield_now();
-        }
-        let (release_tx, release_rx) = mpsc::channel();
-        let sibling = thread::spawn(move || {
-            release_rx.recv().expect("release sibling worker");
-        });
-        let (started_tx, started_rx) = mpsc::channel();
-        let (joined_tx, joined_rx) = mpsc::channel();
-        let coordinator = thread::spawn(move || {
-            started_tx.send(()).expect("report join start");
-            joined_tx
-                .send(join_workers(vec![panicked, sibling]))
-                .expect("report join result");
-        });
-        started_rx
-            .recv_timeout(Duration::from_secs(2))
-            .expect("join start");
-        assert!(matches!(
-            joined_rx.recv_timeout(Duration::from_millis(100)),
-            Err(mpsc::RecvTimeoutError::Timeout)
-        ));
-        release_tx.send(()).expect("release sibling");
-        assert!(matches!(
-            joined_rx.recv_timeout(Duration::from_secs(2)),
-            Ok(Err(NativeSpinStructureError::WorkerPanicked))
-        ));
-        coordinator.join().expect("join coordinator");
-    }
-
-    #[test]
-    fn worker_panic_unblocks_driver_even_when_another_sender_is_alive() {
-        let (events, receiver) = mpsc::channel();
-        let worker_events = events.clone();
-        let worker = thread::spawn(move || {
-            run_worker_guarded(&worker_events, || panic!("intentional worker panic"));
-        });
-        let (result_sender, result_receiver) = mpsc::channel();
-        let coordinator = thread::spawn(move || {
-            let mut pending = VecDeque::new();
-            let mut results = vec![None];
-            let result = drive_workers(
-                &[],
-                &receiver,
-                &mut pending,
-                &mut results,
-                &ExecutionControl::default(),
-            );
-            let _ = result_sender.send(result);
-        });
-        let result = result_receiver.recv_timeout(Duration::from_secs(2));
-        // Even a broken driver is allowed to terminate before asserting, so
-        // the regression test never leaves an owned coordinator thread behind.
-        drop(events);
-        assert!(worker.join().is_err(), "guard must preserve the panic");
-        coordinator.join().expect("join coordinator");
-        assert!(matches!(
-            result,
-            Ok(Err(NativeSpinStructureError::WorkerPanicked))
-        ));
-    }
-
-    #[test]
-    fn driver_preserves_queued_search_error_and_cancellation_priority() {
-        let (events, receiver) = mpsc::channel();
-        events
-            .send(WorkerEvent::Completed {
-                worker_index: 0,
-                task_id: 0,
-                result: Err(SpinStructureError::ZeroPlacementLimit),
-            })
-            .expect("queue search error");
-        events.send(WorkerEvent::Panicked).expect("queue panic");
-        let mut pending = VecDeque::new();
-        let mut results = vec![None];
-        assert_eq!(
-            drive_workers(
-                &[],
-                &receiver,
-                &mut pending,
-                &mut results,
-                &ExecutionControl::default(),
-            ),
-            Err(NativeSpinStructureError::Search(
-                SpinStructureError::ZeroPlacementLimit
-            ))
-        );
-
-        let cancellation = ExecutionCancellationToken::new();
-        cancellation.handle().cancel();
-        assert_eq!(
-            drive_workers(
-                &[],
-                &receiver,
-                &mut pending,
-                &mut results,
-                &ExecutionControl::new(cancellation),
-            ),
-            Err(NativeSpinStructureError::Cancelled)
-        );
-    }
+    use std::sync::{Arc, Mutex};
 
     fn fixture_query() -> SpinStructureQuery {
         let inventory = PieceInventory::from_pieces([PieceKind::T]).expect("inventory");

@@ -36,6 +36,7 @@
     normalizedSpinInventory,
     spinStructureRequestForDesktop,
     spinStructureValidationCodes,
+    SPIN_STRUCTURE_MAX_PATTERNS,
     type SpinStructureRequest,
     type SpinStructureValidationCode
   } from './spinStructureModel';
@@ -177,7 +178,7 @@
       board_mask_invalid: 'boardMaskV1MustBe60Lowercase',
       height_invalid: 'heightMustBeBetween4And24',
       board_outside_height: 'theBoardMaskHasCellsOutsideThe',
-      inventory_invalid: 'enterAnInventoryOf1255I',
+      inventory_invalid: 'enterAnInventoryWithUpTo255EachPiece',
       fill_window_invalid: 'theFillRangeMustSatisfy0Bottom',
       max_placements_invalid: 'maximumPlacementsMustBePositiveAndNo',
       max_patterns_invalid: 'maximumPatternsMustBeBetween1And',
@@ -238,7 +239,7 @@
     </div>
     {#if request.mode !== 'search'}
       <section class="route-options">
-        <label><span>{componentMessage(language, 'maximumInventoryPatterns')}</span><input type="number" min="1" max="100000" value={request.maxPatterns} on:input={(event) => updateRequest({ maxPatterns: Number((event.currentTarget as HTMLInputElement).value) })} /></label>
+        <label><span>{componentMessage(language, 'maximumInventoryPatterns')}</span><input type="number" min="1" max={SPIN_STRUCTURE_MAX_PATTERNS} value={request.maxPatterns} on:input={(event) => updateRequest({ maxPatterns: Number((event.currentTarget as HTMLInputElement).value) })} /></label>
         {#if request.mode === 'cover'}
           <p>{componentMessage(language, 'theObjectiveIsFixedToMinCover')}</p>
         {:else}

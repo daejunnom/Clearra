@@ -245,7 +245,7 @@ impl SetupScoreAppCommand {
     }
 
     /// Setup-score's coverage candidates are built from one caller policy.
-    /// An empty document performs no BuildUp work and loads no accelerator.
+    /// An empty document performs no construction work and loads no accelerator.
     pub(crate) fn exact_accelerator_policy(&self) -> Option<(bool, bool)> {
         let policy = self
             .candidates
@@ -262,7 +262,10 @@ impl SetupScoreAppCommand {
 
     /// Conservative upper bound for every Setup-score owner which remains
     /// live beside one exact PC-score authority during direct App execution.
-    pub(crate) fn checked_direct_external_retained_upper_bound_bytes(&self) -> Option<u128> {
+    pub(crate) fn checked_direct_external_retained_upper_bound_bytes(
+        &self,
+        parallelism: usize,
+    ) -> Option<u128> {
         let mut bytes = (self.document_hash.capacity() as u128).checked_add(
             (self.candidates.capacity() as u128)
                 .checked_mul(core::mem::size_of::<SetupScoreCandidateRequest>() as u128)?,
@@ -289,7 +292,14 @@ impl SetupScoreAppCommand {
                 .checked_add(weight_bytes)?
                 .checked_add(256)?;
         }
-        bytes.checked_add(transient)
+        let patterns = self
+            .candidates
+            .first()
+            .map_or(0, |candidate| candidate.coverage.setup_score_max_patterns());
+        bytes.checked_add(transient)?.checked_add(
+            (priority_reduction_window(patterns, parallelism) as u128)
+                .checked_mul(core::mem::size_of::<std::sync::atomic::AtomicU64>() as u128)?,
+        )
     }
 }
 
@@ -398,19 +408,8 @@ fn execute(
     let weights = canonical_weights.ok_or_else(|| {
         SetupScoreRunError::Rejected("setup score candidate set is empty".to_owned())
     })?;
-    let average_priority_score = (0..weights.len()).try_fold(0.0_f64, |total, index| {
-        let pattern = PatternId::new(index);
-        let best = reduced
-            .iter()
-            .filter(|candidate| candidate.setup_row.contains(pattern))
-            .map(|candidate| f64::from_bits(candidate.continuation.expected_score_bits))
-            .reduce(f64::max)
-            .unwrap_or(0.0);
-        let weight = weights.weight(pattern).ok_or_else(|| {
-            SetupScoreRunError::Rejected("setup score pattern weight is missing".to_owned())
-        })?;
-        Ok::<_, SetupScoreRunError>(total + weight.get() * best)
-    })?;
+    let average_priority_score =
+        reduce_priority_score(&reduced, &weights, context.execution_control())?;
     if !average_priority_score.is_finite() || average_priority_score < 0.0 {
         return Err(SetupScoreRunError::Rejected(
             "setup score reduction produced an invalid average".to_owned(),
@@ -471,6 +470,78 @@ fn execute(
         SETUP_SCORE_RESULT_CONTRACT,
         ProductResultPayloadContent::SetupScoreRanking(payload),
     ))
+}
+
+fn priority_reduction_window(patterns: usize, parallelism: usize) -> usize {
+    patterns.min(parallelism.max(1).saturating_mul(256))
+}
+
+/// Candidate comparisons are independent by original pattern ordinal. Keep a
+/// bounded scalar window, then add its values in the original order so thread
+/// completion order cannot change the public f64 result or evaluation proof.
+fn reduce_priority_score(
+    candidates: &[ReducedCandidate],
+    weights: &clearra_coverage::pattern::weighted_pattern_set::WeightedPatternSet,
+    control: &clearra_core_domain::execution_cancellation::ExecutionControl,
+) -> Result<f64, SetupScoreRunError> {
+    use clearra_core_domain::parallel_work::{try_for_each_chunk, ParallelWorkError};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    let window_size = priority_reduction_window(weights.len(), control.parallelism());
+    if window_size == 0 {
+        return Ok(0.0);
+    }
+    let mut window = Vec::new();
+    window.try_reserve_exact(window_size).map_err(|_| {
+        SetupScoreRunError::Rejected("setup score reduction allocation failed".to_owned())
+    })?;
+    window.resize_with(window_size, || AtomicU64::new(0));
+    let mut total = 0.0_f64;
+    for first in (0..weights.len()).step_by(window_size) {
+        let count = window_size.min(weights.len() - first);
+        try_for_each_chunk(
+            control,
+            count,
+            32,
+            || Ok::<(), SetupScoreRunError>(()),
+            |_, range| {
+                for offset in range {
+                    let pattern = PatternId::new(first + offset);
+                    let best = candidates
+                        .iter()
+                        .filter(|candidate| candidate.setup_row.contains(pattern))
+                        .map(|candidate| f64::from_bits(candidate.continuation.expected_score_bits))
+                        .reduce(f64::max)
+                        .unwrap_or(0.0);
+                    let weight = weights.weight(pattern).ok_or_else(|| {
+                        SetupScoreRunError::Rejected(
+                            "setup score pattern weight is missing".to_owned(),
+                        )
+                    })?;
+                    window[offset].store((weight.get() * best).to_bits(), Ordering::Relaxed);
+                }
+                Ok(())
+            },
+        )
+        .map_err(|error| match error {
+            ParallelWorkError::Worker(error) => error,
+            ParallelWorkError::Cancelled => {
+                SetupScoreRunError::Core(clearra_core_executor::CoreExecutionError::Cancelled)
+            }
+            ParallelWorkError::ThreadSpawnFailed | ParallelWorkError::WorkerPanicked => {
+                SetupScoreRunError::Rejected("setup score reduction worker failed".to_owned())
+            }
+        })?;
+        for value in &window[..count] {
+            total += f64::from_bits(value.load(Ordering::Relaxed));
+        }
+        control.report_progress(
+            "setup-score-reduction",
+            (first + count) as u64,
+            Some(weights.len() as u64),
+        );
+    }
+    Ok(total)
 }
 
 fn continuation_producer_indices(candidates: &[SetupScoreCandidateRequest]) -> Vec<usize> {

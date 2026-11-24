@@ -18,6 +18,8 @@ pub mod commands;
 mod cooperative_execution;
 pub mod diagnostics;
 mod distributed_forward_execution;
+mod distributed_spin_structure_execution;
+pub use distributed_spin_structure_execution::{DistributedSpinStructurePreparation,PreparedDistributedSpinStructureSearch};
 mod distributed_recovery_build_execution;
 pub use distributed_recovery_build_execution::{
     DistributedRecoveryBuildPreparation, PreparedDistributedRecoveryBuildSearch,
@@ -375,6 +377,7 @@ pub use pc_pinned_solution_document::{
 };
 pub use pc_replay_page_error::PcReplayPageError;
 pub use pc_replay_page_source::{
+    PcReplayParallelQuery, PcReplayParallelReceipt, PcReplayParallelTask, PcReplayParallelWorker,
     PcReplayPageAdvance, PcReplayPageSource, PcReplayPageStore, PcReplaySourceBuildSession,
     PC_REPLAY_MEMBER_PAGE_CONTRACT, PC_REPLAY_MEMBER_PAGE_SIZE,
 };

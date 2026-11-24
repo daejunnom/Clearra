@@ -12,7 +12,7 @@ mod source_parallel;
 mod source_worker;
 pub use source_parallel::{
     SpinStructureParallelCoordinator, SpinStructureParallelError, SpinStructureParallelProduce,
-    SpinStructureParallelProgress, SpinStructureParallelWorker,
+    SpinStructureParallelProgress, SpinStructureParallelResult, SpinStructureParallelWorker,
 };
 pub use source_worker::{
     SpinStructureSourceCompletion, SpinStructureSourceMergeCursor, SpinStructureSourceMerger,
@@ -26,6 +26,8 @@ mod minimal;
 mod model;
 mod operation_catalog;
 mod order_coverage;
+mod order_parallel;
+pub use order_parallel::SpinStructureParallelMode;
 mod stage_timer;
 mod structural_expand;
 mod structural_fill;

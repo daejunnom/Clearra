@@ -13,7 +13,10 @@ use crate::{
         PcScorePortfolioExecutionPreparation, PcScorePortfolioPreparationAdvance,
         ValidatedPcScorePortfolioExecutionEvidence,
     },
-    portfolio_alternative_store::CoveragePortfolioAlternativeSetPreparation,
+    portfolio_alternative_store::{
+        CoveragePortfolioAlternativeSetPreparation,
+        CoveragePortfolioAlternativeSetPreparationAdvance,
+    },
 };
 use clearra_coverage::cover::ExactMinimumCoverError;
 
@@ -28,6 +31,7 @@ pub(super) enum CooperativeMinimumPreparation {
     },
     BuildCover(BuildCoverV2Preparation),
     BuildScore(BuildScoreMinimumPreparation),
+    SpinCover(CoveragePortfolioAlternativeSetPreparation),
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -39,6 +43,10 @@ pub(super) enum CooperativeMinimumCompletion {
     ),
     BuildCover(BuildCoveragePortfolioV2),
     BuildScore(
+        clearra_host_contract::ProductResultPayload,
+        crate::ProductPageSourceOwner,
+    ),
+    SpinCover(
         clearra_host_contract::ProductResultPayload,
         crate::ProductPageSourceOwner,
     ),
@@ -113,6 +121,7 @@ impl CooperativeMinimumPreparation {
             Self::PcScore { preparation, .. } => preparation.parallel_work(),
             Self::BuildCover(work) => work.parallel_work(),
             Self::BuildScore(work) => work.parallel_work(),
+            Self::SpinCover(work) => work,
         }
     }
 
@@ -122,6 +131,7 @@ impl CooperativeMinimumPreparation {
             Self::PcScore { preparation, .. } => preparation.parallel_work_mut(),
             Self::BuildCover(work) => work.parallel_work_mut(),
             Self::BuildScore(work) => work.parallel_work_mut(),
+            Self::SpinCover(work) => work,
         }
     }
 
@@ -141,6 +151,7 @@ impl CooperativeMinimumPreparation {
                 }),
             Self::BuildCover(work) => work.checked_retained_capacity_bytes(),
             Self::BuildScore(work) => work.checked_retained_capacity_bytes(),
+            Self::SpinCover(work) => work.checked_retained_capacity_bytes(),
         }
     }
 
@@ -150,6 +161,7 @@ impl CooperativeMinimumPreparation {
             Self::Pc(_) | Self::PcScore { .. } => {
                 response.checked_pc_minimals_retained_capacity_bytes()
             }
+            Self::SpinCover(_) => response.checked_spin_structure_retained_capacity_bytes(),
         }
     }
 
@@ -159,6 +171,7 @@ impl CooperativeMinimumPreparation {
             Self::PcScore { .. } => "pc-score-minimals-finalize",
             Self::BuildCover(_) => "build-minimals-finalize",
             Self::BuildScore(_) => "build-score-minimals-finalize",
+            Self::SpinCover(_) => "spin-structure-cover-minimals-finalize",
         }
     }
 
@@ -295,6 +308,39 @@ impl CooperativeMinimumPreparation {
                     BuildScoreMinimumPreparationAdvance::Completed((payload, owner)) => {
                         Ok(CooperativeMinimumAdvance::Completed(
                             CooperativeMinimumCompletion::BuildScore(payload, owner),
+                        ))
+                    }
+                }
+            }
+            Self::SpinCover(preparation) => {
+                let extra = enum_size - core::mem::size_of_val(preparation) as u128;
+                match preparation
+                    .advance_with_memory_guard(
+                        work,
+                        &mut |peak| {
+                            guard(
+                                extra
+                                    .checked_add(peak)
+                                    .ok_or(ExactMinimumCoverError::ProjectionOverflow)?,
+                            )
+                        },
+                        cancelled,
+                    )
+                    .map_err(|error| error.as_str())?
+                {
+                    CoveragePortfolioAlternativeSetPreparationAdvance::Pending { work_steps } => {
+                        Ok(CooperativeMinimumAdvance::Pending { work_steps })
+                    }
+                    CoveragePortfolioAlternativeSetPreparationAdvance::Cancelled { work_steps } => {
+                        Ok(CooperativeMinimumAdvance::Cancelled { work_steps })
+                    }
+                    CoveragePortfolioAlternativeSetPreparationAdvance::Completed(owner) => {
+                        let projected = crate::spin_structure_coverage_result::project_spin_structure_coverage_owner(owner)?;
+                        Ok(CooperativeMinimumAdvance::Completed(
+                            CooperativeMinimumCompletion::SpinCover(
+                                projected.payload,
+                                crate::spin_structure_coverage_result::page_source(projected.owner),
+                            ),
                         ))
                     }
                 }

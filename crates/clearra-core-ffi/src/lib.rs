@@ -16,6 +16,7 @@ pub mod problem;
 mod raw;
 pub mod rules;
 pub mod supply;
+pub mod system_memory;
 pub mod version;
 
 pub use board::{

@@ -27,5 +27,8 @@ clearra-supply = { path = "../clearra-supply" }
 [dev-dependencies]
 clearra-coverage = { path = "../clearra-coverage" }
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = ["Win32_System_SystemInformation"] }
+
 [lints.rust]
 unsafe_code = "allow"

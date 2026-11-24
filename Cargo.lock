@@ -183,6 +183,7 @@ dependencies = [
  "clearra-ctk3",
  "clearra-forward-search",
  "clearra-fumen",
+ "clearra-geometry",
  "clearra-host-contract",
  "clearra-i18n",
  "clearra-objectives",
@@ -313,6 +314,7 @@ dependencies = [
  "clearra-problem",
  "clearra-rules",
  "clearra-supply",
+ "windows-sys",
 ]
 
 [[package]]

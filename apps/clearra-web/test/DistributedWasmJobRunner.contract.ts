@@ -1109,7 +1109,7 @@ const proofPool = {
     proofMode = args[6] === 'exact-at-most';
     if (proofMode) {
       proofKinds.push(args[6]);
-      assert.equal(args[1], 1);
+      assert.equal(args[1], 2);
     }
   },
   async enqueue(task: ArrayBuffer, merge: (value: ArrayBuffer) => void) {
@@ -1130,7 +1130,7 @@ await new DistributedWasmJobRunner({
   ...wasm,
   distributed_finish_start() { return null; },
   distributed_finish_parallel_prepare(_jobId: number, partitions: number) {
-    assert.equal(partitions, 4);
+    assert.equal(partitions, 8);
     if (proofQueryIssued) return null;
     proofQueryIssued = true;
     return new Uint8Array([99]).buffer;
@@ -1154,50 +1154,19 @@ assert.deepEqual(proofKinds, ['exact-at-most']);
 assert.equal(proofReceiptsMerged, 4);
 assert.equal(negativeProofCancellations, 0, 'transport completion alone never cancels negative proof siblings');
 
-{
-  const singleEvents: ClearraWasmWorkerEvent[] = [];
-  await new DistributedWasmJobRunner({
-    ...wasm,
-    distributed_finish_start: () => null,
-    distributed_finish_advance: (jobId) => wasm.distributed_finish(jobId, 1),
-    distributed_finish_parallel_prepare() { throw new Error('one admitted worker has no remote proof pool'); },
-    distributed_finish_parallel_task() { throw new Error('one worker cannot create parallel tasks'); },
-    distributed_finish_parallel_merge() { throw new Error('one worker has no remote receipts'); },
-    distributed_finish_parallel_local_start() { throw new Error('one worker uses the existing serial exact continuation'); },
-    distributed_finish_parallel_local_advance() { throw new Error('no duplicate serial proof'); }
-  }, 909, 'single-coordinator-budget', finishHost, {
-    ...pool, async initialize() { throw new Error('one worker must not create verifier threads'); }
-  } as never).run('clearra pc minimals --workers 1', {
-    ...plan, workerCount: 1, verificationRequired: false
-  }, (event) => singleEvents.push(event));
-  assert.ok(singleEvents.every((event) => event.event !== 'progress' ||
-    (event.progress.telemetry?.worker_count === 1 && event.progress.telemetry.active_workers <= 1)));
-}
-
-for (const workerCount of [2, 11, 32]) {
+for (const workerCount of [1, 2, 8, 32]) {
   let tasksIssued = 0;
-  let localActive = false;
-  let localCompleted = false;
-  let remoteCompleted = false;
-  let maximumObserved = false;
-  let localAdvances = 0;
   let queryIssued = false;
-  let localStarted!: () => void;
-  let localFinished!: () => void;
-  const started = new Promise<void>((resolve) => { localStarted = resolve; });
-  const finished = new Promise<void>((resolve) => { localFinished = resolve; });
+  let remoteCompleted = false;
   const remote: number[] = [];
-  const coordinatorTasks: number[] = [];
-  const proofSamples: Array<[string, number]> = [];
   let minimumProfile: { wave_count: number; waves: Array<Record<string, number>> } | null = null;
-  let timeout: ReturnType<typeof setTimeout> | undefined;
   const runner = new DistributedWasmJobRunner({
     ...wasm,
     profile_start() {},
     profile_finish: () => ({ core_marker: true }),
     distributed_finish_start: () => null,
     distributed_finish_parallel_prepare(_jobId, partitions) {
-      assert.equal(partitions, workerCount * 4, 'frontier includes the computing coordinator');
+      assert.equal(partitions, workerCount * 4);
       if (queryIssued) return null;
       queryIssued = true;
       return new ArrayBuffer(0);
@@ -1205,91 +1174,47 @@ for (const workerCount of [2, 11, 32]) {
     distributed_finish_parallel_task() {
       return tasksIssued < 4 ? Uint8Array.of(++tasksIssued).buffer : null;
     },
-    distributed_finish_parallel_local_start() {
-      assert.equal(localActive, false);
-      if (tasksIssued === 4) return false;
-      coordinatorTasks.push(++tasksIssued);
-      localActive = true;
-      localStarted();
-      return true;
-    },
-    distributed_finish_parallel_local_advance(_jobId, budget) {
-      localAdvances += 1;
-      assert.equal(budget, 128);
-      assert.equal(localActive, true);
-      if (!maximumObserved) return false;
-      localActive = false;
-      localCompleted = true;
-      localFinished();
-      return true;
-    },
+    distributed_finish_parallel_local_start() { throw new Error('manager must not start compute'); },
+    distributed_finish_parallel_local_advance() { throw new Error('manager must not advance compute'); },
     distributed_finish_parallel_merge(_jobId, receipt) { remote.push(new Uint8Array(receipt)[0]); },
     distributed_finish_parallel_found: () => false,
     distributed_finish_advance(jobId) {
-      assert.ok(localCompleted && remoteCompleted, 'both issued owners drain before the next query');
+      assert.ok(remoteCompleted, 'every requested compute owner drains');
       return wasm.distributed_finish(jobId, workerCount);
     }
-  }, 910 + workerCount, 'coordinator-participates', {
-    ...finishHost, logicalProcessorCount: workerCount + 1
+  }, 910 + workerCount, 'dedicated-completion-manager', {
+    ...finishHost, logicalProcessorCount: workerCount
   }, {
     ...pool,
-    async enqueue(task: ArrayBuffer, merge: (receipt: ArrayBuffer) => void) {
-      // The first ready worker need not wait for a coordinator shard to finish.
-      await started;
-      merge(task);
+    async initialize(_query: unknown, count: number, _module: unknown, _owner: unknown,
+      _recovery: unknown, _host: unknown, kind?: string) {
+      if (kind === 'exact-at-most') assert.equal(count, workerCount, 'N compute slots stay on remote workers, including all-vCPU and N1');
     },
-    async completeAtomicTasks() {
-      await finished;
-      remoteCompleted = true;
-      return workerCount - 1;
-    },
+    async enqueue(task: ArrayBuffer, merge: (receipt: ArrayBuffer) => void) { merge(task); },
+    async completeAtomicTasks() { remoteCompleted = true; return workerCount; },
     progressSnapshot() {
-      return { ...completedProgress, activeWorkers: workerCount - 1,
-        readyWorkers: workerCount - 1, workerCount: workerCount - 1 };
+      return { ...completedProgress, activeWorkers: workerCount, readyWorkers: workerCount, workerCount };
     },
     cancelExactTasks() { throw new Error('a negative query cannot cancel siblings'); }
   } as never);
-  try {
-    await Promise.race([
-      runner.run('clearra pc minimals --patterns P7', { ...plan, workerCount }, (event) => {
-        if (event.event === 'final_response' || event.event === 'failed') {
-          const profile = (event as unknown as { search_profile: {
-            core_marker: boolean; minimum_parallel: NonNullable<typeof minimumProfile>
-          } }).search_profile;
-          assert.equal(profile.core_marker, true, 'core profiling fields are preserved');
-          minimumProfile = profile.minimum_parallel;
-        }
-        if (event.event === 'progress' && event.progress.telemetry) {
-          proofSamples.push([event.progress.telemetry.phase, event.progress.telemetry.active_workers]);
-        }
-        if (event.event === 'progress' && event.progress.telemetry?.phase === 'merging' &&
-          localActive && event.progress.telemetry.active_workers === workerCount) maximumObserved = true;
-      }),
-      new Promise<never>((_, reject) => {
-        timeout = setTimeout(() => reject(new Error(`coordinator/remote progress stalled ${JSON.stringify({ workerCount, tasksIssued, localActive, localCompleted, remoteCompleted, maximumObserved, localAdvances, proofSamples })}`)), 2_000);
-      })
-    ]);
-  } finally {
-    if (timeout !== undefined) clearTimeout(timeout);
-    runner.cancel();
-  }
-  assert.ok(maximumObserved, 'only the actually running coordinator fills the admitted count');
-  assert.ok(coordinatorTasks.length > 0 && remote.length > 0);
-  assert.deepEqual([...coordinatorTasks, ...remote].sort(), [1, 2, 3, 4],
-    'local and remote owners consume one shared, exact-once core frontier');
+  await runner.run('clearra pc minimals --patterns P7', { ...plan, workerCount }, (event) => {
+    if (event.event === 'final_response' || event.event === 'failed') {
+      const profile = (event as unknown as { search_profile: {
+        core_marker: boolean; minimum_parallel: NonNullable<typeof minimumProfile>
+      } }).search_profile;
+      assert.equal(profile.core_marker, true);
+      minimumProfile = profile.minimum_parallel;
+    }
+  });
+  assert.deepEqual(remote, [1, 2, 3, 4], 'remote owners consume the exact frontier once');
   assert.ok(minimumProfile);
   const measured = minimumProfile as { wave_count: number; waves: Array<Record<string, number>> };
   assert.equal(measured.wave_count, 1);
-  assert.equal(measured.waves[0].coordinator_tasks, coordinatorTasks.length);
-  assert.equal(measured.waves[0].remote_tasks, remote.length);
-  assert.equal(measured.waves[0].sampled_active_max, workerCount);
-  assert.ok(measured.waves[0].coordinator_compute_ms >= 0);
-  assert.ok(measured.waves[0].initialize_all_ready_ms >= 0);
-  assert.ok(measured.waves[0].query_prepare_ms >= 0);
-  assert.ok(measured.waves[0].started_after_finalize_ms >= 0);
-  assert.ok(measured.waves[0].first_task_issued_ms >= 0);
-  assert.equal(measured.waves[0].remote_workers, workerCount - 1);
-  assert.ok(measured.waves[0].elapsed_ms >= measured.waves[0].coordinator_compute_ms);
+  assert.equal(measured.waves[0].coordinator_tasks, 0);
+  assert.equal(measured.waves[0].coordinator_slices, 0);
+  assert.equal(measured.waves[0].coordinator_compute_ms, 0);
+  assert.equal(measured.waves[0].remote_tasks, 4);
+  assert.equal(measured.waves[0].remote_workers, workerCount);
 }
 
 {
@@ -1389,49 +1314,46 @@ for (const enabled of [false, true]) {
 }
 {
   let issued = 0;
-  let remoteInitiallyDrained = false;
-  let retryAvailable = false;
-  let localStarted = false;
-  let localDeclined = false;
+  let countWindowReleased = false;
+  let pageReady = false;
+  let initialized = 0;
   const merged: number[] = [];
   await new DistributedWasmJobRunner({
     ...wasm,
     distributed_finish_start: () => null,
     distributed_finish_parallel_prepare: () => new ArrayBuffer(0),
     distributed_finish_parallel_task() {
-      if (retryAvailable) { retryAvailable = false; return Uint8Array.of(2).buffer; }
-      if (issued === 0) { issued = 1; return Uint8Array.of(1).buffer; }
-      remoteInitiallyDrained = true;
+      if (issued === 0 || (issued === 1 && countWindowReleased) || (issued === 2 && pageReady)) {
+        return Uint8Array.of(++issued).buffer;
+      }
       return null;
     },
-    distributed_finish_parallel_local_start() {
-      if (localStarted) return false;
-      localStarted = true;
-      issued = 2;
-      return true;
-    },
-    distributed_finish_parallel_local_advance() {
-      if (!remoteInitiallyDrained) return false;
-      localDeclined = true;
-      retryAvailable = true;
-      return true;
-    },
+    distributed_finish_parallel_local_start() { throw new Error('bounded window cannot borrow manager compute'); },
+    distributed_finish_parallel_local_advance() { throw new Error('no local retry path'); },
     distributed_finish_parallel_merge(_jobId, task) { merged.push(new Uint8Array(task)[0]); },
     distributed_finish_parallel_found: () => false,
     distributed_finish_advance(jobId) {
-      assert.ok(localDeclined);
-      assert.deepEqual(merged, [1, 2], 'late local admission decline returns the exact pending task to remote workers');
+      assert.deepEqual(merged, [1, 2, 3], 'count window and dependent page work both drain');
       return wasm.distributed_finish(jobId, 2);
     }
-  }, 950, 'local-admission-retry-owner', finishHost, {
+  }, 950, 'bounded-completion-window', finishHost, {
     ...pool,
-    async enqueue(task: ArrayBuffer, merge: (receipt: ArrayBuffer) => void) { merge(task); },
-    async completeAtomicTasks() {
-      assert.deepEqual(merged, [1, 2], 'the pool stays available until local retries have drained');
-      return 1;
+    async initialize(_query: unknown, count: unknown, _module: unknown, _owner: unknown,
+      _recovery: unknown, _host: unknown, kind?: string) {
+      if (kind === 'exact-at-most') {
+        assert.equal(count, 8, 'completion preserves requested N after a source with two root lanes');
+        initialized += 1;
+      }
     },
-    cancelExactTasks() { throw new Error('admission failure is not a positive witness'); }
-  } as never).run('clearra pc minimals --workers 2', plan, () => {});
+    async enqueue(task: ArrayBuffer, merge: (receipt: ArrayBuffer) => void) { merge(task); },
+    async waitForIdle() {
+      if (merged.length >= 1) countWindowReleased = true;
+      if (merged.length >= 2) pageReady = true;
+    },
+    async completeAtomicTasks() { assert.deepEqual(merged, [1, 2, 3]); return 2; },
+    cancelExactTasks() { throw new Error('window backpressure is not a positive witness'); }
+  } as never).run('clearra pc path --workers 8', { ...plan, workerCount: 2, completionWorkerCount: 8 }, () => {});
+  assert.equal(initialized, 1, 'large graph query is not re-encoded or reinitialized per receipt window');
 }
 
 let positiveReceiptsMerged = 0;
@@ -1534,16 +1456,15 @@ assert.ok(performance.now() - cancelledFinishStarted < 500,
 }
 
 for (const [workers, logical] of [[1, 1], [1, 2], [2, 3], [6, 7], [7, 7], [11, 12], [32, 33], [12, 12], [32, 32]]) {
-  const eligible = workers > 1 && workers < logical;
   for (const policy of ['auto', 'shared', 'dedicated'] as const) {
     const topology = minimumManagerTopology(workers, logical, true, true, policy);
-    assert.equal(topology.controlOnly, eligible && policy !== 'shared');
+    assert.equal(topology.controlOnly, true, 'manager never owns a compute shard');
     assert.equal(topology.partitions, workers * 4, 'topology never changes solver frontier factor');
-    if (workers > 1) assert.equal(topology.remoteWorkers + Number(!topology.controlOnly), workers);
-    assert.ok(topology.remoteWorkers + 1 <= Math.max(2, logical), 'no extra full-CPU instance');
+    assert.equal(topology.remoteWorkers, workers);
+    assert.ok(topology.remoteWorkers <= logical, 'control management does not consume a requested compute lane');
   }
-  assert.equal(minimumManagerTopology(workers, logical, false, true).controlOnly, false,
-    'an old ABI cannot acquire an unguarded dedicated replica');
+  assert.equal(minimumManagerTopology(workers, logical, false, true).controlOnly, true,
+    'compatibility does not re-enable calling-thread computation');
 }
 
 for (const workers of [2, 11, 32]) {
@@ -1559,12 +1480,12 @@ for (const workers of [2, 11, 32]) {
 for (const sample of [
   { workers: 2, logical: 3, policy: 'auto', decline: false, expected: 2 },
   { workers: 6, logical: 7, policy: 'auto', decline: false, expected: 6 },
-  { workers: 7, logical: 7, policy: 'auto', decline: false, expected: 6 },
+  { workers: 7, logical: 7, policy: 'auto', decline: false, expected: 7 },
   { workers: 11, logical: 12, policy: 'auto', decline: false, expected: 11 },
   { workers: 32, logical: 33, policy: 'auto', decline: false, expected: 32 },
-  { workers: 12, logical: 12, policy: 'auto', decline: false, expected: 11 },
-  { workers: 11, logical: 12, policy: 'shared', decline: false, expected: 10 },
-  { workers: 11, logical: 12, policy: 'auto', decline: true, expected: 10 }
+  { workers: 12, logical: 12, policy: 'auto', decline: false, expected: 12 },
+  { workers: 11, logical: 12, policy: 'shared', decline: false, expected: 11 },
+  { workers: 11, logical: 12, policy: 'auto', decline: true, expected: 11 }
 ] as const) {
   let configured = 0;
   const admitted: Array<[number, boolean]> = [];
@@ -1634,7 +1555,7 @@ for (const sample of [
     progressSnapshot() { return proofPool ? { ...emptyProgress, activeWorkers: sample.expected,
       readyWorkers: sample.expected, workerCount: sample.expected } : completedProgress; }
   };
-  await new DistributedWasmJobRunner(guardWasm, 990, 'guarded-topology', {
+  const run = new DistributedWasmJobRunner(guardWasm, 990, 'guarded-topology', {
     ...finishHost, logicalProcessorCount: sample.logical
   }, guardPool as never, undefined, undefined, sample.policy as MinimumManagerPolicy).run(
     'clearra pc minimals --patterns P7', { ...plan, workerCount: sample.workers }, (event) => {
@@ -1653,10 +1574,18 @@ for (const sample of [
       }
     }
   );
+  if (sample.decline) {
+    await assert.rejects(run, /whole-job memory admission unavailable/);
+    assert.deepEqual(admitted, [[sample.workers, true]], 'decline cannot silently reduce N or run manager compute');
+    assert.equal(localStarts, 0);
+    assert.deepEqual(pools, []);
+    continue;
+  }
+  await run;
   assert.equal(configured, 1);
   assert.deepEqual(pools, [sample.expected, sample.expected]);
-  assert.equal(admitted.length, sample.decline ? 2 : 1, 'fixed completion slices survive query transitions');
-  assert.equal(localStarts, sample.expected === sample.workers ? 0 : 2);
+  assert.equal(admitted.length, 1, 'fixed completion slices survive query transitions');
+  assert.equal(localStarts, 0);
   assert.ok(proofTelemetry.length > 0, 'exact completion publishes phase-correct worker telemetry');
   assert.ok(proofTelemetry.some((telemetry) => telemetry.active === sample.expected),
     'active telemetry reports the remote lanes that are actually computing');
@@ -1756,7 +1685,7 @@ for (const sample of [
   } as never);
   await assert.rejects(runner.run('clearra pc minimals --patterns P7', { ...plan, workerCount: 11 }, () => {}),
     /whole-job memory admission unavailable/);
-  assert.equal(attempts, 2, 'one dedicated attempt plus one admitted shared fallback, never repeated waves');
+  assert.equal(attempts, 1, 'resource decline preserves requested N and never enables manager computation');
   assert.equal(issued, 0);
   assert.equal(exactInitializations, 0);
 }

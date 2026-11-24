@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use clearra_core_domain::execution_cancellation::ExecutionControl;
 use clearra_coverage::pattern::pattern_bitset::PatternBitSet;
 use clearra_host_contract::{
     CoveragePortfolioPagePayload, ProductCandidateMemberPayload, ProductResultPayload,
@@ -9,8 +10,9 @@ use clearra_spin_structure_search::SpinStructureCoverageAnalysis;
 
 use crate::{
     portfolio_alternative_store::{
-        CoveragePortfolioAlternativeSet, PortfolioAlternativeSetIdentity, ProductPageSourceOwner,
-        PORTFOLIO_MEMBER_PAGE_CONTRACT, PORTFOLIO_MEMBER_PAGE_SIZE,
+        CoveragePortfolioAlternativeSet, CoveragePortfolioAlternativeSetPreparation,
+        CoveragePortfolioAlternativeSetPreparationAdvance, PortfolioAlternativeSetIdentity,
+        ProductPageSourceOwner, PORTFOLIO_MEMBER_PAGE_CONTRACT, PORTFOLIO_MEMBER_PAGE_SIZE,
     },
     spin_structure_search_result::SpinStructureSearchResult,
 };
@@ -23,7 +25,33 @@ pub(crate) struct ProjectedSpinStructureCoverage {
 pub(crate) fn project_spin_structure_coverage(
     result: &SpinStructureSearchResult,
     coverage: &SpinStructureCoverageAnalysis,
+    control: &ExecutionControl,
 ) -> Result<ProjectedSpinStructureCoverage, &'static str> {
+    let mut preparation = prepare_spin_structure_coverage(result, coverage)?;
+    loop {
+        #[cfg(not(target_family = "wasm"))]
+        preparation
+            .drive_native_parallel_tasks(control, &mut |_| Ok(()), &mut || control.is_cancelled())
+            .map_err(|error| error.as_str())?;
+        match preparation
+            .advance(1024, &mut || control.is_cancelled())
+            .map_err(|error| error.as_str())?
+        {
+            CoveragePortfolioAlternativeSetPreparationAdvance::Pending { .. } => {}
+            CoveragePortfolioAlternativeSetPreparationAdvance::Cancelled { .. } => {
+                return Err("spin_structure_cover_cancelled")
+            }
+            CoveragePortfolioAlternativeSetPreparationAdvance::Completed(owner) => {
+                return project_spin_structure_coverage_owner(owner)
+            }
+        }
+    }
+}
+
+pub(crate) fn prepare_spin_structure_coverage(
+    result: &SpinStructureSearchResult,
+    coverage: &SpinStructureCoverageAnalysis,
+) -> Result<CoveragePortfolioAlternativeSetPreparation, &'static str> {
     if coverage.rows().len() != result.candidate_identities().len() {
         return Err("spin-structure coverage row count mismatch");
     }
@@ -89,10 +117,14 @@ pub(crate) fn project_spin_structure_coverage(
         .into_iter()
         .map(|(candidate, _)| candidate)
         .collect::<Vec<_>>();
-    let owner = Arc::new(
-        CoveragePortfolioAlternativeSet::new_canonical(identity, candidate_keys, required, rows)
-            .map_err(|_| "spin-structure portfolio alternative set is invalid")?,
-    );
+    CoveragePortfolioAlternativeSetPreparation::new(identity, candidate_keys, required, rows)
+        .map_err(|_| "spin-structure portfolio alternative set is invalid")
+}
+
+pub(crate) fn project_spin_structure_coverage_owner(
+    owner: CoveragePortfolioAlternativeSet,
+) -> Result<ProjectedSpinStructureCoverage, &'static str> {
+    let owner = Arc::new(owner);
     let page = owner.canonical_page();
     let member_count = page.portfolio().candidate_ids().len();
     let end = member_count.min(PORTFOLIO_MEMBER_PAGE_SIZE);
