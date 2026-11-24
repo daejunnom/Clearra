@@ -1,8 +1,8 @@
 use std::{
     fmt,
     sync::{
-        atomic::{AtomicU32, Ordering},
-        Arc,
+        atomic::{AtomicU32, AtomicUsize, Ordering},
+        Arc, Condvar, Mutex,
     },
 };
 
@@ -113,6 +113,77 @@ pub struct ExecutionControl {
     pub cancellation: CancellationToken,
     pub progress_sink: Option<Arc<dyn ProgressSink>>,
     partition: ExecutionPartition,
+    compute_budget: Arc<ComputeBudget>,
+}
+
+/// One request's compute-worker width. The request coordinator never consumes
+/// a compute slot. Descendants share this owner and reuse released permits.
+#[derive(Debug)]
+pub struct ComputeBudget {
+    parallelism: usize,
+    available: AtomicUsize,
+    waiters: Mutex<()>,
+    ready: Condvar,
+}
+
+impl ComputeBudget {
+    fn new(parallelism: usize) -> Self {
+        let parallelism = parallelism.max(1);
+        Self {
+            parallelism,
+            available: AtomicUsize::new(parallelism),
+            waiters: Mutex::new(()),
+            ready: Condvar::new(),
+        }
+    }
+
+    pub const fn parallelism(&self) -> usize {
+        self.parallelism
+    }
+
+    pub fn try_acquire_worker(self: &Arc<Self>) -> Option<ComputePermit> {
+        self.available
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |available| {
+                available.checked_sub(1)
+            })
+            .ok()
+            .map(|_| ComputePermit { budget: Arc::clone(self) })
+    }
+
+    pub fn acquire_worker(
+        self: &Arc<Self>,
+        cancellation: &CancellationToken,
+    ) -> Option<ComputePermit> {
+        let mut waiting = self.waiters.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        loop {
+            if cancellation.is_cancelled() {
+                return None;
+            }
+            if let Some(permit) = self.try_acquire_worker() {
+                return Some(permit);
+            }
+            waiting = self.ready.wait_timeout(waiting, std::time::Duration::from_millis(25))
+                .unwrap_or_else(std::sync::PoisonError::into_inner).0;
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct ComputePermit {
+    budget: Arc<ComputeBudget>,
+}
+
+impl ComputePermit {
+    pub(crate) fn budget_identity(&self) -> usize {
+        Arc::as_ptr(&self.budget) as usize
+    }
+}
+
+impl Drop for ComputePermit {
+    fn drop(&mut self) {
+        self.budget.available.fetch_add(1, Ordering::Release);
+        self.budget.ready.notify_one();
+    }
 }
 
 impl ExecutionControl {
@@ -121,6 +192,7 @@ impl ExecutionControl {
             cancellation,
             progress_sink: None,
             partition: ExecutionPartition::whole(),
+            compute_budget: Arc::new(ComputeBudget::new(1)),
         }
     }
 
@@ -132,6 +204,24 @@ impl ExecutionControl {
     pub fn with_partition(mut self, partition: ExecutionPartition) -> Self {
         self.partition = partition;
         self
+    }
+
+    /// Set the admitted request width at the product boundary. Passing the
+    /// same width preserves the shared owner through composed child stages.
+    pub fn with_parallelism(mut self, parallelism: usize) -> Self {
+        let parallelism = parallelism.max(1);
+        if self.parallelism() != parallelism {
+            self.compute_budget = Arc::new(ComputeBudget::new(parallelism));
+        }
+        self
+    }
+
+    pub fn parallelism(&self) -> usize {
+        self.compute_budget.parallelism()
+    }
+
+    pub fn compute_budget(&self) -> &Arc<ComputeBudget> {
+        &self.compute_budget
     }
 
     pub const fn partition(&self) -> ExecutionPartition {
@@ -162,6 +252,7 @@ impl fmt::Debug for ExecutionControl {
             .field("cancelled", &self.is_cancelled())
             .field("has_progress_sink", &self.progress_sink.is_some())
             .field("partition", &self.partition)
+            .field("parallelism", &self.parallelism())
             .finish()
     }
 }

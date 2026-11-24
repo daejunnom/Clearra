@@ -7,6 +7,7 @@ pub mod field;
 pub mod ids;
 pub mod objective;
 pub mod operation;
+pub mod parallel_work;
 pub mod pc;
 pub mod piece;
 pub mod placement;
