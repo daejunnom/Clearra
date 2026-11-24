@@ -11,6 +11,9 @@ import {
 const SCOPES = new Set(["gateway", "interaction", "job"]);
 const KINDS = new Set(["slash", "text", "render", "search"]);
 const STATUSES = new Set(["succeeded", "failed", "cancelled", "delegated"]);
+const FAILURE_CODES = new Set(["engine-oom", "engine-signal", "engine-exit", "deadline", "cancelled", "result-validation"]);
+const OPERATION_STAGES = new Set(["queue", "prepare", "execute", "artifact", "projection", "render", "delivery"]);
+const PROCESS_SIGNALS = new Set(["SIGTERM", "SIGKILL", "SIGABRT", "SIGSEGV", "SIGBUS", "SIGILL", "SIGFPE", "SIGINT"]);
 const TIMEOUT_CLASSES = new Set([
   "pc_reverse",
   "build_long",
@@ -101,6 +104,11 @@ export function writeOperationalLog(logger, value) {
     status,
     durationMs,
     ...(hasTimeoutPolicy ? { timeoutClass, timeoutMs } : {}),
+    ...(FAILURE_CODES.has(value.failureCode) ? { failureCode: value.failureCode } : {}),
+    ...(OPERATION_STAGES.has(value.failureStage) ? { failureStage: value.failureStage } : {}),
+    ...(Number.isSafeInteger(value.exitCode) ? { exitCode: value.exitCode } : {}),
+    ...(PROCESS_SIGNALS.has(value.signal) ? { signal: value.signal } : {}),
+    ...validatedStageDurations(value.stageDurationsMs),
   };
   try {
     const method = status === "failed" ? "error" : "info";
@@ -109,6 +117,16 @@ export function writeOperationalLog(logger, value) {
   } catch {
     return false;
   }
+}
+
+function validatedStageDurations(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const stages = {};
+  for (const stage of OPERATION_STAGES) {
+    const milliseconds = value[stage];
+    if (Number.isSafeInteger(milliseconds) && milliseconds >= 0) stages[stage] = milliseconds;
+  }
+  return Object.keys(stages).length ? { stageDurationsMs: stages } : {};
 }
 
 /**

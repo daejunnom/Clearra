@@ -787,6 +787,8 @@ test("job runner transports one exact bounded render artifact and cleans its pri
 test("render runner cleans its private output on start failure, timeout, and cancellation", async () => {
   for (const mode of ["start-failure", "timeout", "cancel"]) {
     let outputPath;
+    const spawned = Promise.withResolvers();
+    const startedAt = Date.now();
     const controller = new AbortController();
     const runner = new ClearraCommandRunner(
       {
@@ -800,6 +802,7 @@ test("render runner cleans its private output on start failure, timeout, and can
         terminationGraceMs: 100,
       },
       {
+        now: () => startedAt,
         // A real ChildProcess keeps the event loop alive until close. This
         // synthetic child does not, so keep its deadline timer referenced to
         // make the timeout branch deterministic on every supported Node 22+
@@ -811,6 +814,7 @@ test("render runner cleans its private output on start failure, timeout, and can
         },
         spawn: (_executable, arguments_) => {
           outputPath = arguments_[arguments_.indexOf("--output") + 1];
+          spawned.resolve();
           if (mode === "start-failure") throw new Error("fixture start failure");
           const child = new EventEmitter();
           child.stdout = new PassThrough();
@@ -844,7 +848,7 @@ test("render runner cleans its private output on start failure, timeout, and can
       },
       { signal: controller.signal },
     );
-    if (mode === "cancel") controller.abort();
+    if (mode === "cancel") { await spawned.promise; controller.abort(); }
     await assert.rejects(pending, mode === "start-failure" ? /start/u : /cancelled|deadline/u);
     assert.equal(typeof outputPath, "string");
     assert.equal(existsSync(outputPath), false, `${mode} artifact residue`);
@@ -916,6 +920,7 @@ test("job runner clamps every canonical timeout family and preserves legacy infe
 });
 
 test("job runner retains its slot until a cancelled process closes", async () => {
+  const spawned = Promise.withResolvers();
   const child = new EventEmitter();
   child.stdout = new PassThrough();
   child.stderr = new PassThrough();
@@ -941,7 +946,7 @@ test("job runner retains its slot until a cancelled process closes", async () =>
       maxOutputBytes: 1024 * 1024,
       terminationGraceMs: 100,
     },
-    { spawn: () => child },
+    { spawn: () => { spawned.resolve(); return child; } },
   );
   const controller = new AbortController();
   let outcome;
@@ -957,6 +962,7 @@ test("job runner retains its slot until a cancelled process closes", async () =>
     (error) => { outcome = { error }; },
   );
 
+  await spawned.promise;
   controller.abort();
   await new Promise((resolve) => setTimeout(resolve, 5));
   assert.equal(outcome, undefined);

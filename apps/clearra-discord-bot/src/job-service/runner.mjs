@@ -65,7 +65,8 @@ export class ClearraCommandRunner {
   }
 
   async execute(job, options = {}) {
-    const deadlineRemainingMs = job.deadlineUnixMs - this.now();
+    const startedAt = this.now();
+    const deadlineRemainingMs = job.deadlineUnixMs - startedAt;
     if (deadlineRemainingMs <= 0) {
       return Promise.reject(deadlineError());
     }
@@ -77,6 +78,20 @@ export class ClearraCommandRunner {
       ),
       deadlineRemainingMs,
     );
+    const deadlineUnixMs = startedAt + timeoutMs;
+    const stageDurationsMs = {};
+    let stage = "prepare";
+    let stageStartedAt = startedAt;
+    const nextStage = (next) => {
+      const at = this.now();
+      stageDurationsMs[stage] = (stageDurationsMs[stage] ?? 0) + Math.max(0, at - stageStartedAt);
+      stage = next;
+      stageStartedAt = at;
+    };
+    const assertWithinDeadline = () => {
+      if (options.signal?.aborted) throw abortError("Clearra job was cancelled.");
+      if (this.now() >= deadlineUnixMs) throw deadlineError();
+    };
     const maxOutputBytes = Math.min(
       this.config.maxOutputBytes,
       job.maxOutputBytes,
@@ -109,6 +124,7 @@ export class ClearraCommandRunner {
     const oomKillCountBefore = await readOomEvidence();
 
     try {
+      assertWithinDeadline();
       return await new Promise((resolveJob, rejectJob) => {
       let child;
       try {
@@ -121,6 +137,7 @@ export class ClearraCommandRunner {
           stdio: ["ignore", "pipe", "pipe"],
           ...(childEnvironment ? { env: childEnvironment } : {}),
         });
+        nextStage("execute");
       } catch (error) {
         rejectJob(clearraStartError(error));
         return;
@@ -161,7 +178,10 @@ export class ClearraCommandRunner {
         // finish. A cancellation or deadline accepted in that window still
         // owns the terminal outcome and must not publish the late result.
         if (pendingFailure) rejectJob(pendingFailure);
-        else callback();
+        else {
+          try { assertWithinDeadline(); callback(); }
+          catch (error) { rejectJob(error); }
+        }
       };
       const fail = (error) => {
         if (settled || pendingFailure) return;
@@ -181,7 +201,7 @@ export class ClearraCommandRunner {
         chunks.push(bytes);
       };
       const abort = () => fail(abortError("Clearra job was cancelled."));
-      timeout = this.setTimeout(() => fail(deadlineError()), timeoutMs);
+      timeout = this.setTimeout(() => fail(deadlineError()), Math.max(1, deadlineUnixMs - this.now()));
       timeout.unref?.();
 
       options.signal?.addEventListener("abort", abort, { once: true });
@@ -201,6 +221,7 @@ export class ClearraCommandRunner {
         }
         const stdoutText = takeOutputText(stdout);
         const stderrText = takeOutputText(stderr);
+        nextStage("artifact");
         void (async () => {
           const oomKillCountAfter = signal === "SIGKILL"
             ? await readOomEvidence()
@@ -220,23 +241,35 @@ export class ClearraCommandRunner {
             signal: signal ?? null,
             terminationReason: confirmedOom
               ? "oom"
-              : signal === "SIGKILL" ? "forced-signal" : "exit",
+              : signal ? "forced-signal" : "exit",
+            failureCode: confirmedOom ? "engine-oom"
+              : signal ? "engine-signal" : code !== 0 ? "engine-exit" : null,
             oomKillCountBefore,
             oomKillCountAfter,
             stdout: renderDocument ? encodeRenderStdout(renderDocument) : stdoutText,
             stderr: stderrText,
             ...(artifact ? { artifact } : {}),
           };
+          nextStage("projection");
           // Render stdout is already parsed, sanitized and checked. Other
           // commands keep their existing string-in/string-out policy path.
-          const projected = renderDocument ? result : assertDiscordCanonicalOnlyResult(result);
-          finish(() => resolveJob(projected));
+          const projected = code === 0 && !signal && !renderDocument
+            ? assertDiscordCanonicalOnlyResult(result) : result;
+          nextStage("complete");
+          finish(() => resolveJob({ ...projected, stageDurationsMs: { ...stageDurationsMs } }));
         })().catch((error) => {
           finish(() => rejectJob(error));
         });
       });
       if (options.signal?.aborted) abort();
       });
+    } catch (error) {
+      nextStage("failed");
+      if (error && typeof error === "object") {
+        error.stageDurationsMs = { ...stageDurationsMs };
+        error.failureStage = stage === "failed" ? Object.keys(stageDurationsMs).at(-1) : stage;
+      }
+      throw error;
     } finally {
       await cleanupRenderArtifactPlan(artifactPlan);
     }

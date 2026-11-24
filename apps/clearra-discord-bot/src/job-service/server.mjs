@@ -171,9 +171,23 @@ export class ClearraJobService {
       const result = await this.runner.execute(job, {
         signal: entry.controller.signal,
       });
-      entry.state = "completed";
-      entry.terminal = this.jobEnvelope(job.id, "completed", { result });
+      entry.state = result.exitCode === 0 && !result.signal ? "completed" : "failed";
+      entry.failureCode = result.failureCode ?? (entry.state === "failed" ? "engine-exit" : null);
+      entry.exitCode = result.exitCode;
+      entry.signal = result.signal;
+      entry.stageDurationsMs = result.stageDurationsMs;
+      entry.terminal = this.jobEnvelope(job.id, entry.state, {
+        result,
+        ...(entry.state === "failed" ? {
+          error: "Clearra process did not complete successfully.",
+          failureCode: entry.failureCode,
+        } : {}),
+      });
     } catch (error) {
+      entry.failureCode = error?.name === "DeadlineExceededError" ? "deadline"
+        : error?.name === "AbortError" ? "cancelled" : "result-validation";
+      entry.stageDurationsMs = error?.stageDurationsMs;
+      entry.failureStage = error?.failureStage;
       if (error?.name === "AbortError") {
         entry.state = "cancelled";
         entry.terminal = this.jobEnvelope(job.id, "cancelled");
@@ -200,6 +214,11 @@ export class ClearraJobService {
                 ? "cancelled"
                 : "failed",
           durationMs: entry.completedAt - entry.createdAt,
+          failureCode: entry.failureCode,
+          failureStage: entry.failureStage,
+          exitCode: entry.exitCode,
+          signal: entry.signal,
+          stageDurationsMs: entry.stageDurationsMs,
         });
       }
     }
