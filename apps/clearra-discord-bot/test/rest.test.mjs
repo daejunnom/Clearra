@@ -60,6 +60,45 @@ test("Discord webhook requests do not require a bot token", async () => {
   await assert.rejects(client.application(), /DISCORD_TOKEN is required/);
 });
 
+test("delivery cannot start or retry beyond its original request deadline", async () => {
+  let calls = 0;
+  const client = new DiscordRestClient(null, async () => {
+    calls++;
+    return Response.json({ retry_after: 1 }, { status: 429 });
+  });
+  const message = { payload: { content: "complete" }, files: [],
+    executionOptions: { deadlineUnixMs: Date.now() - 1, stageDurationsMs: {} } };
+  await assert.rejects(client.editOriginalInteraction("application", "interaction", message), {
+    name: "DeadlineExceededError", failureStage: "delivery",
+  });
+  assert.equal(calls, 0);
+  message.executionOptions.deadlineUnixMs = Date.now() + 100;
+  await assert.rejects(client.editOriginalInteraction("application", "interaction", message), {
+    name: "DeadlineExceededError", failureStage: "delivery",
+  });
+  assert.equal(calls, 1);
+  assert.ok(Number.isSafeInteger(message.executionOptions.stageDurationsMs.delivery));
+});
+
+test("delivery cancellation aborts the in-flight HTTP operation", async () => {
+  const started = Promise.withResolvers();
+  const abort = new AbortController();
+  const client = new DiscordRestClient(null, async (_url, options) => {
+    started.resolve();
+    return new Promise((_resolve, reject) => options.signal.addEventListener("abort", () => {
+      const error = new Error("aborted fetch"); error.name = "AbortError"; reject(error);
+    }, { once: true }));
+  });
+  const result = client.editOriginalInteraction("application", "interaction", {
+    payload: { content: "complete" }, files: [],
+    executionOptions: { signal: abort.signal, deadlineUnixMs: Date.now() + 5000 },
+  });
+  const rejected = assert.rejects(result, { name: "AbortError", failureStage: "delivery" });
+  await started.promise;
+  abort.abort();
+  await rejected;
+});
+
 test("Discord Gateway interactions can send a Modal as the initial REST callback", async () => {
   const interaction = { id: "interaction", token: "interaction-token" };
   const modal = {

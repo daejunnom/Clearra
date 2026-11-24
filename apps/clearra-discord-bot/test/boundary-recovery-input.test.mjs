@@ -93,6 +93,19 @@ test("recovery command help is available in every released Discord locale", () =
   }
 });
 
+test("Discord recovery preserves roles beyond 42 and 64 while keeping the input byte boundary", () => {
+  for (const count of [43, 65]) {
+    const args = lower({ initial_board_mask: "0x0", target_board_mask: "0x0", height: 8,
+      queue: "I".repeat(count), placements: count, stage_one_count: 1,
+      role_masks: Array(count).fill("0xf"), max_early_placements: count - 1 });
+    assert.equal(args.filter(argument => argument === "--role-mask").length, count);
+    assert.ok(args.includes(`${count}:0xf`));
+    assert.equal(args[args.indexOf("--max-early-placements") + 1], String(count - 1));
+  }
+  assert.throws(() => lower({ initial_board_mask: "0x0", target_board_mask: "0x0", height: 8,
+    queue: "I".repeat(6001), placements: 6001, stage_one_count: 1 }), /6000/u);
+});
+
 test('multi-role maximum and a global B2B policy reach the CLI without selected-role flags', () => {
   const args = lower({ initial_board_mask: '0x0', stage_one_board_mask: '0xc030000000000',
     target_board_mask: '0xc0300c0300c03', height: 6, queue: 'OOO', placements: 3,

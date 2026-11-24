@@ -9,6 +9,8 @@ import { ClearraDirectExecutor } from "./clearra/direct-executor.mjs";
 import { buildDiscordDocumentUtilityResult } from "./clearra/document-utility-result.mjs";
 import { parseClearraTextRequest } from "./clearra/text-command.mjs";
 import { buildCtk3Result } from "./clearra/ctk3-result.mjs";
+import { validateSolutionTransportArtifact } from "./clearra/solution-artifact.mjs";
+import { assertRequestActive, isRequestInterruption, withRequestPhase } from "./clearra/request-deadline.mjs";
 import {
   CTK3_FILE_MIME_TYPE,
   encodeCtk3File,
@@ -134,7 +136,8 @@ export class Clearrabot {
             utilitySearchTimeoutMs: config.utilitySearchTimeoutMs,
             diagnosticTimeoutMs: config.diagnosticTimeoutMs,
             maxOutputBytes: config.maxOutputBytes,
-            maxArtifactBytes: config.maxGifBytes,
+            maxArtifactBytes: Math.max(config.maxGifBytes ?? 24 * 1024 * 1024,
+              config.maxCtk3FileBytes ?? 24 * 1024 * 1024),
             pollIntervalMs: config.jobPollIntervalMs,
             cancelTimeoutMs: config.jobCancelTimeoutMs,
           })
@@ -160,6 +163,7 @@ export class Clearrabot {
     this.activeSearches = 0;
     this.pendingSearches = [];
     this.controllers = new Set();
+    this.operationDiagnostics = new WeakMap();
     this.interactionDeadlineMs =
       config.interactionDeadlineMs ?? config.searchTimeoutMs ?? 3 * 60_000;
     this.setupProgressNoticeMs =
@@ -737,6 +741,7 @@ export class Clearrabot {
     timeoutClass = undefined,
   ) {
     const controller = new AbortController();
+    const diagnostics = this.beginOperationDiagnostics(interaction);
     const deadlineUnixMs = interactionDeadlineUnixMs(
       interaction,
       Math.min(
@@ -775,6 +780,7 @@ export class Clearrabot {
           const message = labelResultMessage(
             await this.buildResultMessage(result, tilingOnlyRequested(arguments_), {
               maxCtk3FileBytes: this.config.maxCtk3FileBytes,
+              deadlineUnixMs, signal: controller.signal, diagnostics,
               maxArtifactBytes: this.config.maxGifBytes,
               locale,
               resultKind: requestedResultKind ??
@@ -793,9 +799,9 @@ export class Clearrabot {
             delivered += 1;
           }
         }
-      }, { deadlineUnixMs, signal: controller.signal });
+      }, { deadlineUnixMs, signal: controller.signal, diagnostics });
     } catch (error) {
-      const message = textMessage(this.operationFailureText(error, locale));
+      const message = textMessage(this.operationFailureText(error, locale, diagnostics));
       if (delivered === 0) {
         firstResult.resolve(message);
         await firstDelivery;
@@ -817,6 +823,7 @@ export class Clearrabot {
     timeoutClass = undefined,
   ) {
     const controller = new AbortController();
+    const diagnostics = this.beginOperationDiagnostics(interaction);
     const tilingOnly = tilingOnlyRequested(arguments_);
     const deadlineUnixMs = interactionDeadlineUnixMs(
       interaction,
@@ -831,18 +838,19 @@ export class Clearrabot {
           timeoutClass,
           ...interactionJobOptions(interaction, 0),
         }),
-        { deadlineUnixMs, signal: controller.signal },
+        { deadlineUnixMs, signal: controller.signal, diagnostics },
       ).then(
         (value) => this.buildResultMessage(value, tilingOnly, {
           maxCtk3FileBytes: this.config.maxCtk3FileBytes,
+              deadlineUnixMs, signal: controller.signal, diagnostics,
           maxArtifactBytes: this.config.maxGifBytes,
           locale,
           resultKind: requestedResultKind ??
             interactionPublicResultKind(interaction, arguments_),
           allspinExpectation: allspinResultExpectation(arguments_),
         }),
-        (error) => textMessage(this.operationFailureText(error, locale)),
-      ).catch((error) => textMessage(this.operationFailureText(error, locale)));
+        (error) => textMessage(this.operationFailureText(error, locale, diagnostics)),
+      ).catch((error) => textMessage(this.operationFailureText(error, locale, diagnostics)));
       const preview = previewDocument
         ? this.buildOraclePreviewMessage(
             previewDocument,
@@ -1430,31 +1438,56 @@ export class Clearrabot {
   }
 
   async buildResultMessage(result, tilingOnly = false, options = {}) {
-    const message = resultMessage(result, tilingOnly, options);
-    if (result?.exitCode !== 0 || typeof result?.stdout !== "string") return message;
+    const stageDurationsMs = options.diagnostics?.stageDurationsMs ?? {};
+    for (const stage of ["prepare", "execute", "artifact", "projection"]) {
+      const duration = result?.stageDurationsMs?.[stage];
+      if (Number.isSafeInteger(duration) && duration >= 0) {
+        stageDurationsMs[stage] = (stageDurationsMs[stage] ?? 0) + duration;
+      }
+    }
+    if (options.diagnostics && (result?.exitCode !== 0 || result?.signal)) {
+      Object.assign(options.diagnostics, { exitCode: result?.exitCode, signal: result?.signal,
+        failureCode: result?.failureCode ?? (result?.signal ? "engine-signal" : "engine-exit") });
+    }
+    const executionOptions = { deadlineUnixMs: options.deadlineUnixMs,
+      signal: options.signal, stageDurationsMs };
+    const finish = (outgoing) => {
+      assertRequestActive(executionOptions);
+      return options.deadlineUnixMs === undefined && !options.signal
+        ? outgoing : { ...outgoing, executionOptions };
+    };
+    const message = await withRequestPhase(executionOptions, "projection", () =>
+      resultMessage(result, tilingOnly, options));
+    if (result?.exitCode !== 0 || typeof result?.stdout !== "string") return finish(message);
     const structured = parseStructuredResult(result.stdout);
     if (![
       "pc-path-family.v2",
       "build-path-family.v1",
-    ].includes(structured?.kind)) return message;
+    ].includes(structured?.kind)) return finish(message);
     let replay;
     try {
       // The executor boundary has already reduced the exhaustive family to a
       // validated canonical-only envelope. Re-projecting here would reject
       // that intentionally smaller contract and lose the replay entirely.
-      replay = buildCanonicalPathReplayDocument(structured);
+      replay = await withRequestPhase(executionOptions, "projection", () =>
+        buildCanonicalPathReplayDocument(structured));
     } catch (error) {
+      if (isRequestInterruption(error)) throw error;
       this.logRenderFailure(error);
-      return textMessage(t(options.locale ?? "en", "error.result_consistency"));
+      if (options.diagnostics) Object.assign(options.diagnostics, {
+        failureCode: "result-validation", failureStage: "projection" });
+      return finish(textMessage(t(options.locale ?? "en", "error.result_consistency")));
     }
-    if (!replay) return message;
+    if (!replay) return finish(message);
 
     try {
-      const bytes = assertGifBytes(await this.gifRenderer.render(replay.document, {
+      const bytes = assertGifBytes(await withRequestPhase(executionOptions, "render", () => this.gifRenderer.render(replay.document, {
+        deadlineUnixMs: options.deadlineUnixMs,
+        signal: options.signal,
         delayMs: PC_PATH_REPLAY_FRAME_DELAY_MS,
         maxBytes: options.maxArtifactBytes ?? this.config.maxGifBytes ?? 8 * 1024 * 1024,
         maxFrames: this.config.oracleMaxPages ?? 128,
-      }));
+      })));
       const locale = options.locale ?? "en";
       const replayLine = t(locale, `result.${replay.kind}_path_replay_frames`, {
         count: replay.frameCount,
@@ -1462,7 +1495,7 @@ export class Clearrabot {
       });
       const content = `${message.payload.content ?? ""}\n${replayLine}`
         .slice(0, DISCORD_CONTENT_LIMIT);
-      return attachmentMessage(content, [
+      return finish(attachmentMessage(content, [
         ...message.files,
         {
           name: `${replay.kind}-path-1.gif`,
@@ -1470,13 +1503,14 @@ export class Clearrabot {
           contentType: "image/gif",
           bytes,
         },
-      ]);
+      ]));
     } catch (error) {
+      if (isRequestInterruption(error)) throw error;
       this.logRenderFailure(error);
       const locale = options.locale ?? "en";
       const content = `${message.payload.content ?? ""}\n${t(locale, "preview.image_failed")}`
         .slice(0, DISCORD_CONTENT_LIMIT);
-      return { ...message, payload: { ...message.payload, content } };
+      return finish({ ...message, payload: { ...message.payload, content } });
     }
   }
 
@@ -1489,6 +1523,7 @@ export class Clearrabot {
     timeoutClass = undefined,
   ) {
     const controller = new AbortController();
+    const diagnostics = this.beginOperationDiagnostics(message);
     const tilingOnly = tilingOnlyRequested(arguments_);
     const deadlineUnixMs = Date.now() +
       this.searchDeadlineDurationMs(arguments_, timeoutClass);
@@ -1500,11 +1535,12 @@ export class Clearrabot {
           deadlineUnixMs,
           timeoutClass,
         }),
-        { deadlineUnixMs, signal: controller.signal },
+        { deadlineUnixMs, signal: controller.signal, diagnostics },
       ).then(
         async (value) => ({
           outgoing: await this.buildResultMessage(value, tilingOnly, {
             maxCtk3FileBytes: this.config.maxCtk3FileBytes,
+              deadlineUnixMs, signal: controller.signal, diagnostics,
             maxArtifactBytes: this.config.maxGifBytes,
             locale,
             resultKind: requestedResultKind ?? publicResultKind(arguments_),
@@ -1513,11 +1549,11 @@ export class Clearrabot {
           error: null,
         }),
         (error) => ({
-          outgoing: textMessage(this.operationFailureText(error, locale)),
+          outgoing: textMessage(this.operationFailureText(error, locale, diagnostics)),
           error,
         }),
       ).catch((error) => ({
-        outgoing: textMessage(this.operationFailureText(error, locale)),
+        outgoing: textMessage(this.operationFailureText(error, locale, diagnostics)),
         error,
       }));
       const result = outcome.then(({ outgoing }) => outgoing);
@@ -1553,6 +1589,7 @@ export class Clearrabot {
     timeoutClass = undefined,
   ) {
     const controller = new AbortController();
+    const diagnostics = this.beginOperationDiagnostics(message);
     const deadlineUnixMs = Date.now() + Math.min(
       ...argumentSets.map((arguments_) =>
         this.searchDeadlineDurationMs(arguments_, timeoutClass)
@@ -1587,6 +1624,7 @@ export class Clearrabot {
           const outgoing = labelResultMessage(
             await this.buildResultMessage(result, tilingOnlyRequested(arguments_), {
               maxCtk3FileBytes: this.config.maxCtk3FileBytes,
+              deadlineUnixMs, signal: controller.signal, diagnostics,
               maxArtifactBytes: this.config.maxGifBytes,
               locale,
               resultKind: requestedResultKind ?? publicResultKind(arguments_),
@@ -1607,9 +1645,9 @@ export class Clearrabot {
             delivered += 1;
           }
         }
-      }, { deadlineUnixMs, signal: controller.signal });
+      }, { deadlineUnixMs, signal: controller.signal, diagnostics });
     } catch (error) {
-      const outgoing = textMessage(this.operationFailureText(error, locale));
+      const outgoing = textMessage(this.operationFailureText(error, locale, diagnostics));
       if (delivered === 0) {
         firstResult.resolve(outgoing);
         await firstDelivery;
@@ -1784,12 +1822,19 @@ export class Clearrabot {
   }
 
   withSearchSlot(run, options = {}) {
+    const queuedAt = Date.now();
+    const recordQueue = () => {
+      const timings = options.diagnostics?.stageDurationsMs;
+      if (timings) timings.queue = (timings.queue ?? 0) + Math.max(0, Date.now() - queuedAt);
+    };
+    const queuedRun = () => { recordQueue(); return run(); };
     const deadlineUnixMs = Number(options.deadlineUnixMs);
     if (!Number.isSafeInteger(deadlineUnixMs) || deadlineUnixMs <= Date.now()) {
       return Promise.reject(interactionDeadlineError());
     }
     if (this.activeSearches < this.config.maxConcurrentSearches) {
-      return this.useSearchSlot(run);
+      if (options.signal?.aborted) return Promise.reject(abortError("Clearra search was cancelled."));
+      return this.useSearchSlot(queuedRun);
     }
     if (this.pendingSearches.length >= this.maxPendingSearches) {
       return Promise.reject(
@@ -1798,7 +1843,7 @@ export class Clearrabot {
     }
     return new Promise((resolve, reject) => {
       const pending = {
-        run,
+        run: queuedRun,
         resolve,
         reject,
         deadlineUnixMs,
@@ -1811,6 +1856,8 @@ export class Clearrabot {
         if (index < 0) return;
         this.pendingSearches.splice(index, 1);
         this.cleanupPendingSearch(pending);
+        recordQueue();
+        error.failureStage = "queue";
         reject(error);
       };
       pending.abort = () => removeAndReject(abortError("Clearra search was cancelled."));
@@ -1884,7 +1931,27 @@ export class Clearrabot {
     );
   }
 
-  operationFailureText(error, locale = "en") {
+  beginOperationDiagnostics(target) {
+    const diagnostics = { stageDurationsMs: {} };
+    this.operationDiagnostics.set(target, diagnostics);
+    return diagnostics;
+  }
+
+  operationDiagnosticsFor(target) {
+    return this.operationDiagnostics.get(target) ?? {};
+  }
+
+  operationFailureText(error, locale = "en", diagnostics = undefined) {
+    if (diagnostics) {
+      Object.assign(diagnostics, {
+        failureCode: error?.failureCode ?? (error?.name === "DeadlineExceededError" ? "deadline"
+          : error?.name === "AbortError" ? "cancelled" : "result-validation"),
+        failureStage: error?.failureStage,
+        exitCode: error?.exitCode,
+        signal: error?.signal,
+      });
+      if (error?.stageDurationsMs) Object.assign(diagnostics.stageDurationsMs, error.stageDurationsMs);
+    }
     this.logOperationFailure(error);
     return operationErrorText(error, locale);
   }
@@ -1983,6 +2050,14 @@ function resultMessage(result, tilingOnly = false, options = {}) {
     }
     const structured = parsed ? { ...parsed, kind: resultKind } : parsed;
     if (structured) {
+      if (result.artifact?.contract === "clearra.discord-solution-artifact.v1") {
+        const artifact = validateSolutionTransportArtifact(result.artifact,
+          options.maxCtk3FileBytes ?? 24 * 1024 * 1024);
+        return ctk3ResultMessage(structured, {
+          source: artifact.source, pageCount: artifact.solutionCount,
+          complete: artifact.complete, warnings: [],
+        }, tilingOnly, options);
+      }
       const ctk3 = coverageSummaryDisposition(structured.summary) === "non-coverage"
         ? buildCtk3Result(parsed)
         : null;
@@ -2099,11 +2174,11 @@ function validBoundaryRecoverySummary(structured) {
         Number.isSafeInteger(summary.stage_one_checkpoint_step)) &&
       (summary.checkpoint_is_pc === null ||
         typeof summary.checkpoint_is_pc === "boolean") &&
-      Array.isArray(summary.steps) && summary.steps.length <= 42 &&
+      Array.isArray(summary.steps) && summary.steps.length <= 65535 &&
       summary.steps.every((step) => isPlainObject(step) &&
-        Number.isSafeInteger(step.source_queue_index) && step.source_queue_index < 42 &&
+        Number.isSafeInteger(step.source_queue_index) && step.source_queue_index < 65535 &&
         step.source_queue_index >= 0 && Number.isSafeInteger(step.placement_role_index) &&
-        step.placement_role_index < 42 && step.placement_role_index >= 0);
+        step.placement_role_index < 65535 && step.placement_role_index >= 0);
   }
   return ["population-complete", "population-incomplete"].includes(summary.status) &&
     summary.placement_role_scope === "bag-piece-exact-lock-time" &&
@@ -2925,6 +3000,7 @@ function combinePreviewAndResult(preview, result, postedAttachments = []) {
   const payload = { ...result.payload, content };
   if (retained.length > 0) payload.attachments = retained;
   return {
+    ...(result.executionOptions ? { executionOptions: result.executionOptions } : {}),
     payload,
     files: retained.length > 0
       ? [...result.files]
@@ -2949,6 +3025,7 @@ function isRenderFileTextInvocation(content, prefix) {
 
 function replyMessage(message, messageId) {
   return {
+    ...(message.executionOptions ? { executionOptions: message.executionOptions } : {}),
     payload: {
       ...message.payload,
       allowed_mentions: {
@@ -3033,9 +3110,12 @@ function abortError(message) {
 }
 
 function interactionDeadlineError() {
-  return new Error(
+  const error = new Error(
     "Clearra could not start the search before the Discord interaction deadline.",
   );
+  error.name = "DeadlineExceededError";
+  error.failureStage = "queue";
+  return error;
 }
 
 function pcLineLabel(arguments_) {
@@ -3047,6 +3127,7 @@ function pcLineLabel(arguments_) {
 function labelResultMessage(message, label) {
   const content = `${label}\n${message.payload.content ?? ""}`.slice(0, DISCORD_CONTENT_LIMIT);
   return {
+    ...(message.executionOptions ? { executionOptions: message.executionOptions } : {}),
     payload: { ...message.payload, content },
     files: message.files.map((file) => ({
       ...file,

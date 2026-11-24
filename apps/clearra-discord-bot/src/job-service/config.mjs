@@ -76,9 +76,9 @@ export function loadClearraJobServiceConfig(
       environment.CLEARRA_MAX_OUTPUT_BYTES,
       4 * 1024 * 1024,
     ),
-    maxArtifactBytes: positiveInteger(
-      environment.CLEARRA_MAX_GIF_BYTES,
-      24 * 1024 * 1024,
+    maxArtifactBytes: Math.max(
+      positiveInteger(environment.CLEARRA_MAX_GIF_BYTES, 24 * 1024 * 1024),
+      positiveInteger(environment.CLEARRA_MAX_CTK3_FILE_BYTES, 24 * 1024 * 1024),
     ),
     searchTimeoutMs: positiveInteger(
       environment.CLEARRA_SEARCH_TIMEOUT_MS,

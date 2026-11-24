@@ -148,6 +148,30 @@ test("non-path structured results do not request a replay attachment", () => {
   assert.equal(buildCanonicalPcPathReplayDocument({ kind: "pc-score-summary.v2" }), null);
 });
 
+test("PC replay propagates the original deadline and cannot downgrade its expiry to an optional preview failure", async () => {
+  const controller = new AbortController();
+  const deadlineUnixMs = Date.now() + 5000;
+  let renders = 0;
+  const bot = new Clearrabot({}, { maxConcurrentSearches: 1 }, {
+    executor: { async execute() { throw new Error("unused"); } },
+    gifRenderer: { async render(_document, options) {
+      renders++;
+      assert.equal(options.deadlineUnixMs, deadlineUnixMs);
+      assert.equal(options.signal, controller.signal);
+      const error = new Error("render deadline"); error.name = "DeadlineExceededError"; throw error;
+    } },
+  });
+  const result = assertDiscordCanonicalOnlyResult(success(exhaustiveResult()));
+  await assert.rejects(bot.buildResultMessage(result, false, {
+    deadlineUnixMs, signal: controller.signal, resultKind: "path",
+  }), { name: "DeadlineExceededError", failureStage: "render" });
+  assert.equal(renders, 1);
+  await assert.rejects(bot.buildResultMessage(result, false, {
+    deadlineUnixMs: Date.now() - 1, resultKind: "path",
+  }), { name: "DeadlineExceededError", failureStage: "projection" });
+  assert.equal(renders, 1);
+});
+
 test("direct executor canonical boundary reaches Discord PC replay without re-projection", async () => {
   let renderedDocument = null;
   let renderedOptions = null;

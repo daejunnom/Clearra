@@ -9,6 +9,7 @@ import {
   projectDiscordPcScoreMinimalsCanonicalResult,
 } from "../discord/pc-score-minimals-result.mjs";
 import { projectDiscordTypedProductResult } from "../discord/typed-product-result.mjs";
+import { validateSolutionTransportArtifact } from "./solution-artifact.mjs";
 
 const JOB_PROTOCOL = "clearra.job.v1";
 const DEFAULT_JOB_ENDPOINT = "http://127.0.0.1:8787/jobs";
@@ -1251,11 +1252,14 @@ function validateRuntimeIdentity(job, expected) {
 
 function terminalJobResult(job, maxOutputBytes, maxArtifactBytes) {
   if (job.state === "cancelled") {
-    throw abortError("Clearra job service cancelled the search.");
+    throw Object.assign(abortError("Clearra job service cancelled the search."),
+      executionDiagnostics(job));
   }
   if (job.state === "failed") {
     const message = typeof job.error === "string" ? job.error : "remote job failed";
-    throw new Error(`Clearra job service failed the search: ${message}`);
+    const error = new Error(`Clearra job service failed the search: ${message}`);
+    if (job.failureCode === "deadline") error.name = "DeadlineExceededError";
+    throw Object.assign(error, executionDiagnostics(job.result), executionDiagnostics(job));
   }
   const result = job.result;
   if (!result || typeof result !== "object" || Array.isArray(result)) {
@@ -1290,6 +1294,7 @@ function terminalJobResult(job, maxOutputBytes, maxArtifactBytes) {
   }
   const artifact = validateTransportArtifact(result.artifact, maxArtifactBytes);
   return assertDiscordCanonicalOnlyResult({
+    ...executionDiagnostics(result),
     exitCode: result.exitCode,
     signal: result.signal ?? null,
     ...(terminationReason ? { terminationReason } : {}),
@@ -1305,6 +1310,24 @@ function terminalJobResult(job, maxOutputBytes, maxArtifactBytes) {
   });
 }
 
+function executionDiagnostics(value) {
+  if (!value || typeof value !== "object") return {};
+  const output = {};
+  const stages = ["queue", "prepare", "execute", "artifact", "projection", "render", "delivery"];
+  const failureCodes = ["engine-oom", "engine-signal", "engine-exit", "deadline", "cancelled", "result-validation"];
+  if (failureCodes.includes(value.failureCode)) output.failureCode = value.failureCode;
+  if (stages.includes(value.failureStage)) output.failureStage = value.failureStage;
+  if (Number.isSafeInteger(value.exitCode)) output.exitCode = value.exitCode;
+  if (/^SIG(?:TERM|KILL|ABRT|SEGV|BUS|ILL|FPE|INT)$/u.test(value.signal ?? "")) output.signal = value.signal;
+  const timings = {};
+  for (const stage of stages) {
+    const duration = value.stageDurationsMs?.[stage];
+    if (Number.isSafeInteger(duration) && duration >= 0) timings[stage] = duration;
+  }
+  if (Object.keys(timings).length) output.stageDurationsMs = timings;
+  return output;
+}
+
 function checkedJobResponseLimit(maxOutputBytes, maxArtifactBytes) {
   const encodedArtifactBytes = Math.ceil(maxArtifactBytes / 3) * 4;
   const total = maxOutputBytes * 6 + encodedArtifactBytes + 64 * 1024;
@@ -1316,6 +1339,9 @@ function checkedJobResponseLimit(maxOutputBytes, maxArtifactBytes) {
 
 function validateTransportArtifact(value, maximumBytes) {
   if (value === undefined || value === null) return null;
+  if (value.contract === "clearra.discord-solution-artifact.v1") {
+    return validateSolutionTransportArtifact(value, maximumBytes);
+  }
   if (
     !value ||
     typeof value !== "object" ||

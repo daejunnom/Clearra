@@ -1106,9 +1106,6 @@ function forwardRenArguments(command, values) {
     throw new Error("height must include every occupied row in field.");
   }
   const next = validatedNext(values, true).toUpperCase();
-  if (next.length > 22) {
-    throw new Error("REN next must contain at most 22 pieces.");
-  }
   const hold = onOffValue(values, "hold", true);
   return [
     ...command.argvPrefix,

@@ -1565,7 +1565,7 @@ function forwardOutcomeComment(outcome, path, displayIndex) {
   }
   if (hasOwn(outcome, "ren_count")) {
     parts.push(
-      `REN=${requiredInteger(outcome, "ren_count", `${path}.ren_count`, 0, 21)}`,
+      `REN=${requiredInteger(outcome, "ren_count", `${path}.ren_count`, 0, 254)}`,
     );
   }
   if (hasOwn(outcome, "spin_piece")) {

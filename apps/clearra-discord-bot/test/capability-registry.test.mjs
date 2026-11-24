@@ -732,12 +732,11 @@ test("forward REN canonical slash and text ingress share one typed lowering rout
   assert.equal(slashArguments.includes("--spin-profile"), false);
   assert.equal(slashArguments.includes("--initial-combo"), false);
   assert.equal(slashArguments.includes("--minimum-damage"), false);
-  assert.throws(
+  assert.doesNotThrow(
     () => buildSlashCommandArguments(catalog, [
       { name: "field", value: "__________" },
       { name: "next", value: "I".repeat(23) },
     ]),
-    /at most 22 pieces/,
   );
 });
 

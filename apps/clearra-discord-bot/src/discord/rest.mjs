@@ -1,3 +1,6 @@
+import { setTimeout as waitForDelay } from "node:timers/promises";
+import { assertRequestActive, requestDeadlineError, withRequestPhase } from "../clearra/request-deadline.mjs";
+
 const API_ROOT = "https://discord.com/api/v10";
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 const MAX_RATE_LIMIT_DELAY_MS = 30_000;
@@ -61,6 +64,7 @@ export class DiscordRestClient {
       message.payload,
       message.files,
       false,
+      message.executionOptions ?? {},
     );
   }
 
@@ -71,7 +75,7 @@ export class DiscordRestClient {
       message.payload,
       message.files,
       false,
-      { retryServerErrors: false },
+      { ...message.executionOptions, retryServerErrors: false },
     );
   }
 
@@ -82,7 +86,7 @@ export class DiscordRestClient {
       message.payload,
       message.files,
       true,
-      { retryServerErrors: false },
+      { ...message.executionOptions, retryServerErrors: false },
     );
   }
 
@@ -92,6 +96,8 @@ export class DiscordRestClient {
       `/channels/${channelId}/messages/${messageId}`,
       message.payload,
       message.files,
+      true,
+      message.executionOptions ?? {},
     );
   }
 
@@ -147,11 +153,17 @@ export class DiscordRestClient {
     authenticate = true,
     options = {},
   ) {
+    return withRequestPhase(options, "delivery", () =>
+      this.requestWithinDeadline(method, path, payload, files, authenticate, options));
+  }
+
+  async requestWithinDeadline(method, path, payload, files, authenticate, options) {
     if (authenticate && !this.token) {
       throw new Error("DISCORD_TOKEN is required for this Discord API request.");
     }
     let attempt = 0;
     while (true) {
+      assertRequestActive(options);
       const headers = new Headers({
         "user-agent": "Clearrabot/0.1",
       });
@@ -204,13 +216,14 @@ export class DiscordRestClient {
               ? await response.json() : await response.text();
           return { response, data };
         },
+        options,
       );
       if (response.status === 429 && attempt < 4) {
         const delayMs = Math.ceil(Number(data.retry_after ?? 1) * 1000);
         if (!Number.isFinite(delayMs) || delayMs < 0 || delayMs > MAX_RATE_LIMIT_DELAY_MS) {
           throw new Error("Discord API returned an unsafe rate-limit delay.");
         }
-        await sleep(delayMs);
+        await sleep(delayMs, options);
         attempt += 1;
         continue;
       }
@@ -219,7 +232,7 @@ export class DiscordRestClient {
         attempt < 3 &&
         options.retryServerErrors !== false
       ) {
-        await sleep(250 * 2 ** attempt);
+        await sleep(250 * 2 ** attempt, options);
         attempt += 1;
         continue;
       }
@@ -316,13 +329,24 @@ export function fileComponentMessage(file) {
   };
 }
 
-function sleep(milliseconds) {
-  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+async function sleep(milliseconds, options = {}) {
+  assertRequestActive(options);
+  if (options.deadlineUnixMs !== undefined && milliseconds >= options.deadlineUnixMs - Date.now()) {
+    throw requestDeadlineError();
+  }
+  await waitForDelay(milliseconds, undefined, { signal: options.signal });
+  assertRequestActive(options);
 }
 
-async function fetchWithTimeout(fetchImplementation, url, options, timeoutMs, consume) {
+async function fetchWithTimeout(fetchImplementation, url, options, timeoutMs, consume, requestOptions = {}) {
+  assertRequestActive(requestOptions);
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  const remaining = requestOptions.deadlineUnixMs === undefined
+    ? timeoutMs : Math.min(timeoutMs, requestOptions.deadlineUnixMs - Date.now());
+  const abort = () => controller.abort();
+  requestOptions.signal?.addEventListener("abort", abort, { once: true });
+  if (requestOptions.signal?.aborted) abort();
+  const timeout = setTimeout(abort, Math.max(1, remaining));
   let response;
   try {
     response = await fetchImplementation(url, {
@@ -330,13 +354,17 @@ async function fetchWithTimeout(fetchImplementation, url, options, timeoutMs, co
       signal: controller.signal,
     });
     // Fetch resolves at the headers; the deadline owns the entire body read.
-    return await consume(response);
+    const result = await consume(response);
+    assertRequestActive(requestOptions);
+    return result;
   } catch (error) {
+    assertRequestActive(requestOptions);
     if (controller.signal.aborted) throw discordNetworkError({ name: "TimeoutError" });
     if (response === undefined) throw discordNetworkError(error);
     throw error;
   } finally {
     clearTimeout(timeout);
+    requestOptions.signal?.removeEventListener("abort", abort);
     // Retried server errors and rejected attachments must release their body.
     if (response?.body && !response.bodyUsed) controller.abort();
   }

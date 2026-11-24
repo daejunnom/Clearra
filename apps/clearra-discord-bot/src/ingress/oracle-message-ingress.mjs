@@ -454,7 +454,9 @@ export class OracleMessageIngress {
   #writeTerminalLog(message, status, startedAt) {
     if (!this.operationalScope) return;
     const completedAt = numericClock(this.now);
+    const diagnostics = this.handler.operationDiagnosticsFor?.(message) ?? {};
     writeOperationalLog(this.logger, {
+      ...diagnostics,
       scope: this.operationalScope,
       kind: classifyOracleMessageKind(
         message?.content,
@@ -464,7 +466,8 @@ export class OracleMessageIngress {
         message?.content,
         this.commandPrefixes,
       ),
-      status,
+      status: diagnostics.failureCode === "cancelled" ? "cancelled"
+        : diagnostics.failureCode ? "failed" : status,
       durationMs:
         startedAt === null || completedAt === null
           ? null

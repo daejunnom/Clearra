@@ -1,4 +1,5 @@
 import { Worker } from "node:worker_threads";
+import { assertRequestActive, requestDeadlineError } from "../clearra/request-deadline.mjs";
 
 const DEFAULT_TIMEOUT_MS = 10_000;
 const DEFAULT_MAX_PENDING = 8;
@@ -20,10 +21,20 @@ export class BoundedGifRenderer {
     if (this.active && this.pending.length >= this.maxPending) {
       return Promise.reject(new Error("The GIF renderer queue is full."));
     }
+    try { assertRequestActive(options); } catch (error) { return Promise.reject(error); }
     return new Promise((resolve, reject) => {
-      const job = { document, options, resolve, reject };
+      const job = { document, options, resolve, reject, settled: false,
+        deadlineTimer: null, abort: null };
+      job.abort = () => this.#settle(job, renderAbortError("The GIF render was cancelled."));
+      options.signal?.addEventListener("abort", job.abort, { once: true });
+      if (options.deadlineUnixMs !== undefined) {
+        job.deadlineTimer = setTimeout(() => this.#settle(job, requestDeadlineError()),
+          Math.max(1, options.deadlineUnixMs - Date.now()));
+        job.deadlineTimer.unref?.();
+      }
       if (this.active) this.pending.push(job);
       else this.#start(job);
+      if (options.signal?.aborted) job.abort();
     });
   }
 
@@ -31,72 +42,77 @@ export class BoundedGifRenderer {
     if (this.stopped) return;
     this.stopped = true;
     for (const job of this.pending.splice(0)) {
-      job.reject(renderAbortError("The GIF renderer has stopped."));
+      this.#settle(job, renderAbortError("The GIF renderer has stopped."));
     }
     const active = this.active;
     if (!active) return;
-    this.active = null;
-    clearTimeout(active.timeout);
-    active.worker.removeAllListeners();
-    void active.worker.terminate();
-    active.job.reject(renderAbortError("The GIF renderer has stopped."));
+    this.#settle(active.job, renderAbortError("The GIF renderer has stopped."));
   }
 
   #start(job) {
     let worker;
     try {
-      worker = this.createWorker(job.document, job.options);
+      assertRequestActive(job.options);
+      const { signal: _signal, deadlineUnixMs: _deadline, stageDurationsMs: _timings,
+        ...renderOptions } = job.options;
+      worker = this.createWorker(job.document, renderOptions);
     } catch (error) {
-      job.reject(renderWorkerError(error));
-      this.#next();
+      this.#settle(job, error?.name === "DeadlineExceededError" || error?.name === "AbortError"
+        ? error : renderWorkerError(error));
       return;
     }
 
     const active = {
       job,
       worker,
-      settled: false,
       timeout: null,
     };
     this.active = active;
-    const settle = (callback) => {
-      if (active.settled) return;
-      active.settled = true;
-      clearTimeout(active.timeout);
-      worker.removeAllListeners();
-      if (this.active === active) this.active = null;
-      callback();
-      this.#next();
-    };
     worker.once("message", (message) => {
-      settle(() => {
-        if (message?.ok === true && message.bytes instanceof Uint8Array) {
-          job.resolve(message.bytes);
-          return;
-        }
-        const error = new Error(
-          typeof message?.message === "string"
-            ? message.message
-            : "The image preview could not be rendered.",
-        );
-        error.name = typeof message?.name === "string" ? message.name : "Error";
-        job.reject(error);
-      });
+      try { assertRequestActive(job.options); } catch (error) { this.#settle(job, error); return; }
+      if (message?.ok === true && message.bytes instanceof Uint8Array) {
+        this.#settle(job, null, message.bytes);
+        return;
+      }
+      const error = new Error(typeof message?.message === "string"
+        ? message.message : "The image preview could not be rendered.");
+      error.name = typeof message?.name === "string" ? message.name : "Error";
+      this.#settle(job, error);
     });
     worker.once("error", (error) => {
-      settle(() => job.reject(renderWorkerError(error)));
+      this.#settle(job, renderWorkerError(error));
     });
     worker.once("exit", (code) => {
-      if (code === 0 || active.settled) return;
-      settle(() => job.reject(new Error("The GIF renderer worker exited unexpectedly.")));
+      this.#settle(job, new Error("The GIF renderer worker exited without a result."));
     });
     active.timeout = setTimeout(() => {
-      settle(() => {
-        void worker.terminate();
-        job.reject(new Error("The GIF renderer exceeded its time limit."));
-      });
+      this.#settle(job, new Error("The GIF renderer exceeded its time limit."));
     }, this.timeoutMs);
     active.timeout.unref?.();
+  }
+
+  #settle(job, error, bytes) {
+    if (job.settled) return;
+    job.settled = true;
+    clearTimeout(job.deadlineTimer);
+    job.options.signal?.removeEventListener("abort", job.abort);
+    const pendingIndex = this.pending.indexOf(job);
+    if (pendingIndex >= 0) this.pending.splice(pendingIndex, 1);
+    const active = this.active?.job === job ? this.active : null;
+    const finish = () => {
+      if (this.active === active) this.active = null;
+      if (error) job.reject(error);
+      else {
+        try { assertRequestActive(job.options); job.resolve(bytes); }
+        catch (lateError) { job.reject(lateError); }
+      }
+      this.#next();
+    };
+    if (!active) { finish(); return; }
+    clearTimeout(active.timeout);
+    active.worker.removeAllListeners();
+    // Retain the renderer slot until the worker has actually drained.
+    Promise.resolve(active.worker.terminate()).then(finish, finish);
   }
 
   #next() {

@@ -1896,7 +1896,7 @@ function syntax(entry, locale = "en") {
       case "forward-damage-v2":
         return `/${path} next:<정확한 IOTSZJL 큐> field:<격자|CTK3|v115 Fumen|URL> [height:1..24] [hold:<on|off>] [kicktable:<내장 프로필>] [spin-profile:<프로필>] [damage-mode:<maximum|at-least>] [minimum-damage:<0..4294967295>] [initial-combo:<0..65535>] [initial-b2b:<0..65535>] [preserve-b2b:<on|off>]`;
       case "forward-ren-v1":
-        return `/${path} next:<최대 22개의 정확한 IOTSZJL 큐> field:<격자|CTK3|v115 Fumen|URL> [height:1..24] [hold:<on|off>] [kicktable:<내장 프로필>]`;
+        return `/${path} next:<정확한 IOTSZJL 큐> field:<격자|CTK3|v115 Fumen|URL> [height:1..24] [hold:<on|off>] [kicktable:<내장 프로필>]`;
       case "score-fixed-next":
         return `/${path} next:<정확한 IOTSZJL 큐> field:<격자|CTK3|v115 Fumen|URL> [lines:1..${DISCORD_PC_FIELD_MAX_ROWS}] [kicktable:<내장 프로필>] [options:initial-b2b=false]`;
       case "score-fixed-next-v2":
@@ -1985,7 +1985,7 @@ function syntax(entry, locale = "en") {
     case "forward-damage-v2":
       return `/${path} next:<exact IOTSZJL queue> field:<grid|document|URL> [height:1..24] [hold:<on|off>] [kicktable:<built-in>] [spin-profile:<profile>] [damage-mode:<maximum|at-least>] [minimum-damage:<0..4294967295>] [initial-combo:<0..65535>] [initial-b2b:<0..65535>] [preserve-b2b:<on|off>]`;
     case "forward-ren-v1":
-      return `/${path} next:<exact IOTSZJL queue of at most 22 pieces> field:<grid|document|URL> [height:1..24] [hold:<on|off>] [kicktable:<built-in>]`;
+      return `/${path} next:<exact IOTSZJL queue> field:<grid|document|URL> [height:1..24] [hold:<on|off>] [kicktable:<built-in>]`;
     case "score-fixed-next":
       return `/${path} next:<exact IOTSZJL queue> field:<grid|document|URL> [lines:1..${DISCORD_PC_FIELD_MAX_ROWS}] [kicktable:<built-in>] [options:initial-b2b=false]`;
     case "score-fixed-next-v2":
@@ -2032,7 +2032,7 @@ function inputHelp(entry, locale = "en") {
   switch (entry.input) {
     case "boundary-recovery-v1":
       return [
-        "Provide one JSON object with `initial_board_mask`, `target_board_mask`, `height`, `queue`, `stage_one_count`, and `placements`. Board masks are hexadecimal; the queue is 2–42 exact IOTSZJL pieces.",
+        "Provide one JSON object with `initial_board_mask`, `target_board_mask`, `height`, `queue`, `stage_one_count`, and `placements`. Board masks are hexadecimal; the queue is 2–65,535 exact IOTSZJL pieces.",
         "Omit `max_early_placements` or set it to `auto` to allow every feasible early count in the declared role set. A number is an at-most quota, not an exact count. Cleared early placements still count. Legacy borrow options select one role and require a maximum of 1; they cannot describe automatic all-role search.",
         "Optional `preserve_b2b_bags` is an array of one-based supply-bag positions; `preserve_b2b_stage_one` and `preserve_b2b_stage_two` toggle whole stages. `initial_b2b`, `hold`, `rule`, `spin_profile`, and `max_states` are optional.",
         "Add `queue_pattern` with complete seven-piece reference bags and all exact roles for weighted exhaustive evaluation. State and pattern limits are absent by default. Legacy positive limits remain explicit; cancellation or incomplete supply never becomes a proven no-path result.",
@@ -2209,7 +2209,7 @@ function inputHelp(entry, locale = "en") {
       ];
     case "forward-ren-v1":
       return [
-        `\`field\` accepts 1–${DISCORD_WIDE_FIELD_MAX_ROWS} rows or one static document; \`next\` must be one exact queue of at most 22 pieces. \`height\` defaults to at least 8 and cannot exclude supplied rows.`,
+        `\`field\` accepts 1–${DISCORD_WIDE_FIELD_MAX_ROWS} rows or one static document; \`next\` must be one exact queue. \`height\` defaults to at least 8 and cannot exclude supplied rows.`,
         "Every accepted lock must clear at least one line. The first clear is REN 0; initial complete rows are normalized without counting. Discord returns the first result in deterministic order when maximum-REN witnesses tie.",
         nativeKickHelp,
       ];
@@ -2342,7 +2342,7 @@ function koreanInputHelp(entry) {
   switch (entry.input) {
     case "boundary-recovery-v1":
       return [
-        "한 JSON 객체에 `initial_board_mask`, `target_board_mask`, `height`, `queue`, `stage_one_count`, `placements`를 넣습니다. 보드 마스크는 16진수이고 큐는 정확한 IOTSZJL 미노 2~42개입니다.",
+        "한 JSON 객체에 `initial_board_mask`, `target_board_mask`, `height`, `queue`, `stage_one_count`, `placements`를 넣습니다. 보드 마스크는 16진수이고 큐는 정확한 IOTSZJL 미노 2~65,535개입니다.",
         "`max_early_placements`를 생략하거나 `auto`로 지정하면 선언된 역할 집합에서 가능한 선행 개수를 모두 허용합니다. 숫자는 정확한 개수가 아닌 최대 허용 개수이며, 삭제된 선행 배치도 누적합니다. 기존 borrow 옵션은 최대 1에서 특정 역할 하나를 제한하므로 자동 전체 역할 탐색과 함께 사용할 수 없습니다.",
         "`preserve_b2b_bags`는 1부터 시작하는 공급 가방 위치 배열입니다. 두 단계 전체 토글과 `initial_b2b`, `hold`, `rule`, `spin_profile`, `max_states`도 선택할 수 있습니다.",
         "완전한 7미노 기준 가방과 정확한 역할 전체가 있으면 `queue_pattern`으로 가중 전수 평가를 요청합니다. 상태 수와 패턴 평가 수의 기본 제한은 없습니다. 기존 양수 제한은 명시적으로 유지하며, 취소나 미완료 공급을 무경로 증명으로 취급하지 않습니다.",
@@ -2519,7 +2519,7 @@ function koreanInputHelp(entry) {
       ];
     case "forward-ren-v1":
       return [
-        `\`field\`는 1–${DISCORD_WIDE_FIELD_MAX_ROWS}줄 또는 정적 문서를 받고 \`next\`는 최대 22개 미노의 정확한 큐 하나여야 합니다. \`height\` 기본값은 최소 8입니다.`,
+        `\`field\`는 1–${DISCORD_WIDE_FIELD_MAX_ROWS}줄 또는 정적 문서를 받고 \`next\`는 정확한 미노 큐 하나여야 합니다. \`height\` 기본값은 최소 8입니다.`,
         "모든 배치는 한 줄 이상을 지워야 합니다. 첫 줄 삭제는 REN 0이며 초기 완성 줄은 세지 않고 정규화합니다. 최대 REN 경로가 여럿이면 Discord는 결정적으로 정렬된 첫 결과 하나만 반환합니다.",
         nativeKickHelp,
       ];

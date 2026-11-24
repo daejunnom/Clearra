@@ -289,12 +289,11 @@ test("forward and structural families lower independent named controls", () => {
   assertValue(ren, "--rule", "no-kick");
   assert.equal(ren.includes("--no-hold"), true);
   assert.equal(ren.includes("--spin-profile"), false);
-  assert.throws(
+  assert.doesNotThrow(
     () => slashArguments("/forward ren", [
       { name: "field", value: EMPTY_FIELD },
       { name: "next", value: "I".repeat(23) },
     ]),
-    /at most 22 pieces/i,
   );
 
   const structure = slashArguments("/spin-structure search", spinStructureOptions());

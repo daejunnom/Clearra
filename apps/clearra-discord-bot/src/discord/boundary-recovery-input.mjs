@@ -4,7 +4,7 @@ import { DiscordInputError } from "./i18n.mjs";
 // authority; this adapter validates bounded input bytes, not an implicit search cutoff.
 const MAX_SCENARIO_CHARS = 6_000;
 const MAX_PATTERN_CHARS = 2_048;
-const PIECES = /^[IJLOSTZ]{2,42}$/i;
+const PIECES = /^[IJLOSTZ]{2,65535}$/i;
 const RULES = new Set(["srs-plus", "srs", "srs-x", "jstris-180", "no-kick"]);
 const SPIN_PROFILES = new Set([
   "disabled", "t-spins", "t-spins-plus", "all-mini", "all-mini-plus",
@@ -84,7 +84,7 @@ export function boundaryRecoveryArguments(command, scenarioText) {
   const target = mask(scenario.target_board_mask, "target_board_mask", fieldLimit);
   const queue = typeof scenario.queue === "string" && PIECES.test(scenario.queue)
     ? scenario.queue.toUpperCase() : null;
-  if (queue === null) throw invalid("queue must contain 2 through 42 exact IOTSZJL pieces.");
+  if (queue === null) throw invalid("queue must contain 2 through 65535 exact IOTSZJL pieces.");
   const placements = integer(scenario.placements, "placements", 2, queue.length);
   const stageOne = integer(scenario.stage_one_count, "stage_one_count", 1, placements - 1);
   const selected = scenario.borrow_role_position !== undefined || scenario.borrow_placement_mask !== undefined;

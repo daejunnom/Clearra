@@ -138,6 +138,7 @@ export class SlashCommandIngress {
     };
     const operationStartedAt = numericClock(this.now);
     let operationStatus = "succeeded";
+    let failure;
     try {
       const handled = await this.bot.handleInteraction(interaction, {
         acknowledger: deferAwareAcknowledger,
@@ -147,6 +148,7 @@ export class SlashCommandIngress {
       }
     } catch (error) {
       operationStatus = "failed";
+      failure = error;
       if (!deferred || typeof this.bot.handleInteractionFailure !== "function") {
         throw error;
       }
@@ -154,11 +156,17 @@ export class SlashCommandIngress {
     } finally {
       if (this.operationalScope) {
         const completedAt = numericClock(this.now);
+        const diagnostics = this.bot.operationDiagnosticsFor?.(interaction) ?? {};
         writeOperationalLog(this.logger, {
+          ...diagnostics,
+          ...(failure ? { failureCode: failure.failureCode ?? diagnostics.failureCode,
+            failureStage: failure.failureStage ?? diagnostics.failureStage,
+            stageDurationsMs: failure.stageDurationsMs ?? diagnostics.stageDurationsMs } : {}),
           scope: this.operationalScope,
           kind: "slash",
           command: interactionCommandPath(interaction),
-          status: operationStatus,
+          status: diagnostics.failureCode === "cancelled" ? "cancelled"
+            : diagnostics.failureCode ? "failed" : operationStatus,
           durationMs:
             operationStartedAt === null || completedAt === null
               ? null

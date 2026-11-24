@@ -21,6 +21,10 @@ import {
   searchTimeoutMsForArguments,
 } from "../clearra/command.mjs";
 import { productBuildIdentityMatchesRuntime } from "./runtime-identity.mjs";
+import {
+  cleanupSolutionArtifactPlan, createSolutionArtifactPlan,
+  readSolutionArtifact, usesNativeSolutionArtifact,
+} from "../clearra/solution-artifact.mjs";
 
 export class ClearraCommandRunner {
   constructor(config, options = {}) {
@@ -100,20 +104,25 @@ export class ClearraCommandRunner {
       this.config.maxArtifactBytes ?? this.config.maxOutputBytes,
       job.maxArtifactBytes ?? job.maxOutputBytes,
     );
+    const nativeSolutionArtifact = this.config.maxArtifactBytes !== undefined &&
+      job.maxArtifactBytes !== undefined && usesNativeSolutionArtifact(job.arguments);
     const preparedArguments = prepareClearraArguments(job.arguments, {
       workers: this.config.searchWorkersPerSession,
       useAllLogicalProcessors: this.config.useAllLogicalProcessors,
       logicalProcessors: this.config.processLogicalProcessors,
       outputFormat: "json",
-      includeSolutionData: true,
+      includeSolutionData: !nativeSolutionArtifact,
     });
     const artifactPlan = await createRenderArtifactPlan(
       preparedArguments,
       maxArtifactBytes,
     );
+    const solutionPlan = nativeSolutionArtifact
+      ? await createSolutionArtifactPlan(preparedArguments, maxArtifactBytes) : null;
     const arguments_ = artifactPlan
       ? [...preparedArguments, "--output", artifactPlan.outputPath]
-      : preparedArguments;
+      : solutionPlan ? [...preparedArguments, "--solution-output", solutionPlan.outputPath,
+        "--solution-artifact-format", "ctk3"] : preparedArguments;
     const readOomEvidence = async () => {
       try {
         return await this.readOomKillCount();
@@ -226,16 +235,23 @@ export class ClearraCommandRunner {
           const oomKillCountAfter = signal === "SIGKILL"
             ? await readOomEvidence()
             : oomKillCountBefore;
+          assertWithinDeadline();
           const confirmedOom = signal === "SIGKILL" &&
             Number.isSafeInteger(oomKillCountBefore) &&
             Number.isSafeInteger(oomKillCountAfter) &&
             oomKillCountAfter > oomKillCountBefore;
-          const renderDocument = code === 0 && artifactPlan
+          const renderDocument = code === 0 && !signal && artifactPlan
             ? parseRenderStdout(stdoutText)
             : null;
           const artifact = renderDocument
             ? await readRenderArtifact(artifactPlan, renderDocument.payload)
             : null;
+          const solutionDocument = code === 0 && !signal && solutionPlan
+            ? JSON.parse(stdoutText) : null;
+          const solutionArtifact = solutionDocument
+            ? await readSolutionArtifact(solutionPlan, solutionDocument) : null;
+          assertWithinDeadline();
+          if (solutionDocument) delete solutionDocument.solution_artifact;
           const result = {
             exitCode: code ?? -1,
             signal: signal ?? null,
@@ -246,16 +262,18 @@ export class ClearraCommandRunner {
               : signal ? "engine-signal" : code !== 0 ? "engine-exit" : null,
             oomKillCountBefore,
             oomKillCountAfter,
-            stdout: renderDocument ? encodeRenderStdout(renderDocument) : stdoutText,
+            stdout: renderDocument ? encodeRenderStdout(renderDocument)
+              : solutionDocument ? JSON.stringify(solutionDocument) : stdoutText,
             stderr: stderrText,
-            ...(artifact ? { artifact } : {}),
+            ...(artifact || solutionArtifact ? { artifact: artifact ?? solutionArtifact } : {}),
           };
           nextStage("projection");
           // Render stdout is already parsed, sanitized and checked. Other
           // commands keep their existing string-in/string-out policy path.
           const projected = code === 0 && !signal && !renderDocument
             ? assertDiscordCanonicalOnlyResult(result) : result;
-          nextStage("complete");
+          assertWithinDeadline();
+          nextStage(stage);
           finish(() => resolveJob({ ...projected, stageDurationsMs: { ...stageDurationsMs } }));
         })().catch((error) => {
           finish(() => rejectJob(error));
@@ -264,14 +282,16 @@ export class ClearraCommandRunner {
       if (options.signal?.aborted) abort();
       });
     } catch (error) {
+      const failureStage = stage;
       nextStage("failed");
       if (error && typeof error === "object") {
         error.stageDurationsMs = { ...stageDurationsMs };
-        error.failureStage = stage === "failed" ? Object.keys(stageDurationsMs).at(-1) : stage;
+        error.failureStage = failureStage;
       }
       throw error;
     } finally {
       await cleanupRenderArtifactPlan(artifactPlan);
+      await cleanupSolutionArtifactPlan(solutionPlan);
     }
   }
 }

@@ -190,11 +190,16 @@ export class ClearraJobService {
       entry.failureStage = error?.failureStage;
       if (error?.name === "AbortError") {
         entry.state = "cancelled";
-        entry.terminal = this.jobEnvelope(job.id, "cancelled");
+        entry.terminal = this.jobEnvelope(job.id, "cancelled", {
+          failureCode: entry.failureCode, failureStage: entry.failureStage,
+          stageDurationsMs: entry.stageDurationsMs,
+        });
       } else {
         entry.state = "failed";
         entry.terminal = this.jobEnvelope(job.id, "failed", {
           error: safeErrorMessage(error),
+          failureCode: entry.failureCode, failureStage: entry.failureStage,
+          stageDurationsMs: entry.stageDurationsMs,
         });
       }
     } finally {

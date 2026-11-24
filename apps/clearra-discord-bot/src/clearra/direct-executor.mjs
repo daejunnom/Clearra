@@ -102,7 +102,10 @@ export class ClearraDirectExecutor {
       "output limit",
     );
     this.maxArtifactBytes = positiveInteger(
-      config.maxGifBytes ?? config.maxArtifactBytes ?? config.maxOutputBytes,
+      Math.max(
+        config.maxGifBytes ?? config.maxArtifactBytes ?? config.maxOutputBytes,
+        config.maxCtk3FileBytes ?? config.maxArtifactBytes ?? config.maxOutputBytes,
+      ),
       "artifact limit",
     );
     const externalRunner = options.runner;
