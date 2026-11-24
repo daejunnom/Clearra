@@ -1,5 +1,9 @@
 use std::collections::{BTreeMap, VecDeque};
 
+#[cfg(all(feature = "parallel", not(target_family = "wasm")))]
+#[path = "build_probability_parallel.rs"]
+mod native_parallel;
+
 use clearra_core_domain::{
     board::board_size::BoardSize,
     execution_cancellation::ExecutionControl,
@@ -308,7 +312,11 @@ impl WasmBuildProbabilitySession {
         let original = field.original_only();
         let mirrored = mirror_included.then(|| original.mirrored_horizontally());
         let mirror_distinct = mirrored.is_some_and(|candidate| candidate != original);
-        let execution_admission = admit_budget_bound_search_execution(problem, 1)
+        #[cfg(all(feature = "parallel", not(target_family = "wasm")))]
+        let compute_width = problem.backend_policy().workers();
+        #[cfg(not(all(feature = "parallel", not(target_family = "wasm"))))]
+        let compute_width = 1;
+        let execution_admission = admit_budget_bound_search_execution(problem, compute_width)
             .map_err(WasmExactSearchError::resource_admission)?;
         let pass_count = usize::from(mirror_distinct) + 1;
         let allocation_plan = if score_requested {
@@ -479,9 +487,32 @@ impl WasmBuildProbabilitySession {
             session.set_coexisting_retained_bytes(coexisting_retained_bytes);
             let advance = match session {
                 BuildProbabilitySessionKind::Compact(session) => {
+                    #[cfg(all(feature = "parallel", not(target_family = "wasm")))]
+                    if let Some(advance) = session.execute_native_parallel(control)? {
+                        Ok(advance)
+                    } else {
+                        session.advance(work_budget, control)
+                    }
+                    #[cfg(not(all(feature = "parallel", not(target_family = "wasm"))))]
                     session.advance(work_budget, control)
                 }
                 BuildProbabilitySessionKind::Extended(session) => {
+                    #[cfg(all(feature = "parallel", not(target_family = "wasm")))]
+                    {
+                        let parallel_result = if session.distributed_progress().candidates == 0 {
+                            session.execute_pc_family_parallel(
+                                session.requested_pc_workers(),
+                                control,
+                            )?
+                        } else {
+                            None
+                        };
+                        match parallel_result {
+                            Some(result) => Ok(BuildProbabilityAdvance::Completed(result)),
+                            None => session.advance(work_budget, control),
+                        }
+                    }
+                    #[cfg(not(all(feature = "parallel", not(target_family = "wasm"))))]
                     session.advance(work_budget, control)
                 }
             }?;
@@ -2116,6 +2147,7 @@ pub(super) struct CompactBuildProbabilitySession {
     parallel_minimum_worker_candidates: usize,
     parallel_maximum_worker_candidates: usize,
     parallel_decision_reason: &'static str,
+    native_parallel_peak_bytes: u128,
     distributed_spin_materialized: bool,
     distributed_execution_constraint_materialized: bool,
     finesse_requested: bool,
@@ -2123,6 +2155,7 @@ pub(super) struct CompactBuildProbabilitySession {
     memory_bound: ExecutionMemoryBound,
     coexisting_retained_bytes: u128,
     finished: bool,
+    execution_control: ExecutionControl,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2413,6 +2446,7 @@ impl CompactBuildProbabilitySession {
         )?;
         let symbolic = StandardBagCoverage::supports(universe, problem.initial_hold());
         let compile_pattern_indexes = !symbolic
+            || problem.count_policy() == clearra_pc_graph::request::PcCountPolicy::CountAll
             || finesse_requested
             || shared_supply_catalog.is_some_and(|shared| shared.key.compile_pattern_indexes);
         let shared_key = CompactBuildProbabilitySharedCatalogKey {
@@ -2519,6 +2553,7 @@ impl CompactBuildProbabilitySession {
             parallel_minimum_worker_candidates: if external_geometry { usize::MAX } else { 0 },
             parallel_maximum_worker_candidates: 0,
             parallel_decision_reason: "serial-build-probability-session",
+            native_parallel_peak_bytes: 0,
             distributed_spin_materialized: false,
             distributed_execution_constraint_materialized: false,
             finesse_requested,
@@ -2526,6 +2561,7 @@ impl CompactBuildProbabilitySession {
             memory_bound,
             coexisting_retained_bytes,
             finished: false,
+            execution_control: ExecutionControl::default(),
         };
         session.ensure_memory_bound(0)?;
         Ok(session)
@@ -2536,6 +2572,7 @@ impl CompactBuildProbabilitySession {
         work_budget: usize,
         control: &ExecutionControl,
     ) -> Result<BuildProbabilityAdvance, WasmExactSearchError> {
+        self.execution_control = control.clone();
         if self.finished {
             return Err(WasmExactSearchError::InvalidProblem(
                 "wasm_build_probability_session_already_finished",
@@ -2587,6 +2624,7 @@ impl CompactBuildProbabilitySession {
         enforce_candidate_budget: bool,
         control: &ExecutionControl,
     ) -> Result<(), WasmExactSearchError> {
+        self.execution_control = control.clone();
         let max_candidates = self.problem.backend_request().max_candidates();
         if enforce_candidate_budget && max_candidates != 0 && self.candidate_count >= max_candidates
         {
@@ -3760,20 +3798,62 @@ impl CompactBuildProbabilitySession {
             WasmExactSearchError::InvalidProblem("wasm_build_spin_graph_storage_unavailable")
         })?;
         let mut complete = true;
-        for (index, identity) in identities.into_iter().enumerate() {
-            let candidate_id = u64::try_from(index + 1).map_err(|_| {
-                WasmExactSearchError::InvalidProblem("wasm_build_spin_candidate_id_overflow")
-            })?;
-            match exact_scoring_execution_graph_for_completion(
+        #[allow(unused_mut)]
+        let mut parallel_completed = false;
+        #[cfg(all(feature = "parallel", not(target_family = "wasm")))]
+        if self.problem.backend_policy().workers() > 1 && identities.len() > 1 {
+            let control = self
+                .execution_control
+                .clone()
+                .with_parallelism_if_unbound(self.problem.backend_policy().workers());
+            let base = self
+                .checked_retained_bytes()
+                .and_then(|bytes| bytes.checked_add(self.coexisting_retained_bytes))
+                .and_then(|bytes| {
+                    bytes.checked_add(
+                        (identities.capacity() as u128)
+                            * core::mem::size_of::<StandardBoard64TilingIdentity>() as u128,
+                    )
+                })
+                .and_then(|bytes| {
+                    bytes.checked_add(
+                        (graphs.capacity() as u128)
+                            * core::mem::size_of::<ExactScoringExecutionGraph>() as u128,
+                    )
+                })
+                .ok_or(WasmExactSearchError::InvalidProblem(
+                    "wasm_build_spin_parallel_projection_overflow",
+                ))?;
+            let result = super::result::scoring_graph_parallel::fill_graphs_parallel(
                 &self.problem,
                 &self.catalog,
-                identity,
-                candidate_id,
-                &mut self.buildup,
+                &identities,
+                &mut graphs,
                 BuildCompletion::ExactBoardAfterLineClears(self.final_board),
-            )? {
-                Some(graph) => graphs.push(graph),
-                None => complete = false,
+                &control,
+                self.memory_bound,
+                base,
+            )?;
+            complete = result.0;
+            self.native_parallel_peak_bytes = self.native_parallel_peak_bytes.max(result.2);
+            parallel_completed = true;
+        }
+        if !parallel_completed {
+            for (index, identity) in identities.into_iter().enumerate() {
+                let candidate_id = u64::try_from(index + 1).map_err(|_| {
+                    WasmExactSearchError::InvalidProblem("wasm_build_spin_candidate_id_overflow")
+                })?;
+                match exact_scoring_execution_graph_for_completion(
+                    &self.problem,
+                    &self.catalog,
+                    identity,
+                    candidate_id,
+                    &mut self.buildup,
+                    BuildCompletion::ExactBoardAfterLineClears(self.final_board),
+                )? {
+                    Some(graph) => graphs.push(graph),
+                    None => complete = false,
+                }
             }
         }
         let board_size = BoardSize::new(
@@ -4130,7 +4210,10 @@ impl CompactBuildProbabilitySession {
                 "resource_peak_frontier_states",
                 self.geometry.peak_frontier(),
             ),
-            field("resource_peak_cpu_bytes", self.retained_bytes()),
+            field(
+                "resource_peak_cpu_bytes",
+                (self.retained_bytes() as u128).max(self.native_parallel_peak_bytes),
+            ),
             field("peak_build_order_nodes", self.peak_build_nodes),
             field("total_build_order_nodes", self.total_build_nodes),
             field("coverage_product_words", self.covered_patterns.word_count()),
@@ -4349,7 +4432,17 @@ impl CompactBuildProbabilitySession {
     }
 
     fn checked_non_problem_retained_bytes(&self) -> Option<u128> {
-        let mut total = 0_u128;
+        let mut total = self
+            .execution_control
+            .compute_budget()
+            .shared_allocation_retained_bytes();
+        if !self.geometry.retains_target_group_owner() {
+            total = total.checked_add(
+                self.shared_supply_catalog
+                    .targets
+                    .checked_retained_bytes()?,
+            )?;
+        }
         for bytes in [
             self.catalog.retained_bytes(),
             self.geometry.retained_bytes(),

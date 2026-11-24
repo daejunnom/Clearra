@@ -19,8 +19,6 @@ pub mod core_executor;
 pub mod core_postprocess_execution;
 pub mod core_postprocess_score_cell;
 pub mod core_postprocess_spin_coverage;
-#[cfg(feature = "parallel")]
-mod cpu_worker_pool;
 pub mod diagnostics;
 #[cfg(test)]
 mod execution_worker_limit;
@@ -32,6 +30,7 @@ pub mod packing;
 pub mod pc_chance_coverage_evidence;
 pub mod pc_failed_queue_evidence;
 mod pc_full_height_replay_evidence;
+mod pc_path_supply_evidence;
 pub mod performance;
 pub mod problem_lowering;
 #[cfg(any(test, feature = "qualification-reference"))]
@@ -170,6 +169,7 @@ pub use pc_failed_queue_evidence::{
     PcFailedQueueProbabilityClass,
 };
 pub use pc_full_height_replay_evidence::PcFullHeightReplayEvidence;
+pub use pc_path_supply_evidence::PcPathSupplyEvidence;
 #[cfg(any(feature = "search-stage-profiling", feature = "wasm-stage-profiling"))]
 pub use performance::{
     ExecutorSearchProfileError, ExecutorSearchProfileSession, ExecutorSearchProfileStage,

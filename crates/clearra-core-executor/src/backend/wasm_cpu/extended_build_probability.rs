@@ -276,19 +276,19 @@ impl ExtendedBuildProbabilitySession {
         &self,
         memory_bound: ExecutionMemoryBound,
     ) -> Result<Self, WasmExactSearchError> {
-        self.new_shared_pc_verifier_with_resources(memory_bound, None)
-    }
-
-    fn new_shared_pc_verifier_with_resources(
-        &self,
-        memory_bound: ExecutionMemoryBound,
-        private_memory_owner: Option<ExecutionMemoryOwner>,
-    ) -> Result<Self, WasmExactSearchError> {
         if self.purpose != ExtendedFamilyPurpose::Pc {
             return Err(WasmExactSearchError::InvalidProblem(
                 "extended_pc_shared_verifier_requires_pc",
             ));
         }
+        self.new_shared_family_verifier_with_resources(memory_bound, None)
+    }
+
+    fn new_shared_family_verifier_with_resources(
+        &self,
+        memory_bound: ExecutionMemoryBound,
+        private_memory_owner: Option<ExecutionMemoryOwner>,
+    ) -> Result<Self, WasmExactSearchError> {
         let pattern_count = self
             .problem
             .piece_source()
@@ -314,7 +314,7 @@ impl ExtendedBuildProbabilitySession {
         }
         let verifier = Self {
             problem: Arc::clone(&self.problem),
-            purpose: ExtendedFamilyPurpose::Pc,
+            purpose: self.purpose,
             aggregation: self.aggregation,
             field: self.field,
             catalog: Arc::clone(&self.catalog),
@@ -360,20 +360,36 @@ impl ExtendedBuildProbabilitySession {
             distributed_worker_memory_bytes: 0,
             native_parallel_peak_bytes: 0,
             distributed_execution_constraint_materialized: false,
-            finesse_requested: false,
+            finesse_requested: self.finesse_requested,
             finesse_languages: Vec::new(),
             memory_bound,
             request_node_budget: self.request_node_budget.clone(),
             private_memory_owner,
-            pc_observation:
-                super::extended_pc_observation::ExtendedPcObservationLanguage::for_problem(
-                    &self.problem,
-                ),
+            pc_observation: (self.purpose == ExtendedFamilyPurpose::Pc)
+                .then(|| {
+                    super::extended_pc_observation::ExtendedPcObservationLanguage::for_problem(
+                        &self.problem,
+                    )
+                })
+                .flatten(),
             coexisting_retained_bytes: 0,
             finished: false,
         };
         verifier.ensure_memory_bound(0)?;
         Ok(verifier)
+    }
+
+    fn new_shared_pc_verifier_with_resources(
+        &self,
+        memory_bound: ExecutionMemoryBound,
+        private_memory_owner: Option<ExecutionMemoryOwner>,
+    ) -> Result<Self, WasmExactSearchError> {
+        if self.purpose != ExtendedFamilyPurpose::Pc {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "extended_pc_shared_verifier_requires_pc",
+            ));
+        }
+        self.new_shared_family_verifier_with_resources(memory_bound, private_memory_owner)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2395,6 +2411,10 @@ impl ExtendedBuildProbabilitySession {
             && !(execution_constraints.requested()
                 && self.distributed_execution_constraint_materialized)
         {
+            // Worker completion order is not a source ordinal. Preserve the
+            // complete graph family and publish it in canonical physical order.
+            self.spin_execution_graphs
+                .sort_unstable_by(compare_spin_graphs);
             let patterns = (0..universe.pattern_count())
                 .map(|pattern| universe.sequence_at(pattern).into_owned())
                 .collect();
@@ -2526,7 +2546,9 @@ impl ExtendedBuildProbabilitySession {
             field("cpu_parallel_execution", self.workers_used > 1),
             field(
                 "cpu_parallel_decision_reason",
-                if self.workers_used > 1 {
+                if self.workers_used > 1 && self.native_parallel_peak_bytes != 0 {
+                    "native-shared-build-family-queue"
+                } else if self.workers_used > 1 {
                     "browser-worker-build-probability-extended-pipeline"
                 } else {
                     "serial-extended-build-probability"
@@ -2545,10 +2567,7 @@ impl ExtendedBuildProbabilitySession {
                 "cpu_warmup_requested",
                 self.problem.backend_policy().cpu_warmup(),
             ),
-            field(
-                "cpu_warmup_performed",
-                self.problem.backend_policy().cpu_warmup(),
-            ),
+            field("cpu_warmup_performed", false),
             field(
                 "supply_window_resolution",
                 self.problem.supply().supply_window_resolution(),
@@ -3552,7 +3571,7 @@ impl ExtendedBuildProbabilitySession {
             // physical graph to the sorted complete family; multiple physical
             // realizations of one colored tiling deliberately share its index.
             self.spin_execution_graphs
-                .sort_unstable_by(|left, right| left.candidate_key().cmp(right.candidate_key()));
+                .sort_unstable_by(compare_spin_graphs);
             let mut covered_key_count = 0_usize;
             let mut previous_key_index = None;
             for graph in &mut self.spin_execution_graphs {
@@ -3868,6 +3887,11 @@ impl ExtendedBuildProbabilitySession {
         } else {
             0
         };
+        if !self.shared_immutable_owners {
+            total = total.checked_add(
+                clearra_core_domain::execution_cancellation::ComputeBudget::SHARED_ALLOCATION_RETAINED_BYTES,
+            )?;
+        }
         if let Some(observation) = self.pc_observation.as_ref() {
             total = total.checked_add(observation.checked_retained_bytes()?)?;
         }
@@ -4184,6 +4208,57 @@ impl ExtendedBuildProbabilitySession {
         );
         Ok(())
     }
+}
+
+fn compare_spin_graphs(
+    left: &SpinCoverageExecutionGraph,
+    right: &SpinCoverageExecutionGraph,
+) -> core::cmp::Ordering {
+    fn edge_key(edge: &clearra_replay::ScoringExecutionEdge) -> impl Ord {
+        let evidence = edge.lock_evidence();
+        (
+            edge.to(),
+            edge.operation_index(),
+            edge.piece(),
+            edge.rotation(),
+            edge.x(),
+            edge.y(),
+            edge.cleared_lines(),
+            edge.blocked_t_corners(),
+            edge.blocked_t_front_corners(),
+            edge.perfect_clear(),
+            (
+                evidence.last_action_was_rotation(),
+                evidence.used_kick(),
+                evidence.used_180(),
+                evidence.from_rotation(),
+                evidence.rotation_request() as u8,
+                evidence.kick_index(),
+                evidence.kick_dx(),
+                evidence.kick_dy(),
+                evidence.predecessor(),
+                evidence.first_success_confirmed(),
+                evidence.immobile_before_clear(),
+            ),
+        )
+    }
+    fn nodes(graph: &SpinCoverageExecutionGraph) -> impl Iterator<Item = (u32, u32, bool)> + '_ {
+        (0..graph.node_count()).map(|index| {
+            let node = graph.node(index as u32).expect("stored graph node");
+            (node.edge_start(), node.edge_count(), node.accepting())
+        })
+    }
+    left.candidate_key()
+        .cmp(right.candidate_key())
+        .then_with(|| left.root().cmp(&right.root()))
+        .then_with(|| nodes(left).cmp(nodes(right)))
+        .then_with(|| {
+            left.all_edges()
+                .iter()
+                .map(edge_key)
+                .cmp(right.all_edges().iter().map(edge_key))
+        })
+        .then_with(|| left.candidate_id().cmp(&right.candidate_id()))
 }
 
 fn extended_row_ids_from_canonical_key(

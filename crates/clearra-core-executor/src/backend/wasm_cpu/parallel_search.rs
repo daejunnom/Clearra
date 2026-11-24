@@ -1,6 +1,6 @@
 use std::{
     panic::{catch_unwind, AssertUnwindSafe},
-    sync::{mpsc, Arc},
+    sync::{Arc, Mutex},
 };
 
 use clearra_core_domain::{
@@ -12,7 +12,6 @@ use clearra_coverage::row::{coverage_row::CoverageRow, coverage_row_kind::Covera
 use clearra_problem::SearchProblem;
 
 use crate::{
-    cpu_worker_pool,
     performance::{ExecutorSearchStage, SearchStageSpan, WorkerSearchProfile},
     solution_probability::SolutionCoverage,
     CorePathStep,
@@ -456,14 +455,9 @@ fn execute_plan(
     >,
 ) -> Result<ParallelSearchOutcome, WasmExactSearchError> {
     let initialize_span = SearchStageSpan::begin(ExecutorSearchStage::WasmParallelInitialize);
-    let workers_used = requested_workers.min(plan.searches.len()).max(1);
-    let pool = if cpu_warmup_requested {
-        cpu_worker_pool::prewarm_cpu_workers(workers_used)
-    } else {
-        cpu_worker_pool::ensure_cpu_workers(workers_used)
-    }
-    .map_err(|_| WasmExactSearchError::InvalidProblem("wasm_cpu_worker_pool_unavailable"))?;
-    let workers_used = pool.total_workers();
+    let _ = cpu_warmup_requested;
+    let control = control.with_parallelism_if_unbound(requested_workers);
+    let workers_used = control.parallelism().min(plan.searches.len()).max(1);
     let pattern_count = problem
         .piece_source()
         .materialized_universe()
@@ -523,7 +517,6 @@ fn execute_plan(
         coverage,
         request: shared_request,
     });
-    let (sender, receiver) = mpsc::channel();
 
     #[cfg(all(feature = "local-search-ab", target_os = "linux"))]
     let memory_probe = parallel_memory_peak::current();
@@ -543,52 +536,57 @@ fn execute_plan(
 
     initialize_span.finish(branch_count as u64);
     let work_span = SearchStageSpan::begin(ExecutorSearchStage::WasmParallelWorkAndWait);
-    for _worker_index in 1..workers_used {
-        let worker_inputs = Arc::clone(&inputs);
-        let worker_sender = sender.clone();
-        #[cfg(all(feature = "local-search-ab", target_os = "linux"))]
-        let worker_memory = memory_probe.clone();
-        let profile = WorkerSearchProfile::capture();
-        cpu_worker_pool::submit_cpu_job(move || {
-            let result = catch_unwind(AssertUnwindSafe(|| {
-                profile.measure(|| {
-                    run_branch_worker(
-                        &worker_inputs,
-                        #[cfg(all(feature = "local-search-ab", target_os = "linux"))]
-                        worker_memory.as_deref().map(|probe| (probe, _worker_index)),
-                    )
-                })
-            }))
-            .map_err(|_| WasmExactSearchError::InvalidProblem("wasm_parallel_worker_panicked"))
-            .and_then(|result| result);
-            if result.is_err() {
-                worker_inputs.queue.abort();
+    let slots: Vec<_> = (0..workers_used).map(|_| Mutex::new(None)).collect();
+    clearra_core_domain::parallel_work::try_for_each_chunk(
+        &inputs.control,
+        workers_used,
+        1,
+        || Ok::<_, WasmExactSearchError>(()),
+        |_, range| {
+            for _worker_index in range {
+                let profile = WorkerSearchProfile::capture();
+                let result = catch_unwind(AssertUnwindSafe(|| {
+                    profile.measure(|| {
+                        run_branch_worker(
+                            &inputs,
+                            #[cfg(all(feature = "local-search-ab", target_os = "linux"))]
+                            memory_probe.as_deref().map(|probe| (probe, _worker_index)),
+                        )
+                    })
+                }))
+                .map_err(|_| WasmExactSearchError::InvalidProblem("wasm_parallel_worker_panicked"))
+                .and_then(|result| result);
+                if result.is_err() {
+                    inputs.queue.abort();
+                }
+                *slots[_worker_index].lock().map_err(|_| {
+                    WasmExactSearchError::InvalidProblem("wasm_parallel_worker_lost")
+                })? = Some(result);
             }
-            let _ = worker_sender.send(result);
-        })
-        .map_err(|_| WasmExactSearchError::InvalidProblem("wasm_cpu_worker_pool_unavailable"))?;
-    }
-    drop(sender);
-
-    let caller_result = run_branch_worker(
-        &inputs,
-        #[cfg(all(feature = "local-search-ab", target_os = "linux"))]
-        memory_probe.as_deref().map(|probe| (probe, 0)),
-    );
-    if caller_result.is_err() {
-        inputs.queue.abort();
-    }
-    let mut results = Vec::with_capacity(workers_used);
-    results.push(caller_result);
-    for _ in 0..workers_used.saturating_sub(1) {
-        results.push(
-            receiver
-                .recv()
-                .map_err(|_| WasmExactSearchError::InvalidProblem("wasm_parallel_worker_lost"))?,
-        );
-    }
-    let worker_results = results
+            Ok(())
+        },
+    )
+    .map_err(|error| match error {
+        clearra_core_domain::parallel_work::ParallelWorkError::Worker(error) => error,
+        clearra_core_domain::parallel_work::ParallelWorkError::Cancelled => {
+            WasmExactSearchError::Cancelled
+        }
+        clearra_core_domain::parallel_work::ParallelWorkError::ThreadSpawnFailed => {
+            WasmExactSearchError::InvalidProblem("wasm_cpu_worker_pool_unavailable")
+        }
+        clearra_core_domain::parallel_work::ParallelWorkError::WorkerPanicked => {
+            WasmExactSearchError::InvalidProblem("wasm_parallel_worker_panicked")
+        }
+    })?;
+    let worker_results = slots
         .into_iter()
+        .map(|slot| {
+            slot.into_inner()
+                .map_err(|_| WasmExactSearchError::InvalidProblem("wasm_parallel_worker_lost"))?
+                .ok_or(WasmExactSearchError::InvalidProblem(
+                    "wasm_parallel_worker_lost",
+                ))?
+        })
         .collect::<Result<Vec<_>, WasmExactSearchError>>()?;
     work_span.finish(workers_used as u64);
     let merge_span = SearchStageSpan::begin(ExecutorSearchStage::WasmParallelMerge);
@@ -660,7 +658,7 @@ fn branch_tasks(searches: Vec<GeometrySearch>) -> Vec<ParallelBranchTask> {
 fn merge_results(
     problem: &SearchProblem,
     catalog: &GeometryCatalog,
-    targets: &[TargetGroup],
+    targets: &Arc<[TargetGroup]>,
     control: &ExecutionControl,
     shared_coverage: &SharedCoverage,
     shared_request: &SharedWorkerRequest,
@@ -743,11 +741,17 @@ fn merge_results(
         .into_iter()
         .map(|branch| branch.geometry)
         .collect::<Vec<_>>();
-    let geometry = GeometrySearch::from_parallel_searches(
+    let mut geometry = GeometrySearch::from_parallel_searches(
         &searches,
         group_pattern_index_bytes,
         shared_family_bytes,
     );
+    if problem
+        .pc_chance_evidence_policy()
+        .retains_pc_path_v2_evidence()
+    {
+        geometry.retain_shared_targets_for_terminal(Arc::clone(targets));
+    }
 
     Ok(ParallelSearchOutcome {
         geometry,

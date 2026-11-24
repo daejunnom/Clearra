@@ -43,6 +43,48 @@ pub fn with_compute_worker<T>(permit: ComputePermit, work: impl FnOnce() -> T) -
     work()
 }
 
+/// Temporarily make an existing compute worker a control-only coordinator for
+/// an executor that explicitly borrows N permits and joins its own jobs.
+/// `work` must only manage and drain that pool; do preparation and reduction
+/// outside this closure. An ordinary coordinator owns no slot to suspend.
+///
+/// Reacquisition happens before the outer worker can compute again, including
+/// cancellation and unwinding. The original permit remains the sole owner;
+/// the suspension guard balances its temporary release without cloning it.
+pub fn with_compute_coordinator<T>(control: &ExecutionControl, work: impl FnOnce() -> T) -> T {
+    #[cfg(not(target_family = "wasm"))]
+    let _suspension = {
+        let budget_id = std::sync::Arc::as_ptr(control.compute_budget()) as usize;
+        if ACTIVE_BUDGET.with(|active| active.get() == Some(budget_id)) {
+            let previous = ACTIVE_BUDGET.with(|active| active.replace(None));
+            control.compute_budget().release_worker_slot();
+            Some(SuspendedWorker {
+                budget: control.compute_budget(),
+                previous,
+            })
+        } else {
+            None
+        }
+    };
+    #[cfg(target_family = "wasm")]
+    let _ = control;
+    work()
+}
+
+#[cfg(not(target_family = "wasm"))]
+struct SuspendedWorker<'a> {
+    budget: &'a crate::execution_cancellation::ComputeBudget,
+    previous: Option<usize>,
+}
+
+#[cfg(not(target_family = "wasm"))]
+impl Drop for SuspendedWorker<'_> {
+    fn drop(&mut self) {
+        self.budget.resume_suspended_worker();
+        ACTIVE_BUDGET.with(|active| active.set(self.previous));
+    }
+}
+
 #[cfg(not(target_family = "wasm"))]
 impl Drop for WorkerScope {
     fn drop(&mut self) {
@@ -90,7 +132,9 @@ where
     let chunk_size = chunk_size.max(1);
     let record_error = |failure| {
         stop.store(true, Ordering::Release);
-        let mut slot = error.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut slot = error
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if slot.is_none() {
             *slot = Some(failure);
         }
@@ -120,7 +164,9 @@ where
                 Ok(start) => start,
                 Err(_) => return,
             };
-            if let Err(failure) = visit(&mut state, start..start.saturating_add(chunk_size).min(len)) {
+            if let Err(failure) =
+                visit(&mut state, start..start.saturating_add(chunk_size).min(len))
+            {
                 record_error(ParallelWorkError::Worker(failure));
                 return;
             }
@@ -144,16 +190,21 @@ where
             let permit = if already_worker {
                 control.compute_budget().try_acquire_worker()
             } else {
-                control.compute_budget().acquire_worker(&control.cancellation)
+                control
+                    .compute_budget()
+                    .acquire_worker(&control.cancellation)
             };
-            let Some(permit) = permit else { break; };
+            let Some(permit) = permit else {
+                break;
+            };
             let run_ref = &run;
             let record_error_ref = &record_error;
             let handle = std::thread::Builder::new()
                 .name(format!("clearra-product-{index}"))
                 .spawn_scoped(scope, move || {
                     with_compute_worker(permit, || {
-                        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(run_ref)).is_err() {
+                        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(run_ref)).is_err()
+                        {
                             record_error_ref(ParallelWorkError::WorkerPanicked);
                         }
                     });
@@ -181,7 +232,10 @@ where
     #[cfg(target_family = "wasm")]
     run();
 
-    match error.into_inner().unwrap_or_else(std::sync::PoisonError::into_inner) {
+    match error
+        .into_inner()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+    {
         Some(failure) => Err(failure),
         None if control.is_cancelled() => Err(ParallelWorkError::Cancelled),
         None => Ok(()),
@@ -226,31 +280,53 @@ mod tests {
                             active.fetch_sub(1, Ordering::AcqRel);
                             Ok(())
                         },
-                    ).map_err(|_| ())?;
+                    )
+                    .map_err(|_| ())?;
                 }
                 Ok(())
             },
-        ).unwrap();
-        assert!(counts.iter().all(|count| count.load(Ordering::Relaxed) == 1));
+        )
+        .unwrap();
+        assert!(counts
+            .iter()
+            .all(|count| count.load(Ordering::Relaxed) == 1));
         assert!(peak.load(Ordering::Relaxed) <= 8);
         assert_eq!(active.load(Ordering::Relaxed), 0);
-        assert!(Arc::ptr_eq(control.compute_budget(), control.clone().with_parallelism(8).compute_budget()));
+        assert!(Arc::ptr_eq(
+            control.compute_budget(),
+            control.clone().with_parallelism(8).compute_budget()
+        ));
     }
 
     #[test]
     fn error_and_cancellation_return_after_workers_drain() {
         let control = ExecutionControl::default().with_parallelism(4);
-        let result = try_for_each_chunk(&control, 100, 1, || Ok::<_, u8>(()), |_, range| {
-            if range.start == 3 { Err(7) } else { Ok(()) }
-        });
+        let result = try_for_each_chunk(
+            &control,
+            100,
+            1,
+            || Ok::<_, u8>(()),
+            |_, range| {
+                if range.start == 3 {
+                    Err(7)
+                } else {
+                    Ok(())
+                }
+            },
+        );
         assert!(matches!(result, Err(ParallelWorkError::Worker(7))));
         // The failed run returned every permit; failure cannot silently shrink
         // the width of the next stage.
-        let permits: Vec<_> = (0..4).map(|_| control.compute_budget().try_acquire_worker().unwrap()).collect();
+        let permits: Vec<_> = (0..4)
+            .map(|_| control.compute_budget().try_acquire_worker().unwrap())
+            .collect();
         assert!(control.compute_budget().try_acquire_worker().is_none());
         drop(permits);
         control.cancellation.handle().cancel();
-        assert!(matches!(try_for_each_chunk(&control, 1, 1, || Ok::<_, ()>(()), |_, _| Ok(())), Err(ParallelWorkError::Cancelled)));
+        assert!(matches!(
+            try_for_each_chunk(&control, 1, 1, || Ok::<_, ()>(()), |_, _| Ok(())),
+            Err(ParallelWorkError::Cancelled)
+        ));
     }
 
     #[test]
@@ -258,14 +334,21 @@ mod tests {
         let control = ExecutionControl::default();
         let coordinator = std::thread::current().id();
         let count = AtomicUsize::new(0);
-        try_for_each_chunk(&control, 9, 1, || {
-            assert_ne!(std::thread::current().id(), coordinator);
-            Ok::<_, ()>(())
-        }, |_, range| {
-            assert_ne!(std::thread::current().id(), coordinator);
-            count.fetch_add(range.len(), Ordering::Relaxed);
-            Ok(())
-        }).unwrap();
+        try_for_each_chunk(
+            &control,
+            9,
+            1,
+            || {
+                assert_ne!(std::thread::current().id(), coordinator);
+                Ok::<_, ()>(())
+            },
+            |_, range| {
+                assert_ne!(std::thread::current().id(), coordinator);
+                count.fetch_add(range.len(), Ordering::Relaxed);
+                Ok(())
+            },
+        )
+        .unwrap();
         assert_eq!(count.load(Ordering::Relaxed), 9);
     }
 
@@ -276,15 +359,22 @@ mod tests {
         for (len, chunk_size, expected_maximum) in [(1, 16, 1), (17, 16, 2), (3, 0, 3)] {
             let initialized = AtomicUsize::new(0);
             let visited = AtomicUsize::new(0);
-            try_for_each_chunk(&control, len, chunk_size, || {
-                assert_ne!(std::thread::current().id(), coordinator);
-                initialized.fetch_add(1, Ordering::AcqRel);
-                Ok::<_, ()>(())
-            }, |_, range| {
-                assert_ne!(std::thread::current().id(), coordinator);
-                visited.fetch_add(range.len(), Ordering::AcqRel);
-                Ok(())
-            }).unwrap();
+            try_for_each_chunk(
+                &control,
+                len,
+                chunk_size,
+                || {
+                    assert_ne!(std::thread::current().id(), coordinator);
+                    initialized.fetch_add(1, Ordering::AcqRel);
+                    Ok::<_, ()>(())
+                },
+                |_, range| {
+                    assert_ne!(std::thread::current().id(), coordinator);
+                    visited.fetch_add(range.len(), Ordering::AcqRel);
+                    Ok(())
+                },
+            )
+            .unwrap();
             assert_eq!(visited.load(Ordering::Acquire), len);
             assert!((1..=expected_maximum).contains(&initialized.load(Ordering::Acquire)));
             assert_eq!(control.parallelism(), 8);
@@ -293,6 +383,77 @@ mod tests {
                 .collect();
             assert!(control.compute_budget().try_acquire_worker().is_none());
             drop(permits);
+        }
+    }
+
+    #[test]
+    fn nested_explicit_pool_suspends_its_coordinator_and_restores_after_unwind() {
+        for width in [1, 8] {
+            let control = ExecutionControl::default().with_parallelism(width);
+            let request_thread = std::thread::current().id();
+            try_for_each_chunk(
+                &control,
+                1,
+                1,
+                || Ok::<_, ()>(()),
+                |_, _| {
+                    let outer_worker = std::thread::current().id();
+                    let visited = AtomicUsize::new(0);
+                    with_compute_coordinator(&control, || {
+                        let permits: Vec<_> = (0..width)
+                            .map(|_| {
+                                control
+                                    .compute_budget()
+                                    .acquire_worker(&control.cancellation)
+                                    .unwrap()
+                            })
+                            .collect();
+                        assert!(control.compute_budget().try_acquire_worker().is_none());
+                        std::thread::scope(|scope| {
+                            for permit in permits {
+                                let visited = &visited;
+                                scope.spawn(move || {
+                                    with_compute_worker(permit, || {
+                                        assert_ne!(std::thread::current().id(), request_thread);
+                                        assert_ne!(std::thread::current().id(), outer_worker);
+                                        visited.fetch_add(1, Ordering::AcqRel);
+                                    })
+                                });
+                            }
+                        });
+                    });
+                    assert_eq!(visited.load(Ordering::Acquire), width);
+                    let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        with_compute_coordinator(&control, || panic!("test unwind"))
+                    }));
+                    assert!(panic.is_err());
+                    // One original slot is held again, even after the panic.
+                    let spare: Vec<_> = (1..width)
+                        .map(|_| control.compute_budget().try_acquire_worker().unwrap())
+                        .collect();
+                    assert!(control.compute_budget().try_acquire_worker().is_none());
+                    drop(spare);
+                    // TLS role was restored too: a nested one-slot stage reuses
+                    // this worker and never blocks on its own held permit.
+                    try_for_each_chunk(
+                        &control,
+                        1,
+                        1,
+                        || Ok::<_, ()>(()),
+                        |_, _| {
+                            assert_eq!(std::thread::current().id(), outer_worker);
+                            Ok(())
+                        },
+                    )
+                    .map_err(|_| ())
+                },
+            )
+            .unwrap();
+            let all: Vec<_> = (0..width)
+                .map(|_| control.compute_budget().try_acquire_worker().unwrap())
+                .collect();
+            assert!(control.compute_budget().try_acquire_worker().is_none());
+            drop(all);
         }
     }
 }

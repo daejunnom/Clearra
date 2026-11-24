@@ -1,18 +1,18 @@
-//! Native ordinary PC execution over the parent's exact four-word family.
-//! One request lease covers N-1 pool jobs and the caller. Immutable catalog,
-//! input and Geometry indexes are shared; BuildUp/language/reducer workspaces
-//! are private. No worker relabels a Build result or grants typed PC authority.
+//! Native fixed-field execution over the parent's exact four-word family.
+//! One request lease covers N separate compute workers; the request thread
+//! only coordinates. Immutable catalog, input and geometry indexes are shared;
+//! verification/language/reducer workspaces remain private. Build results never
+//! grant PC authority and each purpose retains its own terminal projection.
 use std::{
     mem::size_of,
     panic::{catch_unwind, AssertUnwindSafe},
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
-        mpsc, Mutex,
+        Mutex,
     },
 };
 
 use crate::{
-    cpu_worker_pool,
     performance::{
         profile_sample_scale, ExecutorSearchStage, SearchStageSpan, WorkerSearchProfile,
     },
@@ -337,17 +337,21 @@ impl ExtendedBuildProbabilitySession {
         requested_workers: usize,
         control: &ExecutionControl,
     ) -> Result<Option<CoreExecutionResult>, WasmExactSearchError> {
-        if requested_workers <= 1 {
-            return Ok(None);
-        }
-        if self.purpose != ExtendedFamilyPurpose::Pc
-            || self.shared_immutable_owners
+        if self.shared_immutable_owners
             || requested_workers != self.requested_pc_workers()
             || self.finished
             || self.processed_candidate_count != 0
             || control.partition().count() != 1
         {
             return Err(contract_error());
+        }
+        let requested_workers = if control.has_parallelism_binding() {
+            control.parallelism()
+        } else {
+            requested_workers
+        };
+        if requested_workers <= 1 {
+            return Ok(None);
         }
         let mut preparation_steps = 0_usize;
         while self.geometry.is_compiling() {
@@ -445,7 +449,7 @@ impl ExtendedBuildProbabilitySession {
         // Slots without initial work may steal a queued branch or remain idle;
         // `parallel_active_workers` separately reports useful participation.
         for index in 0..workers {
-            let engine = self.new_shared_pc_verifier_with_resources(
+            let engine = self.new_shared_family_verifier_with_resources(
                 self.memory_bound,
                 Some(private_memory.owner(index)),
             )?;
@@ -467,91 +471,65 @@ impl ExtendedBuildProbabilitySession {
         let queue = Arc::new(Mutex::new(core::mem::take(&mut plan.branches)));
         let abort = Arc::new(AtomicBool::new(false));
         let progress_nodes = Arc::new(AtomicUsize::new(0));
-        if workers > 1 {
-            let pool = if self.problem.backend_policy().cpu_warmup() {
-                cpu_worker_pool::prewarm_cpu_workers(workers)
-            } else {
-                cpu_worker_pool::ensure_cpu_workers(workers)
-            }
-            .map_err(|_| pool_error())?;
-            if pool.total_workers() != workers {
-                return Err(pool_error());
-            }
-        }
-        let (sender, receiver) = mpsc::channel();
-        let (caller_engine, caller_first) = tasks.pop().ok_or_else(contract_error)?;
-        let mut submitted = 0_usize;
-        let mut first_error = None;
-        for (engine, first) in tasks {
-            let queue = Arc::clone(&queue);
-            let abort_worker = Arc::clone(&abort);
-            let progress = Arc::clone(&progress_nodes);
-            let queued_memory = queued_memory.clone();
-            let worker_control = control.clone();
-            let sender = sender.clone();
-            let profile = WorkerSearchProfile::capture();
-            let queued = cpu_worker_pool::submit_cpu_job(move || {
-                let result = profile.measure(|| {
-                    caught_worker(
-                        engine,
-                        first,
-                        &queue,
-                        &queued_memory,
-                        &abort_worker,
-                        &progress,
-                        &worker_control,
-                    )
-                });
-                if result.is_err() {
-                    abort_worker.store(true, Ordering::Release);
-                    worker_control.cancellation.handle().cancel();
-                }
-                let _ = sender.send(result);
-            });
-            if queued.is_err() {
-                abort.store(true, Ordering::Release);
-                control.cancellation.handle().cancel();
-                first_error = Some(pool_error());
-                break;
-            }
-            submitted += 1;
-        }
-        drop(sender);
-        let caller = caught_worker(
-            caller_engine,
-            caller_first,
-            &queue,
-            &queued_memory,
-            &abort,
-            &progress_nodes,
-            control,
-        );
-        if caller.is_err() {
-            abort.store(true, Ordering::Release);
-            control.cancellation.handle().cancel();
-        }
+        let task_slots: Vec<_> = tasks
+            .into_iter()
+            .map(|task| Mutex::new(Some(task)))
+            .collect();
         let mut completed = Vec::new();
-        completed.try_reserve_exact(workers).map_err(|_| {
-            // Allocation was admitted before jobs started. The channel still
-            // must be drained if allocation unexpectedly fails.
-            abort.store(true, Ordering::Release);
-            control.cancellation.handle().cancel();
-            for _ in 0..submitted {
-                let _ = receiver.recv();
+        completed
+            .try_reserve_exact(workers)
+            .map_err(|_| storage_error())?;
+        completed.resize_with(workers, || Mutex::new(None));
+        let worker_control = control.clone().with_parallelism_if_unbound(workers);
+        clearra_core_domain::parallel_work::try_for_each_chunk(
+            &worker_control,
+            workers,
+            1,
+            || Ok::<_, WasmExactSearchError>(()),
+            |_, range| {
+                for index in range {
+                    let (engine, first) = task_slots[index]
+                        .lock()
+                        .map_err(|_| contract_error())?
+                        .take()
+                        .ok_or_else(contract_error)?;
+                    let result = WorkerSearchProfile::capture().measure(|| {
+                        caught_worker(
+                            engine,
+                            first,
+                            &queue,
+                            &queued_memory,
+                            &abort,
+                            &progress_nodes,
+                            &worker_control,
+                        )
+                    });
+                    if result.is_err() {
+                        abort.store(true, Ordering::Release);
+                    }
+                    *completed[index].lock().map_err(|_| contract_error())? = Some(result);
+                }
+                Ok(())
+            },
+        )
+        .map_err(|error| match error {
+            clearra_core_domain::parallel_work::ParallelWorkError::Worker(error) => error,
+            clearra_core_domain::parallel_work::ParallelWorkError::Cancelled => {
+                WasmExactSearchError::Cancelled
             }
-            storage_error()
+            clearra_core_domain::parallel_work::ParallelWorkError::ThreadSpawnFailed
+            | clearra_core_domain::parallel_work::ParallelWorkError::WorkerPanicked => pool_error(),
         })?;
-        completed.push(caller);
-        // Errors, cancellation and caught panics never release the request
-        // lease while a submitted descendant job still owns its workspace.
-        for _ in 0..submitted {
-            completed.push(receiver.recv().unwrap_or_else(|_| Err(pool_error())));
-        }
+        let mut first_error = None;
         let mut successful = Vec::new();
         successful
             .try_reserve_exact(workers)
             .map_err(|_| storage_error())?;
-        for result in completed {
+        for slot in completed {
+            let result = slot
+                .into_inner()
+                .map_err(|_| contract_error())?
+                .ok_or_else(contract_error)?;
             match result {
                 Ok(result) => successful.push(result),
                 Err(error) => {
@@ -636,6 +614,12 @@ impl ExtendedBuildProbabilitySession {
                 count.checked_add(worker.engine.spin_execution_graphs.len())
             })
             .ok_or_else(projection_error)?;
+        let finesse_languages = successful
+            .iter()
+            .try_fold(0_usize, |count, worker| {
+                count.checked_add(worker.engine.finesse_languages.len())
+            })
+            .ok_or_else(projection_error)?;
         // Bucket/control growth coexists with transferred private keys and
         // coverage. The conservative projection does not rely on HashMap's
         // internal load factor or ownership reference count.
@@ -651,6 +635,12 @@ impl ExtendedBuildProbabilitySession {
                 bytes.checked_add(
                     (execution_graphs as u128)
                         * size_of::<super::SpinCoverageExecutionGraph>() as u128,
+                )
+            })
+            .and_then(|bytes| {
+                bytes.checked_add(
+                    (finesse_languages as u128)
+                        * size_of::<(String, super::PreparedFinesseLanguage)>() as u128,
                 )
             })
             .ok_or_else(projection_error)?;
@@ -672,6 +662,9 @@ impl ExtendedBuildProbabilitySession {
         }
         self.spin_execution_graphs
             .try_reserve_exact(execution_graphs)
+            .map_err(|_| storage_error())?;
+        self.finesse_languages
+            .try_reserve_exact(finesse_languages)
             .map_err(|_| storage_error())?;
         self.parallel_minimum_worker_candidates = usize::MAX;
         while let Some(worker) = successful.pop() {
@@ -715,20 +708,24 @@ impl ExtendedBuildProbabilitySession {
     }
 
     fn validate_pc_verifier(&self, worker: &Self) -> Result<(), WasmExactSearchError> {
-        if worker.purpose != ExtendedFamilyPurpose::Pc
+        if worker.purpose != self.purpose
             || !worker.shared_immutable_owners
             || !Arc::ptr_eq(&self.problem, &worker.problem)
             || !Arc::ptr_eq(&self.catalog, &worker.catalog)
             || worker.truncated_reason.is_some()
             || worker.finished
+            || worker.aggregation != self.aggregation
+            || worker.field != self.field
+            || worker.finesse_requested != self.finesse_requested
             || (!self.problem.objective().score().requested()
                 && !self.problem.objective().execution_constraints().requested()
+                && !self.aggregation.requests_spin_coverage()
                 && !self
                     .problem
                     .pc_chance_evidence_policy()
                     .retains_pc_path_v2_evidence()
                 && !worker.spin_execution_graphs.is_empty())
-            || !worker.finesse_languages.is_empty()
+            || (!self.finesse_requested && !worker.finesse_languages.is_empty())
         {
             return Err(contract_error());
         }
@@ -761,6 +758,7 @@ impl ExtendedBuildProbabilitySession {
         // once after the complete source family has been merged and sorted.
         self.spin_execution_graphs
             .append(&mut worker.spin_execution_graphs);
+        self.finesse_languages.append(&mut worker.finesse_languages);
         if let Some(rows) = worker.solution_coverage.take() {
             let target = self.solution_coverage.as_mut().ok_or_else(contract_error)?;
             for (key, bits) in rows {
@@ -1119,47 +1117,6 @@ pub(in crate::backend::wasm_cpu) mod cooperative {
     type WorkerCompletion = Result<(WorkerCursor, usize), WasmExactSearchError>;
     type TaggedCompletion = (usize, WorkerCompletion);
 
-    struct DrainWave<'a> {
-        _admission: &'a ExecutionAdmission,
-        abort: Arc<AtomicBool>,
-        sender: Option<mpsc::Sender<TaggedCompletion>>,
-        receiver: mpsc::Receiver<TaggedCompletion>,
-        submitted: usize,
-    }
-
-    impl<'a> DrainWave<'a> {
-        fn new(admission: &'a ExecutionAdmission, abort: Arc<AtomicBool>) -> Self {
-            let (sender, receiver) = mpsc::channel();
-            Self {
-                _admission: admission,
-                abort,
-                sender: Some(sender),
-                receiver,
-                submitted: 0,
-            }
-        }
-
-        fn receive(&mut self) -> Option<Result<TaggedCompletion, WasmExactSearchError>> {
-            if self.submitted == 0 {
-                return None;
-            }
-            self.submitted -= 1;
-            Some(self.receiver.recv().map_err(|_| pool_error()))
-        }
-    }
-
-    impl Drop for DrainWave<'_> {
-        fn drop(&mut self) {
-            // Every successfully enqueued closure must end before the wave
-            // returns, including an early error or coordinator unwind.
-            if self.submitted != 0 {
-                self.abort.store(true, Ordering::Release);
-                self.sender = None;
-                while self.receive().is_some() {}
-            }
-        }
-    }
-
     pub(super) struct WorkerWaves {
         slots: Vec<Option<WorkerCursor>>,
         queue: Arc<Mutex<Vec<ExtendedParallelGeometryBranch>>>,
@@ -1198,10 +1155,6 @@ pub(in crate::backend::wasm_cpu) mod cooperative {
                 || slots.iter().any(Option::is_none)
             {
                 return Err(contract_error());
-            }
-            let pool = cpu_worker_pool::ensure_cpu_workers(width).map_err(|_| pool_error())?;
-            if pool.total_workers() != width {
-                return Err(pool_error());
             }
             Ok(Self {
                 slots,
@@ -1246,14 +1199,14 @@ pub(in crate::backend::wasm_cpu) mod cooperative {
             let start = self.next_slot;
             self.failed = true;
             let abort = Arc::new(AtomicBool::new(false));
-            let mut wave = DrainWave::new(admission, Arc::clone(&abort));
             let shared = WaveShared {
                 queue: Arc::clone(&self.queue),
                 queued_memory: self.queued_memory.clone(),
                 progress: Arc::clone(&self.progress),
                 abort: Arc::clone(&abort),
             };
-            let mut caller = None;
+            let mut tasks = Vec::new();
+            tasks.try_reserve_exact(active).map_err(|_| pool_error())?;
             let mut assigned = 0;
             for offset in 0..width {
                 let index = (start + offset) % width;
@@ -1262,34 +1215,63 @@ pub(in crate::backend::wasm_cpu) mod cooperative {
                 }
                 let credit = budget / active + usize::from(assigned < budget % active);
                 let cursor = self.slots[index].take().ok_or_else(contract_error)?;
-                if caller.is_none() {
-                    caller = Some((index, cursor, credit));
-                } else {
-                    let work = shared.clone();
-                    let worker_control = control.clone();
-                    let sender = wave.sender.as_ref().ok_or_else(contract_error)?.clone();
-                    let profile = WorkerSearchProfile::capture();
-                    cpu_worker_pool::submit_cpu_job(move || {
-                        let result = profile.measure(|| work.run(cursor, credit, worker_control));
-                        let _ = sender.send((index, result));
-                    })
-                    .map_err(|_| pool_error())?;
-                    wave.submitted += 1;
-                }
+                tasks.push(Mutex::new(Some((index, cursor, credit))));
                 assigned += 1;
                 self.next_slot = (index + 1) % width;
                 if assigned == active {
                     break;
                 }
             }
-            wave.sender = None;
-            let (index, cursor, credit) = caller.ok_or_else(contract_error)?;
-            let caller = shared.run(cursor, credit, control.clone());
+            let mut completed = Vec::new();
+            completed
+                .try_reserve_exact(active)
+                .map_err(|_| pool_error())?;
+            completed.resize_with(active, || Mutex::new(None));
+            let worker_control = control.clone().with_parallelism_if_unbound(width);
+            clearra_core_domain::parallel_work::try_for_each_chunk(
+                &worker_control,
+                active,
+                1,
+                || Ok::<_, WasmExactSearchError>(()),
+                |_, ordinals| {
+                    for ordinal in ordinals {
+                        let (index, cursor, credit) = tasks[ordinal]
+                            .lock()
+                            .map_err(|_| contract_error())?
+                            .take()
+                            .ok_or_else(contract_error)?;
+                        let profile = WorkerSearchProfile::capture();
+                        let result = profile
+                            .measure(|| shared.clone().run(cursor, credit, worker_control.clone()));
+                        *completed[ordinal].lock().map_err(|_| contract_error())? =
+                            Some((index, result));
+                    }
+                    Ok(())
+                },
+            )
+            .map_err(|error| match error {
+                clearra_core_domain::parallel_work::ParallelWorkError::Worker(error) => error,
+                clearra_core_domain::parallel_work::ParallelWorkError::Cancelled => {
+                    WasmExactSearchError::Cancelled
+                }
+                clearra_core_domain::parallel_work::ParallelWorkError::ThreadSpawnFailed => {
+                    pool_error()
+                }
+                clearra_core_domain::parallel_work::ParallelWorkError::WorkerPanicked => {
+                    WasmExactSearchError::InvalidProblem("extended_pc_family_worker_panicked")
+                }
+            })?;
             let mut used = 0;
             let mut error = None;
-            self.accept_completion(Ok((index, caller)), &mut used, &mut error);
-            while let Some(result) = wave.receive() {
-                self.accept_completion(result, &mut used, &mut error);
+            for result in completed {
+                self.accept_completion(
+                    result
+                        .into_inner()
+                        .map_err(|_| contract_error())?
+                        .ok_or_else(contract_error),
+                    &mut used,
+                    &mut error,
+                );
             }
             if let Some(error) = error {
                 return Err(error);

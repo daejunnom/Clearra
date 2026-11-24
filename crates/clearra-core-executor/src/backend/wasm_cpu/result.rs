@@ -34,6 +34,10 @@ use clearra_supply::pattern_universe::{PackingPatternMembershipKind, PieceMultis
 pub(super) mod compact_pc_failed_queue;
 pub use compact_pc_failed_queue::WasmCompactPcFailedQueueSession;
 
+#[cfg(all(feature = "parallel", not(target_family = "wasm")))]
+#[path = "scoring_graph_parallel.rs"]
+pub(super) mod scoring_graph_parallel;
+
 use crate::{
     pc_chance_coverage_evidence::{
         strict_coverage_pattern_bitset_from_words, PcChanceCoverageEvidence, PcScoreProblemEvidence,
@@ -778,15 +782,32 @@ fn canonical_multiset_order(left: [u8; 7], right: [u8; 7]) -> Ordering {
     Ordering::Equal
 }
 
+fn exact_execution_evidence_requested(problem: &SearchProblem) -> bool {
+    problem.objective().score().requested()
+        || problem.objective().execution_constraints().requested()
+        || problem
+            .pc_chance_evidence_policy()
+            .retains_pc_save_groups_v2_evidence()
+        || problem
+            .pc_chance_evidence_policy()
+            .retains_pc_path_v2_evidence()
+}
+
 fn preflight_and_acquire_execution_resources(
     problem: &SearchProblem,
 ) -> Result<ExecutionAdmission, WasmExactSearchError> {
-    let admission = if problem.objective().score().requested() {
-        // Exact score preparation and App-side score reduction are one live
-        // execution. Reserve the request's complete configured cap (or the
-        // complete host cap for an unbounded request) so the terminal authority
-        // can retain this lease through post-processing.
-        admit_budget_bound_search_execution(problem, 1)
+    let admission = if exact_execution_evidence_requested(problem) {
+        // Every rich execution graph (Path, Save, constraints and Score) owns
+        // its real request cap. A one-bitset lease cannot admit N concurrent
+        // graph builders or the returned graph family.
+        admit_budget_bound_search_execution(
+            problem,
+            if cfg!(all(feature = "parallel", not(target_family = "wasm"))) {
+                problem.backend_policy().workers()
+            } else {
+                1
+            },
+        )
     } else {
         // Generic exact search keeps its established small projection.
         admit_search_execution(problem, ExecutionAdmissionPlan::exact_search())
@@ -1759,6 +1780,12 @@ impl WasmExactSearchSession {
                 )?
             }
         };
+        if problem
+            .pc_chance_evidence_policy()
+            .retains_pc_path_v2_evidence()
+        {
+            geometry.retain_pattern_memberships_for_terminal();
+        }
         if !external_geometry && !parent_authorized {
             let mode = physical_pc_prefix_mode(problem.as_ref(), &catalog);
             #[cfg(any(test, feature = "local-search-ab"))]
@@ -2109,7 +2136,9 @@ impl WasmExactSearchSession {
             }
             ParallelSearchDecision::Completed(outcome) => {
                 self.parallel_decision_reason = "parallel-immutable-family-queue";
-                self.cpu_warmup_performed = self.cpu_warmup_requested;
+                // Workers start useful work immediately; the shared budget
+                // does not run the old independent pool's startup barrier.
+                self.cpu_warmup_performed = false;
                 let terminal_identities =
                     self.absorb_parallel_outcome(outcome, terminal_identity_move)?;
                 match self.complete_internal(true, terminal_identities)? {
@@ -2772,6 +2801,11 @@ impl WasmExactSearchSession {
     /// workers have already been joined and dropped.
     fn checked_executor_retained_bytes(&self) -> Option<u128> {
         let mut bytes = core::mem::size_of::<Self>() as u128;
+        bytes = bytes.checked_add(
+            self.execution_control
+                .compute_budget()
+                .shared_allocation_retained_bytes(),
+        )?;
         // GeometryCatalog is an executor-owned Arc pointee and therefore is
         // not part of the session's inline size.
         bytes = bytes.checked_add(core::mem::size_of::<GeometryCatalog>() as u128)?;
@@ -2841,6 +2875,13 @@ impl WasmExactSearchSession {
         let executor = self.checked_executor_retained_bytes()?;
         match self.checked_external_retained_upper_bound_bytes() {
             Some(external) => executor.checked_add(external),
+            None if exact_execution_evidence_requested(&self.problem) => executor
+                .checked_add(
+                    super::extended_pc_search::checked_pc_family_problem_nested_retained_bytes(
+                        &self.problem,
+                    )?,
+                )?
+                .checked_add(core::mem::size_of::<SearchProblem>() as u128 + 32),
             None => Some(executor),
         }
     }
@@ -2873,12 +2914,7 @@ impl WasmExactSearchSession {
         &self,
         checked_future_bytes: u128,
     ) -> Result<(), WasmExactSearchError> {
-        if !self.problem.objective().score().requested() {
-            // Exact execution-constraint evidence shares the scoring graph
-            // builder, but generic exact admission deliberately retains its
-            // historical one-bitset projection. Only a score request owns the
-            // complete configured/host-cap lease against which these checked
-            // allocation projections are authoritative.
+        if !exact_execution_evidence_requested(&self.problem) {
             return Ok(());
         }
         self.ensure_session_memory_bound(checked_future_bytes)
@@ -4584,52 +4620,66 @@ impl WasmExactSearchSession {
             .checked_mul(core::mem::size_of::<clearra_replay::ExactScoringExecutionGraph>() as u128)
             .ok_or_else(|| self.scoring_memory_projection_overflow())?;
         let mut retained_graph_nested_bytes = 0_u128;
-        for (index, identity) in identities.into_iter().enumerate() {
-            let candidate_id = u64::try_from(index + 1).map_err(|_| {
-                WasmExactSearchError::InvalidProblem("wasm_scoring_candidate_id_overflow")
-            })?;
-            let projection = exact_scoring_execution_graph_memory_projection(
-                &self.problem,
-                &self.catalog,
-                identity,
+        #[allow(unused_mut)]
+        let mut parallel_completed = false;
+        #[cfg(all(feature = "parallel", not(target_family = "wasm")))]
+        if self.problem.backend_policy().workers() > 1 && identities.len() > 1 {
+            (complete, retained_graph_nested_bytes) = self.prepare_scoring_graphs_parallel(
+                &identities,
+                &mut graphs,
+                identity_live_bytes,
+                graph_outer_bytes,
             )?;
-            let candidate_future_bytes = identity_live_bytes
-                .checked_add(graph_outer_bytes)
-                .and_then(|bytes| bytes.checked_add(retained_graph_nested_bytes))
-                .and_then(|bytes| bytes.checked_add(projection.peak_additional_bytes))
-                .ok_or_else(|| self.scoring_memory_projection_overflow())?;
-            self.ensure_score_session_memory_bound(candidate_future_bytes)?;
-            match exact_scoring_execution_graph(
-                &self.problem,
-                &self.catalog,
-                identity,
-                candidate_id,
-                &mut self.buildup_workspace,
-            )? {
-                Some(graph) => {
-                    let retained = graph
-                        .checked_nested_retained_bytes()
-                        .ok_or_else(|| self.scoring_memory_projection_overflow())?;
-                    debug_assert!(retained <= projection.retained_graph_nested_bytes);
-                    retained_graph_nested_bytes = retained_graph_nested_bytes
-                        .checked_add(retained)
-                        .ok_or_else(|| self.scoring_memory_projection_overflow())?;
-                    self.ensure_score_session_memory_bound(
-                        identity_live_bytes
-                            .checked_add(graph_outer_bytes)
-                            .and_then(|bytes| bytes.checked_add(retained_graph_nested_bytes))
-                            .ok_or_else(|| self.scoring_memory_projection_overflow())?,
-                    )?;
-                    graphs.push(graph);
-                }
-                None => {
-                    complete = false;
-                    self.ensure_score_session_memory_bound(
-                        identity_live_bytes
-                            .checked_add(graph_outer_bytes)
-                            .and_then(|bytes| bytes.checked_add(retained_graph_nested_bytes))
-                            .ok_or_else(|| self.scoring_memory_projection_overflow())?,
-                    )?;
+            parallel_completed = true;
+        }
+        if !parallel_completed {
+            for (index, identity) in identities.into_iter().enumerate() {
+                let candidate_id = u64::try_from(index + 1).map_err(|_| {
+                    WasmExactSearchError::InvalidProblem("wasm_scoring_candidate_id_overflow")
+                })?;
+                let projection = exact_scoring_execution_graph_memory_projection(
+                    &self.problem,
+                    &self.catalog,
+                    identity,
+                )?;
+                let candidate_future_bytes = identity_live_bytes
+                    .checked_add(graph_outer_bytes)
+                    .and_then(|bytes| bytes.checked_add(retained_graph_nested_bytes))
+                    .and_then(|bytes| bytes.checked_add(projection.peak_additional_bytes))
+                    .ok_or_else(|| self.scoring_memory_projection_overflow())?;
+                self.ensure_score_session_memory_bound(candidate_future_bytes)?;
+                match exact_scoring_execution_graph(
+                    &self.problem,
+                    &self.catalog,
+                    identity,
+                    candidate_id,
+                    &mut self.buildup_workspace,
+                )? {
+                    Some(graph) => {
+                        let retained = graph
+                            .checked_nested_retained_bytes()
+                            .ok_or_else(|| self.scoring_memory_projection_overflow())?;
+                        debug_assert!(retained <= projection.retained_graph_nested_bytes);
+                        retained_graph_nested_bytes = retained_graph_nested_bytes
+                            .checked_add(retained)
+                            .ok_or_else(|| self.scoring_memory_projection_overflow())?;
+                        self.ensure_score_session_memory_bound(
+                            identity_live_bytes
+                                .checked_add(graph_outer_bytes)
+                                .and_then(|bytes| bytes.checked_add(retained_graph_nested_bytes))
+                                .ok_or_else(|| self.scoring_memory_projection_overflow())?,
+                        )?;
+                        graphs.push(graph);
+                    }
+                    None => {
+                        complete = false;
+                        self.ensure_score_session_memory_bound(
+                            identity_live_bytes
+                                .checked_add(graph_outer_bytes)
+                                .and_then(|bytes| bytes.checked_add(retained_graph_nested_bytes))
+                                .ok_or_else(|| self.scoring_memory_projection_overflow())?,
+                        )?;
+                    }
                 }
             }
         }
@@ -4899,6 +4949,56 @@ impl WasmExactSearchSession {
                 })?;
             self.ensure_session_memory_bound(future)?;
         }
+        let path_supply_evidence = if self
+            .problem
+            .pc_chance_evidence_policy()
+            .retains_pc_path_v2_evidence()
+        {
+            match (scoring_batch.as_ref(), self.geometry.targets()) {
+                (Some(batch), Some(targets)) if batch.complete() => {
+                    let refine_membership = targets.len() > 1
+                        && targets.first().is_some_and(|first| {
+                            first.possible_patterns.count_ones() as usize == batch.patterns().len()
+                                && targets.iter().all(|target| {
+                                    Arc::ptr_eq(&first.possible_patterns, &target.possible_patterns)
+                                })
+                        });
+                    let future = crate::PcPathSupplyEvidence::checked_creation_future_bytes(
+                        &self.problem,
+                        targets.len(),
+                        refine_membership,
+                    )
+                    .and_then(|bytes| bytes.checked_add(batch.checked_nested_retained_bytes()?))
+                    .ok_or_else(|| self.scoring_memory_projection_overflow())?;
+                    self.ensure_score_session_memory_bound(future)?;
+                    let mut evidence = crate::PcPathSupplyEvidence::from_executed_source(
+                        &self.problem,
+                        batch,
+                        targets
+                            .iter()
+                            .map(|target| (target.key, target.possible_patterns.as_ref())),
+                    )
+                    .map_err(WasmExactSearchError::InvalidProblem)?;
+                    if refine_membership {
+                        let control = self
+                            .execution_control
+                            .clone()
+                            .with_parallelism_if_unbound(self.problem.backend_policy().workers());
+                        evidence.refine_pattern_membership(&self.problem, batch, &control)
+                            .map_err(|error| match error {
+                                clearra_core_domain::parallel_work::ParallelWorkError::Worker(reason) => WasmExactSearchError::InvalidProblem(reason),
+                                clearra_core_domain::parallel_work::ParallelWorkError::Cancelled => WasmExactSearchError::Cancelled,
+                                clearra_core_domain::parallel_work::ParallelWorkError::ThreadSpawnFailed => WasmExactSearchError::InvalidProblem("pc_path_supply_worker_spawn_failed"),
+                                clearra_core_domain::parallel_work::ParallelWorkError::WorkerPanicked => WasmExactSearchError::InvalidProblem("pc_path_supply_worker_panicked"),
+                            })?;
+                    }
+                    Some(evidence)
+                }
+                _ => None,
+            }
+        } else {
+            None
+        };
         let tiling_only = self.problem.objective().kind() == ObjectiveKind::Tiling;
         let canonical_tiling = self.problem.output_policy() == SearchOutputPolicy::TilingOnly;
         let solution_set_materialized = self.problem.output_policy().retains_solution_set()
@@ -6384,6 +6484,9 @@ impl WasmExactSearchSession {
             .with_pc_score_problem_evidence(pc_score_problem_evidence);
         if let Some(evidence) = pc_chance_coverage_evidence {
             result = result.with_pc_chance_coverage_evidence(evidence);
+        }
+        if let Some(evidence) = path_supply_evidence {
+            result = result.with_pc_path_supply_evidence(evidence);
         }
         if let Some(store) = tiling_solution_store {
             result = result.with_tiling_solution_page_store(store);

@@ -934,6 +934,12 @@ mod retained_capacity {
                 && self.objective.kind() == ObjectiveKind::All
                 && self.count_policy == CountPolicy::CountAll
                 && self.output_policy == SearchOutputPolicy::Trace;
+            let save_source = self
+                .pc_chance_evidence_policy
+                .retains_pc_save_groups_v2_evidence()
+                && self.objective.kind() == ObjectiveKind::All
+                && self.count_policy == CountPolicy::CountAll
+                && self.output_policy == SearchOutputPolicy::Trace;
             let chance_source = self.pc_chance_evidence_policy
                 == PcChanceEvidencePolicy::PcProbabilityV2
                 && self.objective.kind() == ObjectiveKind::Unique
@@ -966,7 +972,8 @@ mod retained_capacity {
                     || minimum_source
                     || chance_source
                     || failed_source
-                    || path_source)
+                    || path_source
+                    || save_source)
                 || self.objective.score().requested()
                 || (self
                     .queue_observation_policy()

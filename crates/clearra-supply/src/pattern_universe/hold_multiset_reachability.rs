@@ -11,11 +11,32 @@ use super::piece_multiset_group::PieceMultisetKey;
 /// hold either stays unused and consumes `n`, or is used and consumes `n + 1`.
 /// Enumerating the possible final hold piece is therefore equivalent to the
 /// full one-slot HoldAutomaton for unordered Packing supply.
-pub(super) struct ReachableMultisetWorkspace {
+pub struct ReachableMultisetWorkspace {
     results: Vec<PieceMultisetKey>,
 }
 
 impl ReachableMultisetWorkspace {
+    /// Reuse the exact one-slot hold projection for a bounded placement count.
+    /// The count representation is independent of an unused queue suffix.
+    pub fn for_placed_pieces(placed_piece_count: u8) -> Self {
+        Self::new(usize::from(placed_piece_count))
+    }
+
+    pub fn for_sequence(
+        &mut self,
+        sequence: &[PieceKind],
+        placed_piece_count: u8,
+        initial_hold: HoldAutomatonState,
+        hold_enabled: bool,
+    ) -> &[PieceMultisetKey] {
+        self.reachable_multisets(
+            sequence,
+            usize::from(placed_piece_count),
+            initial_hold,
+            hold_enabled,
+        )
+    }
+
     pub(super) fn new(placed_piece_count: usize) -> Self {
         Self {
             results: Vec::with_capacity(

@@ -114,6 +114,7 @@ pub struct ExecutionControl {
     pub progress_sink: Option<Arc<dyn ProgressSink>>,
     partition: ExecutionPartition,
     compute_budget: Arc<ComputeBudget>,
+    parallelism_bound: bool,
 }
 
 /// One request's compute-worker width. The request coordinator never consumes
@@ -127,6 +128,9 @@ pub struct ComputeBudget {
 }
 
 impl ComputeBudget {
+    pub const SHARED_ALLOCATION_RETAINED_BYTES: u128 =
+        (std::mem::size_of::<Self>() + 2 * std::mem::size_of::<usize>()) as u128;
+
     fn new(parallelism: usize) -> Self {
         let parallelism = parallelism.max(1);
         Self {
@@ -141,20 +145,31 @@ impl ComputeBudget {
         self.parallelism
     }
 
+    /// The one shared budget allocation, including Arc reference counts.
+    /// Descendants sharing this owner must charge it once by Arc identity.
+    pub const fn shared_allocation_retained_bytes(&self) -> u128 {
+        Self::SHARED_ALLOCATION_RETAINED_BYTES
+    }
+
     pub fn try_acquire_worker(self: &Arc<Self>) -> Option<ComputePermit> {
         self.available
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |available| {
                 available.checked_sub(1)
             })
             .ok()
-            .map(|_| ComputePermit { budget: Arc::clone(self) })
+            .map(|_| ComputePermit {
+                budget: Arc::clone(self),
+            })
     }
 
     pub fn acquire_worker(
         self: &Arc<Self>,
         cancellation: &CancellationToken,
     ) -> Option<ComputePermit> {
-        let mut waiting = self.waiters.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut waiting = self
+            .waiters
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         loop {
             if cancellation.is_cancelled() {
                 return None;
@@ -162,8 +177,46 @@ impl ComputeBudget {
             if let Some(permit) = self.try_acquire_worker() {
                 return Some(permit);
             }
-            waiting = self.ready.wait_timeout(waiting, std::time::Duration::from_millis(25))
-                .unwrap_or_else(std::sync::PoisonError::into_inner).0;
+            waiting = self
+                .ready
+                .wait_timeout(waiting, std::time::Duration::from_millis(25))
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .0;
+        }
+    }
+
+    pub(crate) fn release_worker_slot(&self) {
+        let old = self.available.fetch_add(1, Ordering::Release);
+        debug_assert!(
+            old < self.parallelism,
+            "a compute slot must have one live owner"
+        );
+        self.ready.notify_one();
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    pub(crate) fn resume_suspended_worker(&self) {
+        let mut waiting = self
+            .waiters
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        loop {
+            if self
+                .available
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |available| {
+                    available.checked_sub(1)
+                })
+                .is_ok()
+            {
+                return;
+            }
+            // Cancellation cannot skip reacquisition: the original permit is
+            // still owned by the outer worker and must be balanced on unwind.
+            waiting = self
+                .ready
+                .wait_timeout(waiting, std::time::Duration::from_millis(25))
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .0;
         }
     }
 }
@@ -181,8 +234,7 @@ impl ComputePermit {
 
 impl Drop for ComputePermit {
     fn drop(&mut self) {
-        self.budget.available.fetch_add(1, Ordering::Release);
-        self.budget.ready.notify_one();
+        self.budget.release_worker_slot();
     }
 }
 
@@ -193,6 +245,7 @@ impl ExecutionControl {
             progress_sink: None,
             partition: ExecutionPartition::whole(),
             compute_budget: Arc::new(ComputeBudget::new(1)),
+            parallelism_bound: false,
         }
     }
 
@@ -213,7 +266,22 @@ impl ExecutionControl {
         if self.parallelism() != parallelism {
             self.compute_budget = Arc::new(ComputeBudget::new(parallelism));
         }
+        self.parallelism_bound = true;
         self
+    }
+
+    /// Adopt a width only when no parent has bound this request yet. A bound
+    /// one-worker request is an explicit owner, not an unset default.
+    pub fn with_parallelism_if_unbound(self, parallelism: usize) -> Self {
+        if self.parallelism_bound {
+            self
+        } else {
+            self.with_parallelism(parallelism)
+        }
+    }
+
+    pub const fn has_parallelism_binding(&self) -> bool {
+        self.parallelism_bound
     }
 
     pub fn parallelism(&self) -> usize {
@@ -253,6 +321,26 @@ impl fmt::Debug for ExecutionControl {
             .field("has_progress_sink", &self.progress_sink.is_some())
             .field("partition", &self.partition)
             .field("parallelism", &self.parallelism())
+            .field("parallelism_bound", &self.parallelism_bound)
             .finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn explicit_one_worker_binding_is_preserved_by_descendants() {
+        let unbound = ExecutionControl::default();
+        assert!(!unbound.has_parallelism_binding());
+        let owner = unbound.with_parallelism(1);
+        assert!(owner.has_parallelism_binding());
+        let child = owner.clone().with_parallelism_if_unbound(8);
+        assert_eq!(child.parallelism(), 1);
+        assert!(Arc::ptr_eq(owner.compute_budget(), child.compute_budget()));
+        let derived = ExecutionControl::default().with_parallelism_if_unbound(8);
+        assert!(derived.has_parallelism_binding());
+        assert_eq!(derived.parallelism(), 8);
     }
 }

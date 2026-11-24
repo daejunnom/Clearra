@@ -451,6 +451,9 @@ impl ExtendedPcTilingSession {
 
     fn checked_retained_bytes(&self) -> Option<u128> {
         let mut bytes = (size_of::<Self>() as u128).checked_add(self.external_retained_bytes)?;
+        bytes = bytes.checked_add(
+            clearra_core_domain::execution_cancellation::ComputeBudget::SHARED_ALLOCATION_RETAINED_BYTES,
+        )?;
         bytes = bytes
             .checked_add(
                 super::extended_pc_search::checked_pc_family_problem_nested_retained_bytes(

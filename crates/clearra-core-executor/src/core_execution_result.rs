@@ -19,6 +19,7 @@ use crate::{
         DistributedPcChanceCoverageRows, PcChanceCoverageEvidence, PcScoreProblemEvidence,
     },
     pc_full_height_replay_evidence::PcFullHeightReplayEvidence,
+    pc_path_supply_evidence::PcPathSupplyEvidence,
     result_views::{SearchExecutionReport, SearchExecutionReportBuildError},
     setup_finder_report::SetupFinderReport,
     solution_probability::{
@@ -144,6 +145,7 @@ pub struct CoreExecutionResult {
     distributed_pc_chance_coverage_rows: Option<DistributedPcChanceCoverageRows>,
     pc_score_problem_evidence: Option<PcScoreProblemEvidence>,
     pc_full_height_replay_evidence: Option<PcFullHeightReplayEvidence>,
+    pc_path_supply_evidence: Option<Arc<PcPathSupplyEvidence>>,
     solution_coverages: Vec<SolutionCoverage>,
     normalized_solution_coverages: Vec<NormalizedSolutionCoverage>,
     solution_probabilities: Vec<SolutionProbabilityReport>,
@@ -241,6 +243,7 @@ impl CoreExecutionResult {
             distributed_pc_chance_coverage_rows: None,
             pc_score_problem_evidence: None,
             pc_full_height_replay_evidence: None,
+            pc_path_supply_evidence: None,
             solution_coverages: Vec::new(),
             normalized_solution_coverages: Vec::new(),
             solution_probabilities: Vec::new(),
@@ -431,6 +434,7 @@ impl CoreExecutionResult {
         batch: Option<ExactScoringExecutionBatch>,
     ) -> Self {
         self.exact_scoring_execution_batches = batch.into_iter().collect();
+        self.pc_path_supply_evidence = None;
         self
     }
 
@@ -456,6 +460,15 @@ impl CoreExecutionResult {
         self.pc_full_height_replay_evidence.as_ref()
     }
 
+    pub(crate) fn with_pc_path_supply_evidence(mut self, evidence: PcPathSupplyEvidence) -> Self {
+        self.pc_path_supply_evidence = Some(Arc::new(evidence));
+        self
+    }
+
+    pub fn pc_path_supply_evidence(&self) -> Option<&Arc<PcPathSupplyEvidence>> {
+        self.pc_path_supply_evidence.as_ref()
+    }
+
     /// Page sources own the copied immutable physical graphs after validation;
     /// the response must not retain a second complete producer graph owner.
     pub fn without_pc_full_height_replay_evidence(mut self) -> Self {
@@ -468,6 +481,7 @@ impl CoreExecutionResult {
         batches: Vec<ExactScoringExecutionBatch>,
     ) -> Self {
         self.exact_scoring_execution_batches = batches;
+        self.pc_path_supply_evidence = None;
         self
     }
 
@@ -665,6 +679,7 @@ impl CoreExecutionResult {
         self.distributed_pc_chance_coverage_rows = None;
         self.pc_score_problem_evidence = None;
         self.pc_full_height_replay_evidence = None;
+        self.pc_path_supply_evidence = None;
         self.solution_coverages = Vec::new();
         self.normalized_solution_coverages = Vec::new();
         self.solution_probabilities = Vec::new();
@@ -895,6 +910,7 @@ impl CoreExecutionResult {
     pub fn without_pc_score_transient_evidence(mut self) -> Self {
         self.pc_score_problem_evidence = None;
         self.pc_full_height_replay_evidence = None;
+        self.pc_path_supply_evidence = None;
         self.postprocess_replay_trace = None;
         // These producers are never reused once a typed shape is published.
         // Release their backing slots, not just the initialized entries.
@@ -1291,6 +1307,9 @@ impl CoreExecutionResult {
         if let Some(evidence) = &self.pc_full_height_replay_evidence {
             bytes = bytes.checked_add(evidence.checked_nested_retained_bytes()?)?;
         }
+        if let Some(evidence) = &self.pc_path_supply_evidence {
+            bytes = bytes.checked_add(evidence.checked_shared_non_pattern_retained_bytes()?)?;
+        }
 
         bytes = bytes.checked_add(
             (self.solution_coverages.capacity() as u128)
@@ -1413,6 +1432,11 @@ impl CoreExecutionResult {
                     .iter()
                     .flat_map(|transport| transport.rows().iter())
                     .map(|row| row.coverage_bits()),
+            )
+            .chain(
+                self.pc_path_supply_evidence
+                    .iter()
+                    .flat_map(|evidence| evidence.pattern_bitsets()),
             )
     }
 
@@ -2464,6 +2488,7 @@ mod tests {
             distributed_pc_chance_coverage_rows,
             pc_score_problem_evidence,
             pc_full_height_replay_evidence,
+            pc_path_supply_evidence,
             solution_coverages,
             normalized_solution_coverages,
             solution_probabilities,
@@ -2506,6 +2531,7 @@ mod tests {
             distributed_pc_chance_coverage_rows,
             pc_score_problem_evidence,
             pc_full_height_replay_evidence,
+            pc_path_supply_evidence,
             solution_coverages,
             normalized_solution_coverages,
             solution_probabilities,

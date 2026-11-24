@@ -3173,6 +3173,7 @@ pub(super) struct GeometrySearch {
     component_compositions: usize,
     tablebase_pruned_states: usize,
     external_targets: Option<Arc<[TargetGroup]>>,
+    retain_terminal_targets: bool,
     resource_authoritative: bool,
     prefix: PhysicalPrefixSummary,
 }
@@ -3379,6 +3380,11 @@ fn target_groups_without_pattern_indexes(
 }
 
 impl SharedTargetGroups {
+    pub(super) fn checked_retained_bytes(&self) -> Option<u128> {
+        (target_bytes(&self.targets) as u128)
+            .checked_add(checked_target_nested_retained_bytes(&self.targets)?)
+    }
+
     pub fn compile(
         universe: &MaterializedPatternUniverse,
         family: &PackingMultisetFamily,
@@ -3808,6 +3814,7 @@ impl GeometrySearch {
             component_compositions: 0,
             tablebase_pruned_states: 0,
             external_targets: None,
+            retain_terminal_targets: false,
             resource_authoritative: false,
             prefix: PhysicalPrefixSummary::default(),
         }
@@ -3927,6 +3934,7 @@ impl GeometrySearch {
             component_compositions: 0,
             tablebase_pruned_states: 0,
             external_targets: None,
+            retain_terminal_targets: false,
             resource_authoritative: memory_limit.is_some(),
             prefix: PhysicalPrefixSummary::default(),
         })
@@ -3952,6 +3960,7 @@ impl GeometrySearch {
             component_compositions: 0,
             tablebase_pruned_states: 0,
             external_targets: None,
+            retain_terminal_targets: false,
             resource_authoritative: false,
             prefix: PhysicalPrefixSummary::default(),
         }
@@ -3980,6 +3989,7 @@ impl GeometrySearch {
             component_compositions: 0,
             tablebase_pruned_states: 0,
             external_targets: None,
+            retain_terminal_targets: false,
             resource_authoritative: true,
             prefix: PhysicalPrefixSummary::default(),
         })
@@ -4064,6 +4074,7 @@ impl GeometrySearch {
             component_compositions: 0,
             tablebase_pruned_states: 0,
             external_targets: None,
+            retain_terminal_targets: false,
             resource_authoritative: memory_limit.is_some(),
             prefix: PhysicalPrefixSummary::default(),
         })
@@ -4086,6 +4097,7 @@ impl GeometrySearch {
             component_compositions: 0,
             tablebase_pruned_states: 0,
             external_targets: Some(Arc::clone(&shared.targets)),
+            retain_terminal_targets: false,
             resource_authoritative: false,
             prefix: PhysicalPrefixSummary::default(),
         }
@@ -4296,6 +4308,12 @@ impl GeometrySearch {
                 }
             }
             Ok(FamilyEnumerationAdvance::Complete) => {
+                if self.retain_terminal_targets {
+                    self.external_targets = self
+                        .enumerator
+                        .as_ref()
+                        .map(|owner| Arc::clone(&owner.targets));
+                }
                 self.enumerator = None;
                 GeometryAdvance::Complete
             }
@@ -4492,6 +4510,7 @@ impl GeometrySearch {
                 component_compositions: usize::from(index == 0) * self.component_compositions,
                 tablebase_pruned_states: usize::from(index == 0) * self.tablebase_pruned_states,
                 external_targets: None,
+                retain_terminal_targets: false,
                 resource_authoritative: false,
             });
         }
@@ -4664,6 +4683,25 @@ impl GeometrySearch {
             .as_ref()
             .map(|enumerator| enumerator.targets.as_ref())
             .or(self.external_targets.as_deref())
+    }
+
+    pub(super) fn retains_target_group_owner(&self) -> bool {
+        self.compiler.is_some()
+            || self.enumerator.is_some()
+            || self.external_targets.is_some()
+            || self.target_preparation.is_some()
+    }
+
+    pub(super) fn retain_pattern_memberships_for_terminal(&mut self) {
+        self.retain_terminal_targets = true;
+    }
+
+    #[cfg(feature = "parallel")]
+    pub(super) fn retain_shared_targets_for_terminal(&mut self, targets: Arc<[TargetGroup]>) {
+        // A Path terminal retains only the already admitted target owner until
+        // its private supply proof has taken shared pattern backing. The
+        // ordinary merged search continues to release these indexes eagerly.
+        self.external_targets = Some(targets);
     }
 
     pub fn finish_external(

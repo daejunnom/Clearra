@@ -18,6 +18,7 @@ pub use compact_pattern_union::{
     CompactPatternUnionError, CompactPatternUnionFrontier, CompactPatternUnionLanguage,
     CompactPatternUnionLimits,
 };
+pub use hold_multiset_reachability::ReachableMultisetWorkspace;
 pub use materialized_pattern_universe::{
     MaterializedPatternUniverse, MaterializedPatternUniverseError,
     MaterializedPatternUniverseStructure,

@@ -1,15 +1,15 @@
-//! Native exact Tiling runner. The request's one compute lease covers N-1 pool
-//! jobs plus the caller. All jobs are joined before terminal publication.
+//! Native exact Tiling runner. The request's shared compute budget covers N
+//! workers; the management thread only coordinates. Every job drains before
+//! terminal publication, including cancellation, panic and spawn failure.
 use std::{
     panic::{catch_unwind, AssertUnwindSafe},
     sync::{
         atomic::{AtomicBool, Ordering},
-        mpsc, Mutex,
+        Mutex,
     },
 };
 
 use crate::{
-    cpu_worker_pool,
     performance::{
         profile_sample_scale, ExecutorSearchStage, SearchStageSpan, WorkerSearchProfile,
     },
@@ -43,6 +43,11 @@ impl ExtendedPcTilingSession {
         requested_workers: usize,
         control: &ExecutionControl,
     ) -> Result<Option<CoreExecutionResult>, WasmExactSearchError> {
+        let requested_workers = if control.has_parallelism_binding() {
+            control.parallelism()
+        } else {
+            requested_workers
+        };
         if requested_workers <= 1 {
             return Ok(None);
         }
@@ -141,96 +146,69 @@ impl ExtendedPcTilingSession {
             .sort_unstable_by_key(|branch| (branch.candidate_count, branch.first_ordinal));
         let queue = Arc::new(Mutex::new(core::mem::take(&mut plan.branches)));
         let abort = Arc::new(AtomicBool::new(false));
-        let (sender, receiver) = mpsc::channel();
-        if workers > 1 {
-            let pool = if self.problem.backend_policy().cpu_warmup() {
-                cpu_worker_pool::prewarm_cpu_workers(workers)
-            } else {
-                cpu_worker_pool::ensure_cpu_workers(workers)
-            }
+        let worker_control = control.clone().with_parallelism_if_unbound(workers);
+        let mut results = Vec::new();
+        results
+            .try_reserve_exact(workers)
             .map_err(|_| pool_error())?;
-            if pool.total_workers() != workers {
-                return Err(pool_error());
-            }
-        }
-        let mut submitted = 0_usize;
-        let mut first_error = None;
-        for index in 0..workers.saturating_sub(1) {
-            let queue = Arc::clone(&queue);
-            let catalog = Arc::clone(&self.catalog);
-            let abort_worker = Arc::clone(&abort);
-            let worker_control = control.clone();
-            let sender = sender.clone();
-            let memory_owner = private_memory.owner(index);
-            let queued_memory = queued_memory.clone();
-            let profile = WorkerSearchProfile::capture();
-            let queued = cpu_worker_pool::submit_cpu_job(move || {
-                let result = catch_unwind(AssertUnwindSafe(|| {
-                    profile.measure(|| {
-                        run_worker(
-                            &queue,
-                            &catalog,
-                            &abort_worker,
-                            &worker_control,
-                            memory_owner,
-                            &queued_memory,
+        results.resize_with(workers, || Mutex::new(None));
+        clearra_core_domain::parallel_work::try_for_each_chunk(
+            &worker_control,
+            workers,
+            1,
+            || Ok::<_, WasmExactSearchError>(()),
+            |_, indices| {
+                for index in indices {
+                    let profile = WorkerSearchProfile::capture();
+                    let result = catch_unwind(AssertUnwindSafe(|| {
+                        profile.measure(|| {
+                            run_worker(
+                                &queue,
+                                &self.catalog,
+                                &abort,
+                                &worker_control,
+                                private_memory.owner(index),
+                                &queued_memory,
+                            )
+                        })
+                    }))
+                    .map_err(|_| {
+                        WasmExactSearchError::InvalidProblem(
+                            "extended_parallel_tiling_worker_panicked",
                         )
                     })
-                }))
-                .map_err(|_| {
-                    WasmExactSearchError::InvalidProblem("extended_parallel_tiling_worker_panicked")
-                })
-                .and_then(|result| result);
-                if result.is_err() {
-                    abort_worker.store(true, Ordering::Release);
+                    .and_then(|result| result);
+                    if result.is_err() {
+                        abort.store(true, Ordering::Release);
+                    }
+                    *results[index].lock().map_err(|_| pool_error())? = Some(result);
                 }
-                let _ = sender.send(result);
-            });
-            if queued.is_err() {
-                abort.store(true, Ordering::Release);
-                first_error = Some(pool_error());
-                break;
+                Ok(())
+            },
+        )
+        .map_err(|error| match error {
+            clearra_core_domain::parallel_work::ParallelWorkError::Worker(error) => error,
+            clearra_core_domain::parallel_work::ParallelWorkError::Cancelled => {
+                WasmExactSearchError::Cancelled
             }
-            submitted += 1;
-        }
-        drop(sender);
-        let caller = catch_unwind(AssertUnwindSafe(|| {
-            run_worker(
-                &queue,
-                &self.catalog,
-                &abort,
-                control,
-                private_memory.owner(workers - 1),
-                &queued_memory,
-            )
-        }))
-        .map_err(|_| {
-            WasmExactSearchError::InvalidProblem("extended_parallel_tiling_worker_panicked")
-        })
-        .and_then(|result| result);
-        if caller.is_err() {
-            abort.store(true, Ordering::Release);
-        }
-        let mut results = Vec::new();
-        results.try_reserve_exact(workers).map_err(|_| {
-            abort.store(true, Ordering::Release);
-            for _ in 0..submitted {
-                let _ = receiver.recv();
+            clearra_core_domain::parallel_work::ParallelWorkError::ThreadSpawnFailed => {
+                pool_error()
             }
-            pool_error()
+            clearra_core_domain::parallel_work::ParallelWorkError::WorkerPanicked => {
+                WasmExactSearchError::InvalidProblem("extended_parallel_tiling_worker_panicked")
+            }
         })?;
-        results.push(caller);
-        // Even submit/panic/cancellation errors must drain every owned job.
-        // A returned error must not release the compute lease under a live job.
-        for _ in 0..submitted {
-            results.push(receiver.recv().unwrap_or_else(|_| Err(pool_error())));
-        }
         let mut successful = Vec::new();
         successful
             .try_reserve_exact(workers)
             .map_err(|_| pool_error())?;
+        let mut first_error = None;
         for result in results {
-            match result {
+            match result
+                .into_inner()
+                .map_err(|_| pool_error())?
+                .ok_or_else(pool_error)?
+            {
                 Ok(result) => successful.push(result),
                 Err(error) => {
                     if first_error.is_none()
