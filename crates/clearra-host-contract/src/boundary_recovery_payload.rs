@@ -41,7 +41,7 @@ pub struct BoundaryRecoveryPayload {
     pub knowledge_basis: String,
     pub placement_role_scope: String,
     /// Effective structural maximum; the requested mode is retained separately.
-    pub max_early_placements: u8,
+    pub max_early_placements: usize,
     #[cfg_attr(
         feature = "serde",
         serde(default, skip_serializing_if = "Option::is_none")

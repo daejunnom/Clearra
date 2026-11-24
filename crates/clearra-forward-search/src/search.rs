@@ -412,6 +412,15 @@ pub(crate) enum ExpandedAction {
         damage_state: TetrioDamageState,
         step: ForwardPathStep,
     },
+    /// One final held-piece expansion, computed by the same worker that
+    /// expanded its parent. The coordinator only applies canonical reduction.
+    TerminalExpansion {
+        key: StateKey,
+        damage_state: TetrioDamageState,
+        step: ForwardPathStep,
+        generated_locks: u64,
+        actions: Vec<ExpandedAction>,
+    },
     DamageTerminal {
         board: ForwardBoard,
         total_damage: u32,
@@ -831,7 +840,7 @@ impl ForwardQueueSession {
                 key,
                 damage_state,
                 step,
-            } if self.current.len() >= TERMINAL_FUSION_MIN_PARENT_STATES
+            } if self.should_fuse_terminal_children()
                 && usize::from(key.cursor) >= self.queue.len() =>
             {
                 self.expand_terminal_child(
@@ -848,7 +857,11 @@ impl ForwardQueueSession {
         Ok(())
     }
 
-    fn expand_terminal_child(
+    pub(crate) fn should_fuse_terminal_children(&self) -> bool {
+        self.current.len() >= TERMINAL_FUSION_MIN_PARENT_STATES
+    }
+
+    pub(crate) fn expand_terminal_child(
         &mut self,
         parents: TraceChain,
         key: StateKey,
@@ -868,9 +881,29 @@ impl ForwardQueueSession {
             &mut terminal_actions,
             &mut self.seen_lock_outcomes,
         )?;
+        self.absorb_terminal_expansion(
+            parents,
+            key,
+            damage_state,
+            step,
+            generated_locks,
+            &mut terminal_actions,
+        );
+        self.terminal_actions = terminal_actions;
+        Ok(())
+    }
+
+    fn absorb_terminal_expansion(
+        &mut self,
+        parents: TraceChain,
+        key: StateKey,
+        damage_state: TetrioDamageState,
+        step: ForwardPathStep,
+        generated_locks: u64,
+        terminal_actions: &mut Vec<ExpandedAction>,
+    ) {
         self.visited_states = self.visited_states.saturating_add(1);
         self.generated_locks = self.generated_locks.saturating_add(generated_locks);
-
         let record_damage_prefix = matches!(self.config.mode, ForwardSearchMode::MaximumDamage)
             && (parents.is_empty() || step.damage() > 0)
             && self
@@ -901,8 +934,6 @@ impl ForwardQueueSession {
         } else {
             terminal_actions.clear();
         }
-        self.terminal_actions = terminal_actions;
-        Ok(())
     }
 
     fn terminal_action_is_retainable(&self, action: &ExpandedAction) -> bool {
@@ -920,7 +951,9 @@ impl ForwardQueueSession {
             ExpandedAction::RenTerminal { ren_count, .. } => {
                 self.maximum_ren.is_none_or(|maximum| *ren_count >= maximum)
             }
-            ExpandedAction::Spin { .. } | ExpandedAction::Child { .. } => true,
+            ExpandedAction::Spin { .. }
+            | ExpandedAction::Child { .. }
+            | ExpandedAction::TerminalExpansion { .. } => true,
         }
     }
 
@@ -931,6 +964,22 @@ impl ForwardQueueSession {
                 damage_state,
                 step,
             } => self.insert_child(key, damage_state, parents, step),
+            ExpandedAction::TerminalExpansion {
+                key,
+                damage_state,
+                step,
+                generated_locks,
+                mut actions,
+            } => {
+                self.absorb_terminal_expansion(
+                    parents,
+                    key,
+                    damage_state,
+                    step,
+                    generated_locks,
+                    &mut actions,
+                );
+            }
             ExpandedAction::DamageTerminal {
                 board,
                 total_damage,
@@ -1728,7 +1777,11 @@ pub(crate) fn expand_search_node(
 }
 
 fn ren_count_from_damage_state(state: TetrioDamageState) -> u8 {
-    u8::try_from(state.combo().unwrap_or(0)).expect("REN queue validation caps the chain at 22")
+    // Every accepted REN lock adds four cells and clears at least ten. An
+    // initially normalized 24-row field has at most 24 * 9 occupied cells,
+    // hence at most 36 consecutive clearing locks, independently of queue
+    // length. The byte-sized public REN value is therefore a physical bound.
+    u8::try_from(state.combo().unwrap_or(0)).expect("REN is bounded by normalized field area")
 }
 
 fn state_index_key(
@@ -2574,15 +2627,13 @@ mod tests {
             true,
         ))
         .is_ok());
-        assert!(matches!(
-            ForwardSearchSession::new(ren_query(
-                Board256Mask::EMPTY,
-                4,
-                vec![PieceKind::I; 23],
-                true,
-            )),
-            Err(ForwardSearchError::RenQueueTooLong)
-        ));
+        assert!(ForwardSearchSession::new(ren_query(
+            Board256Mask::EMPTY,
+            4,
+            vec![PieceKind::I; 23],
+            true,
+        ))
+        .is_ok());
 
         let expression = QueuePatternExpression::parse("I", 1).expect("pattern");
         let pattern_query = ForwardSearchQuery::new_with_source(

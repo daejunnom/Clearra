@@ -27,7 +27,7 @@ fn automatic_early_request_mode_and_two_or_three_role_witnesses_survive_wasm_jso
         };
         assert_eq!(boundary.status, "non-pc-recovery");
         assert_eq!(boundary.early_placement_limit_mode.as_deref(), Some("auto"));
-        assert_eq!(boundary.max_early_placements, early as u8);
+        assert_eq!(boundary.max_early_placements, early as usize);
         assert_eq!(boundary.borrowed_stage_two_count, early as usize);
         assert!(boundary.steps.iter().all(|step| step.b2b_active_after));
         let wire = serialize_distributed_final_events(early as u64, &result).unwrap();

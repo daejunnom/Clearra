@@ -27,8 +27,7 @@ use crate::{
 const INIT_MAGIC: u32 = u32::from_le_bytes(*b"FWIN");
 const TASK_MAGIC: u32 = u32::from_le_bytes(*b"FWTK");
 const RESULT_MAGIC: u32 = u32::from_le_bytes(*b"FWRS");
-const WIRE_VERSION: u32 = 10;
-const MAX_WIRE_ITEMS: usize = 10_000_000;
+const WIRE_VERSION: u32 = 11;
 const MAX_FIXED_TASKS_PER_BATCH: usize = 32;
 const MAX_REORDER_BATCHES_PER_WORKER: usize = 4;
 const TARGET_ADAPTIVE_BATCHES_PER_WORKER: usize = 8;
@@ -121,7 +120,6 @@ impl From<ForwardSearchError> for ForwardParallelError {
 pub struct ForwardParallelCoordinator {
     config: ForwardSearchConfig,
     state: CoordinatorState,
-    tail_reachability: ReachabilityWorkspace,
     next_task_id: u64,
     next_absorb_task_id: u64,
     buffered_results: BTreeMap<u64, WireResult>,
@@ -156,6 +154,7 @@ enum WireTask {
         id: u64,
         key: StateKey,
         damage: TetrioDamageState,
+        fuse_terminal: bool,
     },
     Pattern {
         id: u64,
@@ -167,6 +166,7 @@ enum WireTask {
         pattern_index: usize,
         key: StateKey,
         damage: TetrioDamageState,
+        fuse_terminal: bool,
     },
 }
 
@@ -231,10 +231,6 @@ impl ForwardParallelCoordinator {
     ) -> Result<Self, ForwardParallelError> {
         validate_query(&query)?;
         let config = ForwardSearchConfig::from_query(&query);
-        let tail_reachability = ReachabilityWorkspace::new(config.height, config.rule_profile)
-            .map_err(|reason| {
-                ForwardParallelError::Search(ForwardSearchError::UnsupportedRuleProfile(reason))
-            })?;
         let state = if query.piece_source().is_pattern() {
             let layered = should_layer_pattern_search(
                 query.piece_source().sequence_len(),
@@ -259,7 +255,7 @@ impl ForwardParallelCoordinator {
                 pending: HashMap::new(),
             })
         };
-        let parallel_workers = worker_count.saturating_sub(1).max(1);
+        let parallel_workers = worker_count.max(1);
         let tasks_per_batch = match &state {
             CoordinatorState::Pattern(pattern) if !pattern.layered => 1,
             CoordinatorState::Fixed(_) | CoordinatorState::Pattern(_) => MAX_FIXED_TASKS_PER_BATCH,
@@ -270,7 +266,6 @@ impl ForwardParallelCoordinator {
         Ok(Self {
             config,
             state,
-            tail_reachability,
             next_task_id: 1,
             next_absorb_task_id: 1,
             buffered_results: BTreeMap::new(),
@@ -367,7 +362,12 @@ impl ForwardParallelCoordinator {
                     let id = self.next_task_id;
                     self.next_task_id = self.next_task_id.saturating_add(1);
                     fixed.pending.insert(id, index);
-                    tasks.push(WireTask::Expand { id, key, damage });
+                    tasks.push(WireTask::Expand {
+                        id,
+                        key,
+                        damage,
+                        fuse_terminal: fixed.session.should_fuse_terminal_children(),
+                    });
                 }
             }
             CoordinatorState::Pattern(pattern) => {
@@ -404,6 +404,7 @@ impl ForwardParallelCoordinator {
                             pattern_index,
                             key,
                             damage,
+                            fuse_terminal: session.should_fuse_terminal_children(),
                         });
                     }
                 } else {
@@ -489,7 +490,7 @@ impl ForwardParallelCoordinator {
     fn absorb_ready_result(
         &mut self,
         result: WireResult,
-        control: &ExecutionControl,
+        _control: &ExecutionControl,
     ) -> Result<(), ForwardParallelError> {
         match (&mut self.state, result) {
             (
@@ -513,12 +514,7 @@ impl ForwardParallelCoordinator {
                     .generated_locks
                     .saturating_add(generated_locks);
                 for action in actions {
-                    fixed.session.absorb_expanded_action(
-                        parents,
-                        action,
-                        control,
-                        &mut self.tail_reachability,
-                    )?;
+                    fixed.session.absorb_action(parents, action);
                 }
                 self.progress.visited_states = fixed.session.visited_states;
                 self.progress.generated_locks = fixed.session.generated_locks;
@@ -549,12 +545,7 @@ impl ForwardParallelCoordinator {
                 session.visited_states = session.visited_states.saturating_add(1);
                 session.generated_locks = session.generated_locks.saturating_add(generated_locks);
                 for action in actions {
-                    session.absorb_expanded_action(
-                        parents,
-                        action,
-                        control,
-                        &mut self.tail_reachability,
-                    )?;
+                    session.absorb_action(parents, action);
                 }
                 self.progress.visited_states = session.visited_states;
                 self.progress.generated_locks = session.generated_locks;
@@ -764,7 +755,12 @@ impl ForwardParallelWorker {
                 return Err(ForwardParallelError::Search(ForwardSearchError::Cancelled));
             }
             match task {
-                WireTask::Expand { id, key, damage } => {
+                WireTask::Expand {
+                    id,
+                    key,
+                    damage,
+                    fuse_terminal,
+                } => {
                     let queue =
                         self.fixed_queue
                             .as_deref()
@@ -781,8 +777,23 @@ impl ForwardParallelWorker {
                         &mut self.actions,
                         &mut self.seen_lock_outcomes,
                     )?;
-                    self.visited_states = self.visited_states.saturating_add(1);
-                    self.generated_locks = self.generated_locks.saturating_add(generated_locks);
+                    let (terminal_states, terminal_locks) = if fuse_terminal {
+                        expand_terminal_actions(
+                            self.config,
+                            queue,
+                            control,
+                            &mut self.reachability,
+                            &mut self.actions,
+                            &mut self.seen_lock_outcomes,
+                        )?
+                    } else {
+                        (0, 0)
+                    };
+                    self.visited_states = self.visited_states.saturating_add(1 + terminal_states);
+                    self.generated_locks = self
+                        .generated_locks
+                        .saturating_add(generated_locks)
+                        .saturating_add(terminal_locks);
                     results.push(WireResult::Expansion {
                         id,
                         generated_locks,
@@ -818,6 +829,7 @@ impl ForwardParallelWorker {
                     pattern_index,
                     key,
                     damage,
+                    fuse_terminal,
                 } => {
                     let queue = self.pattern_queues.get(pattern_index).ok_or(
                         ForwardParallelError::InvalidState(
@@ -834,8 +846,23 @@ impl ForwardParallelWorker {
                         &mut self.actions,
                         &mut self.seen_lock_outcomes,
                     )?;
-                    self.visited_states = self.visited_states.saturating_add(1);
-                    self.generated_locks = self.generated_locks.saturating_add(generated_locks);
+                    let (terminal_states, terminal_locks) = if fuse_terminal {
+                        expand_terminal_actions(
+                            self.config,
+                            queue,
+                            control,
+                            &mut self.reachability,
+                            &mut self.actions,
+                            &mut self.seen_lock_outcomes,
+                        )?
+                    } else {
+                        (0, 0)
+                    };
+                    self.visited_states = self.visited_states.saturating_add(1 + terminal_states);
+                    self.generated_locks = self
+                        .generated_locks
+                        .saturating_add(generated_locks)
+                        .saturating_add(terminal_locks);
                     results.push(WireResult::Expansion {
                         id,
                         generated_locks,
@@ -871,6 +898,53 @@ impl ForwardParallelWorker {
             pattern_count: self.pattern_queues.len(),
         }
     }
+}
+
+fn expand_terminal_actions(
+    config: ForwardSearchConfig,
+    queue: &[PieceKind],
+    control: &ExecutionControl,
+    reachability: &mut ReachabilityWorkspace,
+    actions: &mut [ExpandedAction],
+    seen_lock_outcomes: &mut HashSet<CanonicalLockOutcomeKey>,
+) -> Result<(u64, u64), ForwardSearchError> {
+    let mut states = 0_u64;
+    let mut locks = 0_u64;
+    for action in actions {
+        let ExpandedAction::Child {
+            key,
+            damage_state,
+            step,
+        } = action
+        else {
+            continue;
+        };
+        if usize::from(key.cursor) < queue.len() {
+            continue;
+        }
+        let mut terminal = Vec::new();
+        let generated_locks = expand_search_node(
+            config,
+            queue,
+            *key,
+            *damage_state,
+            control,
+            reachability,
+            &mut terminal,
+            seen_lock_outcomes,
+        )?;
+        let expanded = ExpandedAction::TerminalExpansion {
+            key: *key,
+            damage_state: *damage_state,
+            step: step.clone(),
+            generated_locks,
+            actions: terminal,
+        };
+        *action = expanded;
+        states += 1;
+        locks = locks.saturating_add(generated_locks);
+    }
+    Ok((states, locks))
 }
 
 fn apply_session_progress(
@@ -1029,7 +1103,7 @@ fn decode_worker_initialization(
     reader.require_header(INIT_MAGIC)?;
     let config = decode_config(&mut reader)?;
     let queue = decode_piece_vec(&mut reader)?;
-    let pattern_count = reader.count()?;
+    let pattern_count = reader.collection_count(4)?;
     let mut pattern_queues = Vec::with_capacity(pattern_count);
     for _ in 0..pattern_count {
         pattern_queues.push(decode_piece_vec(&mut reader)?);
@@ -1044,10 +1118,16 @@ fn encode_tasks(tasks: &[WireTask]) -> Vec<u8> {
     put_u32(&mut output, tasks.len() as u32);
     for task in tasks {
         match task {
-            WireTask::Expand { id, key, damage } => {
+            WireTask::Expand {
+                id,
+                key,
+                damage,
+                fuse_terminal,
+            } => {
                 output.push(0);
                 put_u64(&mut output, *id);
                 encode_state(&mut output, *key, *damage);
+                output.push(u8::from(*fuse_terminal));
             }
             WireTask::Pattern {
                 id,
@@ -1064,11 +1144,13 @@ fn encode_tasks(tasks: &[WireTask]) -> Vec<u8> {
                 pattern_index,
                 key,
                 damage,
+                fuse_terminal,
             } => {
                 output.push(2);
                 put_u64(&mut output, *id);
                 put_u32(&mut output, *pattern_index as u32);
                 encode_state(&mut output, *key, *damage);
+                output.push(u8::from(*fuse_terminal));
             }
         }
     }
@@ -1078,7 +1160,7 @@ fn encode_tasks(tasks: &[WireTask]) -> Vec<u8> {
 fn decode_tasks(input: &[u8]) -> Result<Vec<WireTask>, ForwardParallelError> {
     let mut reader = Reader::new(input);
     reader.require_header(TASK_MAGIC)?;
-    let count = reader.count()?;
+    let count = reader.collection_count(17)?;
     let mut tasks = Vec::with_capacity(count);
     for _ in 0..count {
         let tag = reader.u8()?;
@@ -1086,7 +1168,12 @@ fn decode_tasks(input: &[u8]) -> Result<Vec<WireTask>, ForwardParallelError> {
         tasks.push(match tag {
             0 => {
                 let (key, damage) = decode_state(&mut reader)?;
-                WireTask::Expand { id, key, damage }
+                WireTask::Expand {
+                    id,
+                    key,
+                    damage,
+                    fuse_terminal: reader.bool()?,
+                }
             }
             1 => WireTask::Pattern {
                 id,
@@ -1101,6 +1188,7 @@ fn decode_tasks(input: &[u8]) -> Result<Vec<WireTask>, ForwardParallelError> {
                     pattern_index,
                     key,
                     damage,
+                    fuse_terminal: reader.bool()?,
                 }
             }
             _ => {
@@ -1146,7 +1234,7 @@ fn encode_results(results: &[WireResult]) -> Vec<u8> {
 fn decode_results(input: &[u8]) -> Result<Vec<WireResult>, ForwardParallelError> {
     let mut reader = Reader::new(input);
     reader.require_header(RESULT_MAGIC)?;
-    let count = reader.count()?;
+    let count = reader.collection_count(21)?;
     let mut results = Vec::with_capacity(count);
     for _ in 0..count {
         let tag = reader.u8()?;
@@ -1154,7 +1242,7 @@ fn decode_results(input: &[u8]) -> Result<Vec<WireResult>, ForwardParallelError>
         results.push(match tag {
             0 => {
                 let generated_locks = reader.u64()?;
-                let action_count = reader.count()?;
+                let action_count = reader.collection_count(45)?;
                 let mut actions = Vec::with_capacity(action_count);
                 for _ in 0..action_count {
                     actions.push(decode_action(&mut reader)?);
@@ -1322,6 +1410,22 @@ fn encode_action(output: &mut Vec<u8>, action: &ExpandedAction) {
             encode_state(output, *key, *damage_state);
             encode_action_step(output, step);
         }
+        ExpandedAction::TerminalExpansion {
+            key,
+            damage_state,
+            step,
+            generated_locks,
+            actions,
+        } => {
+            output.push(4);
+            encode_state(output, *key, *damage_state);
+            encode_action_step(output, step);
+            put_u64(output, *generated_locks);
+            put_u32(output, actions.len() as u32);
+            for action in actions {
+                encode_action(output, action);
+            }
+        }
         ExpandedAction::DamageTerminal {
             board,
             total_damage,
@@ -1368,6 +1472,13 @@ fn encode_action(output: &mut Vec<u8>, action: &ExpandedAction) {
 }
 
 fn decode_action(reader: &mut Reader<'_>) -> Result<ExpandedAction, ForwardParallelError> {
+    decode_action_level(reader, true)
+}
+
+fn decode_action_level(
+    reader: &mut Reader<'_>,
+    allow_terminal: bool,
+) -> Result<ExpandedAction, ForwardParallelError> {
     match reader.u8()? {
         0 => {
             let (key, damage_state) = decode_state(reader)?;
@@ -1399,6 +1510,23 @@ fn decode_action(reader: &mut Reader<'_>) -> Result<ExpandedAction, ForwardParal
             ren_count: reader.u8()?,
             step: decode_action_step(reader)?,
         }),
+        4 if allow_terminal => {
+            let (key, damage_state) = decode_state(reader)?;
+            let step = decode_action_step(reader)?;
+            let generated_locks = reader.u64()?;
+            let count = reader.collection_count(45)?;
+            let mut actions = Vec::with_capacity(count);
+            for _ in 0..count {
+                actions.push(decode_action_level(reader, false)?);
+            }
+            Ok(ExpandedAction::TerminalExpansion {
+                key,
+                damage_state,
+                step,
+                generated_locks,
+                actions,
+            })
+        }
         _ => Err(ForwardParallelError::InvalidWire(
             "forward_action_tag_invalid",
         )),
@@ -1447,7 +1575,7 @@ fn decode_report(reader: &mut Reader<'_>) -> Result<ForwardSearchReport, Forward
     let visited_states = reader.u64()?;
     let generated_locks = reader.u64()?;
     let peak_frontier = reader.count()?;
-    let outcome_count = reader.count()?;
+    let outcome_count = reader.collection_count(55)?;
     let mut outcomes = Vec::with_capacity(outcome_count);
     for _ in 0..outcome_count {
         let source_pattern_index = reader.u32()?;
@@ -1475,12 +1603,7 @@ fn decode_report(reader: &mut Reader<'_>) -> Result<ForwardSearchReport, Forward
         let spin_lines = reader.u8()?;
         let ren_count = match reader.u8()? {
             u8::MAX => None,
-            value @ 0..=21 => Some(value),
-            _ => {
-                return Err(ForwardParallelError::InvalidWire(
-                    "forward_ren_count_invalid",
-                ))
-            }
+            value => Some(value),
         };
         let total_damage = reader.u32()?;
         let evidence_path_count = reader.decimal_string()?;
@@ -1490,7 +1613,7 @@ fn decode_report(reader: &mut Reader<'_>) -> Result<ForwardSearchReport, Forward
                 "forward_evidence_incomplete",
             ));
         }
-        let path_count = reader.count()?;
+        let path_count = reader.collection_count(83)?;
         let mut path = Vec::with_capacity(path_count);
         for _ in 0..path_count {
             path.push(decode_step(reader)?);
@@ -1692,7 +1815,7 @@ fn encode_piece_slice(output: &mut Vec<u8>, pieces: &[PieceKind]) {
 }
 
 fn decode_piece_vec(reader: &mut Reader<'_>) -> Result<Vec<PieceKind>, ForwardParallelError> {
-    let count = reader.count()?;
+    let count = reader.collection_count(1)?;
     let mut pieces = Vec::with_capacity(count);
     for _ in 0..count {
         pieces.push(piece_from_code(reader.u8()?)?);
@@ -1827,8 +1950,18 @@ impl<'a> Reader<'a> {
     }
 
     fn count(&mut self) -> Result<usize, ForwardParallelError> {
-        let count = self.u32()? as usize;
-        if count > MAX_WIRE_ITEMS {
+        Ok(self.u32()? as usize)
+    }
+
+    /// A packet cannot declare more elements than its remaining encoded
+    /// bytes. Numeric metadata is independent of allocation and has no
+    /// unrelated product-level item ceiling.
+    fn collection_count(
+        &mut self,
+        minimum_encoded_bytes: usize,
+    ) -> Result<usize, ForwardParallelError> {
+        let count = self.count()?;
+        if count > (self.input.len() - self.cursor) / minimum_encoded_bytes {
             return Err(ForwardParallelError::InvalidWire(
                 "forward_wire_count_exceeded",
             ));
@@ -1845,7 +1978,7 @@ impl<'a> Reader<'a> {
     }
 
     fn decimal_string(&mut self) -> Result<String, ForwardParallelError> {
-        let length = self.count()?;
+        let length = self.collection_count(1)?;
         let bytes = self.take(length)?;
         if bytes.is_empty()
             || !bytes.iter().all(u8::is_ascii_digit)
@@ -1934,6 +2067,125 @@ mod tests {
             .expect("serial session")
             .run_to_completion(&control)
             .expect("serial search")
+    }
+
+    #[test]
+    fn fused_worker_tail_matches_serial_terminal_oracle_including_evidence() {
+        let control = ExecutionControl::default();
+        for mode in [
+            ForwardSearchMode::MaximumDamage,
+            ForwardSearchMode::DamageAtLeast(0),
+            ForwardSearchMode::SpinFinder(ForwardSpinTarget::default()),
+        ] {
+            let query = ForwardSearchQuery::new(
+                Board256Mask::EMPTY,
+                4,
+                vec![PieceKind::T, PieceKind::O],
+                true,
+                RuleProfileId::SrsPlus,
+                SpinProfileId::TSpins,
+                None,
+                None,
+                mode,
+            );
+            let config = ForwardSearchConfig::from_query(&query);
+            let queue = query.piece_source().sequence_at(0);
+            let mut serial = ForwardQueueSession::new(config, queue.clone(), 0);
+            let mut parallel = ForwardQueueSession::new(config, queue.clone(), 0);
+            let key = serial.materialize_state_key(serial.current[0].key);
+            let damage = serial.current[0].damage_state();
+            let parents = serial.current[0].traces;
+            let mut workspace =
+                ReachabilityWorkspace::new(config.height, config.rule_profile).unwrap();
+            let mut actions = Vec::new();
+            let mut seen = HashSet::new();
+            let generated = expand_search_node(
+                config,
+                &queue,
+                key,
+                damage,
+                &control,
+                &mut workspace,
+                &mut actions,
+                &mut seen,
+            )
+            .unwrap();
+            let expected_fused = actions
+                .iter()
+                .filter(|action| {
+                    matches!(action,
+                ExpandedAction::Child { key, .. } if usize::from(key.cursor) >= queue.len())
+                })
+                .count();
+            assert!(expected_fused > 0);
+            for action in actions {
+                match action {
+                    ExpandedAction::Child {
+                        key,
+                        damage_state,
+                        step,
+                    } if usize::from(key.cursor) >= queue.len() => serial
+                        .expand_terminal_child(
+                            parents,
+                            key,
+                            damage_state,
+                            step,
+                            &control,
+                            &mut workspace,
+                        )
+                        .unwrap(),
+                    other => serial.absorb_action(parents, other),
+                }
+            }
+            let coordinator = ForwardParallelCoordinator::new(query, 8).unwrap();
+            let mut worker =
+                ForwardParallelWorker::new(&coordinator.worker_initialization()).unwrap();
+            let (_, bytes) = worker
+                .consume(
+                    &encode_tasks(&[WireTask::Expand {
+                        id: 1,
+                        key,
+                        damage,
+                        fuse_terminal: true,
+                    }]),
+                    &control,
+                )
+                .unwrap();
+            let WireResult::Expansion {
+                generated_locks,
+                actions,
+                ..
+            } = decode_results(&bytes).unwrap().pop().unwrap()
+            else {
+                panic!("expansion");
+            };
+            assert_eq!(generated_locks, generated);
+            assert_eq!(
+                actions
+                    .iter()
+                    .filter(|action| matches!(action, ExpandedAction::TerminalExpansion { .. }))
+                    .count(),
+                expected_fused
+            );
+            for action in actions {
+                parallel.absorb_action(parents, action);
+            }
+            assert_eq!(
+                parallel.build_report(&control).unwrap(),
+                serial.build_report(&control).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn wire_counts_admit_real_metadata_and_reject_unbacked_allocations() {
+        let value = 10_000_001_u32.to_le_bytes();
+        assert_eq!(Reader::new(&value).count().unwrap(), 10_000_001);
+        assert!(Reader::new(&value).collection_count(1).is_err());
+        let mut tasks = Vec::new();
+        put_header(&mut tasks, TASK_MAGIC);
+        put_u32(&mut tasks, u32::MAX);
+        assert!(decode_tasks(&tasks).is_err());
     }
 
     fn run_parallel(
@@ -2306,7 +2558,7 @@ mod tests {
         );
         let mut coordinator = ForwardParallelCoordinator::new(query, 4).expect("coordinator");
         let max_outstanding_tasks = coordinator.max_outstanding_tasks;
-        assert_eq!(max_outstanding_tasks, 3 * 32 * 4);
+        assert_eq!(max_outstanding_tasks, 4 * 32 * 4);
         let CoordinatorState::Fixed(fixed) = &mut coordinator.state else {
             panic!("fixed coordinator");
         };

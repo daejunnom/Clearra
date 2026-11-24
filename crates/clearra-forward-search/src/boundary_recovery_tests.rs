@@ -233,8 +233,8 @@ fn five_stage_one_bags_and_one_adjacent_bag_fit_without_bitmask_wraparound() {
 
     query.queue.push(PieceKind::I);
     assert_eq!(
-        query.search(&control()),
-        Err(BoundaryRecoveryError::QueueTooLong)
+        query.search(&control()).unwrap().status,
+        BoundaryRecoveryStatus::Incomplete
     );
 }
 
@@ -439,4 +439,114 @@ fn first_stage_target_cannot_extend_outside_the_declared_field() {
         query.search(&control()),
         Err(BoundaryRecoveryError::BoardOutsideField)
     );
+}
+
+#[test]
+fn heap_dfs_preserves_recursive_witness_and_state_order() {
+    for hold in [false, true] {
+        for cap in [0, 1] {
+            for state_limit in [None, Some(1), Some(7)] {
+                let mut query = two_stage_query();
+                query.hold_enabled = hold;
+                query.queue.push(PieceKind::T);
+                query.max_states = state_limit;
+                let control = control();
+                let mut iterative = Pass::new(&query, &control, cap).unwrap();
+                let mut recursive = Pass::new(&query, &control, cap).unwrap();
+                let initial = ForwardBoard::from_mask(query.initial_board);
+                let state = State {
+                    board: initial,
+                    stage_one_board: initial,
+                    stage_two_board: ForwardBoard::EMPTY,
+                    active: Some(Token {
+                        index: 0,
+                        piece: query.queue[0],
+                    }),
+                    hold: None,
+                    next_queue_index: 1,
+                    placed_mask: RoleSet::EMPTY,
+                    fulfilled_role_mask: RoleSet::EMPTY,
+                    checkpoint_step: None,
+                    checkpoint_is_pc: false,
+                    borrowed_count: 0,
+                    b2b_active: query.initial_b2b,
+                };
+                let mut actual = Vec::new();
+                let mut expected = Vec::new();
+                assert_eq!(
+                    iterative.visit(state.clone(), &mut actual).unwrap(),
+                    recursive.visit_recursive(state, &mut expected).unwrap()
+                );
+                assert_eq!(actual, expected);
+                assert_eq!(iterative.seen, recursive.seen);
+                assert_eq!(iterative.incomplete, recursive.incomplete);
+            }
+        }
+    }
+}
+
+#[test]
+fn long_recovery_sources_cross_role_words_and_byte_indices() {
+    // Ten vertical I locks clear four rows. Repeating this real clear cycle
+    // traverses roles beyond 64 and source identities beyond 255 without
+    // growing the physical field or relaxing lock-time role geometry.
+    for count in [50, 70, 260] {
+        let mut query = two_stage_query();
+        query.initial_board = Board256Mask::EMPTY;
+        query.final_board = Board256Mask::EMPTY;
+        query.queue = vec![PieceKind::I; count];
+        query.stage_one_queue_len = 10;
+        query.required_placements = Some(count);
+        query.max_early_placements = Some(0);
+        query.early_placement = EarlyPlacementPolicy::AnyStageTwoRole;
+        query.hold_enabled = false;
+        query.max_states = Some(count * 2);
+        query.placement_role_masks = (0..count)
+            .map(|role| {
+                let column = role % 10;
+                Board256Mask::from_words([
+                    (0..4).fold(0_u64, |word, row| word | (1_u64 << (row * 10 + column))),
+                    0,
+                    0,
+                    0,
+                ])
+            })
+            .collect();
+        let result = query.search(&control()).unwrap();
+        assert_eq!(
+            result.status,
+            BoundaryRecoveryStatus::Normal,
+            "{count}: {result:?}"
+        );
+        assert_eq!(result.steps.len(), count);
+        assert_eq!(result.stage_one_checkpoint_step, Some(10));
+        let mut roles = std::collections::BTreeSet::new();
+        for (index, step) in result.steps.iter().enumerate() {
+            assert_eq!(step.source_queue_index, index);
+            assert!(roles.insert(step.placement_role_index));
+            assert_eq!(
+                step.placement_mask,
+                query.placement_role_masks[step.placement_role_index].words()
+            );
+        }
+        assert_eq!(roles.len(), count);
+        assert_eq!(result.steps.last().unwrap().board_after, [0; 4]);
+    }
+}
+
+#[test]
+fn queue_and_early_limits_follow_the_real_source_identity_range() {
+    let mut query = two_stage_query();
+    query.queue = vec![PieceKind::I; MAX_BOUNDARY_QUEUE_PIECES];
+    query.required_placements = Some(MAX_BOUNDARY_QUEUE_PIECES);
+    query.max_early_placements = Some(MAX_BOUNDARY_QUEUE_PIECES - 1);
+    query.early_placement = EarlyPlacementPolicy::AnyStageTwoRole;
+    assert_eq!(query.validate(), Ok(()));
+    query.max_early_placements = None;
+    assert_eq!(
+        query.effective_max_early_placements(),
+        MAX_BOUNDARY_QUEUE_PIECES - 1
+    );
+    query.queue.push(PieceKind::I);
+    assert_eq!(query.validate(), Err(BoundaryRecoveryError::QueueTooLong));
 }

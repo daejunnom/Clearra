@@ -1,7 +1,10 @@
 //! Host-owned persistent worker pool using the same exact pair wire as WASM.
-//! The calling thread is the coordinator; the remaining requested workers run
+//! The calling thread is the coordinator; every requested compute worker runs
 //! fixed-pair searches. No worker-count reduction or serial retry is hidden.
-use clearra_core_domain::execution_cancellation::ExecutionControl;
+use clearra_core_domain::{
+    execution_cancellation::ExecutionControl,
+    parallel_work::{try_for_each_chunk, with_compute_worker, ParallelWorkError},
+};
 use clearra_forward_search::{
     RecoveryBuildError, RecoveryBuildParallelCoordinator as Coordinator,
     RecoveryBuildParallelError as Error, RecoveryBuildParallelProduce as Produce,
@@ -64,49 +67,94 @@ pub(crate) fn run_native_recovery_build(
     workers: usize,
     control: &ExecutionControl,
 ) -> Result<RecoveryBuildPopulation, Error> {
+    let owned_control = control.clone().with_parallelism(workers.max(1));
+    let control = &owned_control;
     if control.is_cancelled() {
         return Err(RecoveryBuildError::Cancelled.into());
     }
     if workers <= 1 {
-        return query.search(control).map_err(Into::into);
+        let result = std::sync::Mutex::new(None);
+        try_for_each_chunk(
+            control,
+            1,
+            1,
+            || Ok::<_, Error>(()),
+            |_, _| {
+                let report = query.search(control)?;
+                *result
+                    .lock()
+                    .map_err(|_| Error::InvalidState("recovery result poisoned"))? = Some(report);
+                Ok(())
+            },
+        )
+        .map_err(|error| match error {
+            ParallelWorkError::Worker(error) => error,
+            ParallelWorkError::Cancelled => RecoveryBuildError::Cancelled.into(),
+            ParallelWorkError::ThreadSpawnFailed => {
+                Error::InvalidState("recovery worker spawn failed")
+            }
+            ParallelWorkError::WorkerPanicked => Error::InvalidState("recovery worker panicked"),
+        })?;
+        return result
+            .into_inner()
+            .map_err(|_| Error::InvalidState("recovery result poisoned"))?
+            .ok_or(Error::InvalidState("recovery result missing"));
     }
     let mut coordinator = Coordinator::new_with_control(query, workers, control)?;
-    let init = coordinator.worker_initialization();
-    let ready = (0..workers - 1)
-        .map(|_| {
-            if control.is_cancelled() {
-                Err(RecoveryBuildError::Cancelled.into())
-            } else {
-                Worker::new(&init)
-            }
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+    let init = std::sync::Arc::new(coordinator.worker_initialization());
     if control.is_cancelled() {
         return Err(RecoveryBuildError::Cancelled.into());
     }
     let (sender, receiver) = mpsc::channel();
     let mut senders = Vec::new();
-    let mut handles = Vec::new();
-    for (index, mut worker) in ready.into_iter().enumerate() {
+    let mut handles: Vec<thread::JoinHandle<()>> = Vec::new();
+    for index in 0..workers {
         let (tx, rx) = mpsc::sync_channel::<Vec<u8>>(1);
         let completion = sender.clone();
         let worker_control = control.clone();
+        let init = init.clone();
+        let Some(permit) = control
+            .compute_budget()
+            .acquire_worker(&control.cancellation)
+        else {
+            drop(senders);
+            drop(sender);
+            for handle in handles {
+                let _ = handle.join();
+            }
+            return Err(RecoveryBuildError::Cancelled.into());
+        };
         let spawn = thread::Builder::new()
             .name(format!("clearra-recovery-{index}"))
             .spawn(move || {
-                while let Ok(packet) = rx.recv() {
-                    let result = catch_unwind(AssertUnwindSafe(|| {
-                        let mut output = worker.consume(&packet, &worker_control)?;
-                        while worker.has_pending_work() {
-                            output = worker.advance(&worker_control)?;
+                let panic = catch_unwind(AssertUnwindSafe(|| {
+                    with_compute_worker(permit, || {
+                        let mut worker = match Worker::new(&init) {
+                            Ok(worker) => worker,
+                            Err(error) => {
+                                let _ = completion.send((index, Err(error)));
+                                return;
+                            }
+                        };
+                        while let Ok(packet) = rx.recv() {
+                            let result = catch_unwind(AssertUnwindSafe(|| {
+                                let mut output = worker.consume(&packet, &worker_control)?;
+                                while worker.has_pending_work() {
+                                    output = worker.advance(&worker_control)?;
+                                }
+                                output.ok_or(Error::InvalidState("recovery worker omitted result"))
+                            }))
+                            .unwrap_or(Err(Error::InvalidState("recovery worker panicked")));
+                            let failed = result.is_err();
+                            if completion.send((index, result)).is_err() || failed {
+                                break;
+                            }
                         }
-                        output.ok_or(Error::InvalidState("recovery worker omitted result"))
-                    }))
-                    .unwrap_or(Err(Error::InvalidState("recovery worker panicked")));
-                    let failed = result.is_err();
-                    if completion.send((index, result)).is_err() || failed {
-                        break;
-                    }
+                    })
+                }));
+                if panic.is_err() {
+                    let _ = completion
+                        .send((index, Err(Error::InvalidState("recovery worker panicked"))));
                 }
             });
         match spawn {

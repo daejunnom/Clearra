@@ -280,7 +280,7 @@ fn multiple_early_roles_execute_through_the_public_cli_and_preserve_their_scope(
             let ProductResultPayloadContent::BoundaryRecovery(report) = payload.content() else {
                 panic!("typed result");
             };
-            assert_eq!(report.max_early_placements, cap.unwrap_or(early) as u8);
+            assert_eq!(report.max_early_placements, cap.unwrap_or(early) as usize);
             assert_eq!(
                 report.early_placement_limit_mode.as_deref(),
                 Some(if cap.is_none() { "auto" } else { "maximum" })
@@ -340,4 +340,13 @@ fn automatic_early_quota_survives_typed_execution_and_public_payload() {
         CliCommandParser::parse(&source).is_err(),
         "Auto cannot falsely describe a selected single-role scope"
     );
+}
+
+#[test]
+fn boundary_source_and_explicit_early_quota_can_cross_legacy_byte_limits() {
+    let text = format!("clearra recovery boundary --initial-board-mask 0 --target-board-mask 0 --height 4 --queue {} --stage-one-count 1 --placements 300 --max-early-placements 299 --no-hold", "I".repeat(300));
+    let request = CliCommandParser::parse(&text).unwrap().to_app_request().unwrap();
+    let AppCommand::BoundaryRecovery(command) = request.command() else { panic!("typed recovery"); };
+    assert_eq!(command.query().queue.len(), 300);
+    assert_eq!(command.query().max_early_placements, Some(299));
 }

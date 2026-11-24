@@ -33,7 +33,7 @@ fn tower(early: usize) -> BoundaryRecoveryQuery {
         required_placements: Some(early + 1),
         placement_role_masks: roles,
         placement_role_pieces: Vec::new(),
-        max_early_placements: Some(early as u8),
+        max_early_placements: Some(early),
         early_placement: EarlyPlacementPolicy::AnyStageTwoRole,
         hold_enabled: false,
         rule_profile: RuleProfileId::SrsPlus,
@@ -95,7 +95,7 @@ fn assert_witness(query: &BoundaryRecoveryQuery, report: &BoundaryRecoveryReport
         board = next;
     }
     assert_eq!(early, report.borrowed_stage_two_count);
-    assert!(early <= usize::from(query.effective_max_early_placements()));
+    assert!(early <= query.effective_max_early_placements());
     assert_eq!(source.count_ones() as usize, report.steps.len());
     assert_eq!(roles.count_ones() as usize, report.steps.len());
     assert_eq!(board.words(), query.final_board.words());
@@ -108,11 +108,11 @@ fn two_and_three_early_roles_are_real_execution_capabilities() {
     for required in [2, 3] {
         let mut query = tower(required);
         for cap in 0..required {
-            query.max_early_placements = Some(cap as u8);
+            query.max_early_placements = Some(cap);
             let failed = query.search(&ExecutionControl::default()).unwrap();
             assert_eq!(failed.status, BoundaryRecoveryStatus::NoPath);
         }
-        query.max_early_placements = Some(required as u8);
+        query.max_early_placements = Some(required);
         for automatic in [false, true] {
             if automatic {
                 query.required_placements = None;
@@ -303,7 +303,7 @@ fn automatic_early_count_matches_the_union_of_all_explicit_quotas() {
             }
             let mut explicit_success = false;
             for cap in 0..=required {
-                query.max_early_placements = Some(cap as u8);
+                query.max_early_placements = Some(cap);
                 let result = query.search(&ExecutionControl::default()).unwrap();
                 let success = matches!(
                     result.status,
@@ -326,7 +326,7 @@ fn automatic_early_count_matches_the_union_of_all_explicit_quotas() {
             assert_witness(&query, &automatic);
             // The maximum structural quota and Auto invoke exactly the same
             // recovery search; there are no hidden 1,2,... capped reruns.
-            query.max_early_placements = Some(required as u8);
+            query.max_early_placements = Some(required);
             assert_eq!(
                 query.search(&ExecutionControl::default()).unwrap(),
                 automatic

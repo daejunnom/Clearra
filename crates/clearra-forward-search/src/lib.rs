@@ -44,8 +44,9 @@ pub use query::{
 pub use result::{ForwardPathStep, ForwardSearchOutcome, ForwardSearchReport, ForwardSpinGroup};
 pub use search::{ForwardSearchAdvance, ForwardSearchError, ForwardSearchSession};
 
-/// The public fixed-queue REN boundary. Larger inputs fail closed before search starts.
-pub const MAX_REN_QUEUE_PIECES: usize = 22;
+/// REN uses the same finite queue identity as the other forward modes. The
+/// former 22-piece product policy is not a bound on the exact search.
+pub const MAX_REN_QUEUE_PIECES: usize = u16::MAX as usize;
 
 pub use recovery_build::{
     RecoveryBuildError, RecoveryBuildExample, RecoveryBuildFields, RecoveryBuildFixedQuery,

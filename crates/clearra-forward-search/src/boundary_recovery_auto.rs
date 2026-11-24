@@ -77,7 +77,9 @@ pub(super) fn search(
                 0
             };
             // A policy on a future, unconsumed bag does not require consuming it.
-            query.preserve_b2b_bag_mask &= (1_u64 << query.bag_count()) - 1;
+            if query.bag_count() < 64 {
+                query.preserve_b2b_bag_mask &= (1_u64 << query.bag_count()) - 1;
+            }
             let used = normal_states.saturating_add(recovery_states);
             query.max_states = source.max_states.map(|limit| limit.saturating_sub(used));
             if query.max_states == Some(0) {
