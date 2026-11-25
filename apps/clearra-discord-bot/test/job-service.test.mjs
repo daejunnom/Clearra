@@ -459,6 +459,47 @@ test("explicit 8-worker Cloud Run policy survives startup CPU boost visibility",
   assert.equal(nonCloud.searchWorkersPerSession, 8);
 });
 
+test("job runner preserves the declared CPU allocation when the startup probe is lower", async () => {
+  for (const concurrency of [1, 2]) {
+    const config = loadClearraJobServiceConfig({
+      K_SERVICE: "clearra-current-job",
+      CLEARRA_JOB_TOKEN: "job-token",
+      CLEARRA_EXPECTED_VCPUS: "8",
+      CLEARRA_SEARCH_WORKERS_PER_SESSION: "auto",
+      CLEARRA_MAX_CONCURRENT_JOBS: String(concurrency),
+    }, { availableParallelism: () => 3 });
+    let invocation;
+    const runner = new ClearraCommandRunner(config, {
+      readOomKillCount: async () => null,
+      spawn(executable, arguments_, options) {
+        invocation = { executable, arguments_, options };
+        const child = new EventEmitter();
+        child.stdout = new PassThrough();
+        child.stderr = new PassThrough();
+        child.exitCode = null;
+        child.signalCode = null;
+        child.kill = () => true;
+        queueMicrotask(() => {
+          child.exitCode = 0;
+          child.emit("close", 0, null);
+        });
+        return child;
+      },
+    });
+    const result = await runner.execute({
+      arguments: ["pc", "path", "--supply", "P7P4", "--rule", "srs-plus"],
+      deadlineUnixMs: Date.now() + 5_000,
+      maxOutputBytes: 4096,
+    });
+    assert.equal(result.exitCode, 0);
+    assert.equal(config.processLogicalProcessors, 3);
+    assert.equal(invocation.arguments_[invocation.arguments_.indexOf("--auto-workers") + 1],
+      String(8 / concurrency));
+    assert.equal(invocation.options.env.CLEARRA_EXPECTED_VCPUS, "8");
+    assert.equal(invocation.options.shell, false);
+  }
+});
+
 test("unauthenticated local job service is restricted to loopback", () => {
   assert.throws(
     () => loadClearraJobServiceConfig({

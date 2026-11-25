@@ -1316,6 +1316,28 @@ test("Clearra executor cancels the remote job when the Clearrabot timeout expire
   ]);
 });
 
+test("Clearra executor preserves an output-limit cause and phase from the job service", async () => {
+  const executor = new ClearraJobExecutor({
+    endpoint: "https://jobs.example.test/jobs",
+    authorizationToken: "job-token",
+    createJobId: () => "job-output-limit",
+    fetch: async (_url, request) => request.method === "DELETE"
+      ? new Response(null, { status: 204 })
+      : jobResponse({
+        id: "job-output-limit", state: "failed",
+        error: "Clearra produced more output than the job allows.",
+        failureCode: "output-limit", failureStage: "execute",
+        stageDurationsMs: { prepare: 1, execute: 25 },
+      }),
+  });
+  await assert.rejects(executor.execute(["pc", "--lines", "4"]), (error) => {
+    assert.equal(error.failureCode, "output-limit");
+    assert.equal(error.failureStage, "execute");
+    assert.deepEqual(error.stageDurationsMs, { prepare: 1, execute: 25 });
+    return true;
+  });
+});
+
 test("Clearra executor forwards caller cancellation to the remote job", async () => {
   const controller = new AbortController();
   const requests = [];

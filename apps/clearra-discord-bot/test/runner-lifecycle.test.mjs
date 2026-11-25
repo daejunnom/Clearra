@@ -109,3 +109,43 @@ test("phase diagnostics keep only bounded known metadata", () => {
   assert.equal(record.signal, "SIGKILL");
   assert.equal(lines[0].includes("private"), false);
 });
+
+test("an output limit failure survives process draining and terminal diagnostics", async () => {
+  let closed = false;
+  const signals = [];
+  const runner = new ClearraCommandRunner({ ...config, maxOutputBytes: 16 }, {
+    readOomKillCount: async () => null,
+    spawn() {
+      const child = new EventEmitter();
+      child.stdout = new PassThrough(); child.stderr = new PassThrough();
+      child.exitCode = null; child.signalCode = null;
+      child.kill = (signal) => {
+        signals.push(signal);
+        queueMicrotask(() => {
+          closed = true;
+          child.signalCode = signal;
+          child.emit("close", null, signal);
+        });
+        return true;
+      };
+      queueMicrotask(() => child.stdout.end("private output exceeds the configured limit"));
+      return child;
+    },
+  });
+  const logs = [];
+  const service = new ClearraJobService({}, runner, {
+    operationalScope: "job", logger: { error(value) { logs.push(value); } },
+  });
+  const terminal = await service.runJob({ id: "output-limit", arguments: ["pc", "path"],
+    timeoutClass: "pc_reverse", timeoutLimitMs: 5000,
+    deadlineUnixMs: Date.now() + 5000, maxOutputBytes: 16, maxArtifactBytes: 4096 }, {
+    createdAt: Date.now(), controller: new AbortController(),
+  });
+  assert.equal(closed, true);
+  assert.deepEqual(signals, ["SIGTERM"]);
+  assert.equal(terminal.state, "failed");
+  assert.equal(terminal.failureCode, "output-limit");
+  assert.equal(terminal.failureStage, "execute");
+  assert.equal(JSON.parse(logs[0]).failureCode, "output-limit");
+  assert.equal(logs[0].includes("private output"), false);
+});

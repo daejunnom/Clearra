@@ -185,7 +185,8 @@ export class ClearraJobService {
       });
     } catch (error) {
       entry.failureCode = error?.name === "DeadlineExceededError" ? "deadline"
-        : error?.name === "AbortError" ? "cancelled" : "result-validation";
+        : error?.name === "AbortError" ? "cancelled"
+        : error?.failureCode === "output-limit" ? "output-limit" : "result-validation";
       entry.stageDurationsMs = error?.stageDurationsMs;
       entry.failureStage = error?.failureStage;
       if (error?.name === "AbortError") {

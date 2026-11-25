@@ -109,7 +109,10 @@ export class ClearraCommandRunner {
     const preparedArguments = prepareClearraArguments(job.arguments, {
       workers: this.config.searchWorkersPerSession,
       useAllLogicalProcessors: this.config.useAllLogicalProcessors,
-      logicalProcessors: this.config.processLogicalProcessors,
+      // The job configuration already partitions the declared platform CPU
+      // capacity. A lower startup probe must not become a second authority and
+      // reject that allocation before the native affinity check can run.
+      logicalProcessors: this.config.expectedVcpus ?? this.config.processLogicalProcessors,
       outputFormat: "json",
       includeSolutionData: !nativeSolutionArtifact,
     });
@@ -203,7 +206,9 @@ export class ClearraCommandRunner {
         if (settled || pendingFailure) return;
         const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
         if (outputBytes + bytes.length > maxOutputBytes) {
-          fail(new Error("Clearra produced more output than the job allows."));
+          const error = new Error("Clearra produced more output than the job allows.");
+          error.failureCode = "output-limit";
+          fail(error);
           return;
         }
         outputBytes += bytes.length;

@@ -1314,7 +1314,7 @@ function executionDiagnostics(value) {
   if (!value || typeof value !== "object") return {};
   const output = {};
   const stages = ["queue", "prepare", "execute", "artifact", "projection", "render", "delivery"];
-  const failureCodes = ["engine-oom", "engine-signal", "engine-exit", "deadline", "cancelled", "result-validation"];
+  const failureCodes = ["engine-oom", "engine-signal", "engine-exit", "output-limit", "deadline", "cancelled", "result-validation"];
   if (failureCodes.includes(value.failureCode)) output.failureCode = value.failureCode;
   if (stages.includes(value.failureStage)) output.failureStage = value.failureStage;
   if (Number.isSafeInteger(value.exitCode)) output.exitCode = value.exitCode;
