@@ -12,6 +12,7 @@ import { ClearraVerifierPool } from './ClearraVerifierPool';
 import { DistributedWasmJobRunner } from './DistributedWasmJobRunner';
 import type { DistributedSourceRuntime, DistributedSourceTask } from './DistributedSourceRuntime';
 import {
+  SharedExecutionAvailabilityError,
   SharedExecutionResourceAuthority,
   type SharedExecutionResourceCapacity
 } from './SharedExecutionResourceAuthority';
@@ -30,7 +31,12 @@ const SOURCE_METHODS = [
 ] as const satisfies readonly (keyof ClearraWasmModule)[];
 type SourceMethod = typeof SOURCE_METHODS[number];
 type RpcMethod = SourceMethod | 'take_exact_task' | 'conditioned_queries';
-type Failure = { name: string; message: string; diagnosticCode?: string };
+type Failure = { name: string; message: string } & (
+  | { kind: 'wasm'; diagnosticCode: string; resourceReport: ClearraWasmRuntimeError['resourceReport'] }
+  | { kind: 'availability'; availability: SharedExecutionAvailabilityError['availability'];
+    requested: SharedExecutionResourceCapacity; available: SharedExecutionResourceCapacity }
+  | { kind: 'trap' | 'error' }
+);
 type RelationWire = Omit<AcceleratorWorkerRelation, 'answerQueries'>;
 
 type Start = {
@@ -308,12 +314,23 @@ function isTerminal(event: ClearraWasmWorkerEvent) {
 function asError(error: unknown): Error { return error instanceof Error ? error : new Error(String(error)); }
 function failure(error: unknown): Failure {
   const value = asError(error);
-  return { name: value.name, message: value.message,
-    ...(value instanceof ClearraWasmRuntimeError ? { diagnosticCode: value.diagnosticCode } : {}) };
+  const base = { name: value.name, message: value.message };
+  // Structured cloning does not retain custom Error fields or prototypes.
+  // Carry the admitted resource evidence and error class through both RPC
+  // hops so the source publishes the same terminal contract as a local run.
+  if (value instanceof ClearraWasmRuntimeError) return { ...base, kind: 'wasm',
+    diagnosticCode: value.diagnosticCode, resourceReport: value.resourceReport };
+  if (value instanceof SharedExecutionAvailabilityError) return { ...base, kind: 'availability',
+    availability: value.availability, requested: value.requested, available: value.available };
+  return { ...base, kind: value instanceof WebAssembly.RuntimeError ? 'trap' : 'error' };
 }
 function fromFailure(error: Failure): Error {
-  return error.diagnosticCode ? new ClearraWasmRuntimeError(error.diagnosticCode, error.message)
-    : Object.assign(new Error(error.message), { name: error.name });
+  if (error.kind === 'wasm') return new ClearraWasmRuntimeError(
+    error.diagnosticCode, error.message, error.resourceReport);
+  if (error.kind === 'availability') return new SharedExecutionAvailabilityError(
+    error.availability, error.requested, error.available);
+  if (error.kind === 'trap') return new WebAssembly.RuntimeError(error.message);
+  return Object.assign(new Error(error.message), { name: error.name });
 }
 function ownedBuffers(value: unknown): Transferable[] {
   const buffers = new Set<ArrayBuffer>();

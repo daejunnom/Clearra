@@ -3,6 +3,7 @@ import {
   type WorkspaceLanguage,
   type WorkspaceMessageKey
 } from './workspaceI18n.ts';
+import type { ExecutionAvailabilityReport } from '../wasm/executionAvailability.ts';
 
 export type WorkspacePublicFailureCode =
   | 'request-cancelled'
@@ -51,6 +52,7 @@ export type WorkspaceFailureProjectionInput = {
   responseStatus?: string | null;
   terminationReason?: string | null;
   error?: string | null;
+  executionAvailability?: ExecutionAvailabilityReport | null;
   diagnostics?: ReadonlyArray<{
     code?: string | null;
     severity?: string | null;
@@ -123,6 +125,12 @@ export function projectWorkspacePublicFailure(
   const runtimeFailure = knownRuntimeFailure(input.error ?? '');
   if (runtimeFailure) add(runtimeFailure, 4);
 
+  // Admission reports carry stable causes even when a transport wraps them
+  // in a generic execution code. Keep counts and internal reason identifiers
+  // in the runtime evidence; the notice uses the existing localized category.
+  const availabilityFailure = knownAvailabilityFailure(input.executionAvailability);
+  if (availabilityFailure) add(availabilityFailure, 4);
+
   if (
     candidates.length === 0 &&
     (input.error || input.status === 'failed' || input.responseStatus === 'execution-failed')
@@ -139,6 +147,26 @@ export function projectWorkspacePublicFailure(
     ? [{ code: primary.code, severity: primary.severity }]
     : [];
   return { publicFailures, developerEvidence };
+}
+
+function knownAvailabilityFailure(
+  availability: ExecutionAvailabilityReport | null | undefined
+): WorkspacePublicFailureCode | null {
+  switch (availability?.reason) {
+    case 'pattern-count-address-space-exceeded':
+    case 'dense-pattern-representation-unavailable':
+    case 'compute-budget-exceeded':
+    case 'memory-budget-exceeded':
+      return 'resource-limit';
+    case 'capability-unavailable':
+      return 'unsupported';
+    case 'cancelled-by-caller':
+      return 'request-cancelled';
+    default:
+      // Partial execution and not-executed describe completeness, not the
+      // cause. They must not hide a more useful trap or input diagnostic.
+      return null;
+  }
 }
 
 export function workspacePublicFailure(

@@ -4,7 +4,8 @@ import { ClearraProductJobRunner } from '../src/workers/ClearraProductJobRunner'
 import type { ClearraVerifierPool } from '../src/workers/ClearraVerifierPool';
 import { DedicatedDistributedManager, installDedicatedDistributedManager }
   from '../src/workers/DedicatedDistributedManager';
-import { SharedExecutionResourceAuthority } from '../src/workers/SharedExecutionResourceAuthority';
+import { SharedExecutionAvailabilityError, SharedExecutionResourceAuthority }
+  from '../src/workers/SharedExecutionResourceAuthority';
 import { ClearraWasmRuntimeError, type ClearraDistributedPlan, type ClearraWasmModule }
   from '../src/workers/clearraWasmRuntime';
 
@@ -312,19 +313,58 @@ function sourceFixture() {
 // Structured source failures preserve the public WASM diagnostic and release
 // all ownership; they are not interpreted as a successful empty result.
 {
-  const pool = new TestPool();
-  const realm = new ManagerRealm(pool);
-  const { wasm, state } = sourceFixture();
-  wasm.distributed_produce = () => { throw new ClearraWasmRuntimeError('E_SOURCE_FIXTURE', 'bounded source failure'); };
-  const authority = new SharedExecutionResourceAuthority(grant);
-  const runner = new ClearraProductJobRunner(wasm, 4, '', host, authority, 100,
-    null, null, { create: options => new DedicatedDistributedManager(options, () => realm as unknown as Worker),
-      release: () => realm.terminate() });
-  try {
-    await assert.rejects(runner.run('clearra pc failed-queue --workers 3', () => {}), error =>
-      error instanceof ClearraWasmRuntimeError && error.diagnosticCode === 'E_SOURCE_FIXTURE');
-    assert.equal(state.resets, 1);
-    assert.ok(pool.cancelled > 0);
-    assert.deepEqual(authority.snapshot().used, { computeUnits: 0, memoryBytes: 0n });
-  } finally { realm.terminate(); }
+  const resourceReport = {
+    solver_executed: false, memory_status: 'not-executed', truncated: false,
+    truncation_reason: null, peak_frontier_states: 0, peak_candidate_rows: 0,
+    peak_hash_buckets: 0, peak_gpu_bytes: 0, peak_cpu_bytes: 0,
+    build_worker_backlog_peak: 0, coverage_rows_emitted: 0, probability_complete: false,
+    execution_availability: {
+      state: 'unavailable', reason: 'dense-pattern-representation-unavailable',
+      surface: 'browser-wasm32', descriptor_pattern_count: '35384428800',
+      dense_pattern_count: '35384428800', required_dense_bytes: '4423053600',
+      required_memory_bytes: '8846107200'
+    }, result_completeness: 'not-executed'
+  } as const;
+  const availability = {
+    state: 'exhausted', reason: 'memory-budget-exceeded', surface: 'browser-wasm32',
+    descriptor_pattern_count: null, dense_pattern_count: null,
+    required_dense_bytes: null, required_memory_bytes: null
+  } as const;
+  const errors = [
+    new ClearraWasmRuntimeError('E_SOURCE_FIXTURE', 'bounded source failure'),
+    new ClearraWasmRuntimeError('E_WASM_DISTRIBUTED_START', 'dense representation unavailable', resourceReport),
+    new SharedExecutionAvailabilityError(availability, grant, { computeUnits: 1, memoryBytes: 0n }),
+    new WebAssembly.RuntimeError('memory access out of bounds')
+  ];
+  for (const expected of errors) {
+    const pool = new TestPool();
+    const realm = new ManagerRealm(pool);
+    const { wasm, state } = sourceFixture();
+    wasm.distributed_produce = () => { throw expected; };
+    const authority = new SharedExecutionResourceAuthority(grant);
+    const runner = new ClearraProductJobRunner(wasm, 4, '', host, authority, 100,
+      null, null, { create: options => new DedicatedDistributedManager(options, () => realm as unknown as Worker),
+        release: () => realm.terminate() });
+    try {
+      await assert.rejects(runner.run('clearra pc failed-queue --workers 3', () => {}), error => {
+        assert.ok(error instanceof expected.constructor, 'the public error class survives both manager RPC hops');
+        assert.equal((error as Error).message, expected.message);
+        if (expected instanceof ClearraWasmRuntimeError) {
+          assert.ok(error instanceof ClearraWasmRuntimeError);
+          assert.equal(error.diagnosticCode, expected.diagnosticCode);
+          assert.deepEqual(error.resourceReport, expected.resourceReport,
+            'not-executed and exact resource evidence must not become generic incomplete');
+        } else if (expected instanceof SharedExecutionAvailabilityError) {
+          assert.ok(error instanceof SharedExecutionAvailabilityError);
+          assert.deepEqual(error.availability, expected.availability);
+          assert.deepEqual(error.requested, expected.requested);
+          assert.deepEqual(error.available, expected.available);
+        }
+        return true;
+      });
+      assert.equal(state.resets, 1);
+      assert.ok(pool.cancelled > 0);
+      assert.deepEqual(authority.snapshot().used, { computeUnits: 0, memoryBytes: 0n });
+    } finally { realm.terminate(); }
+  }
 }

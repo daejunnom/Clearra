@@ -13,6 +13,7 @@ const bundle = await build({
     contents: `
       export { projectWorkspaceSearchReport } from './src/lib/workspace/workspaceSearchReport.ts';
       export { workspaceSolutionCount } from './src/lib/workspace/solutionSetAvailability.ts';
+      export { workspacePublicFailureMessage } from './src/lib/workspace/workspacePublicFailure.ts';
       export {
         workspaceViewFromDesktop,
         workspaceViewFromWasm
@@ -119,4 +120,39 @@ test('Web and desktop runtime adapters both expose complete standard PC solution
   assert.equal(production.workspaceSolutionCount(desktop.searchReport), 2);
   assert.deepEqual(web.searchReport.normalized_solution_keys, report.normalized_solution_keys);
   assert.deepEqual(desktop.searchReport.normalized_solution_keys, report.normalized_solution_keys);
+});
+
+test('Web and desktop use typed admission causes without publishing private diagnostic details', () => {
+  for (const [state, reason, expected] of [
+    ['unavailable', 'pattern-count-address-space-exceeded', 'resource-limit'],
+    ['unavailable', 'dense-pattern-representation-unavailable', 'resource-limit'],
+    ['exhausted', 'compute-budget-exceeded', 'resource-limit'],
+    ['exhausted', 'memory-budget-exceeded', 'resource-limit'],
+    ['unavailable', 'capability-unavailable', 'unsupported'],
+    ['cancelled', 'cancelled-by-caller', 'request-cancelled'],
+    ['unavailable', 'not-executed', 'execution-failed'],
+    ['incomplete', 'partial-execution', 'runtime-trap']
+  ]) {
+    const diagnostics = [{ code: reason === 'partial-execution' ? 'E_WASM_RUNTIME_TRAP' : 'E_WASM_DISTRIBUTED_START',
+      severity: 'error', message: 'private candidate_id=81 problem_id=fixture' }];
+    const availability = { ...available, state, reason };
+    const commonState = { status: 'failed', jobId: 1, progressLabel: '', progressDone: 0,
+      progressTotal: 1, diagnostics, searchReport: null, error: 'private input=fixture' };
+    const web = production.workspaceViewFromWasm({ ...commonState,
+      terminationReason: null, forwardPatternDone: 0, forwardPatternTotal: 0,
+      progressTelemetry: null, response: null, resourceReport: null,
+      executionAvailability: availability, resultCompleteness: 'not-executed', webgpuBackend: null });
+    const desktop = production.workspaceViewFromDesktop({ ...commonState,
+      result: null, backendStatus: null, resourceStatus: {
+        execution_availability: { ...availability, surface: 'native' }, result_completeness: 'not-executed' } });
+    for (const view of [web, desktop]) {
+      assert.deepEqual(view.publicFailures, [{ code: expected, severity: 'error' }], reason);
+      assert.deepEqual(view.developerDiagnostics, diagnostics);
+      assert.equal(view.developerError, commonState.error);
+      for (const language of ['en', 'ko', 'ja']) {
+        assert.doesNotMatch(production.workspacePublicFailureMessage(language, view.publicFailures[0]),
+          /private|candidate_id|problem_id|E_WASM|fixture|pattern-count|dense-pattern/u);
+      }
+    }
+  }
 });

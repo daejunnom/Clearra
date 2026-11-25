@@ -55,7 +55,8 @@ type VerifierResponse =
     }
   | { type: 'partial'; requestId: number; partial: ArrayBuffer }
   | { type: 'finished'; requestId: number; partial: ArrayBuffer }
-  | { type: 'failed'; requestId?: number; code: string; message: string };
+  | { type: 'failed'; requestId?: number; code: string; message: string;
+    resourceReport?: ClearraWasmRuntimeError['resourceReport'] };
 
 type PendingRequest = {
   resolve: (response: DelegatedVerifierResponse) => void;
@@ -268,7 +269,7 @@ class VerifierClient {
           cleanup();
           resolve();
         } else if (event.data.type === 'failed' && event.data.requestId === undefined) {
-          rejectAndCleanup(new ClearraWasmRuntimeError(event.data.code, event.data.message));
+          rejectAndCleanup(new ClearraWasmRuntimeError(event.data.code, event.data.message, event.data.resourceReport));
         }
       };
       const onError = (event: ErrorEvent) => {
@@ -372,7 +373,7 @@ class VerifierClient {
               })
               .catch((error) => rejectAndCleanup(asError(error)));
           } else if (event.data.type === 'failed' && event.data.requestId === undefined) {
-            rejectAndCleanup(new ClearraWasmRuntimeError(event.data.code, event.data.message));
+            rejectAndCleanup(new ClearraWasmRuntimeError(event.data.code, event.data.message, event.data.resourceReport));
           }
         };
         const onError = (event: ErrorEvent) => {
@@ -433,7 +434,7 @@ class VerifierClient {
           cleanup();
           resolve();
         } else if (event.data.type === 'failed' && event.data.requestId === undefined) {
-          rejectAndCleanup(new ClearraWasmRuntimeError(event.data.code, event.data.message));
+          rejectAndCleanup(new ClearraWasmRuntimeError(event.data.code, event.data.message, event.data.resourceReport));
         }
       };
       const onError = (event: ErrorEvent) => {
@@ -482,7 +483,7 @@ class VerifierClient {
           cleanup();
           resolve();
         } else if (event.data.type === 'failed' && event.data.requestId === undefined) {
-          rejectAndCleanup(new ClearraWasmRuntimeError(event.data.code, event.data.message));
+          rejectAndCleanup(new ClearraWasmRuntimeError(event.data.code, event.data.message, event.data.resourceReport));
         }
       };
       const onError = (event: ErrorEvent) => {
@@ -730,7 +731,7 @@ class VerifierClient {
         return;
       }
       if (response.type === 'failed' && response.requestId === undefined && this.initialized) {
-        this.onFatalWorkerError(new ClearraWasmRuntimeError(response.code, response.message));
+        this.onFatalWorkerError(new ClearraWasmRuntimeError(response.code, response.message, response.resourceReport));
         return;
       }
       if (response.type === 'delegation-accepted') {
@@ -788,7 +789,7 @@ class VerifierClient {
         pending.delegation.executing?.(true);
         this.deletePendingRequest(requestId);
         void this.failDelegation(pending.delegation, response.message);
-        pending.reject(new ClearraWasmRuntimeError(response.code, response.message));
+        pending.reject(new ClearraWasmRuntimeError(response.code, response.message, response.resourceReport));
       } else {
         this.executing = false;
         pending.delegation.executing?.();

@@ -7,6 +7,7 @@ import { mock } from 'node:test';
 // they do not implement search or replace the durable journal's authority.
 
 import { ClearraVerifierPool } from '../src/workers/ClearraVerifierPool.ts';
+import { ClearraWasmRuntimeError } from '../src/workers/clearraWasmRuntime.ts';
 import { VerifierTransportProfile } from '../src/workers/VerifierTransportProfile.ts';
 import {
   DurableDelegationAuthority,
@@ -186,6 +187,51 @@ await assert.rejects(
 
 assert.equal(workers.length, 1);
 assert.equal(workers[0].terminated, true);
+
+// A worker may fail its resource admission before producing a receipt. Keep
+// its typed evidence across both initialization and task/finalization replies.
+{
+  const report = {
+    solver_executed: false, memory_status: 'not-executed', truncated: false,
+    truncation_reason: null, peak_frontier_states: 0, peak_candidate_rows: 0,
+    peak_hash_buckets: 0, peak_gpu_bytes: 0, peak_cpu_bytes: 0,
+    build_worker_backlog_peak: 0, coverage_rows_emitted: 0, probability_complete: false,
+    execution_availability: {
+      state: 'exhausted', reason: 'memory-budget-exceeded', surface: 'browser-wasm32',
+      descriptor_pattern_count: null, dense_pattern_count: null,
+      required_dense_bytes: null, required_memory_bytes: '134217728'
+    }, result_completeness: 'not-executed'
+  } as const;
+  for (const phase of ['initialize', 'consume', 'finish']) {
+    class ResourceFailureWorker extends FakeVerifierWorker {
+      protected override handleExecutable(message: WorkerMessage) {
+        if (message.type !== phase) { super.handleExecutable(message); return; }
+        this.emit(structuredClone({ type: 'failed', requestId: message.requestId,
+          code: 'E_WASM_RESOURCE_ADMISSION', message: 'bounded admission failure', resourceReport: report }));
+      }
+    }
+    const worker = new ResourceFailureWorker(false);
+    const pool = new ClearraVerifierPool(() => worker as unknown as Worker);
+    const run = async () => {
+      await pool.initialize(new ArrayBuffer(0), 1, undefined, `resource-${phase}`);
+      if (phase === 'consume') {
+        await pool.enqueue(Uint8Array.of(1).buffer, () => { throw new Error('no failed receipt is applicable'); });
+        await pool.waitForIdle();
+      } else {
+        await pool.finish(() => { throw new Error('no failed receipt is applicable'); });
+      }
+    };
+    try {
+      await assert.rejects(bounded(`typed ${phase} failure`, run()), error => {
+        assert.ok(error instanceof ClearraWasmRuntimeError);
+        assert.equal(error.diagnosticCode, 'E_WASM_RESOURCE_ADMISSION');
+        assert.deepEqual(error.resourceReport, report, phase);
+        return true;
+      });
+    } finally { pool.cancel(); }
+    assert.equal(worker.terminated, true);
+  }
+}
 
 class SynopsisVerifierWorker extends FakeVerifierWorker {
   readonly controls: { profile: number | null; bytes: number }[] = [];

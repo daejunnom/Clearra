@@ -62,6 +62,7 @@ export function workspaceViewFromWasm(state: WasmWorkerState): WorkspaceRuntimeV
     responseStatus: state.response?.status,
     terminationReason: state.terminationReason,
     error: state.error,
+    executionAvailability: state.executionAvailability,
     diagnostics: state.diagnostics
   });
   return {
@@ -97,6 +98,7 @@ export function workspaceViewFromDesktop(state: DesktopJobState): WorkspaceRunti
     status: state.status,
     responseStatus: state.result?.status,
     error: state.error,
+    executionAvailability: resourceReport?.execution_availability,
     diagnostics: state.diagnostics
   });
   return {

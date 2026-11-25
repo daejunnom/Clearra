@@ -47,6 +47,51 @@ function optionValue(command, option) {
   return index === -1 ? null : tokens[index + 1];
 }
 
+test('extended Build option combinations preserve complete supply and active rules on web and desktop', () => {
+  // The reported P7P7 field lives above the compact six-row boundary. Checking
+  // its ingress and longer sources does not enumerate any of their queues.
+  const field = {
+    height: 10,
+    existingMask: 0xc0383f3fc7n,
+    targetMask: 0xc120fc1fcfe3fff3fc7c0c038n
+  };
+  let combinations = 0;
+  for (const queue of ['P7P7', 'P7P7P7', 'ITOLSZJITOLSZJITOLSZJ']) {
+    for (const rule of ['srs', 'srs-plus', 'srs-x', 'jstris-180', 'no-kick']) {
+      for (const spinProfile of ['t-spins', 't-spins-plus', 'all-mini', 'all-mini-plus', 'all-spin', 'all-spin-plus']) {
+        for (const preserveB2B of [false, true]) {
+          for (const holdEnabled of [false, true]) {
+            for (const workers of [1, 8]) {
+              for (const aggregation of ['buildability', 'spin']) {
+                const request = validBuildRequest({ ...field, queue, rule, spinProfile,
+                  preserveB2B, holdEnabled, workers, aggregation });
+                const context = `${queue}/${rule}/${spinProfile}/${preserveB2B}/${holdEnabled}/${workers}/${aggregation}`;
+                assert.deepEqual(production.buildProbabilityValidationCodes(request), [], context);
+                const args = production.buildProbabilityCommandArguments(request);
+                assert.equal(optionValue(args, queue.startsWith('P') ? '--patterns' : '--queue'), queue, context);
+                assert.equal(optionValue(args, '--height'), '10', context);
+                assert.equal(BigInt(optionValue(args, '--base-mask')), field.existingMask, context);
+                assert.equal(BigInt(optionValue(args, '--target-mask')), field.targetMask, context);
+                assert.equal(optionValue(args, '--source-pieces'), null, 'the full supplied queue remains authoritative');
+                assert.equal(optionValue(args, '--rule'), rule, context);
+                assert.equal(optionValue(args, '--spin-profile'),
+                  aggregation === 'spin' || preserveB2B ? spinProfile : null, context);
+                assert.equal(args.includes('--preserve-b2b'), preserveB2B, context);
+                assert.equal(args.includes('--hold'), holdEnabled, context);
+                assert.equal(args.includes('--no-hold'), !holdEnabled, context);
+                assert.equal(optionValue(args, '--workers'), String(workers), context);
+                assert.deepEqual(production.buildProbabilityRequestForDesktop(request, 'ko').arguments, args, context);
+                combinations += 1;
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+  assert.equal(combinations, 1440);
+});
+
 test('build source-pieces omission preserves the native automatic default', () => {
   const request = validBuildRequest();
   assert.equal(request.sourcePieces, null);

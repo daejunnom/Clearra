@@ -90,7 +90,8 @@ type VerifierResponse =
     }
   | { type: 'partial'; requestId: number; partial: ArrayBuffer }
   | { type: 'finished'; requestId: number; partial: ArrayBuffer }
-  | { type: 'failed'; requestId?: number; code: string; message: string };
+  | { type: 'failed'; requestId?: number; code: string; message: string;
+    resourceReport?: ClearraWasmRuntimeError['resourceReport'] };
 
 let wasm: ClearraWasmModule | null = null;
 let initialized = false;
@@ -262,6 +263,7 @@ async function handleRequest(request: VerifierRequest) {
       type: 'failed',
       requestId: 'requestId' in failureRequest ? failureRequest.requestId : undefined,
       code: failure.code,
+      resourceReport: failure.resourceReport,
       message: `${failure.message}; verifier operation: ${failedOperation}; execution: ${executionKind}`
     });
   }
@@ -550,7 +552,9 @@ function disposeVerifierRuntime() {
   self.close();
 }
 
-function verifierFailure(error: unknown, wasm: ClearraWasmModule | null) {
+function verifierFailure(error: unknown, wasm: ClearraWasmModule | null): {
+  code: string; message: string; resourceReport?: ClearraWasmRuntimeError['resourceReport']
+} {
   let diagnostics: ReturnType<ClearraWasmModule['failure_diagnostics']> | undefined;
   try {
     diagnostics = wasm?.failure_diagnostics();
@@ -565,7 +569,7 @@ function verifierFailure(error: unknown, wasm: ClearraWasmModule | null) {
     : null;
   const message = context ? `${baseMessage} (${context})` : baseMessage;
   if (error instanceof ClearraWasmRuntimeError) {
-    return { code: error.diagnosticCode, message };
+    return { code: error.diagnosticCode, message, resourceReport: error.resourceReport };
   }
   if (error instanceof WebAssembly.RuntimeError) {
     const memoryExhausted =
