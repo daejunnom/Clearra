@@ -4,11 +4,84 @@ import { lstat, mkdtemp, open, realpath, rmdir, unlink } from "node:fs/promises"
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { crc32 } from "node:zlib";
-import { inspectCtk3Exact } from "ctk3";
 
 const CONTRACT = "clearra.discord-solution-artifact.v1";
 const PREFIX = "clearra-discord-solutions-";
 const SUPPORTED = new Set(["pc-scenario", "build-probability"]);
+const MAX_SEGMENT_PAGES = 4096;
+const MAX_DOCUMENT_PAGES = 1_048_576;
+const MAX_SEGMENT_CHARACTERS = Math.ceil((16 * 1024 * 1024 * 8) / 6);
+const CTK64_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+
+// The native solution encoder emits CTK64 segments or a CTK64 bundle. Inspect
+// the same common headers as the document codec, without importing its Fumen
+// dependency or decoding/materializing pages in the job service. File CRC32,
+// identity and transport SHA-256 remain the integrity authorities below.
+function inspectNativeSolutionEnvelope(input, expectedPages) {
+  const source = input.trim();
+  const bundled = source.slice(0, 6).toLowerCase() === "ctk3b_";
+  if (!bundled && source.slice(0, 5).toLowerCase() !== "ctk3_") {
+    throw new Error("Clearra returned an invalid native CTK3 envelope.");
+  }
+  let cursor = bundled ? 6 : 5;
+  let width = null;
+  let pageCount = 0;
+  let segments = 0;
+  while (cursor <= source.length) {
+    const separator = bundled ? source.indexOf(".", cursor) : -1;
+    const end = separator < 0 ? source.length : separator;
+    const length = end - cursor;
+    if (length < 1 || length > MAX_SEGMENT_CHARACTERS || length % 4 === 1) {
+      throw new Error("Clearra returned an invalid native CTK3 segment length.");
+    }
+    const payload = source.slice(cursor, end);
+    if (!/^[A-Za-z0-9_-]+$/u.test(payload)) {
+      throw new Error("Clearra returned an invalid native CTK3 alphabet.");
+    }
+    const unusedBits = length % 4 === 2 ? 4 : length % 4 === 3 ? 2 : 0;
+    if (CTK64_ALPHABET.indexOf(payload.at(-1)) & ((1 << unusedBits) - 1)) {
+      throw new Error("Clearra returned noncanonical native CTK3 padding.");
+    }
+    // At most eight decoded bytes cover every supported header. Exclude the
+    // trailing CRC16 bytes from the readable body even for truncated segments.
+    const bodyBytes = Math.floor(length * 6 / 8) - 2;
+    const header = Buffer.from(payload.slice(0, 12), "base64url").subarray(0, 8);
+    const availableBits = Math.min(header.length, bodyBytes) * 8;
+    let bitOffset = 0;
+    const readBits = (count) => {
+      if (bitOffset + count > availableBits) {
+        throw new Error("Clearra returned a truncated native CTK3 header.");
+      }
+      let value = 0;
+      for (let bit = 0; bit < count; bit++, bitOffset++) {
+        value += ((header[Math.floor(bitOffset / 8)] >>> (bitOffset % 8)) & 1) * 2 ** bit;
+      }
+      return value;
+    };
+    if (readBits(8) !== 0xc3 || readBits(3) > 3) {
+      throw new Error("Clearra returned an unsupported native CTK3 header.");
+    }
+    const segmentWidth = readBits(5) + 1;
+    const countBits = readBits(1) === 0 ? 4 : readBits(1) === 0 ? 8 : readBits(1) === 0 ? 16 : 32;
+    const segmentPages = readBits(countBits);
+    if (segmentWidth > 31 || segmentPages < 1 || segmentPages > MAX_SEGMENT_PAGES || readBits(1) !== 0) {
+      throw new Error("Clearra returned invalid native CTK3 dimensions or extensions.");
+    }
+    if (width !== null && width !== segmentWidth) {
+      throw new Error("Clearra returned inconsistent native CTK3 bundle widths.");
+    }
+    width = segmentWidth;
+    pageCount += segmentPages;
+    if (pageCount > MAX_DOCUMENT_PAGES || pageCount > expectedPages) {
+      throw new Error("Clearra native CTK3 page count exceeds its receipt or format limit.");
+    }
+    segments++;
+    if (separator < 0) break;
+    cursor = separator + 1;
+  }
+  if (bundled && segments < 2) throw new Error("Clearra returned an invalid native CTK3 bundle.");
+  return { pageCount };
+}
 
 export function usesNativeSolutionArtifact(arguments_) {
   const command = arguments_?.[0];
@@ -97,7 +170,7 @@ export async function readSolutionArtifact(plan, document) {
     throw new Error("Clearra solution artifact checksum does not match its receipt.");
   }
   const source = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
-  const info = inspectCtk3Exact(source);
+  const info = inspectNativeSolutionEnvelope(source, receipt.solution_count);
   if (info.pageCount !== receipt.solution_count) {
     throw new Error("Clearra solution artifact page count does not match its receipt.");
   }
@@ -122,7 +195,7 @@ export function validateSolutionTransportArtifact(value, maximumBytes) {
   }
   const bytes = Buffer.from(value.source, "utf8");
   if (bytes.length !== value.byteLength || createHash("sha256").update(bytes).digest("hex") !== value.sha256 ||
-      inspectCtk3Exact(value.source).pageCount !== value.solutionCount) {
+      inspectNativeSolutionEnvelope(value.source, value.solutionCount).pageCount !== value.solutionCount) {
     throw new Error("Clearra returned a mismatched solution artifact transport.");
   }
   return Object.freeze({ ...value });

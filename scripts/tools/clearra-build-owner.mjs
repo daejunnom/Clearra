@@ -236,6 +236,24 @@ async function assertCleanProductCatalog(root) {
     if (/^product-[a-f0-9]{32}\.lock$/u.test(entry)) throw new Error('An active or stale product lease requires explicit cleanup');
   }
 }
+async function assertExperimentalSlotOwnership(root, transactionRoot) {
+  let previous;
+  try { previous = await readJson(resolve(transactionRoot, BUILD_TRANSACTION_MARKER)); }
+  catch (error) { if (error.code !== 'ENOENT') throw error; }
+  if (!previous) {
+    try { await stat(transactionRoot); throw new Error('Experimental slot exists without ownership metadata'); }
+    catch (error) { if (error.code !== 'ENOENT') throw error; }
+    return;
+  }
+  assertBuildRecord(previous, root, transactionRoot);
+  if (previous.status === 'active') {
+    try { await readJson(leasePath(root, previous)); }
+    catch (error) {
+      if (error.code === 'ENOENT') throw new Error('An active experimental generation cannot be replaced, even without a lease');
+      throw error;
+    }
+  }
+}
 export async function acquireBuildOwner({ sourceRoot, purpose = 'experiment', environment = process.env } = {}) {
   sourceRoot = canonicalNativeBuildPath(sourceRoot);
   if (!['experiment', 'product'].includes(purpose)) throw new Error('Unknown Clearra build purpose');
@@ -263,6 +281,10 @@ export async function acquireBuildOwner({ sourceRoot, purpose = 'experiment', en
   assertNoBuildLinks(transactionRoot);
   assertNoBuildLinks(sourceRoot);
   await stat(resolve(sourceRoot, 'Cargo.toml'));
+  // Reject known foreign or interrupted slots before catalog observation can
+  // obscure their ownership error. This read grants no ownership: admission,
+  // leases and the marker recheck below still precede every replacement.
+  if (purpose === 'experiment') await assertExperimentalSlotOwnership(root, transactionRoot);
   const compilerSnapshot = await buildCompilerSnapshot(sourceRoot, environment);
   const marker = { schema_version: BUILD_TRANSACTION_SCHEMA, purpose, source_root: sourceRoot, source_id: sourceId, session_id: sessionId,
     transaction_root: transactionRoot, cargo_target_dir: cargoTarget, owner_pid: process.pid, status: 'active', created_utc: created, completed_utc: null,

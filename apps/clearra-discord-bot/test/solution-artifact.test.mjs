@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { existsSync } from "node:fs";
-import { lstat, symlink, unlink, writeFile } from "node:fs/promises";
+import { lstat, readFile, symlink, unlink, writeFile } from "node:fs/promises";
 import { PassThrough } from "node:stream";
 import test from "node:test";
 import { crc32 } from "node:zlib";
-import { encodeCtk3 } from "ctk3";
+import { encodeCtk3, encodeCtk3Bundle, encodeCtk3Compact, inspectCtk3Exact } from "ctk3";
 
 import {
   cleanupSolutionArtifactPlan, createSolutionArtifactPlan, readSolutionArtifact,
@@ -16,21 +17,97 @@ import { ClearraCommandRunner } from "../src/job-service/runner.mjs";
 const source = encodeCtk3({ width: 10, pages: [{ height: 1, cells: ["I", "I", "I", "I", null, null, null, null, null, null] }] });
 const bytes = Buffer.from(source);
 
-async function writeArtifact(outputPath) {
-  await writeFile(outputPath, bytes, { flag: "wx" });
+async function writeArtifact(outputPath, artifactSource = source, solutionCount = 1) {
+  const artifactBytes = Buffer.from(artifactSource);
+  await writeFile(outputPath, artifactBytes, { flag: "wx" });
   const identity = await lstat(outputPath, { bigint: true });
   return {
-    summary: { normalized_unique_solution_count: "1" },
+    summary: { normalized_unique_solution_count: String(solutionCount) },
     solution_artifact: {
       status: "committed", schema: "solution-set-artifact.v2", encoding: "ctk3",
-      compression: "ctk3-revision-native", bytes: bytes.length,
-      checksum: `crc32:${crc32(bytes).toString(16).padStart(8, "0")}`,
-      solution_count: 1, annotated_solution_count: 0, target_owned: true,
+      compression: "ctk3-revision-native", bytes: artifactBytes.length,
+      checksum: `crc32:${crc32(artifactBytes).toString(16).padStart(8, "0")}`,
+      solution_count: solutionCount, annotated_solution_count: 0, target_owned: true,
       file_identity_kind: "linux-device-inode",
       file_identity: `${identity.dev.toString(16).padStart(16, "0")}:${identity.ino.toString(16).padStart(16, "0")}`,
     },
   };
 }
+
+function transport(artifactSource, solutionCount) {
+  const artifactBytes = Buffer.from(artifactSource);
+  return {
+    contract: "clearra.discord-solution-artifact.v1", mediaType: "text/plain; charset=utf-8",
+    filename: "clearra-result.ctk3", source: artifactSource, byteLength: artifactBytes.length,
+    sha256: createHash("sha256").update(artifactBytes).digest("hex"),
+    solutionCount, complete: true,
+  };
+}
+
+test("native envelope inspection agrees with the shared native interop fixtures", async () => {
+  const fixture = await readFile(new URL(
+    "../../../tests/fixtures/contracts/ctk3_native_interop.v1.tsv", import.meta.url), "utf8");
+  const revisions = new Set();
+  for (const row of fixture.trim().split(/\r?\n/u).slice(1)) {
+    const [name, revision, canonical, compact] = row.split("\t");
+    revisions.add(Number(revision));
+    for (const encoded of new Set([canonical, compact])) {
+      const info = inspectCtk3Exact(encoded);
+      const artifact = transport(encoded, info.pageCount);
+      assert.deepEqual(validateSolutionTransportArtifact(artifact, 24 * 1024 * 1024), artifact, name);
+    }
+  }
+  assert.deepEqual([...revisions].sort(), [1, 2, 3]);
+});
+
+test("native bundles retain all pages across segment boundaries and enforce the aggregate limit", () => {
+  const page = { height: 1, cells: ["I", "I", "I", "I", null, null, null, null, null, null] };
+  const fullSegment = encodeCtk3Compact({ width: 10, pages: Array(4096).fill(page) });
+  const encoded = encodeCtk3Bundle([fullSegment, source]);
+  assert.equal(inspectCtk3Exact(encoded).pageCount, 4097);
+  const artifact = transport(encoded, 4097);
+  assert.deepEqual(validateSolutionTransportArtifact(artifact, 24 * 1024 * 1024), artifact);
+  assert.throws(() => validateSolutionTransportArtifact(transport(encoded, 4096), 24 * 1024 * 1024), /page count/u);
+  const excessive = `ctk3b_${Array(257).fill(fullSegment.slice(5)).join(".")}`;
+  assert.throws(() => validateSolutionTransportArtifact(transport(excessive, 257 * 4096),
+    24 * 1024 * 1024), /page count/u);
+});
+
+test("native envelope rejects malformed framing even with matching transport hashes", () => {
+  const mutateHeader = (change) => {
+    const payload = Buffer.from(source.slice(5), "base64url");
+    change(payload);
+    return `ctk3_${payload.toString("base64url")}`;
+  };
+  const narrow = encodeCtk3Compact({ width: 9, pages: [
+    { height: 1, cells: ["I", "I", "I", "I", null, null, null, null, null] },
+  ] });
+  const malformed = [
+    ["ctk3_", 1], ["ctk3_!", 1], [`${source}=`, 1],
+    ["ctk3_w0kCAAdPCh", 1], // Valid alphabet, nonzero unused base64 bits.
+    ["ctk3b_", 1], [`ctk3b_${source.slice(5)}`, 1],
+    [`ctk3b_${source.slice(5)}.`, 1], [`ctk3b_.${source.slice(5)}`, 1],
+    [`ctk3b_${source.slice(5)}.${narrow.slice(5)}`, 2],
+    [`ctk3_${Buffer.from([0xc3, 0x49, 2, 0]).toString("base64url")}`, 1],
+    [mutateHeader(payload => { payload[0] = 0; }), 1],
+    [mutateHeader(payload => { payload[1] = (payload[1] & 0xf8) | 4; }), 1],
+    [mutateHeader(payload => { payload[1] |= 0xf8; }), 1],
+    [mutateHeader(payload => { payload[2] &= 0xe0; }), 1],
+    [mutateHeader(payload => { payload[2] |= 0x20; }), 1],
+  ];
+  for (const [encoded, count] of malformed) {
+    assert.throws(() => validateSolutionTransportArtifact(transport(encoded, count), 4096),
+      /native CTK3/u, encoded);
+  }
+});
+
+test("native reader verifies envelope after matching file identity and CRC32", async () => {
+  const plan = await createSolutionArtifactPlan(["pc"], 4096);
+  try {
+    const document = await writeArtifact(plan.outputPath, `ctk3b_${source.slice(5)}.`, 1);
+    await assert.rejects(readSolutionArtifact(plan, document), /native CTK3/u);
+  } finally { await cleanupSolutionArtifactPlan(plan); }
+});
 
 test("native solution transport preserves the complete source and file identity", async () => {
   const plan = await createSolutionArtifactPlan(["pc", "--lines", "2"], 4096);
