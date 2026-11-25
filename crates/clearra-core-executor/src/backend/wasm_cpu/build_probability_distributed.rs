@@ -532,6 +532,63 @@ impl WasmBuildProbabilityCandidateProducer {
         verifier_count: usize,
         coordinator_reserved_bytes: u128,
     ) -> Result<Self, WasmCpuSearchError> {
+        Self::new_with_finesse_and_verifier_admission_typed(
+            problem,
+            field,
+            aggregation,
+            finesse_metric,
+            finesse_pattern_knowledge,
+            verifier_count,
+            coordinator_reserved_bytes,
+            None,
+        )
+    }
+
+    /// Admit a native pool whose N workers time-share the unique producer and
+    /// N private verifiers. The host must move production into that same pool;
+    /// the calling coordinator must not execute solver work. All pool jobs use
+    /// this control's compute permits, including preparation and reduction.
+    /// Memory still covers N + 1 simultaneously retained session replicas.
+    /// Separate WASM instances and the ordinary constructor keep their existing
+    /// local-instance admission contract.
+    #[cfg(not(target_family = "wasm"))]
+    pub fn new_with_finesse_for_native_pool_typed(
+        problem: &SearchProblem,
+        field: BuildProbabilityField,
+        aggregation: BuildProbabilityAggregation,
+        finesse_metric: FinesseMetric,
+        finesse_pattern_knowledge: FinessePatternKnowledge,
+        coordinator_reserved_bytes: u128,
+        control: &ExecutionControl,
+    ) -> Result<Self, WasmCpuSearchError> {
+        if !control.has_parallelism_binding() {
+            return Err(WasmCpuSearchError::InvalidProblem {
+                reason: "native_build_probability_pool_compute_budget_unbound",
+            });
+        }
+        Self::new_with_finesse_and_verifier_admission_typed(
+            problem,
+            field,
+            aggregation,
+            finesse_metric,
+            finesse_pattern_knowledge,
+            control.parallelism(),
+            coordinator_reserved_bytes,
+            Some(control.parallelism()),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn new_with_finesse_and_verifier_admission_typed(
+        problem: &SearchProblem,
+        field: BuildProbabilityField,
+        aggregation: BuildProbabilityAggregation,
+        finesse_metric: FinesseMetric,
+        finesse_pattern_knowledge: FinessePatternKnowledge,
+        verifier_count: usize,
+        coordinator_reserved_bytes: u128,
+        native_pool_compute_units: Option<usize>,
+    ) -> Result<Self, WasmCpuSearchError> {
         let mirror_included = field.includes_applicable_horizontal_mirror();
         let original = field.original_only();
         let mirrored = mirror_included.then(|| original.mirrored_horizontally());
@@ -551,8 +608,9 @@ impl WasmBuildProbabilityCandidateProducer {
         // one-slot authority rejects all distributed Build searches. Native
         // in-process verifiers still borrow their slots from the parent lease.
         // Replica memory remains accounted for by the aggregate plan below.
-        let local_compute_units =
-            distributed_build_local_compute_units(replica_count, cfg!(target_family = "wasm"));
+        let local_compute_units = native_pool_compute_units.unwrap_or_else(|| {
+            distributed_build_local_compute_units(replica_count, cfg!(target_family = "wasm"))
+        });
         let execution_admission = admit_budget_bound_search_execution(problem, local_compute_units)
             .map_err(WasmCpuSearchError::resource_admission)?;
         let pass_count = usize::from(mirror_distinct) + 1;
@@ -2423,6 +2481,163 @@ mod tests {
                 "native delegated verifiers retain parent compute coverage"
             );
         }
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    #[test]
+    fn native_pool_advances_and_merges_after_all_n_child_leases_are_delegated() {
+        use clearra_core_domain::parallel_work::with_compute_worker;
+        use std::{env, process::Command};
+
+        // This constructor owns the process-wide resource surface. Use the
+        // same isolated-child convention as the native cooperative admission
+        // tests so unrelated tests cannot contend for its full memory lease.
+        const CHILD: &str = "CLEARRA_TEST_NATIVE_BUILD_POOL_ADMISSION_CHILD";
+        if env::var_os(CHILD).is_none() {
+            let name = format!(
+                "{}::native_pool_advances_and_merges_after_all_n_child_leases_are_delegated",
+                module_path!().split_once("::").unwrap().1,
+            );
+            let result = Command::new(env::current_exe().unwrap())
+                .args(["--exact", &name, "--nocapture"])
+                .env(CHILD, "1")
+                .output()
+                .unwrap();
+            assert!(
+                result.status.success()
+                    && String::from_utf8_lossy(&result.stdout)
+                        .lines()
+                        .any(|line| line == "clearra_native_build_pool_admission=complete"),
+                "isolated pool admission failed:\n{}\n{}",
+                String::from_utf8_lossy(&result.stdout),
+                String::from_utf8_lossy(&result.stderr),
+            );
+            return;
+        }
+
+        let query = PcScenarioQuery::new(
+            PcScenarioBoard::standard_10(4, 0),
+            PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::I])),
+            PieceWindow::new(1),
+        )
+        .with_allow_hold(false)
+        .with_exact_pieces(Some(1))
+        .with_solution_probability_policy(PcSolutionProbabilityPolicy::Omit);
+        let field = BuildProbabilityField::from_words_preserving_height(4, [0; 4], [0xf, 0, 0, 0])
+            .expect("one-I target");
+        let capacity = crate::resource::shared_execution_resource_capacity().compute_units as usize;
+        for worker_count in [1, 2, 4].into_iter().filter(|count| *count <= capacity) {
+            let problem = ProblemCompiler::compile_scenario_pc(
+                &query.clone().with_execution_policy(
+                    PcExecutionPolicy::mvp_default()
+                        .with_use_all_logical_processors(true)
+                        .with_workers(worker_count),
+                ),
+            )
+            .expect("host-admitted one-I pool problem");
+            let serial = run_serial(&problem, field);
+            let control = ExecutionControl::default().with_parallelism(worker_count);
+            let permit = control
+                .compute_budget()
+                .acquire_worker(&control.cancellation)
+                .unwrap();
+            let result = with_compute_worker(permit, || {
+                let mut producer =
+                    WasmBuildProbabilityCandidateProducer::new_with_finesse_for_native_pool_typed(
+                        &problem,
+                        field,
+                        BuildProbabilityAggregation::Buildability,
+                        FinesseMetric::Inputs,
+                        FinessePatternKnowledge::Both,
+                        0,
+                        &control,
+                    )
+                    .expect("native pool admission");
+                let parent = producer.execution_admission.lease_token();
+                assert_eq!(parent.grant().compute_units as usize, worker_count);
+                assert_eq!(
+                    producer.aggregate_budget.replica_count,
+                    worker_count as u128 + 1
+                );
+                let mut verifiers: Vec<_> = (0..worker_count)
+                    .map(|_| {
+                        let verifier = producer
+                            .new_delegated_verifier(
+                                field,
+                                BuildProbabilityAggregation::Buildability,
+                            )
+                            .expect("one verifier per admitted pool slot");
+                        let child = verifier._execution_admission.lease_token();
+                        assert_eq!(child.parent_epoch(), Some(parent.epoch()));
+                        assert_eq!(child.grant().compute_units, 1);
+                        verifier
+                    })
+                    .collect();
+                assert!(
+                    producer
+                        .new_delegated_verifier(field, BuildProbabilityAggregation::Buildability)
+                        .is_err(),
+                    "N delegated grants cannot admit an N+1 verifier"
+                );
+                // No parent grant remains undelegated here. Source computation
+                // runs as a job of the same pool, under its existing permit.
+                let mut candidates = 0;
+                let summary = loop {
+                    match producer
+                        .advance(&control)
+                        .expect("source after all child grants")
+                    {
+                        WasmCandidateProducerAdvance::Pending => {}
+                        WasmCandidateProducerAdvance::Candidate(candidate) => {
+                            verifiers[candidates % worker_count]
+                                .consume(&candidate, &control)
+                                .expect("verification shares the pool compute owner");
+                            candidates += 1;
+                        }
+                        WasmCandidateProducerAdvance::Completed(summary) => break summary,
+                        WasmCandidateProducerAdvance::Cancelled => panic!("pool not cancelled"),
+                    }
+                };
+                assert!(candidates > 0);
+                let partials: Vec<_> = verifiers
+                    .into_iter()
+                    .flat_map(|mut verifier| {
+                        verifier.finish().expect("finish every delegated verifier")
+                    })
+                    .collect();
+                let mut merger = producer
+                    .into_merger()
+                    .expect("returned source becomes merger");
+                for partial in &partials {
+                    merger.absorb(partial).expect("admitted pool reduction");
+                }
+                merger
+                    .finish_with_control(&summary, worker_count, &control)
+                    .expect("native pool terminal result")
+            });
+            assert_eq!(
+                result.normalized_solution_keys(),
+                serial.normalized_solution_keys()
+            );
+            assert_eq!(result.finesse_report(), serial.finesse_report());
+            assert_eq!(result.usize_field("workers_used"), Some(worker_count));
+        }
+        let problem = ProblemCompiler::compile_scenario_pc(&query).expect("one-I pool problem");
+        assert!(matches!(
+            WasmBuildProbabilityCandidateProducer::new_with_finesse_for_native_pool_typed(
+                &problem,
+                field,
+                BuildProbabilityAggregation::Buildability,
+                FinesseMetric::Inputs,
+                FinessePatternKnowledge::Both,
+                0,
+                &ExecutionControl::default(),
+            ),
+            Err(WasmCpuSearchError::InvalidProblem {
+                reason: "native_build_probability_pool_compute_budget_unbound",
+            })
+        ));
+        println!("clearra_native_build_pool_admission=complete");
     }
 
     #[test]

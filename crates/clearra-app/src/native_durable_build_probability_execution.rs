@@ -7,14 +7,15 @@
 //! materialization seam without creating a second nominal backend.
 
 use std::{
-    collections::BTreeMap,
-    sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender},
+    panic::{catch_unwind, AssertUnwindSafe},
+    sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TryRecvError},
     thread::{self, JoinHandle},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use clearra_core_domain::{
     execution_cancellation::ExecutionControl,
+    parallel_work::{with_compute_coordinator, with_compute_worker},
     solution::normalized_tiling_solution::StandardBoard64TilingIdentity,
 };
 use clearra_core_executor::resource::{
@@ -26,6 +27,7 @@ use clearra_core_executor::{
     canonical_wasm_candidate_packet_batch_sha256, CoreExecutionError, CoreExecutionResult,
     WasmBuildProbabilityCandidateProducer, WasmBuildProbabilityDistributedVerifier,
     WasmCandidatePacket, WasmCandidateProducerAdvance, WasmCpuSearchError,
+    WasmDistributedGeometrySummary,
 };
 use clearra_problem::{
     BuildProbabilityAggregation, BuildProbabilityField, BuildSolutionProbabilityPolicy,
@@ -34,10 +36,11 @@ use clearra_problem::{
 use sha2::{Digest, Sha256};
 
 use super::{
-    finish_native_build_probability, join_workers, native_coordinator_allocation_unavailable,
-    native_worker_thread_name, NativeBuildProbabilityExecutionOutput,
-    NativeBuildProbabilityWorkerOutput, NativeCoordinatorMemoryProjection,
-    NATIVE_BUILD_BATCH_CAPACITY, NATIVE_BUILD_COMPLETION_CHANNEL_CAPACITY,
+    checked_heap_backing_bytes, finish_native_build_probability, join_workers,
+    native_coordinator_allocation_unavailable, native_worker_thread_name, run_native_build_compute,
+    NativeBuildProbabilityExecutionOutput, NativeBuildProbabilityWorkerOutput,
+    NativeCoordinatorMemoryProjection, NATIVE_BUILD_BATCH_CAPACITY,
+    NATIVE_BUILD_COMPLETION_CHANNEL_CAPACITY, NATIVE_BUILD_INITIAL_BATCH_CAPACITY,
     NATIVE_BUILD_REQUEST_CHANNEL_CAPACITY, NATIVE_BUILD_WORKER_STACK_BYTES,
 };
 use crate::app_services::AppCoreExecutorService;
@@ -342,6 +345,13 @@ impl DurableWorkerExecutable {
 // inline representation avoids allocating each durable queue operation.
 #[allow(clippy::large_enum_variant)]
 enum DurableWorkerRequest {
+    Produce {
+        producer: Box<WasmBuildProbabilityCandidateProducer>,
+        field: BuildProbabilityField,
+        aggregation: BuildProbabilityAggregation,
+        initialize: bool,
+        batch_capacity: usize,
+    },
     Offer(DurableWorkerOffer),
     Publish {
         permit: CompactExecutablePermit,
@@ -364,6 +374,24 @@ struct DurableWorkerCompletion {
     result: Result<DurableWorkerResult, &'static str>,
 }
 
+struct ProducedBuildWork {
+    producer: Box<WasmBuildProbabilityCandidateProducer>,
+    verifier: Option<WasmBuildProbabilityDistributedVerifier>,
+    batch: Vec<WasmCandidatePacket>,
+    summary: Option<WasmDistributedGeometrySummary>,
+}
+
+// A completion transfers its owners through a rendezvous, never an unbounded
+// result queue. The verifier is moved, not cloned, into its durable Initialize.
+#[allow(clippy::large_enum_variant)]
+enum NativeBuildPoolCompletion {
+    Delegated(DurableWorkerCompletion),
+    Produced {
+        worker_index: usize,
+        result: Result<ProducedBuildWork, CoreExecutionError>,
+    },
+}
+
 struct PendingDurableDelegation {
     worker_index: usize,
     worker_id: u32,
@@ -376,6 +404,43 @@ struct PendingDurableDelegation {
 struct SealedDurableDelegation {
     token: DelegationToken,
     result_sha256: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DurableWorkerStage {
+    Offered,
+    Published,
+    Running,
+}
+
+struct ActiveDurableDelegation {
+    pending: PendingDurableDelegation,
+    stage: DurableWorkerStage,
+    candidate_count: usize,
+    last_heartbeat_unix_ms: u64,
+}
+
+#[derive(Default)]
+struct NativeBuildPoolWorker {
+    initialized: bool,
+    producing: bool,
+    finished: bool,
+    consumed_batches: usize,
+    delegation: Option<ActiveDurableDelegation>,
+    queued_batch: Option<Vec<WasmCandidatePacket>>,
+}
+
+impl NativeBuildPoolWorker {
+    fn is_ready(&self) -> bool {
+        !self.producing && !self.finished && self.delegation.is_none()
+    }
+
+    fn next_batch_capacity(&self) -> usize {
+        NATIVE_BUILD_INITIAL_BATCH_CAPACITY
+            .checked_shl(self.consumed_batches.min(3) as u32)
+            .unwrap_or(NATIVE_BUILD_BATCH_CAPACITY)
+            .min(NATIVE_BUILD_BATCH_CAPACITY)
+    }
 }
 
 fn durable_runtime_unavailable(component: &'static str) -> CoreExecutionError {
@@ -776,8 +841,38 @@ fn durable_worker_main(
     expected_job_sha256: [u8; 32],
     expected_request_sha256: [u8; 32],
     requests: Receiver<DurableWorkerRequest>,
-    completions: SyncSender<DurableWorkerCompletion>,
+    completions: SyncSender<NativeBuildPoolCompletion>,
     control: ExecutionControl,
+) {
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        durable_worker_loop(
+            worker_index,
+            worker_id,
+            expected_job_sha256,
+            expected_request_sha256,
+            &requests,
+            &completions,
+            &control,
+        );
+    }));
+    if result.is_err() {
+        send_durable_completion(
+            &completions,
+            worker_index,
+            Err("native_build_probability_worker_panicked"),
+        );
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn durable_worker_loop(
+    worker_index: usize,
+    worker_id: u32,
+    expected_job_sha256: [u8; 32],
+    expected_request_sha256: [u8; 32],
+    requests: &Receiver<DurableWorkerRequest>,
+    completions: &SyncSender<NativeBuildPoolCompletion>,
+    control: &ExecutionControl,
 ) {
     let mut accepted_offer = None;
     let mut published = None;
@@ -785,6 +880,53 @@ fn durable_worker_main(
     let mut finished = false;
     while let Ok(request) = requests.recv() {
         let stage = match request {
+            DurableWorkerRequest::Produce {
+                producer,
+                field,
+                aggregation,
+                initialize,
+                batch_capacity,
+            } => {
+                let result = if accepted_offer.is_some()
+                    || published.is_some()
+                    || finished
+                    || initialize != verifier.is_none()
+                    || batch_capacity > NATIVE_BUILD_BATCH_CAPACITY
+                {
+                    Err(durable_runtime_unavailable(
+                        "native_build_probability_producer_state_invalid",
+                    ))
+                } else {
+                    control
+                        .compute_budget()
+                        .acquire_worker(&control.cancellation)
+                        .ok_or(CoreExecutionError::Cancelled)
+                        .and_then(|permit| {
+                            with_compute_worker(permit, || {
+                                produce_build_work(
+                                    producer,
+                                    field,
+                                    aggregation,
+                                    initialize,
+                                    batch_capacity,
+                                    control,
+                                )
+                            })
+                        })
+                };
+                let failed = result.is_err();
+                if completions
+                    .send(NativeBuildPoolCompletion::Produced {
+                        worker_index,
+                        result,
+                    })
+                    .is_err()
+                    || failed
+                {
+                    return;
+                }
+                continue;
+            }
             DurableWorkerRequest::Offer(offer) => {
                 if offer.worker_id != worker_id
                     || accepted_offer.is_some()
@@ -804,7 +946,7 @@ fn durable_worker_main(
             } => {
                 let Some(offer) = accepted_offer else {
                     send_durable_completion(
-                        &completions,
+                        completions,
                         worker_index,
                         Err("native_build_probability_durable_publication_without_offer"),
                     );
@@ -838,7 +980,7 @@ fn durable_worker_main(
             DurableWorkerRequest::Run(key) => {
                 let Some((published_key, executable)) = published.take() else {
                     send_durable_completion(
-                        &completions,
+                        completions,
                         worker_index,
                         Err("native_build_probability_durable_run_without_publication"),
                     );
@@ -860,23 +1002,25 @@ fn durable_worker_main(
                             let count = candidates.len();
                             let Some(worker_verifier) = verifier.as_mut() else {
                                 send_durable_completion(
-                                    &completions,
+                                    completions,
                                     worker_index,
                                     Err("native_build_probability_durable_consume_before_initialize"),
                                 );
                                 return;
                             };
-                            candidates
-                                .iter()
-                                .try_for_each(|candidate| {
-                                    worker_verifier.consume(candidate, &control)
-                                })
-                                .map(|()| DurableWorkerResult::Consumed(key, count))
+                            with_durable_compute(control, || {
+                                candidates
+                                    .iter()
+                                    .try_for_each(|candidate| {
+                                        worker_verifier.consume(candidate, control)
+                                    })
+                                    .map(|()| DurableWorkerResult::Consumed(key, count))
+                            })
                         }
                         DurableWorkerExecutable::Finish => {
                             let Some(mut worker_verifier) = verifier.take() else {
                                 send_durable_completion(
-                                    &completions,
+                                    completions,
                                     worker_index,
                                     Err(
                                         "native_build_probability_durable_finish_before_initialize",
@@ -885,32 +1029,86 @@ fn durable_worker_main(
                                 return;
                             };
                             finished = true;
-                            worker_verifier
-                                .finish()
-                                .map(|results| DurableWorkerResult::Finished(key, results))
+                            with_durable_compute(control, || {
+                                worker_verifier
+                                    .finish()
+                                    .map(|results| DurableWorkerResult::Finished(key, results))
+                            })
                         }
                     }
                 }
             }
         };
         let terminal = stage.is_err() || matches!(stage, Ok(DurableWorkerResult::Finished(_, _)));
-        if !send_durable_completion(&completions, worker_index, stage) || terminal {
+        if !send_durable_completion(completions, worker_index, stage) || terminal {
             return;
         }
     }
 }
 
 fn send_durable_completion(
-    completions: &SyncSender<DurableWorkerCompletion>,
+    completions: &SyncSender<NativeBuildPoolCompletion>,
     worker_index: usize,
     result: Result<DurableWorkerResult, &'static str>,
 ) -> bool {
     completions
-        .send(DurableWorkerCompletion {
-            worker_index,
-            result,
-        })
+        .send(NativeBuildPoolCompletion::Delegated(
+            DurableWorkerCompletion {
+                worker_index,
+                result,
+            },
+        ))
         .is_ok()
+}
+
+fn with_durable_compute<T>(
+    control: &ExecutionControl,
+    work: impl FnOnce() -> Result<T, &'static str>,
+) -> Result<T, &'static str> {
+    let permit = control
+        .compute_budget()
+        .acquire_worker(&control.cancellation)
+        .ok_or("native_build_probability_worker_cancelled")?;
+    with_compute_worker(permit, work)
+}
+
+fn produce_build_work(
+    mut producer: Box<WasmBuildProbabilityCandidateProducer>,
+    field: BuildProbabilityField,
+    aggregation: BuildProbabilityAggregation,
+    initialize: bool,
+    batch_capacity: usize,
+    control: &ExecutionControl,
+) -> Result<ProducedBuildWork, CoreExecutionError> {
+    let verifier = initialize
+        .then(|| producer.new_delegated_verifier(field, aggregation))
+        .transpose()
+        .map_err(WasmCpuSearchError::into_core_execution_error)?;
+    let mut batch = Vec::new();
+    batch
+        .try_reserve_exact(batch_capacity)
+        .map_err(|_| native_coordinator_allocation_unavailable())?;
+    let mut summary = None;
+    while batch.len() < batch_capacity {
+        match producer
+            .advance(control)
+            .map_err(|reason| CoreExecutionError::Pc(reason.to_owned()))?
+        {
+            WasmCandidateProducerAdvance::Pending => {}
+            WasmCandidateProducerAdvance::Candidate(candidate) => batch.push(candidate),
+            WasmCandidateProducerAdvance::Completed(completed) => {
+                summary = Some(completed);
+                break;
+            }
+            WasmCandidateProducerAdvance::Cancelled => return Err(CoreExecutionError::Cancelled),
+        }
+    }
+    Ok(ProducedBuildWork {
+        producer,
+        verifier,
+        batch,
+        summary,
+    })
 }
 
 fn checked_maximum_task_count(problem: &SearchProblem, worker_count: usize) -> Option<usize> {
@@ -921,8 +1119,8 @@ fn checked_maximum_task_count(problem: &SearchProblem, worker_count: usize) -> O
         // storage is grown for issued tasks, never reserved for this sentinel.
         return Some(0);
     }
-    let batches = maximum_candidates / NATIVE_BUILD_BATCH_CAPACITY
-        + usize::from(!maximum_candidates.is_multiple_of(NATIVE_BUILD_BATCH_CAPACITY));
+    let batches = maximum_candidates / NATIVE_BUILD_INITIAL_BATCH_CAPACITY
+        + usize::from(!maximum_candidates.is_multiple_of(NATIVE_BUILD_INITIAL_BATCH_CAPACITY));
     batches.checked_add(worker_count.checked_mul(2)?)
 }
 
@@ -947,7 +1145,7 @@ fn reserve_durable_task_slots<T>(
         .map_err(|_| native_coordinator_allocation_unavailable())
 }
 
-fn reserve_durable_wave_receipts(
+fn reserve_durable_task_receipts(
     live_tokens: &mut Vec<DelegationToken>,
     sealed: &mut Vec<SealedDurableDelegation>,
     additional: usize,
@@ -968,6 +1166,32 @@ fn admission_request(
 ) -> Result<NativeBuildProbabilityAdmissionRequest, CoreExecutionError> {
     let projection = NativeCoordinatorMemoryProjection::checked(field, worker_count)
         .ok_or_else(native_coordinator_allocation_unavailable)?;
+    // Unlike the reference coordinator, the durable pool retains per-worker
+    // protocol state while independent workers can already return results.
+    // Charge that overlap, the actual (larger) durable channel slot, and the
+    // single boxed source that moves between the manager and compute workers.
+    let worker_state_bytes = checked_heap_backing_bytes::<NativeBuildPoolWorker>(worker_count)
+        .ok_or_else(native_coordinator_allocation_unavailable)?;
+    let producer_owner_bytes =
+        core::mem::size_of::<WasmBuildProbabilityCandidateProducer>() as u128;
+    let durable_request_slot_bytes = (worker_count as u128)
+        .checked_mul(NATIVE_BUILD_REQUEST_CHANNEL_CAPACITY as u128)
+        .and_then(|count| count.checked_mul(core::mem::size_of::<DurableWorkerRequest>() as u128))
+        .ok_or_else(native_coordinator_allocation_unavailable)?;
+    let additional_channel_bytes = durable_request_slot_bytes
+        .checked_sub(projection.request_channel_slot_bytes)
+        .ok_or_else(native_coordinator_allocation_unavailable)?;
+    let pool_container_bytes = core::mem::size_of::<Vec<NativeBuildPoolWorker>>() as u128;
+    let pool_owner_bytes = worker_state_bytes
+        .checked_add(producer_owner_bytes)
+        .and_then(|bytes| bytes.checked_add(pool_container_bytes))
+        .ok_or_else(native_coordinator_allocation_unavailable)?;
+    let known_coordinator_peak_bytes = projection
+        .required_peak_bytes
+        .checked_add(additional_channel_bytes)
+        .and_then(|bytes| bytes.checked_add(pool_owner_bytes))
+        .and_then(|bytes| bytes.checked_add(projection.worker_result_backing_bytes))
+        .ok_or_else(native_coordinator_allocation_unavailable)?;
     let minimum_channel_control_bytes = projection
         .request_sender_backing_bytes
         .checked_add(projection.worker_handle_backing_bytes)
@@ -978,14 +1202,15 @@ fn admission_request(
         .and_then(|bytes| bytes.checked_add(projection.completion_channel_slot_bytes))
         .and_then(|bytes| bytes.checked_add(projection.container_owner_bytes))
         .and_then(|bytes| bytes.checked_add(projection.thread_name_payload_bytes))
+        .and_then(|bytes| bytes.checked_add(additional_channel_bytes))
         .ok_or_else(native_coordinator_allocation_unavailable)?;
     let minimum_batch_owner_peak_bytes = projection
         .available_queue_backing_bytes
         .checked_add(projection.candidate_packet_backing_bytes)
         .and_then(|bytes| bytes.checked_add(projection.candidate_row_id_payload_bytes))
+        .and_then(|bytes| bytes.checked_add(pool_owner_bytes))
         .ok_or_else(native_coordinator_allocation_unavailable)?;
-    let minimum_result_owner_peak_bytes = projection
-        .available_queue_backing_bytes
+    let minimum_result_owner_peak_bytes = minimum_batch_owner_peak_bytes
         .checked_add(projection.worker_result_backing_bytes)
         .ok_or_else(native_coordinator_allocation_unavailable)?;
     Ok(NativeBuildProbabilityAdmissionRequest {
@@ -996,7 +1221,7 @@ fn admission_request(
         request_channel_capacity: NATIVE_BUILD_REQUEST_CHANNEL_CAPACITY,
         completion_channel_capacity: NATIVE_BUILD_COMPLETION_CHANNEL_CAPACITY,
         candidate_batch_capacity: NATIVE_BUILD_BATCH_CAPACITY,
-        known_coordinator_peak_bytes: projection.required_peak_bytes,
+        known_coordinator_peak_bytes,
         minimum_channel_control_bytes,
         minimum_batch_owner_peak_bytes,
         minimum_result_owner_peak_bytes,
@@ -1080,255 +1305,229 @@ fn pending_key(pending: &PendingDurableDelegation) -> DurableWorkerTaskKey {
     }
 }
 
-#[derive(Clone, Copy)]
-enum ExpectedWaveStage {
-    OfferAccepted,
-    Started,
-}
-
-fn receive_wave_stage(
-    receiver: &Receiver<DurableWorkerCompletion>,
-    pending: &[PendingDurableDelegation],
-    expected_stage: ExpectedWaveStage,
-) -> Result<Vec<(usize, DurableWorkerResult)>, CoreExecutionError> {
-    let mut expected = BTreeMap::new();
-    for item in pending {
-        if expected
-            .insert(pending_key(item), item.worker_index)
-            .is_some()
-        {
-            return Err(durable_runtime_unavailable(
-                "native_build_probability_duplicate_task_key",
-            ));
-        }
+#[allow(clippy::too_many_arguments)]
+fn submit_durable_delegation<J: DelegationJournal, C: NativeDurableClock>(
+    worker: &mut NativeBuildPoolWorker,
+    worker_index: usize,
+    executable: DurableWorkerExecutable,
+    sender: &SyncSender<DurableWorkerRequest>,
+    authority: &mut DurableDelegationAuthority<J>,
+    durable_identity: &NativeBuildProbabilityDurableIdentity,
+    budget: DelegationBudget,
+    ordinal: &mut u64,
+    maximum_task_count: usize,
+    live_tokens: &mut Vec<DelegationToken>,
+    sealed: &mut Vec<SealedDurableDelegation>,
+    clock: &C,
+) -> Result<(), CoreExecutionError> {
+    if !worker.is_ready() {
+        return Err(durable_runtime_unavailable(
+            "native_build_probability_worker_not_ready",
+        ));
     }
-    let mut received = Vec::new();
-    received
-        .try_reserve_exact(pending.len())
-        .map_err(|_| native_coordinator_allocation_unavailable())?;
-    while !expected.is_empty() {
-        let completion = receiver.recv().map_err(|_| {
+    reserve_durable_task_receipts(live_tokens, sealed, 1, maximum_task_count)?;
+    let candidate_count = match &executable {
+        DurableWorkerExecutable::Consume(batch) => batch.len(),
+        _ => 0,
+    };
+    let pending = prepare_durable_delegation(
+        authority,
+        durable_identity,
+        ordinal,
+        maximum_task_count,
+        worker_index,
+        u32::try_from(worker_index)
+            .ok()
+            .and_then(|value| value.checked_add(1))
+            .ok_or_else(|| {
+                durable_runtime_unavailable("native_build_probability_worker_identity_overflow")
+            })?,
+        executable,
+        budget,
+        clock,
+    )?;
+    live_tokens.push(pending.token.clone());
+    authority
+        .offered(&pending.token, clock.now_unix_ms())
+        .map_err(|_| {
+            durable_runtime_unavailable("native_build_probability_delegation_offer_failed")
+        })?;
+    sender
+        .send(DurableWorkerRequest::Offer(DurableWorkerOffer {
+            key: pending_key(&pending),
+            worker_id: pending.worker_id,
+        }))
+        .map_err(|_| {
             durable_runtime_unavailable("native_build_probability_worker_pool_unavailable")
         })?;
-        let result = completion
-            .result
-            .map_err(|reason| CoreExecutionError::Pc(reason.to_owned()))?;
-        let key = result.key();
-        let expected_worker = expected.remove(&key).ok_or_else(|| {
-            durable_runtime_unavailable("native_build_probability_unexpected_worker_ack")
-        })?;
-        if completion.worker_index != expected_worker {
-            return Err(durable_runtime_unavailable(
-                "native_build_probability_worker_ack_identity_mismatch",
-            ));
-        }
-        let stage_valid = match expected_stage {
-            ExpectedWaveStage::OfferAccepted => {
-                matches!(result, DurableWorkerResult::OfferAccepted(_))
-            }
-            ExpectedWaveStage::Started => matches!(result, DurableWorkerResult::Started(_)),
-        };
-        if !stage_valid {
-            return Err(durable_runtime_unavailable(
-                "native_build_probability_worker_ack_stage_invalid",
-            ));
-        }
-        received.push((completion.worker_index, result));
-    }
-    Ok(received)
+    worker.delegation = Some(ActiveDurableDelegation {
+        pending,
+        stage: DurableWorkerStage::Offered,
+        candidate_count,
+        last_heartbeat_unix_ms: clock.now_unix_ms(),
+    });
+    Ok(())
 }
 
-fn receive_final_wave_with_heartbeats<J: DelegationJournal, C: NativeDurableClock>(
-    receiver: &Receiver<DurableWorkerCompletion>,
-    pending: &[PendingDurableDelegation],
-    authority: &mut DurableDelegationAuthority<J>,
-    clock: &C,
-) -> Result<Vec<(usize, DurableWorkerResult)>, CoreExecutionError> {
-    let mut expected = BTreeMap::new();
-    for item in pending {
-        if expected
-            .insert(pending_key(item), item.worker_index)
-            .is_some()
-        {
-            return Err(durable_runtime_unavailable(
-                "native_build_probability_duplicate_task_key",
-            ));
-        }
-    }
-    let mut received = Vec::new();
-    received
-        .try_reserve_exact(pending.len())
-        .map_err(|_| native_coordinator_allocation_unavailable())?;
-    while !expected.is_empty() {
-        let completion =
-            match receiver.recv_timeout(Duration::from_millis(WORKER_HEARTBEAT_INTERVAL_MS)) {
-                Ok(completion) => completion,
-                Err(RecvTimeoutError::Timeout) => {
-                    let now = clock.now_unix_ms();
-                    for item in pending
-                        .iter()
-                        .filter(|item| expected.contains_key(&pending_key(item)))
-                    {
-                        authority.heartbeat(&item.token, now).map_err(|_| {
-                            durable_runtime_unavailable(
-                                "native_build_probability_worker_heartbeat_failed",
-                            )
-                        })?;
-                    }
-                    continue;
-                }
-                Err(RecvTimeoutError::Disconnected) => {
-                    return Err(durable_runtime_unavailable(
-                        "native_build_probability_worker_pool_unavailable",
-                    ))
-                }
-            };
-        let result = completion
-            .result
-            .map_err(|reason| CoreExecutionError::Pc(reason.to_owned()))?;
-        let key = result.key();
-        let expected_worker = expected.remove(&key).ok_or_else(|| {
-            durable_runtime_unavailable("native_build_probability_unexpected_worker_result")
-        })?;
-        if completion.worker_index != expected_worker {
-            return Err(durable_runtime_unavailable(
-                "native_build_probability_worker_result_identity_mismatch",
-            ));
-        }
-        let expected_operation = pending
-            .iter()
-            .find(|item| pending_key(item) == key)
-            .map(|item| item.operation);
-        if !matches!(
-            (&result, expected_operation),
-            (
-                DurableWorkerResult::Initialized(_),
-                Some(DurableWorkerOperationKind::Initialize)
-            ) | (
-                DurableWorkerResult::Consumed(_, _),
-                Some(DurableWorkerOperationKind::Consume)
-            ) | (
-                DurableWorkerResult::Finished(_, _),
-                Some(DurableWorkerOperationKind::Finish)
-            )
-        ) {
-            return Err(durable_runtime_unavailable(
-                "native_build_probability_worker_result_stage_invalid",
-            ));
-        }
-        received.push((completion.worker_index, result));
-    }
-    Ok(received)
-}
-
+/// Advance only the worker that replied. An outstanding offer, publication or
+/// slow Consume on another worker cannot hold this worker behind a wave barrier.
 #[allow(clippy::too_many_arguments)]
-fn execute_durable_wave<J: DelegationJournal, C: NativeDurableClock>(
+fn advance_durable_delegation<J: DelegationJournal, C: NativeDurableClock>(
+    worker: &mut NativeBuildPoolWorker,
+    completion: DurableWorkerCompletion,
+    sender: &SyncSender<DurableWorkerRequest>,
     authority: &mut DurableDelegationAuthority<J>,
     durable_identity: &NativeBuildProbabilityDurableIdentity,
     admitted_peak_bytes: u128,
-    request_senders: &[SyncSender<DurableWorkerRequest>],
-    completion_receiver: &Receiver<DurableWorkerCompletion>,
-    mut pending: Vec<PendingDurableDelegation>,
     sealed: &mut Vec<SealedDurableDelegation>,
     clock: &C,
-) -> Result<Vec<(usize, DurableWorkerResult)>, CoreExecutionError> {
-    for item in &pending {
-        authority
-            .offered(&item.token, clock.now_unix_ms())
-            .map_err(|_| {
-                durable_runtime_unavailable("native_build_probability_delegation_offer_failed")
-            })?;
-        request_senders[item.worker_index]
-            .send(DurableWorkerRequest::Offer(DurableWorkerOffer {
-                key: pending_key(item),
-                worker_id: item.worker_id,
-            }))
-            .map_err(|_| {
-                durable_runtime_unavailable("native_build_probability_worker_pool_unavailable")
-            })?;
+) -> Result<Option<DurableWorkerResult>, CoreExecutionError> {
+    let result = completion
+        .result
+        .map_err(|reason| CoreExecutionError::Pc(reason.to_owned()))?;
+    let mut active = worker.delegation.take().ok_or_else(|| {
+        durable_runtime_unavailable("native_build_probability_unexpected_worker_result")
+    })?;
+    let item = &mut active.pending;
+    if completion.worker_index != item.worker_index || result.key() != pending_key(item) {
+        return Err(durable_runtime_unavailable(
+            "native_build_probability_worker_result_identity_mismatch",
+        ));
     }
-    let _ = receive_wave_stage(
-        completion_receiver,
-        &pending,
-        ExpectedWaveStage::OfferAccepted,
-    )?;
-
-    for item in &mut pending {
-        authority
-            .accepted(
-                &item.token,
-                item.worker_id.to_string(),
-                worker_reservation_sha256(durable_identity, item.worker_id, admitted_peak_bytes),
-                clock.now_unix_ms(),
-            )
-            .map_err(|_| {
-                durable_runtime_unavailable("native_build_probability_delegation_accept_failed")
-            })?;
-        let permit = authority
-            .publish(&item.token, clock.now_unix_ms())
-            .map_err(|_| {
-                durable_runtime_unavailable("native_build_probability_delegation_publish_failed")
-            })?;
-        request_senders[item.worker_index]
-            .send(DurableWorkerRequest::Publish {
-                permit: compact_permit(permit)?,
-                observed_now_unix_ms: clock.now_unix_ms(),
-                executable: item.executable.take().ok_or_else(|| {
+    match (&result, active.stage) {
+        (DurableWorkerResult::OfferAccepted(_), DurableWorkerStage::Offered) => {
+            authority
+                .accepted(
+                    &item.token,
+                    item.worker_id.to_string(),
+                    worker_reservation_sha256(
+                        durable_identity,
+                        item.worker_id,
+                        admitted_peak_bytes,
+                    ),
+                    clock.now_unix_ms(),
+                )
+                .map_err(|_| {
+                    durable_runtime_unavailable("native_build_probability_delegation_accept_failed")
+                })?;
+            let permit = authority
+                .publish(&item.token, clock.now_unix_ms())
+                .map_err(|_| {
                     durable_runtime_unavailable(
-                        "native_build_probability_executable_payload_missing",
+                        "native_build_probability_delegation_publish_failed",
                     )
-                })?,
-            })
-            .map_err(|_| {
-                durable_runtime_unavailable("native_build_probability_worker_pool_unavailable")
-            })?;
+                })?;
+            sender
+                .send(DurableWorkerRequest::Publish {
+                    permit: compact_permit(permit)?,
+                    observed_now_unix_ms: clock.now_unix_ms(),
+                    executable: item.executable.take().ok_or_else(|| {
+                        durable_runtime_unavailable(
+                            "native_build_probability_executable_payload_missing",
+                        )
+                    })?,
+                })
+                .map_err(|_| {
+                    durable_runtime_unavailable("native_build_probability_worker_pool_unavailable")
+                })?;
+            active.stage = DurableWorkerStage::Published;
+        }
+        (DurableWorkerResult::Started(_), DurableWorkerStage::Published) => {
+            authority
+                .running(&item.token, clock.now_unix_ms())
+                .map_err(|_| {
+                    durable_runtime_unavailable(
+                        "native_build_probability_delegation_running_failed",
+                    )
+                })?;
+            sender
+                .send(DurableWorkerRequest::Run(pending_key(item)))
+                .map_err(|_| {
+                    durable_runtime_unavailable("native_build_probability_worker_pool_unavailable")
+                })?;
+            active.stage = DurableWorkerStage::Running;
+            active.last_heartbeat_unix_ms = clock.now_unix_ms();
+        }
+        (_, DurableWorkerStage::Running) => {
+            let valid = match (&result, item.operation) {
+                (DurableWorkerResult::Initialized(_), DurableWorkerOperationKind::Initialize) => {
+                    !worker.initialized
+                }
+                (DurableWorkerResult::Consumed(_, count), DurableWorkerOperationKind::Consume) => {
+                    worker.initialized && *count != 0 && *count == active.candidate_count
+                }
+                (DurableWorkerResult::Finished(_, _), DurableWorkerOperationKind::Finish) => {
+                    worker.initialized && !worker.finished
+                }
+                _ => false,
+            };
+            if !valid {
+                return Err(durable_runtime_unavailable(
+                    "native_build_probability_worker_result_stage_invalid",
+                ));
+            }
+            let result_sha256 = result_sha256_for_completion(item, &result)?;
+            authority
+                .result_sealed(
+                    &item.token,
+                    result_sha256.clone(),
+                    worker_reply_sha256(item, &result_sha256),
+                    clock.now_unix_ms(),
+                )
+                .map_err(|_| {
+                    durable_runtime_unavailable("native_build_probability_result_seal_failed")
+                })?;
+            sealed.push(SealedDurableDelegation {
+                token: item.token.clone(),
+                result_sha256,
+            });
+            match &result {
+                DurableWorkerResult::Initialized(_) => worker.initialized = true,
+                DurableWorkerResult::Consumed(_, _) => {
+                    worker.consumed_batches = worker.consumed_batches.saturating_add(1);
+                }
+                DurableWorkerResult::Finished(_, _) => worker.finished = true,
+                _ => unreachable!("validated terminal operation"),
+            }
+            return Ok(Some(result));
+        }
+        _ => {
+            return Err(durable_runtime_unavailable(
+                "native_build_probability_worker_ack_stage_invalid",
+            ))
+        }
     }
-    let _ = receive_wave_stage(completion_receiver, &pending, ExpectedWaveStage::Started)?;
+    worker.delegation = Some(active);
+    Ok(None)
+}
 
-    for item in &pending {
-        authority
-            .running(&item.token, clock.now_unix_ms())
-            .map_err(|_| {
-                durable_runtime_unavailable("native_build_probability_delegation_running_failed")
-            })?;
-        request_senders[item.worker_index]
-            .send(DurableWorkerRequest::Run(pending_key(item)))
-            .map_err(|_| {
-                durable_runtime_unavailable("native_build_probability_worker_pool_unavailable")
-            })?;
+fn heartbeat_running_delegations<J: DelegationJournal, C: NativeDurableClock>(
+    workers: &mut [NativeBuildPoolWorker],
+    authority: &mut DurableDelegationAuthority<J>,
+    clock: &C,
+) -> Result<(), CoreExecutionError> {
+    let now = clock.now_unix_ms();
+    for active in workers
+        .iter_mut()
+        .filter_map(|worker| worker.delegation.as_mut())
+    {
+        if active.stage == DurableWorkerStage::Running
+            && now.saturating_sub(active.last_heartbeat_unix_ms) >= WORKER_HEARTBEAT_INTERVAL_MS
+        {
+            authority
+                .heartbeat(&active.pending.token, now)
+                .map_err(|_| {
+                    durable_runtime_unavailable("native_build_probability_worker_heartbeat_failed")
+                })?;
+            active.last_heartbeat_unix_ms = now;
+        }
     }
-    let final_results =
-        receive_final_wave_with_heartbeats(completion_receiver, &pending, authority, clock)?;
-    for (_, result) in &final_results {
-        let key = result.key();
-        let item = pending
-            .iter()
-            .find(|item| pending_key(item) == key)
-            .ok_or_else(|| {
-                durable_runtime_unavailable("native_build_probability_result_identity_missing")
-            })?;
-        let result_sha256 = result_sha256_for_completion(item, result)?;
-        authority
-            .result_sealed(
-                &item.token,
-                result_sha256.clone(),
-                worker_reply_sha256(item, &result_sha256),
-                clock.now_unix_ms(),
-            )
-            .map_err(|_| {
-                durable_runtime_unavailable("native_build_probability_result_seal_failed")
-            })?;
-        sealed.push(SealedDurableDelegation {
-            token: item.token.clone(),
-            result_sha256,
-        });
-    }
-    Ok(final_results)
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
 fn drive_durable_build_probability<J: DelegationJournal, C: NativeDurableClock>(
-    producer: &mut WasmBuildProbabilityCandidateProducer,
+    producer: WasmBuildProbabilityCandidateProducer,
     authority: &mut DurableDelegationAuthority<J>,
     durable_identity: &NativeBuildProbabilityDurableIdentity,
     admitted_peak_bytes: u128,
@@ -1336,12 +1535,13 @@ fn drive_durable_build_probability<J: DelegationJournal, C: NativeDurableClock>(
     field: BuildProbabilityField,
     aggregation: BuildProbabilityAggregation,
     request_senders: &[SyncSender<DurableWorkerRequest>],
-    completion_receiver: &Receiver<DurableWorkerCompletion>,
+    completion_receiver: &Receiver<NativeBuildPoolCompletion>,
     control: &ExecutionControl,
     clock: &C,
     live_tokens: &mut Vec<DelegationToken>,
 ) -> Result<
     (
+        WasmBuildProbabilityCandidateProducer,
         NativeBuildProbabilityWorkerOutput,
         Vec<SealedDurableDelegation>,
     ),
@@ -1353,211 +1553,262 @@ fn drive_durable_build_probability<J: DelegationJournal, C: NativeDurableClock>(
     let budget = DelegationBudget::new(1, memory_bytes).ok_or_else(|| {
         durable_runtime_unavailable("native_build_probability_delegation_budget_invalid")
     })?;
-    let mut sealed = Vec::new();
-    let mut ordinal = 0_u64;
-
-    let mut initialize = Vec::new();
-    initialize
+    let mut workers = Vec::new();
+    workers
         .try_reserve_exact(request_senders.len())
         .map_err(|_| native_coordinator_allocation_unavailable())?;
-    reserve_durable_wave_receipts(
-        live_tokens,
-        &mut sealed,
-        request_senders.len(),
-        maximum_task_count,
-    )?;
-    for worker_index in 0..request_senders.len() {
-        let verifier = producer
-            .new_delegated_verifier(field, aggregation)
-            .map_err(WasmCpuSearchError::into_core_execution_error)?;
-        let pending = prepare_durable_delegation(
-            authority,
-            durable_identity,
-            &mut ordinal,
-            maximum_task_count,
-            worker_index,
-            u32::try_from(worker_index)
-                .ok()
-                .and_then(|value| value.checked_add(1))
-                .ok_or_else(|| {
-                    durable_runtime_unavailable("native_build_probability_worker_identity_overflow")
-                })?,
-            DurableWorkerExecutable::Initialize(verifier),
-            budget,
-            clock,
-        )?;
-        live_tokens.push(pending.token.clone());
-        initialize.push(pending);
-    }
-    let initialized = execute_durable_wave(
-        authority,
-        durable_identity,
-        admitted_peak_bytes,
-        request_senders,
-        completion_receiver,
-        initialize,
-        &mut sealed,
-        clock,
-    )?;
-    if initialized.len() != request_senders.len()
-        || initialized
-            .iter()
-            .any(|(_, result)| !matches!(result, DurableWorkerResult::Initialized(_)))
-    {
-        return Err(durable_runtime_unavailable(
-            "native_build_probability_initialize_wave_incomplete",
-        ));
-    }
-
+    workers.resize_with(request_senders.len(), NativeBuildPoolWorker::default);
+    let mut worker_results = Vec::new();
+    worker_results
+        .try_reserve_exact(request_senders.len())
+        .map_err(|_| native_coordinator_allocation_unavailable())?;
+    let mut producer = Some(Box::new(producer));
     let mut summary = None;
+    let mut sealed = Vec::new();
+    let mut ordinal = 0_u64;
     let mut emitted_candidates = 0_u64;
-    while summary.is_none() {
-        let mut wave = Vec::new();
-        wave.try_reserve_exact(request_senders.len())
-            .map_err(|_| native_coordinator_allocation_unavailable())?;
-        for worker_index in 0..request_senders.len() {
-            let mut batch = Vec::new();
-            batch
-                .try_reserve_exact(NATIVE_BUILD_BATCH_CAPACITY)
-                .map_err(|_| native_coordinator_allocation_unavailable())?;
-            while batch.len() < NATIVE_BUILD_BATCH_CAPACITY && summary.is_none() {
-                match producer
-                    .advance(control)
-                    .map_err(|reason| CoreExecutionError::Pc(reason.to_owned()))?
-                {
-                    WasmCandidateProducerAdvance::Pending => {}
-                    WasmCandidateProducerAdvance::Candidate(candidate) => batch.push(candidate),
-                    WasmCandidateProducerAdvance::Completed(completed) => summary = Some(completed),
-                    WasmCandidateProducerAdvance::Cancelled => {
-                        return Err(CoreExecutionError::Cancelled)
+    let mut next_completion = None;
+    loop {
+        if control.is_cancelled() {
+            return Err(CoreExecutionError::Cancelled);
+        }
+        heartbeat_running_delegations(&mut workers, authority, clock)?;
+        let completion = match next_completion.take() {
+            Some(completion) => Some(completion),
+            None => match completion_receiver.try_recv() {
+                Ok(completion) => Some(completion),
+                Err(TryRecvError::Empty) => None,
+                Err(TryRecvError::Disconnected) => {
+                    return Err(durable_runtime_unavailable(
+                        "native_build_probability_worker_pool_unavailable",
+                    ));
+                }
+            },
+        };
+        if let Some(completion) = completion {
+            match completion {
+                NativeBuildPoolCompletion::Produced {
+                    worker_index,
+                    result,
+                } => {
+                    let worker = workers.get_mut(worker_index).ok_or_else(|| {
+                        durable_runtime_unavailable(
+                            "native_build_probability_worker_result_identity_mismatch",
+                        )
+                    })?;
+                    if !worker.producing || producer.is_some() || worker.queued_batch.is_some() {
+                        return Err(durable_runtime_unavailable(
+                            "native_build_probability_producer_result_repeated",
+                        ));
+                    }
+                    let produced = result?;
+                    worker.producing = false;
+                    producer = Some(produced.producer);
+                    if let Some(completed) = produced.summary {
+                        if summary.replace(completed).is_some() {
+                            return Err(durable_runtime_unavailable(
+                                "native_build_probability_geometry_summary_repeated",
+                            ));
+                        }
+                    }
+                    if !produced.batch.is_empty() {
+                        emitted_candidates =
+                            emitted_candidates.saturating_add(produced.batch.len() as u64);
+                        control.report_progress(
+                            "build-probability-candidates",
+                            emitted_candidates,
+                            None,
+                        );
+                        worker.queued_batch = Some(produced.batch);
+                    }
+                    if let Some(verifier) = produced.verifier {
+                        submit_durable_delegation(
+                            worker,
+                            worker_index,
+                            DurableWorkerExecutable::Initialize(verifier),
+                            &request_senders[worker_index],
+                            authority,
+                            durable_identity,
+                            budget,
+                            &mut ordinal,
+                            maximum_task_count,
+                            live_tokens,
+                            &mut sealed,
+                            clock,
+                        )?;
+                    } else if !worker.initialized {
+                        return Err(durable_runtime_unavailable(
+                            "native_build_probability_worker_initialization_missing",
+                        ));
+                    }
+                }
+                NativeBuildPoolCompletion::Delegated(completion) => {
+                    let worker_index = completion.worker_index;
+                    let worker = workers.get_mut(worker_index).ok_or_else(|| {
+                        durable_runtime_unavailable(
+                            "native_build_probability_worker_result_identity_mismatch",
+                        )
+                    })?;
+                    if let Some(DurableWorkerResult::Finished(_, results)) =
+                        advance_durable_delegation(
+                            worker,
+                            completion,
+                            &request_senders[worker_index],
+                            authority,
+                            durable_identity,
+                            admitted_peak_bytes,
+                            &mut sealed,
+                            clock,
+                        )?
+                    {
+                        worker_results.push((worker_index, results));
+                        let producer = producer.as_ref().ok_or_else(|| {
+                            durable_runtime_unavailable(
+                                "native_build_probability_finish_before_source_return",
+                            )
+                        })?;
+                        let retained = super::checked_worker_results_memory(
+                            &worker_results,
+                            worker_results.capacity(),
+                        )
+                        .and_then(|(container, payload)| container.checked_add(payload))
+                        .and_then(|bytes| {
+                            bytes.checked_add(
+                                core::mem::size_of::<WasmDistributedGeometrySummary>() as u128,
+                            )
+                        })
+                        .unwrap_or(u128::MAX);
+                        producer
+                            .validate_external_result_memory(retained)
+                            .map_err(WasmCpuSearchError::into_core_execution_error)?;
                     }
                 }
             }
-            if !batch.is_empty() {
-                let count = batch.len();
-                reserve_durable_wave_receipts(live_tokens, &mut sealed, 1, maximum_task_count)?;
-                let pending = prepare_durable_delegation(
-                    authority,
-                    durable_identity,
-                    &mut ordinal,
-                    maximum_task_count,
-                    worker_index,
-                    u32::try_from(worker_index)
-                        .ok()
-                        .and_then(|value| value.checked_add(1))
-                        .ok_or_else(|| {
-                            durable_runtime_unavailable(
-                                "native_build_probability_worker_identity_overflow",
-                            )
-                        })?,
-                    DurableWorkerExecutable::Consume(batch),
-                    budget,
-                    clock,
-                )?;
-                live_tokens.push(pending.token.clone());
-                wave.push(pending);
-                emitted_candidates = emitted_candidates.saturating_add(count as u64);
-                control.report_progress("build-probability-candidates", emitted_candidates, None);
-            }
-            if summary.is_some() {
-                break;
+        }
+
+        // A worker owns at most one batch across source output, pending durable
+        // publication and running Consume. Never prefetch a second batch into
+        // the one-slot request channel behind a busy verifier.
+        for (worker_index, worker) in workers.iter_mut().enumerate() {
+            if worker.is_ready() && worker.initialized {
+                if let Some(batch) = worker.queued_batch.take() {
+                    submit_durable_delegation(
+                        worker,
+                        worker_index,
+                        DurableWorkerExecutable::Consume(batch),
+                        &request_senders[worker_index],
+                        authority,
+                        durable_identity,
+                        budget,
+                        &mut ordinal,
+                        maximum_task_count,
+                        live_tokens,
+                        &mut sealed,
+                        clock,
+                    )?;
+                }
             }
         }
-        if wave.is_empty() {
-            if summary.is_some() {
-                break;
+
+        // Production is an ordinary pool job with a unique movable owner. Its
+        // former worker can consume this batch while another ready worker
+        // produces the next one; the manager never runs geometry or verification.
+        if producer.is_some() {
+            let available = workers
+                .iter()
+                .position(|worker| {
+                    worker.is_ready() && worker.queued_batch.is_none() && !worker.initialized
+                })
+                .or_else(|| {
+                    summary
+                        .is_none()
+                        .then(|| {
+                            workers.iter().position(|worker| {
+                                worker.is_ready() && worker.queued_batch.is_none()
+                            })
+                        })
+                        .flatten()
+                });
+            if let Some(worker_index) = available {
+                let worker = &mut workers[worker_index];
+                request_senders[worker_index]
+                    .send(DurableWorkerRequest::Produce {
+                        producer: producer.take().expect("unique available source owner"),
+                        field,
+                        aggregation,
+                        initialize: !worker.initialized,
+                        batch_capacity: if summary.is_some() {
+                            0
+                        } else {
+                            worker.next_batch_capacity()
+                        },
+                    })
+                    .map_err(|_| {
+                        durable_runtime_unavailable(
+                            "native_build_probability_worker_pool_unavailable",
+                        )
+                    })?;
+                worker.producing = true;
             }
+        }
+
+        // Once every replica has initialized and the source has completed, any
+        // ready verifier can finish independently of slower Consume operations.
+        if summary.is_some() && workers.iter().all(|worker| worker.initialized) {
+            for (worker_index, worker) in workers.iter_mut().enumerate() {
+                if worker.is_ready() && worker.queued_batch.is_none() {
+                    submit_durable_delegation(
+                        worker,
+                        worker_index,
+                        DurableWorkerExecutable::Finish,
+                        &request_senders[worker_index],
+                        authority,
+                        durable_identity,
+                        budget,
+                        &mut ordinal,
+                        maximum_task_count,
+                        live_tokens,
+                        &mut sealed,
+                        clock,
+                    )?;
+                }
+            }
+        }
+        if worker_results.len() == workers.len() {
+            worker_results.sort_unstable_by_key(|(worker_index, _)| *worker_index);
+            return Ok((
+                *producer.ok_or_else(|| {
+                    durable_runtime_unavailable("native_build_probability_producer_owner_missing")
+                })?,
+                NativeBuildProbabilityWorkerOutput {
+                    summary: summary.ok_or_else(|| {
+                        durable_runtime_unavailable(
+                            "native_build_probability_worker_geometry_summary_missing",
+                        )
+                    })?,
+                    worker_results,
+                },
+                sealed,
+            ));
+        }
+        if workers
+            .iter()
+            .all(|worker| !worker.producing && worker.delegation.is_none())
+        {
             return Err(durable_runtime_unavailable(
                 "native_build_probability_worker_pool_stalled",
             ));
         }
-        let consumed = execute_durable_wave(
-            authority,
-            durable_identity,
-            admitted_peak_bytes,
-            request_senders,
-            completion_receiver,
-            wave,
-            &mut sealed,
-            clock,
-        )?;
-        if consumed.iter().any(
-            |(_, result)| !matches!(result, DurableWorkerResult::Consumed(_, count) if *count != 0),
-        ) {
-            return Err(durable_runtime_unavailable(
-                "native_build_probability_consume_wave_invalid",
-            ));
-        }
-    }
-
-    reserve_durable_wave_receipts(
-        live_tokens,
-        &mut sealed,
-        request_senders.len(),
-        maximum_task_count,
-    )?;
-    let mut finish = Vec::new();
-    finish
-        .try_reserve_exact(request_senders.len())
-        .map_err(|_| native_coordinator_allocation_unavailable())?;
-    for worker_index in 0..request_senders.len() {
-        let pending = prepare_durable_delegation(
-            authority,
-            durable_identity,
-            &mut ordinal,
-            maximum_task_count,
-            worker_index,
-            u32::try_from(worker_index)
-                .ok()
-                .and_then(|value| value.checked_add(1))
-                .ok_or_else(|| {
-                    durable_runtime_unavailable("native_build_probability_worker_identity_overflow")
-                })?,
-            DurableWorkerExecutable::Finish,
-            budget,
-            clock,
-        )?;
-        live_tokens.push(pending.token.clone());
-        finish.push(pending);
-    }
-    let mut finished = execute_durable_wave(
-        authority,
-        durable_identity,
-        admitted_peak_bytes,
-        request_senders,
-        completion_receiver,
-        finish,
-        &mut sealed,
-        clock,
-    )?;
-    finished.sort_unstable_by_key(|(worker_index, _)| *worker_index);
-    let mut worker_results = Vec::new();
-    worker_results
-        .try_reserve_exact(finished.len())
-        .map_err(|_| native_coordinator_allocation_unavailable())?;
-    for (worker_index, result) in finished {
-        match result {
-            DurableWorkerResult::Finished(_, results) => {
-                worker_results.push((worker_index, results))
-            }
-            _ => {
+        next_completion = match completion_receiver.recv_timeout(Duration::from_millis(25)) {
+            Ok(completion) => Some(completion),
+            Err(RecvTimeoutError::Timeout) => None,
+            Err(RecvTimeoutError::Disconnected) => {
                 return Err(durable_runtime_unavailable(
-                    "native_build_probability_finish_wave_invalid",
+                    "native_build_probability_worker_pool_unavailable",
                 ))
             }
-        }
+        };
     }
-    Ok((
-        NativeBuildProbabilityWorkerOutput {
-            summary: summary.ok_or_else(|| {
-                durable_runtime_unavailable(
-                    "native_build_probability_worker_geometry_summary_missing",
-                )
-            })?,
-            worker_results,
-        },
-        sealed,
-    ))
 }
 
 fn fail_all_live_delegations<J: DelegationJournal, C: NativeDurableClock>(
@@ -1607,6 +1858,55 @@ pub(crate) fn run_provider_admitted_native_build_probability<
     admission_provider: &P,
     clock: &C,
 ) -> Result<NativeBuildProbabilityExecutionOutput, CoreExecutionError> {
+    let owned_control = control
+        .clone()
+        .with_parallelism_if_unbound(requested_workers.max(1));
+    if owned_control.parallelism() != requested_workers.max(1) {
+        return Err(durable_runtime_unavailable(
+            "native_build_probability_pool_compute_budget_mismatch",
+        ));
+    }
+    with_compute_coordinator(&owned_control, || {
+        run_provider_admitted_native_build_probability_coordinator(
+            service,
+            problem,
+            field,
+            aggregation,
+            finesse_metric,
+            finesse_pattern_knowledge,
+            solution_probability_policy,
+            requested_workers,
+            retain_private_score_authority,
+            &owned_control,
+            durable_identity,
+            authority,
+            admission_provider,
+            clock,
+        )
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_provider_admitted_native_build_probability_coordinator<
+    J: DelegationJournal,
+    P: NativeBuildProbabilityAdmissionProvider + ?Sized,
+    C: NativeDurableClock,
+>(
+    service: AppCoreExecutorService,
+    problem: &SearchProblem,
+    field: BuildProbabilityField,
+    aggregation: BuildProbabilityAggregation,
+    finesse_metric: FinesseMetric,
+    finesse_pattern_knowledge: FinessePatternKnowledge,
+    solution_probability_policy: BuildSolutionProbabilityPolicy,
+    requested_workers: usize,
+    retain_private_score_authority: bool,
+    control: &ExecutionControl,
+    durable_identity: &NativeBuildProbabilityDurableIdentity,
+    authority: &mut DurableDelegationAuthority<J>,
+    admission_provider: &P,
+    clock: &C,
+) -> Result<NativeBuildProbabilityExecutionOutput, CoreExecutionError> {
     let expected_request_sha256 = canonical_native_build_probability_request_sha256(
         problem,
         field,
@@ -1624,8 +1924,8 @@ pub(crate) fn run_provider_admitted_native_build_probability<
     let request_sha256 = parse_sha256(&expected_request_sha256).ok_or_else(|| {
         durable_runtime_unavailable("native_build_probability_request_digest_invalid")
     })?;
-    let total_workers = requested_workers.max(2);
-    let worker_threads = total_workers.saturating_sub(1).max(1);
+    let total_workers = requested_workers.max(1);
+    let worker_threads = total_workers;
     let admission_request = admission_request(problem, field, worker_threads)?;
     let provider_measurement = admission_provider
         .admit_native_build_probability(admission_request)
@@ -1639,19 +1939,21 @@ pub(crate) fn run_provider_admitted_native_build_probability<
         durable_runtime_unavailable("native_build_probability_provider_admission_mismatch")
     })?;
     let admitted_peak_bytes = provider_authority.admitted_peak_bytes();
-    let producer = WasmBuildProbabilityCandidateProducer::new_with_finesse_and_verifiers_typed(
-        problem,
-        field,
-        aggregation,
-        finesse_metric,
-        finesse_pattern_knowledge,
-        worker_threads,
-        admitted_peak_bytes,
-    )
-    .map_err(WasmCpuSearchError::into_core_execution_error)?;
+    let producer = run_native_build_compute(control, || {
+        WasmBuildProbabilityCandidateProducer::new_with_finesse_for_native_pool_typed(
+            problem,
+            field,
+            aggregation,
+            finesse_metric,
+            finesse_pattern_knowledge,
+            admitted_peak_bytes,
+            control,
+        )
+        .map_err(WasmCpuSearchError::into_core_execution_error)
+    })?;
 
     let (completion_sender, completion_receiver) =
-        mpsc::sync_channel::<DurableWorkerCompletion>(NATIVE_BUILD_COMPLETION_CHANNEL_CAPACITY);
+        mpsc::sync_channel::<NativeBuildPoolCompletion>(NATIVE_BUILD_COMPLETION_CHANNEL_CAPACITY);
     let mut request_senders = Vec::new();
     request_senders
         .try_reserve_exact(worker_threads)
@@ -1703,10 +2005,9 @@ pub(crate) fn run_provider_admitted_native_build_probability<
     }
     drop(completion_sender);
 
-    let mut producer = producer;
     let mut live_tokens = Vec::new();
     let drive_result = drive_durable_build_probability(
-        &mut producer,
+        producer,
         authority,
         durable_identity,
         admitted_peak_bytes,
@@ -1719,10 +2020,13 @@ pub(crate) fn run_provider_admitted_native_build_probability<
         clock,
         &mut live_tokens,
     );
+    if drive_result.is_err() {
+        control.cancellation.handle().cancel();
+    }
     drop(request_senders);
     drop(completion_receiver);
     let join_result = join_workers(handles);
-    let (worker_output, sealed) = match (drive_result, join_result) {
+    let (producer, worker_output, sealed) = match (drive_result, join_result) {
         (Ok(output), Ok(())) => output,
         (Err(error), _) => {
             fail_all_live_delegations(
@@ -1755,15 +2059,17 @@ pub(crate) fn run_provider_admitted_native_build_probability<
         ));
     }
 
-    let result = match finish_native_build_probability(
-        service,
-        producer,
-        worker_output,
-        solution_probability_policy,
-        total_workers,
-        control,
-        retain_private_score_authority,
-    ) {
+    let result = match run_native_build_compute(control, || {
+        finish_native_build_probability(
+            service,
+            producer,
+            worker_output,
+            solution_probability_policy,
+            total_workers,
+            control,
+            retain_private_score_authority,
+        )
+    }) {
         Ok(result) => result,
         Err(error) => {
             fail_all_live_delegations(
@@ -1824,7 +2130,7 @@ pub(crate) fn run_provider_admitted_native_build_probability<
 
 #[cfg(test)]
 mod tests {
-    use std::cell::Cell;
+    use std::{cell::Cell, collections::BTreeMap};
 
     use clearra_core_domain::piece::piece_kind::PieceKind;
     use clearra_core_executor::resource::MemoryDelegationJournal;
@@ -1937,6 +2243,294 @@ mod tests {
         assert!(reserve_durable_task_slots(&mut tokens, 1, 0).is_err());
     }
 
+    #[test]
+    fn native_pool_batches_grow_within_the_admitted_owner_bound() {
+        let mut worker = NativeBuildPoolWorker::default();
+        for expected in [32, 64, 128, 256, 256] {
+            assert_eq!(worker.next_batch_capacity(), expected);
+            worker.consumed_batches += 1;
+        }
+        worker.consumed_batches = usize::MAX;
+        assert_eq!(worker.next_batch_capacity(), 256);
+        for workers in [1, 2, 4, 8] {
+            let request = admission_request(&one_piece_problem(workers), field(), workers)
+                .expect("bounded pool admission");
+            let reference = NativeCoordinatorMemoryProjection::checked(field(), workers).unwrap();
+            assert_eq!(request.worker_count(), workers);
+            assert_eq!(request.candidate_batch_capacity(), 256);
+            assert!(
+                request.known_coordinator_peak_bytes()
+                    >= reference.required_peak_bytes
+                        + (workers * core::mem::size_of::<NativeBuildPoolWorker>()) as u128
+                        + core::mem::size_of::<WasmBuildProbabilityCandidateProducer>() as u128
+                        + reference.worker_result_backing_bytes
+            );
+            // Results may arrive while another worker still owns its maximum
+            // batch; these allocations must be admitted together.
+            assert!(
+                request.minimum_result_owner_peak_bytes()
+                    >= request.minimum_batch_owner_peak_bytes()
+                        + reference.worker_result_backing_bytes
+            );
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn complete_scripted_consume(
+        workers: &mut [NativeBuildPoolWorker],
+        worker_index: usize,
+        senders: &[SyncSender<DurableWorkerRequest>],
+        receivers: &[Receiver<DurableWorkerRequest>],
+        authority: &mut DurableDelegationAuthority<MemoryDelegationJournal>,
+        identity: &NativeBuildProbabilityDurableIdentity,
+        sealed: &mut Vec<SealedDurableDelegation>,
+        clock: &StepClock,
+    ) -> DelegationToken {
+        let token = workers[worker_index]
+            .delegation
+            .as_ref()
+            .unwrap()
+            .pending
+            .token
+            .clone();
+        let DurableWorkerRequest::Offer(offer) = receivers[worker_index].try_recv().unwrap() else {
+            panic!("worker must receive the durable offer first")
+        };
+        for result in [
+            DurableWorkerResult::OfferAccepted(offer.key),
+            DurableWorkerResult::Started(offer.key),
+        ] {
+            assert!(advance_durable_delegation(
+                &mut workers[worker_index],
+                DurableWorkerCompletion {
+                    worker_index,
+                    result: Ok(result)
+                },
+                &senders[worker_index],
+                authority,
+                identity,
+                4096,
+                sealed,
+                clock,
+            )
+            .unwrap()
+            .is_none());
+            match receivers[worker_index].try_recv().unwrap() {
+                DurableWorkerRequest::Publish {
+                    permit, executable, ..
+                } => {
+                    assert_eq!(permit.worker_id, offer.worker_id);
+                    assert!(matches!(executable, DurableWorkerExecutable::Consume(_)));
+                }
+                DurableWorkerRequest::Run(key) => assert_eq!(key, offer.key),
+                _ => panic!("only the acknowledged worker may advance"),
+            }
+        }
+        assert!(matches!(
+            advance_durable_delegation(
+                &mut workers[worker_index],
+                DurableWorkerCompletion {
+                    worker_index,
+                    result: Ok(DurableWorkerResult::Consumed(offer.key, 1))
+                },
+                &senders[worker_index],
+                authority,
+                identity,
+                4096,
+                sealed,
+                clock,
+            )
+            .unwrap(),
+            Some(DurableWorkerResult::Consumed(_, 1))
+        ));
+        token
+    }
+
+    #[test]
+    fn ready_worker_advances_and_takes_another_batch_before_a_slow_worker_accepts() {
+        let problem = one_piece_problem(2);
+        let identity = durable_identity(&problem, 2, BuildSolutionProbabilityPolicy::Omit);
+        let mut authority =
+            DurableDelegationAuthority::recover(MemoryDelegationJournal::default()).unwrap();
+        let clock = StepClock::new();
+        let mut workers = [
+            NativeBuildPoolWorker {
+                initialized: true,
+                ..Default::default()
+            },
+            NativeBuildPoolWorker {
+                initialized: true,
+                ..Default::default()
+            },
+        ];
+        let (senders, receivers): (Vec<_>, Vec<_>) = (0..2)
+            .map(|_| mpsc::sync_channel(NATIVE_BUILD_REQUEST_CHANNEL_CAPACITY))
+            .unzip();
+        let mut ordinal = 0;
+        let mut live_tokens = Vec::new();
+        let mut sealed = Vec::new();
+        let budget = DelegationBudget::new(1, 4096).unwrap();
+        for index in [0, 1] {
+            submit_durable_delegation(
+                &mut workers[index],
+                index,
+                DurableWorkerExecutable::Consume(vec![WasmCandidatePacket::new(
+                    index as u64,
+                    0,
+                    vec![1],
+                )]),
+                &senders[index],
+                &mut authority,
+                &identity,
+                budget,
+                &mut ordinal,
+                0,
+                &mut live_tokens,
+                &mut sealed,
+                &clock,
+            )
+            .unwrap();
+        }
+        let slow = live_tokens[0].clone();
+        let first_ready = complete_scripted_consume(
+            &mut workers,
+            1,
+            &senders,
+            &receivers,
+            &mut authority,
+            &identity,
+            &mut sealed,
+            &clock,
+        );
+        assert!(workers[1].is_ready());
+        assert_eq!(authority.phase(&slow).unwrap(), DelegationPhase::Offered);
+        submit_durable_delegation(
+            &mut workers[1],
+            1,
+            DurableWorkerExecutable::Consume(vec![WasmCandidatePacket::new(2, 0, vec![1])]),
+            &senders[1],
+            &mut authority,
+            &identity,
+            budget,
+            &mut ordinal,
+            0,
+            &mut live_tokens,
+            &mut sealed,
+            &clock,
+        )
+        .unwrap();
+        let second_ready = complete_scripted_consume(
+            &mut workers,
+            1,
+            &senders,
+            &receivers,
+            &mut authority,
+            &identity,
+            &mut sealed,
+            &clock,
+        );
+        assert_eq!(authority.phase(&slow).unwrap(), DelegationPhase::Offered);
+        complete_scripted_consume(
+            &mut workers,
+            0,
+            &senders,
+            &receivers,
+            &mut authority,
+            &identity,
+            &mut sealed,
+            &clock,
+        );
+        assert_eq!(ordinal, 3);
+        assert_eq!(live_tokens.len(), sealed.len());
+        assert_eq!(sealed[0].token, first_ready);
+        assert_eq!(sealed[1].token, second_ready);
+        assert_eq!(sealed[2].token, slow);
+        // Out-of-order sealing still permits exactly one application per task.
+        for result in &sealed {
+            assert_eq!(
+                authority
+                    .result_application_decision(&result.token, &result.result_sha256)
+                    .unwrap(),
+                ResultApplicationDecision::ApplyOnce
+            );
+            authority
+                .result_applied(&result.token, clock.now_unix_ms())
+                .unwrap();
+            assert_eq!(
+                authority
+                    .result_application_decision(&result.token, &result.result_sha256)
+                    .unwrap(),
+                ResultApplicationDecision::AlreadyApplied
+            );
+            authority
+                .complete(&result.token, clock.now_unix_ms())
+                .unwrap();
+        }
+        let journal_len = authority.journal().records().len();
+        let repeated_key = DurableWorkerTaskKey {
+            task_id_sha256: sha256_text(&second_ready.task_id),
+            fencing_token: second_ready.fencing_token,
+        };
+        assert!(advance_durable_delegation(
+            &mut workers[1],
+            DurableWorkerCompletion {
+                worker_index: 1,
+                result: Ok(DurableWorkerResult::Consumed(repeated_key, 1))
+            },
+            &senders[1],
+            &mut authority,
+            &identity,
+            4096,
+            &mut sealed,
+            &clock,
+        )
+        .is_err());
+        assert_eq!(authority.journal().records().len(), journal_len);
+    }
+
+    #[test]
+    fn completed_source_slot_can_join_all_compute_workers_without_overflow() {
+        use std::sync::{Arc, Barrier};
+        for count in [1, 2, 4] {
+            let control = ExecutionControl::default().with_parallelism(count);
+            let started = Arc::new(Barrier::new(count + 1));
+            let release = Arc::new(Barrier::new(count + 1));
+            thread::scope(|scope| {
+                for index in 0..count {
+                    let started = started.clone();
+                    let release = release.clone();
+                    let control = &control;
+                    scope.spawn(move || {
+                        if index == 0 {
+                            // A completed Produce job returns its slot. The same
+                            // worker can then enter Consume with all N peers.
+                            with_durable_compute(control, || Ok(())).unwrap();
+                        }
+                        with_durable_compute(control, || {
+                            started.wait();
+                            release.wait();
+                            Ok(())
+                        })
+                        .unwrap();
+                    });
+                }
+                started.wait();
+                assert!(control.compute_budget().try_acquire_worker().is_none());
+                release.wait();
+            });
+            let permits: Vec<_> = (0..count)
+                .map(|_| {
+                    control
+                        .compute_budget()
+                        .try_acquire_worker()
+                        .expect("returned pool slot")
+                })
+                .collect();
+            assert!(control.compute_budget().try_acquire_worker().is_none());
+            drop(permits);
+        }
+    }
+
     fn durable_identity(
         problem: &SearchProblem,
         requested_workers: usize,
@@ -2040,7 +2634,7 @@ mod tests {
                     | DelegationPhase::ResultApplied
                     | DelegationPhase::Completed
             ) {
-                assert_eq!(event.worker_id.as_deref(), Some("1"));
+                assert!(matches!(event.worker_id.as_deref(), Some("1" | "2")));
             }
             if matches!(
                 event.phase,
@@ -2074,14 +2668,14 @@ mod tests {
                 .keys()
                 .filter(|task| task.ends_with(":initialize"))
                 .count(),
-            1
+            2
         );
         assert_eq!(
             phases_by_task
                 .keys()
                 .filter(|task| task.ends_with(":finish"))
                 .count(),
-            1
+            2
         );
         assert!(phases_by_task.keys().any(|task| task.ends_with(":consume")));
         assert!(phases_by_task.values().all(|phases| phases == &expected));

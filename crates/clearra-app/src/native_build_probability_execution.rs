@@ -9,7 +9,10 @@ use std::{
 #[cfg(test)]
 use std::{sync::mpsc, thread};
 
-use clearra_core_domain::execution_cancellation::ExecutionControl;
+use clearra_core_domain::{
+    execution_cancellation::ExecutionControl,
+    parallel_work::{with_compute_coordinator, with_compute_worker},
+};
 use clearra_core_executor::{
     core_execution_result::CoreResultFieldReplacementError, CoreExecutionError,
     CoreExecutionResult, WasmBuildProbabilityCandidateProducer,
@@ -32,11 +35,39 @@ pub(crate) mod host_runtime;
 #[path = "native_build_probability_system_provider.rs"]
 mod system_provider;
 
-const NATIVE_BUILD_BATCH_CAPACITY: usize = 32;
+const NATIVE_BUILD_INITIAL_BATCH_CAPACITY: usize = 32;
+const NATIVE_BUILD_BATCH_CAPACITY: usize = 256;
 const NATIVE_BUILD_WORKER_STACK_BYTES: usize = 1024 * 1024;
 const NATIVE_BUILD_WORKER_THREAD_NAME_PREFIX: &str = "clearra-finesse-build-";
 const NATIVE_BUILD_REQUEST_CHANNEL_CAPACITY: usize = 1;
 const NATIVE_BUILD_COMPLETION_CHANNEL_CAPACITY: usize = 0;
+
+/// Preparation and terminal reduction have one owner, just like a pool job.
+/// The caller only waits; even a bound outer worker suspends its permit while
+/// managing this child. These short stages do not overlap the persistent pool.
+fn run_native_build_compute<T: Send>(
+    control: &ExecutionControl,
+    work: impl FnOnce() -> Result<T, CoreExecutionError> + Send,
+) -> Result<T, CoreExecutionError> {
+    with_compute_coordinator(control, || {
+        let permit = control
+            .compute_budget()
+            .acquire_worker(&control.cancellation)
+            .ok_or(CoreExecutionError::Cancelled)?;
+        std::thread::scope(|scope| {
+            std::thread::Builder::new()
+                .stack_size(NATIVE_BUILD_WORKER_STACK_BYTES)
+                .spawn_scoped(scope, move || with_compute_worker(permit, work))
+                .map_err(|_| CoreExecutionError::RuntimeUnavailable {
+                    component: "native_build_probability_compute_worker_unavailable",
+                })?
+                .join()
+                .map_err(|_| CoreExecutionError::RuntimeUnavailable {
+                    component: "native_build_probability_compute_worker_panicked",
+                })?
+        })
+    })
+}
 
 // The direct native coordinator remains compiled in non-test builds as the
 // reference implementation for admission parity, while production delegates
@@ -932,6 +963,37 @@ mod tests {
 
     use super::*;
     use crate::{AppStatus, BuildProbabilityAppCommand, BuildProbabilityResultMode};
+
+    #[test]
+    fn native_build_preparation_and_reduction_leave_the_caller_control_only() {
+        let control = ExecutionControl::default().with_parallelism(2);
+        let caller = thread::current().id();
+        let outer = control
+            .compute_budget()
+            .acquire_worker(&control.cancellation)
+            .unwrap();
+        with_compute_worker(outer, || {
+            run_native_build_compute(&control, || {
+                assert_ne!(thread::current().id(), caller);
+                let spare = control
+                    .compute_budget()
+                    .try_acquire_worker()
+                    .expect("the managing caller suspended its original permit");
+                assert!(control.compute_budget().try_acquire_worker().is_none());
+                drop(spare);
+                Ok(())
+            })
+            .unwrap();
+            let spare = control.compute_budget().try_acquire_worker().unwrap();
+            assert!(control.compute_budget().try_acquire_worker().is_none());
+            drop(spare);
+        });
+        let returned: Vec<_> = (0..2)
+            .map(|_| control.compute_budget().try_acquire_worker().unwrap())
+            .collect();
+        assert!(control.compute_budget().try_acquire_worker().is_none());
+        drop(returned);
+    }
 
     #[test]
     fn join_workers_waits_for_every_sibling_after_a_panic() {
