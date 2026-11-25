@@ -1572,9 +1572,16 @@ impl WebCommandRequest {
             } else {
                 BoundaryRecoveryAppCommand::new(query)
             };
-            return self.attach_product_capability_contract(AppRequest::new(
-                AppCommand::BoundaryRecovery(command),
-            ));
+            let workers = u16::try_from(self.resolved_worker_budget()).map_err(|_| {
+                WebCommandError::new(
+                    WebCommandErrorCode::InvalidValue,
+                    "boundary recovery worker budget exceeds u16",
+                )
+            })?;
+            return self.attach_product_capability_contract(
+                AppRequest::new(AppCommand::BoundaryRecovery(command))
+                    .with_resource_budget(ResourceBudget::new(workers, None, None)),
+            );
         }
         if matches!(self.command_kind.as_str(), "damage" | "spin-finder" | "ren") {
             let query = self.forward_search.clone().ok_or_else(|| {
@@ -2159,5 +2166,66 @@ impl WebCommandRequest {
                 | RequestedSearchBackend::Gpu
                 | RequestedSearchBackend::Hybrid
         )
+    }
+}
+
+#[cfg(test)]
+mod boundary_recovery_worker_budget_tests {
+    use clearra_core_domain::board::standard_pc_board::Board256Mask;
+    use clearra_forward_search::EarlyPlacementPolicy;
+    use clearra_rules::profile::rule_profile::RuleProfileId;
+    use clearra_scoring::profile::SpinProfileId;
+
+    use super::*;
+
+    fn query() -> BoundaryRecoveryQuery {
+        BoundaryRecoveryQuery {
+            initial_board: Board256Mask::from_words([0x3f0, 0, 0, 0]),
+            stage_one_target: Board256Mask::EMPTY,
+            final_board: Board256Mask::from_words([0xf, 0, 0, 0]),
+            height: 4,
+            queue: vec![PieceKind::I, PieceKind::I],
+            stage_one_queue_len: 1,
+            required_placements: Some(2),
+            placement_role_masks: Vec::new(),
+            placement_role_pieces: Vec::new(),
+            max_early_placements: None,
+            early_placement: EarlyPlacementPolicy::AnyStageTwoRole,
+            hold_enabled: false,
+            rule_profile: RuleProfileId::SrsPlus,
+            spin_profile: SpinProfileId::TSpins,
+            preserve_b2b_by_stage: [false; 2],
+            preserve_b2b_bag_mask: 0,
+            initial_b2b: false,
+            max_states: None,
+        }
+    }
+
+    #[test]
+    fn fixed_and_pattern_recovery_preserve_auto_all_and_explicit_worker_budgets() {
+        for patterned in [false, true] {
+            let request = if patterned {
+                WebCommandRequest::boundary_recovery_pattern(query(), "II".to_owned(), None, None)
+            } else {
+                WebCommandRequest::boundary_recovery(query())
+            }
+            .with_worker_hardware_limit(8);
+            let budget = |request: WebCommandRequest| {
+                usize::from(
+                    request
+                        .to_app_request()
+                        .unwrap()
+                        .resource_budget()
+                        .workers(),
+                )
+            };
+            assert_eq!(budget(request.clone()), 7);
+            let all = request.with_use_all_logical_processors(true);
+            assert_eq!(budget(all.clone()), 8);
+            for fixed in [1, 2, 4, 8] {
+                assert_eq!(budget(all.clone().with_workers(fixed)), fixed);
+            }
+            assert_eq!(budget(all.with_automatic_worker_limit(2)), 2);
+        }
     }
 }
