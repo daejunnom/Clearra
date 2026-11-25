@@ -439,6 +439,46 @@ async function oneIProductWithoutAccelerators() {
   console.log('real_web_one_i_cpu=passed workers_requested=2 workers_used=2 solutions=1');
 }
 
+async function extendedBuildProductWithoutAccelerators() {
+  // Match the Rust distributed Build regression: one horizontal I rests on
+  // four filled columns. The target itself is above bit 64, so preparation
+  // cannot reduce a nominally tall but empty field into the compact frame.
+  for (const [height, baseHex, targetHex] of [
+    [8, 'f03c0f03c0f03c0f', '3c00000000000000000'],
+    [10, 'f03c0f03c0f03c0f03c0f', '3c0000000000000000000000']
+  ]) {
+    assert.ok(BigInt(`0x${targetHex}`) > 0xffffffffffffffffn);
+    const base = `clearra build-probability --base-mask 0x${baseHex} ` +
+      `--target-mask 0x${targetHex} --height ${height} --queue I --source-pieces 1 ` +
+      '--no-hold --no-mirror --queue-knowledge oracle --aggregate buildability ' +
+      '--result-mode all-solutions --rule srs-plus --backend cpu --no-backend-fallback';
+    const projectBuild = (terminal, workers) => {
+      const projection = result(terminal);
+      assert.equal(terminal.response.result?.kind, 'build-probability');
+      assert.equal(terminal.search_report.workers_used, workers);
+      return projection;
+    };
+    const baseline = projectBuild(await new WasmJobRunner(wasm).run(
+      `${base} --workers 1`, () => {}), 1);
+    assert.deepEqual(baseline.keys, [
+      `ctk2|height=${height}|initial=${baseHex.padStart(64, '0')}|placements=I:${targetHex.padStart(64, '0')}`
+    ], 'the complete Build result must retain the actual high-row target');
+    assert.equal(baseline.covered, 1);
+    assert.equal(baseline.total, '1');
+    assert.equal(baseline.probability, '1');
+    const before = verifierConsumes();
+    const actual = await distributed(`${base} --workers 2`, { synopsis: null, pack: null }, {
+      expectedFullHeight: true,
+      expectedWorkerCount: 2,
+      projectTerminal: terminal => projectBuild(terminal, 2)
+    });
+    assert.deepEqual(actual, baseline, `extended Build all-solutions height=${height}`);
+    assert.ok(verifierConsumes() > before,
+      'an extended Build candidate must cross the actual production Worker transport');
+    console.log(`real_web_extended_build_all_solutions=passed height=${height} workers_requested=2 workers_used=2 solutions=1`);
+  }
+}
+
 async function signedAcceleratorCases() {
   for (let profile = 0; profile < profiles.length; profile++) {
     for (const input of ['existing', 'empty']) {
@@ -481,6 +521,7 @@ try {
     assert.deepEqual(extendedRows.map(row => row.split('\t')[0]),
       ['forced-7L', 'forced-8L', 'forced-12L', 'forced-24L']);
     await oneIProductWithoutAccelerators();
+    await extendedBuildProductWithoutAccelerators();
   }
   // The older smoke always requested per-solution probabilities and therefore
   // bypassed the ordinary GUI's PcRoots producer entirely. Use real solver

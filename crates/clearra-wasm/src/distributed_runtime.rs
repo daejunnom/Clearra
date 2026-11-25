@@ -1580,6 +1580,12 @@ impl WasmDistributedCoordinator {
         let requested_compute_workers = worker_count;
         let distributed_worthwhile =
             WasmCpuSearchBackend::distributed_execution_is_worthwhile(problem);
+        // The generic PC pre-gate rejects fields above six rows because its
+        // compact worker protocol cannot carry them. A prepared Build request
+        // has its own extended row-ID packets, verifier and checked merger.
+        // Keep its existing constructor as the capability and memory authority.
+        let extended_build_probability =
+            build_probability_request.is_some_and(|(field, _)| !field.is_compact());
         let pc_tiling_terminal_resource_authority = prepared
             .pc_tiling_terminal_resource_authority()
             .map_err(|reason| distributed_error("E_WASM_DISTRIBUTED_START", reason))?;
@@ -1587,6 +1593,7 @@ impl WasmDistributedCoordinator {
             worker_count >= 2 && pc_tiling_terminal_resource_authority.is_some();
         if worker_count < 2
             || (!distributed_worthwhile
+                && !extended_build_probability
                 && !typed_pc_tiling_requires_coordinator
                 && !full_height_pc
                 && !full_height_tiling)

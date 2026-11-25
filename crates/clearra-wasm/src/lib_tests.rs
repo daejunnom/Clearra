@@ -2817,6 +2817,119 @@ fn release_regression_distributed_extended_build_probability_reconstructs_b2b_ex
 }
 
 #[test]
+fn distributed_extended_build_probability_keeps_high_rows_and_exact_worker_results() {
+    let runtime = WasmCommandRuntime::default()
+        .with_host_capabilities(WasmHostCapabilities::new(4, false, false));
+    for (height, base_mask, target_mask) in [
+        (8, 0xf03c0f03c0f03c0f_u128, 0x3c00000000000000000_u128),
+        (
+            10,
+            0xf03c0f03c0f03c0f03c0f_u128,
+            0x3c0000000000000000000000_u128,
+        ),
+    ] {
+        // Four filled columns support one horizontal I in the highest row.
+        // Real occupied bits above bit 63 prevent empty-row normalization from
+        // turning this into the compact case despite the declared height.
+        let command = format!(
+            "clearra build-probability --base-mask 0x{base_mask:x} \
+             --target-mask 0x{target_mask:x} --height {height} --queue I \
+             --source-pieces 1 --no-hold --no-mirror --queue-knowledge oracle \
+             --aggregate buildability --result-mode all-solutions --rule srs-plus \
+             --backend cpu --no-backend-fallback"
+        );
+        let request = runtime
+            .compile_command_text(&format!("{command} --workers 2"))
+            .expect("extended Build request");
+        let AppCommand::BuildProbability(build) = request.command() else {
+            panic!("the fixture must retain its Build product contract");
+        };
+        assert_eq!(usize::from(build.query().field().height()), height);
+        assert!(!build.query().field().is_compact());
+        assert!(build.query().field().target_words()[1] != 0);
+
+        let serial = runtime
+            .run_command_text(&format!("{command} --workers 1"))
+            .expect("serial high-row Build result");
+        let source = completed_distributed_cpu_source(&runtime, &format!("{command} --workers 2"));
+        // This helper consumes actual encoded producer batches in the verifier;
+        // it panics if preparation silently selects the serial path.
+        assert_eq!(source.mode(), WasmDistributedMode::CpuMulti);
+        assert_eq!(source.worker_count(), 2);
+        assert!(source.verification_required());
+        assert!(source.progress().candidates > 0);
+        let distributed = finish_distributed_cpu_source(source, 2);
+        let serial_report = serial.search_report().expect("serial Build report");
+        let distributed_report = distributed
+            .search_report()
+            .expect("distributed Build report");
+        let expected_key = format!(
+            "ctk2|height={height}|initial={base_mask:064x}|placements=I:{target_mask:064x}"
+        );
+        assert_eq!(serial_report.normalized_solution_keys, vec![expected_key]);
+        assert_eq!(
+            distributed_report.normalized_solution_keys,
+            serial_report.normalized_solution_keys
+        );
+        assert_eq!(
+            distributed_report.normalized_solution_set_hash,
+            serial_report.normalized_solution_set_hash
+        );
+        assert_eq!(distributed_report.unique_solution_count, 1);
+        assert_eq!(distributed_report.covered_pattern_count, 1);
+        assert_eq!(
+            distributed_report.materialized_pattern_count,
+            serial_report.materialized_pattern_count
+        );
+        assert_eq!(
+            distributed_report.covered_pattern_count,
+            serial_report.covered_pattern_count
+        );
+        assert_eq!(distributed_report.coverage_probability, "1");
+        assert!(distributed_report.probability_complete);
+        assert!(distributed_report.count_complete);
+        assert!(distributed_report.cpu_parallel_execution);
+        assert_eq!(distributed_report.workers_used, 2);
+    }
+}
+
+#[test]
+fn original_p7p7_extended_build_prepares_distributed_without_running_search() {
+    let runtime = WasmCommandRuntime::default()
+        .with_host_capabilities(WasmHostCapabilities::new(4, false, false));
+    // Same base/target, 14 locks/draws, empty hold and FullQueueOracle source as
+    // oracle_ctk3_bench. This regression stops at preparation: no source batch
+    // or worker search is advanced over the 25,401,600 original queues.
+    let command = "clearra build-probability --base-mask 0xc0383f3fc7 \
+        --target-mask 0xc120fc1fcfe3fff3fc7c0c038 --height 10 --patterns P7P7 \
+        --source-pieces 14 --hold empty --queue-knowledge oracle \
+        --aggregate buildability --result-mode all-solutions --rule srs-plus \
+        --no-mirror --backend cpu --workers 2 --no-backend-fallback \
+        --no-legal-board --no-conditioned-reachability --no-build-dependency-dag";
+    let request = runtime
+        .compile_command_text(command)
+        .expect("original P7P7 Build request");
+    let AppCommand::BuildProbability(build) = request.command() else {
+        panic!("the oracle fixture must remain a Build request");
+    };
+    assert_eq!(build.query().field().height(), 10);
+    assert_eq!(build.query().target_piece_count(), 14);
+    assert!(!build.query().field().is_compact());
+    let WasmDistributedPreparation::Coordinator(source) =
+        WasmDistributedCoordinator::prepare(&runtime, command)
+            .expect("P7P7 distributed preparation")
+    else {
+        panic!("the original extended Build must expose the browser worker plan");
+    };
+    assert_eq!(source.mode(), WasmDistributedMode::CpuMulti);
+    assert_eq!(source.worker_count(), 2);
+    assert_eq!(source.requested_compute_workers(), 2);
+    assert!(source.verification_required());
+    assert!(!source.root_task_parallel());
+    assert_eq!(source.progress().candidates, 0);
+}
+
+#[test]
 fn gui_build_probability_b2b_argv_runs_through_serial_and_distributed_wasm() {
     let commands =
         include_str!("../../../tests/fixtures/contracts/gui_build_probability_b2b_argv.tsv")
