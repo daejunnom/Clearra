@@ -3004,14 +3004,35 @@ fn original_p7p7_extended_build_prepares_distributed_without_running_search() {
         assert_eq!(source.progress().candidates, 0);
     }
     let all = command.replace("--workers 2", "--workers 12 --use-all-cpu-threads");
-    let WasmDistributedPreparation::Coordinator(source) = WasmDistributedCoordinator::prepare(
-        &runtime,
-        &format!("{all} --preserve-b2b --spin-profile all-spin-plus"),
-    )
-    .expect("original P7P7 B2B admits the full logical processor count") else {
+    let all = format!("{all} --preserve-b2b --spin-profile all-spin-plus");
+    let request = runtime
+        .compile_command_text(&all)
+        .expect("original P7P7 full-worker request");
+    let AppCommand::BuildProbability(build) = request.command() else {
+        panic!("the full-worker fixture must remain a Build request");
+    };
+    let policy = build.query().core_query().execution_policy();
+    assert_eq!(
+        policy.worker_policy(),
+        clearra_pc_graph::request::WorkerPolicy::Fixed(12)
+    );
+    assert_eq!(policy.worker_hardware_limit(), 12);
+    assert!(policy.use_all_logical_processors());
+    // The browser uses its injected twelve-processor host authority. Native
+    // CI additionally honors its real CPU bound, even for preparation-only
+    // fixtures; the original parsed request above must still retain twelve.
+    #[cfg(target_family = "wasm")]
+    let expected_workers = 12;
+    #[cfg(not(target_family = "wasm"))]
+    let expected_workers = 12.min(clearra_pc_graph::request::WorkerPolicy::hardware_worker_limit());
+    assert_eq!(policy.workers(), expected_workers);
+    let WasmDistributedPreparation::Coordinator(source) =
+        WasmDistributedCoordinator::prepare(&runtime, &all)
+            .expect("original P7P7 B2B admits the full host processor budget")
+    else {
         panic!("the full-worker request must expose the browser worker plan");
     };
-    assert_eq!(source.requested_compute_workers(), 12);
+    assert_eq!(source.requested_compute_workers(), expected_workers);
     assert_eq!(source.progress().candidates, 0);
 }
 

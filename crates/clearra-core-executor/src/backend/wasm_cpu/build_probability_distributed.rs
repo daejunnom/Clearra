@@ -1146,11 +1146,18 @@ impl WasmBuildProbabilityDistributedVerifier {
         aggregation: BuildProbabilityAggregation,
         execution_admission: ExecutionAdmission,
     ) -> Result<Self, WasmCpuSearchError> {
-        if !prepared.matches_pass(field, aggregation) {
+        // An asymmetric base has no mirrored pass, even when the caller keeps
+        // the include-mirror option enabled. The producer's original pass has
+        // already cleared that inactive flag. Normalize only this case; an
+        // applicable mirror still requires its independently prepared pass.
+        if field.includes_applicable_horizontal_mirror()
+            || !prepared.matches_pass(field.original_only(), aggregation)
+        {
             return Err(WasmCpuSearchError::InvalidProblem {
                 reason: "extended_build_shared_preparation_request_mismatch",
             });
         }
+        let field = field.original_only();
         // Request identity is by construction: no separately supplied source,
         // rule profile or weights can be paired with this preparation.
         let mut verifier = Self::new_with_delegated_admission(
@@ -3530,6 +3537,9 @@ mod tests {
     fn native_extended_preparation_is_delegated_only_for_the_matching_original_pass() {
         let (problem, field) =
             super::super::build_probability::inverse_dependency_build_fixture(8, false);
+        let field = field.with_horizontal_mirror_included(true);
+        assert!(field.includes_horizontal_mirror());
+        assert!(!field.includes_applicable_horizontal_mirror());
         let standalone = WasmBuildProbabilityDistributedVerifier::new_typed(
             &problem,
             field,
@@ -3598,6 +3608,26 @@ mod tests {
                 .unwrap()
                 .with_horizontal_mirror_included(true);
         assert!(mirror_field.includes_applicable_horizontal_mirror());
+        let original_only =
+            WasmBuildProbabilityCandidateProducer::new_with_finesse_and_verifiers_typed(
+                &problem,
+                mirror_field.original_only(),
+                BuildProbabilityAggregation::Buildability,
+                FinesseMetric::Off,
+                FinessePatternKnowledge::Both,
+                1,
+                0,
+            )
+            .unwrap();
+        assert!(original_only.shared_extended_preparation.is_some());
+        assert!(matches!(
+            original_only
+                .new_delegated_verifier(mirror_field, BuildProbabilityAggregation::Buildability,),
+            Err(WasmCpuSearchError::InvalidProblem {
+                reason: "extended_build_shared_preparation_request_mismatch",
+            })
+        ));
+        drop(original_only);
         for (fallback_field, finesse) in [
             (mirror_field, FinesseMetric::Off),
             (field, FinesseMetric::Inputs),
