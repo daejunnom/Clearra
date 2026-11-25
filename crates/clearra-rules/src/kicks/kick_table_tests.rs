@@ -1,6 +1,30 @@
 use super::*;
 
 #[test]
+fn retained_capacity_counts_imported_profile_buffers_by_capacity() {
+    let mut offsets = Vec::with_capacity(17);
+    offsets.push(KickOffset::new(0, 0));
+    let mut annotation = String::with_capacity(31);
+    annotation.push_str("fixture");
+    let mut entries = Vec::with_capacity(9);
+    let expected = entries.capacity() * core::mem::size_of::<KickTableEntry>()
+        + offsets.capacity() * core::mem::size_of::<KickOffset>()
+        + annotation.capacity();
+    entries.push(
+        KickTableEntry::new(
+            KickTransition::new(PieceKind::T, RotationState::Zero, RotationState::Right),
+            KickOffsetSequence::new(offsets),
+        )
+        .with_unsupported_reason(annotation),
+    );
+    let profile = KickTableProfile::new(KickTableProfileId::Srs90, RuleProfileId::Srs, entries);
+    assert_eq!(
+        profile.checked_retained_capacity_bytes(),
+        Some(expected as u128)
+    );
+}
+
+#[test]
 fn kick_transition_preserves_piece_and_rotation_direction() {
     let transition = KickTransition::new(PieceKind::T, RotationState::Zero, RotationState::Right);
 

@@ -1737,7 +1737,7 @@ mod coverage_summary_tests {
     }
 
     #[test]
-    fn score_exact_search_uses_full_configured_cap_while_generic_keeps_projection() {
+    fn bounded_exact_search_uses_full_cap_and_unbounded_generic_keeps_projection() {
         let _resource_guard = score_resource_test_guard();
         let generic_cap = {
             let session = WasmCpuSearchSession::new(&one_piece_exact_problem(false))
@@ -1751,7 +1751,24 @@ mod coverage_summary_tests {
         };
 
         assert_eq!(score_cap, 64_u128 * 1024 * 1024);
-        assert!(generic_cap < score_cap);
+        if cfg!(all(feature = "parallel", not(target_family = "wasm"))) {
+            // A configured cap activates native candidate-window accounting,
+            // including the catalog, problem and bounded verification workers.
+            assert_eq!(generic_cap, score_cap);
+        } else {
+            assert!(generic_cap < score_cap);
+        }
+        let query = PcScenarioQuery::new(
+            PcScenarioBoard::standard_10(1, 0x3f0),
+            PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::I])),
+            PieceWindow::new(1),
+        )
+        .with_allow_hold(false)
+        .with_exact_pieces(Some(1))
+        .with_execution_policy(PcExecutionPolicy::mvp_default().with_workers(1));
+        let problem = ProblemCompiler::compile_scenario_pc(&query).unwrap();
+        let session = WasmCpuSearchSession::new(&problem).expect("unbounded generic exact session");
+        assert_eq!(session.admitted_memory_cap_bytes(), 8);
     }
 
     #[test]

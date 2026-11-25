@@ -242,6 +242,23 @@ impl KickTableProfile {
     pub fn entries(&self) -> &[KickTableEntry] {
         &self.entries
     }
+
+    /// Complete heap payload retained by this profile, excluding its inline
+    /// owner. Imported profiles own their table, offset and annotation buffers.
+    pub fn checked_retained_capacity_bytes(&self) -> Option<u128> {
+        let mut bytes = (self.entries.capacity() as u128)
+            .checked_mul(core::mem::size_of::<KickTableEntry>() as u128)?;
+        for entry in &self.entries {
+            bytes = bytes.checked_add(
+                (entry.sequence.offsets.capacity() as u128)
+                    .checked_mul(core::mem::size_of::<KickOffset>() as u128)?,
+            )?;
+            if let Some(reason) = &entry.unsupported_reason {
+                bytes = bytes.checked_add(reason.capacity() as u128)?;
+            }
+        }
+        Some(bytes)
+    }
 }
 impl KickTableProfile {
     pub fn sequence_for(&self, transition: KickTransition) -> Option<&KickOffsetSequence> {

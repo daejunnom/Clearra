@@ -131,7 +131,12 @@ pub(crate) fn c_buildup_results(
     // output remains governed by `retained_trace_limit`.
     let materialized_variant_limit =
         if score_matrix_requested(problem) || complete_trace_batch_requested(problem) {
-            problem.resource_budget().max_results()
+            match problem.resource_budget().max_results() {
+                // Resource budgets use zero for unlimited generation. Trace
+                // retention below still uses zero to request no public traces.
+                0 => usize::MAX,
+                limit => limit,
+            }
         } else {
             problem.trace_policy().retained_trace_limit()
         };

@@ -3589,6 +3589,34 @@ mod tests {
         assert!(extended_result.normalized_solution_keys()[0].starts_with("ctk2|"));
     }
 
+    #[cfg(all(feature = "parallel", not(target_family = "wasm")))]
+    #[test]
+    fn native_parallel_empty_target_uses_the_existing_complete_result_path() {
+        let problem = exact_probability_problem(24, 0, PcSolutionProbabilityPolicy::Include);
+        let field = BuildProbabilityField::from_words_preserving_height(24, [0; 4], [0; 4])
+            .expect("extended empty target");
+        let mut session = WasmBuildProbabilitySession::new(
+            &problem,
+            field,
+            BuildProbabilityAggregation::Buildability,
+            BuildProbabilityFinesseRequest::Off,
+        )
+        .expect("public extended empty-target session");
+        // Exercise the multi-worker entry regardless of the test host's
+        // logical-processor count. No compute work exists for this target.
+        let control = ExecutionControl::default().with_parallelism(2);
+        let BuildProbabilityAdvance::Completed(result) = session
+            .advance(1, &control)
+            .expect("empty target completes through the public probability materializer")
+        else {
+            panic!("an empty target must complete without search work");
+        };
+        assert_solution_probability_contract(&result, true, 1);
+        assert_eq!(result.bool_field("probability_complete"), Some(true));
+        assert_eq!(result.bool_field("count_complete"), Some(true));
+        assert!(result.normalized_solution_keys()[0].starts_with("ctk2|"));
+    }
+
     fn worker_partials_and_merger(
         problem: &SearchProblem,
         field: BuildProbabilityField,

@@ -555,6 +555,22 @@ impl PcScenarioQuery<PcScenarioBoard> {
                 })?;
         queue_bytes.checked_add(allowed_identity_bytes)
     }
+
+    /// Query-owned heap storage for compact exact search, including queue
+    /// variants and imported profiles outside the typed Build/score contracts.
+    pub fn checked_compact_exact_retained_capacity_bytes(&self) -> Option<u128> {
+        let mut bytes = self.remaining_queue.checked_retained_capacity_bytes()?;
+        if let Some(profile) = &self.verified_kick_profile {
+            // The verification report and profile metadata are inline.
+            bytes = bytes.checked_add(profile.profile().checked_retained_capacity_bytes()?)?;
+        }
+        if let Some(identities) = &self.allowed_colored_solution_identities {
+            bytes = bytes.checked_add((identities.capacity() as u128).checked_mul(
+                core::mem::size_of::<StandardBoard64ColoredTilingIdentity>() as u128,
+            )?)?;
+        }
+        Some(bytes)
+    }
 }
 
 impl PcScenarioQuery<ExtendedPcScenarioBoard> {

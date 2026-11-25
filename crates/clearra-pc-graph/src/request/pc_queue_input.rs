@@ -147,6 +147,18 @@ impl PcQueueInput {
             Self::BagAlignedPattern(_) | Self::Observed(_) => None,
         }
     }
+
+    /// Complete queue-owned heap payload for allocation accounting. This
+    /// projection does not grant a typed score or Build ingress capability.
+    pub fn checked_retained_capacity_bytes(&self) -> Option<u128> {
+        match self {
+            Self::FixedSequence(sequence) => sequence.checked_retained_capacity_bytes(),
+            Self::PatternExpression(expression) => expression.checked_retained_capacity_bytes(),
+            Self::Standard7Bag => Some(0),
+            Self::BagAlignedPattern(pattern) => pattern.checked_retained_capacity_bytes(),
+            Self::Observed(queue) => queue.checked_retained_capacity_bytes(),
+        }
+    }
 }
 
 impl Default for PcQueueInput {
@@ -160,6 +172,26 @@ mod tests {
     use clearra_core_domain::piece::piece_kind::PieceKind;
 
     use super::*;
+
+    #[test]
+    fn compact_queue_projection_counts_non_typed_queue_capacities() {
+        for observed in [false, true] {
+            let mut pieces = Vec::with_capacity(73);
+            pieces.push(PieceKind::I);
+            let expected = (pieces.capacity() * core::mem::size_of::<PieceKind>()) as u128;
+            let queue = if observed {
+                PcQueueInput::observed(ObservedQueue::new(pieces))
+            } else {
+                PcQueueInput::bag_aligned_pattern(BagAlignedPattern::new(pieces))
+            };
+            assert_eq!(queue.checked_retained_capacity_bytes(), Some(expected));
+            assert_eq!(queue.checked_pc_score_retained_capacity_bytes(), None);
+            assert_eq!(
+                queue.checked_build_probability_retained_capacity_bytes(),
+                None
+            );
+        }
+    }
 
     #[test]
     fn pc_queue_input_distinguishes_fixed_and_observed_queues() {

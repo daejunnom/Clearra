@@ -245,6 +245,43 @@ impl ScenarioQuery {
         }
         Some(bytes)
     }
+
+    /// Heap owners of a compact exact PC query, independent of its result or
+    /// observation policy. Queue, selected-identity and imported-profile
+    /// allocations are counted without granting typed terminal authority.
+    pub(crate) fn checked_pc_exact_retained_capacity_bytes(&self) -> Option<u128> {
+        if self.setup_query.is_some() || self.build_query.is_some() {
+            return None;
+        }
+        match self.source {
+            ScenarioQuerySource::OpeningPreset
+                if self.pc_query.is_some()
+                    && self.checkpoint_schedule.is_some()
+                    && self.exact_target_policy.is_some() => {}
+            ScenarioQuerySource::ScenarioPreset
+                if self.pc_query.is_none()
+                    && self.checkpoint_schedule.is_none()
+                    && self.exact_target_policy.is_none() => {}
+            ScenarioQuerySource::OpeningPreset
+            | ScenarioQuerySource::ScenarioPreset
+            | ScenarioQuerySource::SetupPreset
+            | ScenarioQuerySource::BuildPreset => return None,
+        }
+        let mut bytes = self
+            .core_query
+            .checked_compact_exact_retained_capacity_bytes()?;
+        bytes = bytes.checked_add(checked_string_vec_retained_capacity_bytes(&self.labels)?)?;
+        if let Some(schedule) = &self.checkpoint_schedule {
+            bytes = bytes.checked_add(schedule.checked_retained_capacity_bytes()?)?;
+        }
+        if let Some(pc_query) = &self.pc_query {
+            bytes = bytes.checked_add(pc_query.queue().checked_retained_capacity_bytes()?)?;
+            if let Some(profile) = pc_query.verified_kick_profile() {
+                bytes = bytes.checked_add(profile.profile().checked_retained_capacity_bytes()?)?;
+            }
+        }
+        Some(bytes)
+    }
 }
 
 fn checked_string_vec_retained_capacity_bytes(values: &Vec<String>) -> Option<u128> {

@@ -365,7 +365,10 @@ impl ExtendedBuildProbabilitySession {
         } else {
             requested_workers
         };
-        if requested_workers <= 1 {
+        // The empty target has one complete empty solution and no placement
+        // graph to verify. Let advance materialize its existing exact result,
+        // including any requested per-solution probability report.
+        if requested_workers <= 1 || self.trivial_target {
             return Ok(None);
         }
         let mut preparation_steps = 0_usize;

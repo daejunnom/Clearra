@@ -1,6 +1,6 @@
 use crate::backend::gpu_worker::{
-    PackingBatchDescriptor, PackingBatchDescriptorBuilder, PackingBatchId, PackingBatchSource,
-    PackingBatchSourceError, PackingBatchValidationError,
+    GpuWorkerBudget, PackingBatchDescriptor, PackingBatchDescriptorBuilder, PackingBatchId,
+    PackingBatchSource, PackingBatchSourceError, PackingBatchValidationError,
 };
 use clearra_core_domain::{pc::pc_target::PcTarget, piece::piece_kind::PieceKind};
 use clearra_core_ffi::{
@@ -446,13 +446,47 @@ mod case_packing_batch_descriptor_builder_uses_problem_budget {
 
         assert_eq!(descriptor.candidate_capacity, 64);
     }
+
+    #[test]
+    fn unlimited_compact_budget_uses_finite_batches_and_rejects_explicit_zero_capacity() {
+        let compact = CPackingProblem {
+            budget: CProblemBudget::default(),
+            ..compact_problem()
+        };
+        let descriptor = PackingBatchDescriptorBuilder::new()
+            .with_batch_id(PackingBatchId::new(1))
+            .from_compact_problem_with_identity(&compact, 1001, 2001)
+            .expect("unlimited query has a valid finite batch");
+        assert_eq!(
+            descriptor.candidate_capacity,
+            GpuWorkerBudget::default_local().max_batch_size
+        );
+        assert_eq!(descriptor.max_frontier_states, 2_048);
+        descriptor
+            .to_c_descriptor_view()
+            .expect("all descriptor limits remain valid across the FFI boundary");
+        assert_eq!(compact.budget.max_results, 0);
+
+        let source = PackingBatchSource::from_compact_problem_with_identity(
+            &compact,
+            Some(PackingBatchId::new(1)),
+            1001,
+            2001,
+            Some(0),
+        )
+        .expect("source preserves the explicit invalid override");
+        assert_eq!(
+            source.into_descriptor(),
+            Err(PackingBatchValidationError::ZeroCandidateCapacity)
+        );
+    }
 }
 
-mod case_packing_batch_descriptor_builder_from_search_problem_uses_problem_budget {
+mod case_packing_batch_descriptor_builder_from_search_problem_uses_unlimited_budget {
     use super::*;
 
     #[test]
-    fn packing_batch_descriptor_builder_from_search_problem_uses_problem_budget() {
+    fn packing_batch_descriptor_builder_from_search_problem_uses_finite_unlimited_batches() {
         let query = PcScenarioQuery::new(
             PcScenarioBoard::standard_10(2, 0),
             PcQueueInput::fixed_sequence(parse_fixed_sequence("IOTSL").expect("queue")),
@@ -477,10 +511,15 @@ mod case_packing_batch_descriptor_builder_from_search_problem_uses_problem_budge
             .from_search_problem(&problem, &compact)
             .expect("descriptor");
 
+        assert_eq!(problem.budget().max_results(), 0);
         assert_eq!(
             descriptor.candidate_capacity,
-            problem.budget().max_results() as u32
+            GpuWorkerBudget::default_local().max_batch_size
         );
+        assert_eq!(descriptor.max_frontier_states, 2_048);
+        descriptor
+            .to_c_descriptor_view()
+            .expect("unlimited source produces a valid bounded FFI batch");
         assert_ne!(descriptor.candidate_capacity, compact.budget.max_results);
         assert_ne!(descriptor.pattern_universe_id, 0);
         assert_ne!(descriptor.pattern_weight_model_id, 0);

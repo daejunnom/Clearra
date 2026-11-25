@@ -797,6 +797,49 @@ mod retained_capacity {
     };
 
     impl SearchProblem {
+        /// Complete allocation-capacity projection for compact exact PC
+        /// execution. Output, observation, objective and evidence policies
+        /// are inline and do not change which problem-owned buffers exist.
+        /// This grants no typed score/path/minimum terminal authority.
+        ///
+        /// The projection counts imported profiles, every supported queue
+        /// representation, both selected-identity copies and all opening
+        /// checkpoint/queue owners. Non-PC goals keep a separate owner domain.
+        pub fn checked_compact_exact_pointee_retained_bytes(&self) -> Option<u128> {
+            if !matches!(self.search_goal, SearchGoal::ClearToEmpty)
+                || !matches!(
+                    (self.preset, self.problem_kind, self.scenario.source()),
+                    (
+                        SearchProblemPreset::OpeningPc,
+                        SearchProblemKind::OpeningPc,
+                        ScenarioQuerySource::OpeningPreset,
+                    ) | (
+                        SearchProblemPreset::ScenarioPc,
+                        SearchProblemKind::ScenarioPc,
+                        ScenarioQuerySource::ScenarioPreset,
+                    )
+                )
+            {
+                return None;
+            }
+
+            let mut bytes = core::mem::size_of::<SearchProblem>() as u128;
+            bytes = bytes.checked_add(self.problem_id.checked_retained_capacity_bytes()?)?;
+            bytes = bytes.checked_add(self.scenario.checked_pc_exact_retained_capacity_bytes()?)?;
+            bytes = bytes.checked_add(self.piece_source.checked_retained_capacity_bytes()?)?;
+            bytes = bytes.checked_add(self.supply.queue().checked_retained_capacity_bytes()?)?;
+            if let Some(profile) = self.rule_profile.verified_kick_profile() {
+                bytes = bytes.checked_add(profile.profile().checked_retained_capacity_bytes()?)?;
+            }
+            bytes = bytes.checked_add(checked_string_vec_retained_capacity_bytes(&self.labels)?)?;
+            bytes = bytes.checked_add(
+                self.allowed_colored_solution_identities
+                    .as_ref()
+                    .map_or(Some(0), checked_inline_vec_retained_capacity_bytes)?,
+            )?;
+            Some(bytes)
+        }
+
         /// Returns the complete retained byte count of this compiled
         /// `SearchProblem` pointee when it has the finite scenario shape
         /// consumed by BuildProbability.
@@ -1368,6 +1411,118 @@ mod retained_capacity {
             assert!(tiling.checked_pc_family_pointee_retained_bytes().is_none());
             let generic = ProblemCompiler::compile_scenario_pc(&query).unwrap();
             assert!(generic.checked_pc_tiling_pointee_retained_bytes().is_none());
+        }
+
+        #[test]
+        fn compact_exact_projection_counts_policy_and_selected_identity_owners() {
+            use crate::SearchOutputPolicy;
+            use clearra_pc_graph::request::PcSolutionProbabilityPolicy;
+
+            let query = PcScenarioQuery::new(
+                PcScenarioBoard::standard_10(4, 0),
+                fixed_queue(73),
+                PieceWindow::new(4),
+            )
+            .with_exact_pieces(Some(4))
+            .with_allow_hold(false)
+            .with_count_policy(PcCountPolicy::CountUnique)
+            .with_objective(ObjectivePolicy::unique())
+            .with_solution_probability_policy(PcSolutionProbabilityPolicy::Include)
+            .with_allowed_colored_solution_identities(std::iter::empty());
+            let problem = ProblemCompiler::compile_scenario_pc(&query).unwrap();
+            for output in [
+                SearchOutputPolicy::Trace,
+                SearchOutputPolicy::CoverageSummary,
+            ] {
+                let mut problem = problem.clone().with_output_policy(output);
+                problem.allowed_colored_solution_identities = Some(Vec::with_capacity(19));
+                assert_eq!(
+                    problem.checked_compact_exact_pointee_retained_bytes(),
+                    manual_build_expected(&problem)
+                );
+                assert!(problem
+                    .checked_compact_exact_pointee_retained_bytes()
+                    .is_some());
+                assert!(problem.checked_pc_family_pointee_retained_bytes().is_none());
+                assert!(problem.checked_pc_score_pointee_retained_bytes().is_none());
+            }
+        }
+
+        #[test]
+        fn compact_exact_projection_counts_each_imported_profile_and_observed_queue_owner() {
+            use clearra_rules::kicks::{SrsKicks, VerifiedKickTableProfile};
+            use clearra_supply::queue::observed_queue::ObservedQueue;
+
+            let profile = VerifiedKickTableProfile::try_new(SrsKicks::srs_plus_profile()).unwrap();
+            let mut pieces = Vec::with_capacity(53);
+            pieces.push(PieceKind::I);
+            let problem = ProblemCompiler::compile_opening_pc(
+                &OpeningPcSearchQuery::new(PcTarget::two_lines())
+                    .with_queue(PcQueueInput::observed(ObservedQueue::new(pieces)))
+                    .with_verified_kick_table_profile(profile),
+            )
+            .unwrap();
+            let scenario = problem.scenario();
+            let core = scenario.core_query();
+            let opening = scenario.pc_query().unwrap();
+            let profile_bytes = [
+                core.verified_kick_profile().unwrap(),
+                opening.verified_kick_profile().unwrap(),
+                problem.rule_profile().verified_kick_profile().unwrap(),
+            ]
+            .into_iter()
+            .map(|profile| profile.profile().checked_retained_capacity_bytes().unwrap())
+            .sum::<u128>();
+            assert!(profile_bytes > 0);
+            let mut expected = core::mem::size_of::<SearchProblem>() as u128
+                + problem
+                    .problem_id
+                    .checked_retained_capacity_bytes()
+                    .unwrap()
+                + problem
+                    .piece_source
+                    .checked_retained_capacity_bytes()
+                    .unwrap()
+                + profile_bytes
+                + core
+                    .remaining_queue()
+                    .checked_retained_capacity_bytes()
+                    .unwrap()
+                + opening.queue().checked_retained_capacity_bytes().unwrap()
+                + problem
+                    .supply
+                    .queue()
+                    .checked_retained_capacity_bytes()
+                    .unwrap()
+                + scenario
+                    .checkpoint_schedule()
+                    .unwrap()
+                    .checked_retained_capacity_bytes()
+                    .unwrap();
+            // Labels are independent scenario and problem Vec<String> owners.
+            expected += scenario.checked_pc_exact_retained_capacity_bytes().unwrap()
+                - core
+                    .checked_compact_exact_retained_capacity_bytes()
+                    .unwrap()
+                - opening.queue().checked_retained_capacity_bytes().unwrap()
+                - opening
+                    .verified_kick_profile()
+                    .unwrap()
+                    .profile()
+                    .checked_retained_capacity_bytes()
+                    .unwrap()
+                - scenario
+                    .checkpoint_schedule()
+                    .unwrap()
+                    .checked_retained_capacity_bytes()
+                    .unwrap();
+            expected += super::checked_string_vec_retained_capacity_bytes(&problem.labels).unwrap();
+            assert_eq!(
+                problem.checked_compact_exact_pointee_retained_bytes(),
+                Some(expected)
+            );
+            assert!(problem.checked_pc_family_pointee_retained_bytes().is_none());
+            assert!(problem.checked_pc_score_pointee_retained_bytes().is_none());
         }
 
         #[test]

@@ -899,8 +899,10 @@ fn checked_initial_session_coexisting_retained_bytes(
 }
 
 pub(super) fn checked_public_result_bytes(result: &CoreExecutionResult) -> Option<u128> {
-    let bytes = result.checked_resource_retained_bytes()?;
-    Some(bytes.max(result.usize_field("resource_peak_cpu_bytes").unwrap_or(0) as u128))
+    // Admission counts the owners that coexist with the caller's retained
+    // state. The reported execution peak can describe already released worker
+    // storage; only its reporting field remains owned by this result.
+    result.checked_resource_retained_bytes()
 }
 
 pub(super) fn checked_core_result_vec_retained_bytes(

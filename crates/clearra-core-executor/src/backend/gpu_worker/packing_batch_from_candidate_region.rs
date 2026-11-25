@@ -11,7 +11,8 @@ use clearra_core_ffi::{
 };
 
 use super::{
-    PackingBatchId, PackingBatchSource, PackingBatchSourceError, PackingBatchValidationError,
+    GpuWorkerBudget, PackingBatchId, PackingBatchSource, PackingBatchSourceError,
+    PackingBatchValidationError,
 };
 
 pub fn packing_batch_source_from_candidate_region(
@@ -97,7 +98,13 @@ pub fn packing_batch_source_from_candidate_region(
         )),
         rule_profile_id: u64::from(compact.rule.rule_profile_id),
         kick_profile_id: u64::from(compact.rule.kick_profile_id),
-        candidate_capacity: candidate_capacity_override.unwrap_or(compact.budget.max_results),
+        candidate_capacity: candidate_capacity_override.unwrap_or_else(|| {
+            if compact.budget.max_results == 0 {
+                GpuWorkerBudget::default_local().max_batch_size
+            } else {
+                compact.budget.max_results
+            }
+        }),
         max_frontier_states: if compact.budget.max_frontier_states == 0 {
             2_048
         } else {

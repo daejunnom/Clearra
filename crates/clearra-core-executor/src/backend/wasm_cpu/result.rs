@@ -809,6 +809,12 @@ fn native_candidate_window_accounting(problem: &SearchProblem) -> bool {
             || problem.backend_request().max_memory_mib().is_some())
 }
 
+fn checked_compact_problem_nested_retained_bytes(problem: &SearchProblem) -> Option<u128> {
+    problem
+        .checked_compact_exact_pointee_retained_bytes()?
+        .checked_sub(core::mem::size_of::<SearchProblem>() as u128)
+}
+
 fn preflight_and_acquire_execution_resources(
     problem: &SearchProblem,
 ) -> Result<ExecutionAdmission, WasmExactSearchError> {
@@ -1093,10 +1099,8 @@ impl WasmExactSearchSession {
             SearchProblemRetention::SessionOwnedCloneUnaccounted
             | SearchProblemRetention::CallerOwnedSharedInputWithoutParentAuthority => {
                 if native_candidate_window_accounting(problem) {
-                    super::extended_pc_search::checked_pc_family_problem_nested_retained_bytes(
-                        problem,
-                    )?
-                    .checked_add(core::mem::size_of::<SearchProblem>() as u128 + 32)?
+                    checked_compact_problem_nested_retained_bytes(problem)?
+                        .checked_add(core::mem::size_of::<SearchProblem>() as u128 + 32)?
                 } else {
                     0
                 }
@@ -1577,15 +1581,13 @@ impl WasmExactSearchSession {
                 checked_external_retained_upper_bound_bytes,
             } => Some(checked_external_retained_upper_bound_bytes),
             _ if native_candidate_window_accounting(&problem) => Some(
-                super::extended_pc_search::checked_pc_family_problem_nested_retained_bytes(
-                    &problem,
-                )
-                .and_then(|bytes| {
-                    bytes.checked_add(core::mem::size_of::<SearchProblem>() as u128 + 32)
-                })
-                .ok_or_else(|| {
-                    Self::initialization_memory_projection_unavailable(&execution_admission)
-                })?,
+                checked_compact_problem_nested_retained_bytes(&problem)
+                    .and_then(|bytes| {
+                        bytes.checked_add(core::mem::size_of::<SearchProblem>() as u128 + 32)
+                    })
+                    .ok_or_else(|| {
+                        Self::initialization_memory_projection_unavailable(&execution_admission)
+                    })?,
             ),
             _ => None,
         };
@@ -2938,11 +2940,9 @@ impl WasmExactSearchSession {
                 || native_candidate_window_accounting(&self.problem) =>
             {
                 executor
-                    .checked_add(
-                        super::extended_pc_search::checked_pc_family_problem_nested_retained_bytes(
-                            &self.problem,
-                        )?,
-                    )?
+                    .checked_add(checked_compact_problem_nested_retained_bytes(
+                        &self.problem,
+                    )?)?
                     .checked_add(core::mem::size_of::<SearchProblem>() as u128 + 32)
             }
             None => Some(executor),
@@ -6710,6 +6710,113 @@ mod tests {
         QueueObservationPolicy,
     };
 
+    #[cfg(all(feature = "parallel", not(target_family = "wasm")))]
+    #[test]
+    fn bounded_compact_probability_and_observation_keep_exact_results() {
+        use clearra_pc_graph::request::{PcSolutionProbabilityPolicy, RequestedSearchBackend};
+        let base = PcExecutionPolicy::default()
+            .with_requested_backend(RequestedSearchBackend::Cpu)
+            .with_workers(1);
+        for policy in [
+            base.clone().with_max_memory_mib(Some(64)),
+            base.clone().with_max_nodes(100_000),
+            base.clone().with_max_candidates(10_000),
+            base.with_max_frontier_states(100_000),
+        ] {
+            for observed in [false, true] {
+                let mut query = PcScenarioQuery::new(
+                    PcScenarioBoard::standard_10(1, 0x3f0),
+                    PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::I])),
+                    PieceWindow::new(1),
+                )
+                .with_allow_hold(false)
+                .with_exact_pieces(Some(1))
+                .with_count_policy(PcCountPolicy::CountUnique)
+                .with_objective(ObjectivePolicy::unique())
+                .with_execution_policy(policy.clone());
+                let problem = if observed {
+                    query =
+                        query.with_queue_observation_policy(QueueObservationPolicy::VisibleSeven);
+                    ProblemCompiler::compile_scenario_percent(&query)
+                        .expect("observed probability problem")
+                        .with_pc_chance_probability_v2_evidence()
+                } else {
+                    query = query
+                        .with_solution_probability_policy(PcSolutionProbabilityPolicy::Include);
+                    ProblemCompiler::compile_scenario_pc(&query)
+                        .expect("solution probability problem")
+                        .with_output_policy(clearra_problem::SearchOutputPolicy::CoverageSummary)
+                };
+                let result = WasmCpuSearchBackend::execute_with_control(
+                    &problem,
+                    &ExecutionControl::default(),
+                )
+                .expect("bounded compact execution retains its normal policy contract");
+                assert_eq!(result.field("covered_pattern_count"), Some("1"));
+                assert_eq!(result.bool_field("count_complete"), Some(true));
+                if observed {
+                    assert!(!result
+                        .pc_chance_coverage_evidence()
+                        .expect("observed candidate evidence remains available")
+                        .complete());
+                } else {
+                    assert_eq!(result.solution_coverages().len(), 1);
+                    assert_eq!(result.bool_field("probability_complete"), Some(true));
+                }
+            }
+        }
+    }
+
+    #[cfg(all(feature = "parallel", not(target_family = "wasm")))]
+    #[test]
+    fn bounded_compact_probability_rejects_insufficient_actual_owner_capacity() {
+        use clearra_core_domain::resource::ExecutionAvailabilityReason;
+        use clearra_pc_graph::request::PcSolutionProbabilityPolicy;
+        let query = PcScenarioQuery::new(
+            PcScenarioBoard::standard_10(1, 0x3f0),
+            PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::I])),
+            PieceWindow::new(1),
+        )
+        .with_allow_hold(false)
+        .with_exact_pieces(Some(1))
+        .with_count_policy(PcCountPolicy::CountUnique)
+        .with_objective(ObjectivePolicy::unique())
+        .with_solution_probability_policy(PcSolutionProbabilityPolicy::Include)
+        .with_execution_policy(
+            PcExecutionPolicy::default()
+                .with_workers(1)
+                .with_max_memory_mib(Some(64)),
+        );
+        let problem = ProblemCompiler::compile_scenario_pc(&query)
+            .unwrap()
+            .with_output_policy(clearra_problem::SearchOutputPolicy::CoverageSummary);
+        let admission = super::preflight_and_acquire_execution_resources(&problem)
+            .unwrap()
+            .restrict_memory_cap(256)
+            .unwrap();
+        let result = WasmExactSearchSession::new_with_preacquired_execution_admission(
+            std::sync::Arc::new(problem),
+            false,
+            super::SearchProblemRetention::SessionOwnedCloneUnaccounted,
+            admission,
+        );
+        let error = match result {
+            Ok(_) => panic!("the real problem and catalog owners exceed 256 bytes"),
+            Err(error) => error,
+        };
+        let super::WasmExactSearchError::ResourceAdmission(report) = error else {
+            panic!("expected checked memory admission failure, got {error:?}");
+        };
+        let availability = report.execution_availability();
+        assert_eq!(
+            availability.reason(),
+            Some(ExecutionAvailabilityReason::MemoryBudgetExceeded)
+        );
+        let required = availability.required_memory_bytes().unwrap();
+        assert!(required > 256 && required < u128::MAX);
+        assert!(!report.execution_started());
+    }
+
     #[cfg(feature = "parallel")]
     #[test]
     fn native_parallel_terminal_identity_move_preserves_exact_trace_result() {
@@ -7252,7 +7359,8 @@ mod tests {
     fn exact_six_line_session_fails_dense_preflight_before_catalog_allocation() {
         let query = OpeningPcSearchQuery::new(PcTarget::six_lines())
             .with_execution_policy(PcExecutionPolicy::default().with_max_memory_mib(Some(1024)));
-        let problem = ProblemCompiler::compile_opening_pc(&query).expect("lazy six-line descriptor");
+        let problem =
+            ProblemCompiler::compile_opening_pc(&query).expect("lazy six-line descriptor");
         let universe = problem
             .piece_source()
             .materialized_universe()

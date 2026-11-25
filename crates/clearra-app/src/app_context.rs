@@ -665,9 +665,16 @@ mod tests;
 fn default_and_product_context_use_rust_even_when_c_reference_is_available() {
     let product = AppContext::rust_cpu_product();
     let default = AppContext::default();
+    let expected_product_executor = AppCoreExecutorService::wasm_cpu();
+    #[cfg(not(target_family = "wasm"))]
+    let expected_product_executor = expected_product_executor.with_product_retention_budget(
+        crate::ProductRetentionBudget::new(
+            clearra_core_executor::resource::product_memory_capacity_bytes(),
+        ),
+    );
     assert_eq!(
         product.services().core_executor(),
-        &AppCoreExecutorService::wasm_cpu()
+        &expected_product_executor
     );
     assert_eq!(
         default.services().core_executor(),
