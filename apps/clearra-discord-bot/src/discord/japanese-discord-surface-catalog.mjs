@@ -18,6 +18,7 @@ export const JAPANESE_DESCRIPTIONS = Object.freeze({
   "Disable every command except server resume": "サーバーでの再開以外のコマンドを無効にします",
   "Resume Clearra commands in this server": "このサーバーでClearraコマンドを再開します",
   "Search fixed clear-to-empty perfect-clear objectives": "盤面をすべて消すパーフェクトクリアを検索します",
+  "Find distinct executable perfect-clear solutions": "実行可能な重複のないパーフェクトクリア解法を探します",
   "Find every represented perfect-clear path": "対象となるパーフェクトクリアの全経路を探します",
   "Queue/pattern such as *!, *p4, or [IOSZ]p2; omit it to use the Modal": "キューまたはパターン（*!、*p4、[IOSZ]p2など）。省略すると入力フォームを開きます",
   "PC field (1–6 rows): CTK3/Fumen/URL or grid:row/row; omit for multiline form": "PC盤面（1〜6行）: CTK3/Fumen/URLまたはgrid:行/行。複数行入力はフォームで行います",
@@ -192,6 +193,7 @@ export const JAPANESE_DESCRIPTIONS = Object.freeze({
 });
 
 export const JAPANESE_NAMES = Object.freeze({
+  "solutions": "解法",
   "help": "ヘルプ",
   "arguments": "コマンド",
   "render-file": "元gif取得",
@@ -479,9 +481,11 @@ export const JAPANESE_HELP_DESCRIPTIONS = Object.freeze({
 });
 
 export const JAPANESE_HELP_TEXT = Object.freeze({
+  "Calculates success probability across the full queue pattern. `preserve-b2b=on` requires B2B preservation; `spin-profile` selects its spin rules and requires preservation to be on.": "キューパターン全体の成功確率を計算します。`preserve-b2b=on`はB2B維持を条件にし、`spin-profile`でそのスピン判定ルールを選びます。スピンルールを選ぶ場合はB2B維持を有効にしてください。",
+  "Finds distinct executable solutions under the selected movement, hold, and queue rules. Results are colored solution fields; use `/pc path` for complete replay paths.": "選択した移動・ホールド・キューのルールで実行可能な重複のない解法を探し、色付きの解法盤面を出力します。全リプレイ経路は`/pc path`で検索します。",
   "**Clearra slash commands**": "**Clearraのスラッシュコマンド**",
   "Render files: `/render-file` or `Apps → Get original GIF` on a preview message (command fields render inside their own command)": "画像の取得: `/render-file`またはプレビューメッセージの`Apps → Get original GIF`を使います（各コマンドの盤面はそのコマンド内で描画されます）。",
-  "Perfect clears: `/pc path|chance|minimals|score|saves|best-save|score-minimals|tiling|failed-queue|score-finder|allspin-sol|allspin-pres-chance`": "パーフェクトクリア: `/pc path|chance|minimals|score|saves|best-save|score-minimals|tiling|failed-queue|score-finder|allspin-sol|allspin-pres-chance`",
+  "Perfect clears: `/pc solutions|path|chance|minimals|score|saves|best-save|score-minimals|tiling|failed-queue|score-finder|allspin-sol|allspin-pres-chance`": "パーフェクトクリア: `/pc solutions|path|chance|minimals|score|saves|best-save|score-minimals|tiling|failed-queue|score-finder|allspin-sol|allspin-pres-chance`",
   "Build: `/build cover|probability|finesse-score|setup|congruent|congruent-cover|setup-cover|setup-cover-percent|setup-cover-score|evaluate-cover-percent|evaluate-cover|evaluate-minimals|evaluate-score|evaluate-b2b-cover`": "構築: `/build cover|probability|finesse-score|setup|congruent|congruent-cover|setup-cover|setup-cover-percent|setup-cover-score|evaluate-cover-percent|evaluate-cover|evaluate-minimals|evaluate-score|evaluate-b2b-cover`",
   "Setup ranking and scoring: `/setup joint|build|pc|score`": "セットアップの順位付けとスコア計算: `/setup joint|build|pc|score`",
   "Forward search: `/forward spin|damage|ren`": "前方検索: `/forward spin|damage|ren`",

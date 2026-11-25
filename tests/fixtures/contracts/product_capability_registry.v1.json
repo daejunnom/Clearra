@@ -68,6 +68,17 @@
     "unsafe_execution"
   ],
   "surface_profiles": {
+    "discord_command": {
+      "discord_slash": "public",
+      "discord_text": "public",
+      "cli": "none",
+      "gui": "none",
+      "web": "none",
+      "desktop": "none",
+      "modal": "capability-schema",
+      "autocomplete": "public",
+      "help_visibility": "public"
+    },
     "public_command": {
       "discord_slash": "public",
       "discord_text": "public",
@@ -183,6 +194,7 @@
     "slash_alias_remove_in": "v0.10.0",
     "text_alias_lifetime": "long-term",
     "current_capabilities": [
+      {"id":"pc.solutions","kind":"search","status":"active","path":["pc","solutions"],"ingress":{"slash":true,"text":true},"problem_contract_id":"pc-clear-to-empty","input_schema_id":"pc-pattern.v2","modal_schema_id":"pc-pattern.v2","result_contract_id":"pc-scenario","algorithm_family":"pc_inverse_lock_clear","timeout_class":"pc_reverse","effect_classes":["search_space","supply_semantics","reachability_semantics","result_materialization"],"help_policy":"public","i18n_policy":"en-ko-ja","result_allowlist":["pc","pc-scenario"],"telemetry_identity":"pc.solutions","lowering_authority":"clearra.cli-command.v1","engine":{"input":"pc-v2","argvPrefix":["pc","--count","unique"],"pcObjective":"unique","fixedSemantics":{"solutionIdentity":"unique","completeReplayPaths":false}}},
       {"id":"build.congruent","kind":"search","status":"active","path":["build","congruent"],"ingress":{"slash":true,"text":true},"problem_contract_id":"build-colored-congruence.v1","input_schema_id":"build-colored-target.v2","modal_schema_id":"build-colored-target.v2","result_contract_id":"build-congruence-family.v1","algorithm_family":"build_inverse_lock_clear","timeout_class":"build_long","effect_classes":["search_space","supply_semantics","result_materialization"],"help_policy":"public","i18n_policy":"en-ko-ja","result_allowlist":["build-congruence-family.v1"],"telemetry_identity":"build.congruent","lowering_authority":"clearra.cli-command.v1","engine":{"input":"build-v2-target","argvPrefix":["build","congruent"]}},
       {"id":"build.congruent-cover","kind":"search","status":"active","path":["build","congruent-cover"],"ingress":{"slash":true,"text":true},"problem_contract_id":"build-colored-congruence-coverage.v1","input_schema_id":"build-colored-target.v2","modal_schema_id":"build-colored-target.v2","result_contract_id":"build-congruence-coverage.v1","algorithm_family":"build_inverse_lock_clear","timeout_class":"build_long","effect_classes":["search_space","supply_semantics","probability_semantics","result_materialization"],"help_policy":"public","i18n_policy":"en-ko-ja","result_allowlist":["build-congruence-coverage.v1"],"telemetry_identity":"build.congruent-cover","lowering_authority":"clearra.cli-command.v1","engine":{"input":"build-v2-target","argvPrefix":["build","congruent-cover"]}},
       {"id":"build.cover","kind":"search","status":"active","path":["build","cover"],"ingress":{"slash":true,"text":true},"problem_contract_id":"build-base-target-search.v2","input_schema_id":"build-base-target.v2","modal_schema_id":"build-base-target.v2","result_contract_id":"build-coverage-portfolio.v2","algorithm_family":"build_inverse_lock_clear","timeout_class":"build_long","effect_classes":["search_space","supply_semantics","reachability_semantics","probability_semantics"],"help_policy":"public","i18n_policy":"en-ko-ja","result_allowlist":["build-coverage-portfolio.v2"],"telemetry_identity":"build.cover","lowering_authority":"clearra.cli-command.v1","engine":{"input":"build-v2-cover","argvPrefix":["build","cover"]}},
@@ -331,6 +343,20 @@
       "result_contract_id": "settings-ack.v1",
       "effect_classes": ["configuration", "external_state"],
       "surface_profile": "public_configuration"
+    },
+    {
+      "id": "pc.solutions",
+      "kind": "search",
+      "command_path": ["pc", "solutions"],
+      "problem_contract_id": "pc-clear-to-empty",
+      "algorithm_family": "pc_inverse_lock_clear",
+      "algorithm_phases": ["inverse-geometry", "exact-reachability-and-supply", "unique-solution-materialization"],
+      "timeout_class": "pc_reverse",
+      "input_schema_id": "pc-pattern.v2",
+      "modal_schema_id": "pc-pattern.v2",
+      "result_contract_id": "pc-scenario",
+      "effect_classes": ["search_space", "supply_semantics", "reachability_semantics", "result_materialization"],
+      "surface_profile": "discord_command"
     },
     {
       "id": "pc.path",
@@ -1018,6 +1044,7 @@
   ],
   "implementation_statuses": ["implemented", "partial", "missing", "excluded"],
   "capability_implementation": [
+    { "capability_id": "pc.solutions", "implementation_status": "implemented", "current_surface": "discord-grouped-slash-and-text-over-existing-native-unique-producer", "implementation_evidence": ["apps/clearra-discord-bot/src/discord/capability-registry.mjs", "apps/clearra-discord-bot/src/discord/slash-command-input.mjs", "apps/clearra-discord-bot/src/bot.mjs", "apps/clearra-discord-bot/test/text-command.test.mjs", "apps/clearra-discord-bot/test/bot.test.mjs", "tests/contracts/product_capability_registry.test.mjs"] },
     { "capability_id": "meta.help", "implementation_status": "implemented", "current_surface": "canonical-slash-and-text-help", "implementation_evidence": ["apps/clearra-discord-bot/src/discord/capability-registry.mjs", "apps/clearra-discord-bot/src/discord/slash-command-catalog.mjs", "apps/clearra-discord-bot/test/capability-registry.test.mjs", "tests/contracts/product_capability_registry.test.mjs"] },
     { "capability_id": "settings.channel", "implementation_status": "implemented", "current_surface": "canonical-slash-and-text-configuration", "implementation_evidence": ["apps/clearra-discord-bot/src/discord/capability-registry.mjs", "apps/clearra-discord-bot/src/discord/slash-command-catalog.mjs", "apps/clearra-discord-bot/test/capability-registry.test.mjs", "tests/contracts/product_capability_registry.test.mjs"] },
     { "capability_id": "settings.server", "implementation_status": "implemented", "current_surface": "canonical-slash-and-text-configuration", "implementation_evidence": ["apps/clearra-discord-bot/src/discord/capability-registry.mjs", "apps/clearra-discord-bot/src/discord/slash-command-catalog.mjs", "apps/clearra-discord-bot/test/capability-registry.test.mjs", "tests/contracts/product_capability_registry.test.mjs"] },

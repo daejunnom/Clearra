@@ -112,7 +112,7 @@ test("advanced text objectives resolve pc.path ingress to honest canonical PC va
     ],
     [
       ">path --field XXXXXX____ --patterns I --lines 1 --objective unique",
-      ">", "chance", "pc.chance", "chance",
+      ">", "solutions", "pc.solutions", "solutions",
     ],
     [
       "$pc path --field XXXXXX____ --patterns I --lines 1 --objective min-cover",
@@ -136,10 +136,11 @@ test("advanced text objectives resolve pc.path ingress to honest canonical PC va
     assert.equal(request.command.publicResultKind, resultKind);
     assert.equal(classifyClearraTextCommand(content, prefix), `pc.${subcommand}`);
     assert.equal(request.arguments_[0], "pc");
-    assert.deepEqual(request.arguments_.slice(0, 2), ["pc", subcommand]);
+    assert.deepEqual(request.arguments_.slice(0, 2), subcommand === "solutions"
+      ? ["pc", "--count"] : ["pc", subcommand]);
     assert.ok(request.arguments_.includes("--board-mask"));
     assert.equal(request.arguments_.includes("--target-mask"), false);
-    assert.equal(request.arguments_.includes("--objective"), false);
+    assert.equal(request.arguments_.includes("--objective"), subcommand === "solutions");
     assert.equal(request.arguments_.includes("--tiling-only"), false);
     assert.deepEqual(request.rawOptions, [
       { name: "field", value: "XXXXXX____" },
@@ -193,8 +194,6 @@ test("pc chance text is typed while top-level chance and percent stay generic", 
     );
     for (const option of [
       "--queue-knowledge oracle",
-      "--spin-profile all-spin",
-      "--preserve-b2b",
       "--solution-probabilities",
       "--objective unique",
     ]) {
@@ -203,6 +202,15 @@ test("pc chance text is typed while top-level chance and percent stay generic", 
         /does not expose option|does not support options key|only on the pc\.path base capability/i,
       );
     }
+    const preserving = parseClearraTextRequest(
+      `${prefix}pc chance ${base} --preserve-b2b --spin-profile all-spin`, prefix,
+    );
+    assert.ok(preserving.arguments_.includes("--preserve-b2b"));
+    assert.ok(preserving.arguments_.includes("all-spin"));
+    assert.throws(
+      () => parseClearraTextRequest(`${prefix}pc chance ${base} --spin-profile all-spin`, prefix),
+      /requires preserve-b2b=on/u,
+    );
   }
 });
 
@@ -1012,7 +1020,7 @@ test("explicit clearra and noncatalog sfinder raw routes are disabled", () => {
   }
   assert.throws(
     () => parseClearraTextMessage("$pc --lines 2", "$", remoteExecution),
-    /requires one of: path, chance, minimals, score, saves, best-save, score-minimals, tiling, failed-queue, score-finder/,
+    /requires one of: solutions, path, chance, minimals, score, saves, best-save, score-minimals, tiling, failed-queue, score-finder/,
   );
 });
 

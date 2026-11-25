@@ -106,12 +106,10 @@ test("native PC routes preserve objective ownership while chance owns typed uniq
   assertValue(chance, "--rule", "srs-plus");
   assert.deepEqual(
     chanceCommand.registration.options.map(({ name }) => name),
-    ["next", "field", "lines", "hold", "kicktable"],
+    ["next", "field", "lines", "hold", "kicktable", "spin-profile", "preserve-b2b"],
   );
   for (const name of [
     "queue-knowledge",
-    "spin-profile",
-    "preserve-b2b",
     "solution-probabilities",
     "objective",
   ]) {

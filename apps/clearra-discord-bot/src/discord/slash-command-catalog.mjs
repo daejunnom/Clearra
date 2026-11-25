@@ -683,6 +683,8 @@ function registrationOptions(input, capabilityId = null) {
         linesOption(discordPcMaxRows(input)),
         pcHoldOption(),
         kicktableOption(true),
+        spinProfileOption(false),
+        onOffOption("preserve-b2b", "Require a solution that preserves back-to-back", "off"),
       ]);
     case "pc-save-v2":
       return Object.freeze([
@@ -1861,7 +1863,7 @@ function syntax(entry, locale = "en") {
       case "pc-path-v2":
         return `/${path} next:<큐|패턴> field:<grid:윗줄/다음줄|CTK3|v115 Fumen|URL> [lines:1..${discordPcMaxRows(entry.input)}] [hold:<disabled|empty|IOTSZJL>] [kicktable:<내장 프로필>] [spin-profile:<프로필>] [preserve-b2b:<on|off>]`;
       case "pc-chance-v2":
-        return `/${path} next:<패턴> field:<grid:윗줄/다음줄|CTK3|v115 Fumen|URL> [lines:1..${discordPcMaxRows(entry.input)}] [hold:<disabled|empty|IOTSZJL>] [kicktable:<내장 프로필>]`;
+        return `/${path} next:<패턴> field:<grid:윗줄/다음줄|CTK3|v115 Fumen|URL> [lines:1..${discordPcMaxRows(entry.input)}] [hold:<disabled|empty|IOTSZJL>] [kicktable:<내장 프로필>] [spin-profile:<프로필>] [preserve-b2b:<on|off>]`;
       case "pc-save-v2":
         return `/${path} next:<고정 가방 경계 패턴> field:<grid:윗줄/다음줄|CTK3|v115 Fumen|URL> [lines:1..${DISCORD_PC_FIELD_MAX_ROWS}] [hold:<disabled|empty|IOTSZJL>] [kicktable:<내장 프로필>]`;
       case "pc-allspin-exact-v1":
@@ -1950,7 +1952,7 @@ function syntax(entry, locale = "en") {
     case "pc-path-v2":
       return `/${path} next:<queue|pattern> field:<grid:top-row/next-row|CTK3|v115 Fumen|URL> [lines:1..${discordPcMaxRows(entry.input)}] [hold:<disabled|empty|IOTSZJL>] [kicktable:<built-in>] [spin-profile:<profile>] [preserve-b2b:<on|off>]`;
     case "pc-chance-v2":
-      return `/${path} next:<pattern> field:<grid:top-row/next-row|CTK3|v115 Fumen|URL> [lines:1..${discordPcMaxRows(entry.input)}] [hold:<disabled|empty|IOTSZJL>] [kicktable:<built-in>]`;
+      return `/${path} next:<pattern> field:<grid:top-row/next-row|CTK3|v115 Fumen|URL> [lines:1..${discordPcMaxRows(entry.input)}] [hold:<disabled|empty|IOTSZJL>] [kicktable:<built-in>] [spin-profile:<profile>] [preserve-b2b:<on|off>]`;
     case "pc-save-v2":
       return `/${path} next:<fixed-bag-boundary pattern> field:<grid:top-row/next-row|CTK3|v115 Fumen|URL> [lines:1..${DISCORD_PC_FIELD_MAX_ROWS}] [hold:<disabled|empty|IOTSZJL>] [kicktable:<built-in>]`;
     case "pc-allspin-exact-v1":
@@ -2057,10 +2059,13 @@ function inputHelp(entry, locale = "en") {
       ];
     case "pc-v2":
       return [
+        ...(entry.capabilityId === "pc.solutions" ? [
+          "Finds distinct executable solutions under the selected movement, hold, and queue rules. Results are colored solution fields; use `/pc path` for complete replay paths.",
+        ] : []),
         `\`field\` is a top-first 10-column grid of 1–${discordPcMaxRows(entry.input)} rows or one static CTK3/v115 Fumen/URL; \`next\` accepts the supported fixed/group/bag pattern grammar.`,
         `\`lines\` accepts every height 1–${discordPcMaxRows(entry.input)}; omitting it evaluates all feasible heights serially. \`hold\` is disabled, empty, or one occupied piece.`,
         "`queue-knowledge`, `spin-profile`, B2B preservation, and per-solution probabilities are named. A spin profile requires preservation on unscored PC objectives; visible-7 is unavailable with minimum-cover.",
-        "Above 6 PC lines, queue knowledge must be oracle.",
+        ...(entry.capabilityId === "pc.solutions" ? [] : ["Above 6 PC lines, queue knowledge must be oracle."]),
         nativeKickHelp,
       ];
     case "pc-path-v2":
@@ -2074,7 +2079,7 @@ function inputHelp(entry, locale = "en") {
       return [
         `\`field\` is a top-first 10-column grid of 1–${discordPcMaxRows(entry.input)} rows or one static CTK3/v115 Fumen/URL; \`next\` defines the full-oracle queue-pattern universe.`,
         `\`lines\` accepts every height 1–${discordPcMaxRows(entry.input)}; omitting it evaluates all feasible heights serially. \`hold\` is disabled, empty, or one occupied piece.`,
-        "This typed probability route owns unique/full-oracle semantics and exposes no objective, queue-knowledge, spin, B2B-preservation, or per-solution-probability control.",
+        "Calculates success probability across the full queue pattern. `preserve-b2b=on` requires B2B preservation; `spin-profile` selects its spin rules and requires preservation to be on.",
         nativeKickHelp,
       ];
     case "pc-save-v2":
@@ -2367,10 +2372,13 @@ function koreanInputHelp(entry) {
       ];
     case "pc-v2":
       return [
+        ...(entry.capabilityId === "pc.solutions" ? [
+          "선택한 이동·홀드·큐 규칙으로 실행 가능한 고유 해법을 찾고 색상 해법 필드를 출력합니다. 전체 리플레이 경로는 `/pc path`로 탐색합니다.",
+        ] : []),
         `\`field\`에는 위쪽 줄부터 적은 10열 1–${discordPcMaxRows(entry.input)}줄 격자 또는 정적 CTK3/v115 Fumen/URL 하나를 입력하며, \`next\`에는 지원되는 고정·그룹·가방 패턴을 사용합니다.`,
         `\`lines\`는 1–${discordPcMaxRows(entry.input)} 전부를 지원하며 생략하면 가능한 높이를 순서대로 판정합니다. \`hold\`는 비활성·빈 홀드·미노 하나 중 하나입니다.`,
         "`queue-knowledge`, `spin-profile`, B2B 보존, 해법별 확률은 각각 명명 옵션입니다. 점수 없는 PC에서 스핀 프로필은 B2B 보존이 필요하고 visible-7은 minimum-cover와 함께 쓸 수 없습니다.",
-        "6L 초과 PC에서는 큐 공개 범위를 oracle로 지정해야 합니다.",
+        ...(entry.capabilityId === "pc.solutions" ? [] : ["6L 초과 PC에서는 큐 공개 범위를 oracle로 지정해야 합니다."]),
         nativeKickHelp,
       ];
     case "pc-path-v2":
@@ -2384,7 +2392,7 @@ function koreanInputHelp(entry) {
       return [
         `\`field\`에는 위쪽 줄부터 적은 10열 1–${discordPcMaxRows(entry.input)}줄 격자 또는 정적 CTK3/v115 Fumen/URL 하나를 입력하며, \`next\`가 전체 큐를 아는 패턴 확률 공간을 정합니다.`,
         `\`lines\`는 1–${discordPcMaxRows(entry.input)} 전부를 지원하며 생략하면 가능한 높이를 순서대로 판정합니다. \`hold\`는 비활성·빈 홀드·미노 하나 중 하나입니다.`,
-        "이 타입 확률 경로는 unique·전체 큐 지식 의미를 자체 소유하며 objective, queue-knowledge, 스핀, B2B 보존, 해법별 확률 옵션을 노출하지 않습니다.",
+        "전체 큐 패턴의 성공 확률을 계산합니다. `preserve-b2b=on`은 B2B 보존을 요구하며, `spin-profile`은 보존 판정에 쓸 스핀 규칙을 선택하므로 B2B 보존을 켜야 합니다.",
         nativeKickHelp,
       ];
     case "pc-save-v2":
@@ -3416,6 +3424,7 @@ const KOREAN_OPTION_NAMES = Object.freeze({
   "timeout-seconds": "제한시간-초",
   "finesse.search": "탐색",
   "finesse.score": "계산",
+  "pc.solutions": "해법",
   "pc.path": "경로",
   "pc.chance": "확률",
   "pc.minimals": "최소집합",
@@ -3558,6 +3567,7 @@ const KOREAN_COMMAND_NOTES = Object.freeze({
 const KOREAN_OPTION_DESCRIPTIONS = Object.freeze({
   "recovery.boundary": "두 단계의 일반 연결과 경계 리커버리를 탐색합니다",
   scenario: "두 단계의 필드·공급·배치 역할·B2B 설정을 한 JSON 객체로 입력합니다",
+  "pc.solutions": "실행 가능한 고유 퍼펙트 클리어 해법을 찾습니다",
   "pc.path": "표현되는 모든 퍼펙트 클리어 경로를 찾습니다",
   "pc.chance": "정확한 퍼펙트 클리어 성공 확률을 계산합니다",
   "pc.minimals": "최소 커버 퍼펙트 클리어 해법 집합을 찾습니다",

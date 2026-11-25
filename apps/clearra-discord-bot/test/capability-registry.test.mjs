@@ -578,7 +578,7 @@ test("canonical slash topology uses family-specific subcommands and keeps compat
       Object.keys(findSlashCommand(name).subcommands),
     ]),
     [
-      ["pc", ["path", "chance", "minimals", "score", "saves", "best-save", "score-minimals", "tiling", "failed-queue", "score-finder", "allspin-sol", "allspin-pres-chance"]],
+      ["pc", ["solutions", "path", "chance", "minimals", "score", "saves", "best-save", "score-minimals", "tiling", "failed-queue", "score-finder", "allspin-sol", "allspin-pres-chance"]],
       ["build", [
         "cover",
         "probability",
@@ -842,8 +842,8 @@ test("Discord capability IDs are exact members of the product authority", () => 
     .map(({ id }) => id).concat(candidate.runtime_capability.id)
     .sort();
   const actualRuntimeIds = productCapabilityRegistry.map(({ id }) => id).sort();
-  assert.equal(authority.runtime_projection.current_capabilities.length, 47);
-  assert.equal(actualRuntimeIds.length, 48);
+  assert.equal(authority.runtime_projection.current_capabilities.length, 48);
+  assert.equal(actualRuntimeIds.length, 49);
   assert.deepEqual(actualRuntimeIds, expectedRuntimeIds);
   const stableIds = new Set([...authority.capabilities.map(({ id }) => id), candidate.product.id]);
   for (const capability of productCapabilityRegistry) {

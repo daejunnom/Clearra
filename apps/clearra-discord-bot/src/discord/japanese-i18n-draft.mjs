@@ -55,6 +55,7 @@ export const JAPANESE_DISCORD_MESSAGES = Object.freeze({
   "result.kind.finesse_search": "最小操作検索",
   "result.kind.finesse_score": "最小操作数計算",
   "result.kind.public.search": "検索",
+  "result.kind.public.solutions": "パーフェクトクリア解法検索",
   "result.kind.public.path": "経路検索",
   "result.kind.public.percent": "パーフェクトクリア確率計算",
   "result.kind.public.chance": "パーフェクトクリア確率計算",

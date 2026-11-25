@@ -9,6 +9,28 @@ interaction token, webhook URL, or channel credential.
 
 ## Active Discord surface
 
+`/pc solutions` finds distinct executable PC solutions and returns their colored
+solution fields. It uses the same existing native Unique search as solution-only
+CLI and GUI searches, including movement, Hold, queue knowledge, optional spin/B2B
+filters, and per-solution probabilities. For example:
+
+```text
+/pc solutions next:P7P4 field:grid:__________ hold:empty kicktable:srs-plus
+$pc solutions grid:__________ P7P4
+$path grid:__________ P7P4 --objective unique
+```
+
+Omitting `lines` evaluates every feasible PC target in order under the same
+interaction deadline. `/pc path` remains the explicit complete replay-path
+search; `/pc chance` calculates success probability. The advanced text
+`--objective unique` option now selects solution search instead of probability
+search. Existing `$path` and `/path` calls without that option keep their replay
+semantics. No CLI or GUI command/default is changed by this Discord addition.
+`/pc chance` also accepts `preserve-b2b:on` with an optional `spin-profile` for
+the probability of a preserving solution. A spin profile without preservation
+is rejected as inactive input; the unfiltered probability route keeps its
+existing default.
+
 The registered slash commands are `/render-file`, `/path`, `/percent`, `/chance`, `/minimals`,
 `/score`, `/score-minimals`, `/saves`, `/best-save`, `/cover`, `/setup`,
 `/congruent`, `/congruent-cover`, `/setup-cover`, `/cover-percent`,

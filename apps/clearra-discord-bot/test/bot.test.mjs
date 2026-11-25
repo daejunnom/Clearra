@@ -2703,6 +2703,7 @@ test("every public search result kind has an exact allowed engine kind and EN/KO
     saves: ["perfect-clear save groups", "퍼펙트 클리어 세이브 그룹"],
     best_save: ["best perfect-clear save", "최적 퍼펙트 클리어 세이브"],
     score_minimals: ["minimum-cover scored search", "최소 커버 점수 탐색"],
+    solutions: ["perfect-clear solution search", "퍼펙트 클리어 해법 탐색"],
     tiling: ["perfect-clear tiling search", "퍼펙트 클리어 타일링 탐색"],
     failed_queue: ["failed-queue search", "실패 큐 탐색"],
     cover: ["build-coverage search", "구축 커버리지 탐색"],
@@ -2744,7 +2745,7 @@ test("every public search result kind has an exact allowed engine kind and EN/KO
     evaluate_cover_percent: ["supplied-solution coverage probability", "제공 해법 커버리지 확률"],
     boundary_recovery: ["boundary-recovery search", "경계 리커버리 탐색"],
   };
-  assert.equal(DISCORD_PUBLIC_SEARCH_CONTRACT.length, 56);
+  assert.equal(DISCORD_PUBLIC_SEARCH_CONTRACT.length, 57);
   assert.equal(Object.isFrozen(DISCORD_PUBLIC_SEARCH_CONTRACT), true);
   assert.equal(
     DISCORD_PUBLIC_SEARCH_CONTRACT.every((entry) =>
@@ -2779,6 +2780,15 @@ test("every public search result kind has an exact allowed engine kind and EN/KO
     {
       executor: {
         async execute() {
+          if (requestedCapabilityId === "pc.solutions") {
+            return { exitCode: 0, stderr: "", stdout: JSON.stringify({ kind: engineKind,
+              contract: { command: { kind: engineKind } },
+              summary: { objective: "unique", search_output_policy: "trace",
+                postprocess_pc_path_requested: "false", packing_candidate_is_solution: "false",
+                buildability_verified: true,
+                count_complete: true, solution_count_calculated: true, solution_set_materialized: true },
+            }) };
+          }
           if (engineKind === "pc-path-family.v2") {
             return {
               exitCode: 0,

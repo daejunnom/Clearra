@@ -131,11 +131,11 @@ const PACKED_BOOLEAN_FLAGS = new Map([
 ]);
 
 // Objective selection is an advanced text-only projection over pc.path. Every
-// accepted objective resolves to its own canonical typed calculation; the
+// accepted objective resolves to its own calculation; the
 // pc.path parser itself never receives an explicit objective override.
 const ADVANCED_PC_OBJECTIVES = new Map([
   ["all", Object.freeze({ subcommand: "path", capabilityId: "pc.path" })],
-  ["unique", Object.freeze({ subcommand: "chance", capabilityId: "pc.chance" })],
+  ["unique", Object.freeze({ subcommand: "solutions", capabilityId: "pc.solutions" })],
   ["min-cover", Object.freeze({ subcommand: "minimals", capabilityId: "pc.minimals" })],
   ["tiling", Object.freeze({ subcommand: "tiling", capabilityId: "pc.tiling" })],
 ]);

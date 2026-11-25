@@ -2793,7 +2793,7 @@ function allowedOptionNames(command) {
         "preserve-b2b",
       ]);
     case "pc-chance-v2":
-      return new Set(["field", "next", "lines", "hold", "kicktable"]);
+      return new Set(["field", "next", "lines", "hold", "kicktable", "spin-profile", "preserve-b2b"]);
     case "pc-save-v2":
       return new Set(["field", "next", "lines", "hold", "kicktable"]);
     case "pc-score-v2":

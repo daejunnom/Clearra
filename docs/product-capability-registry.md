@@ -55,6 +55,23 @@ This produces the public search roots `/pc`, `/build`, `/setup`, `/forward`, and
 `/spin-structure`. The registry deliberately contains no public catch-all or
 standalone finesse root.
 
+### Discord solution search
+
+`/pc solutions` and `$pc solutions` expose the existing exact native PC Unique
+search through Discord. They lower to `pc --count unique --objective unique`
+with the selected field, full queue source, Hold state, movement rule, queue
+knowledge, spin/B2B filter, and per-solution probability setting. The existing
+native `pc`/`pc-scenario` results and colored solution keys remain the output
+authority. This Discord capability does not define a new App result family or
+add a named CLI/GUI command.
+
+The `discord_command` surface profile records that boundary. `/pc path` keeps
+its complete replay-family semantics and `/pc chance` keeps its typed
+probability result. Advanced text `--objective unique` selects `pc.solutions`;
+it must not redirect a request for solution fields to probability-only output.
+Omitted PC height continues to plan every feasible target under the existing
+shared interaction deadline, with the complete original queue source retained.
+
 ## Algorithm, timeout, and effect axes
 
 `algorithm_family`, `timeout_class`, and `effect_classes` are separate required

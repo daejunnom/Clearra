@@ -46,6 +46,7 @@ import {
   validDiscordPcScoreMinimalsResult,
 } from "./discord/pc-score-minimals-result.mjs";
 import { validDiscordTypedProductResult } from "./discord/typed-product-result.mjs";
+import { validDiscordPcSolutionsResult } from "./discord/pc-solutions-result.mjs";
 import {
   findCommandModalCommand,
   readCommandModalLocale,
@@ -2123,6 +2124,9 @@ function requestedStructuredResultKind(structured, fallback, allspinExpectation)
   ) return fallback;
   const publicKind = publicStructuredResultKind(structured?.kind, fallback);
   if (publicKind === null) return null;
+  if (publicKind === "pc-solutions" && !validDiscordPcSolutionsResult(structured)) {
+    return null;
+  }
   if (publicKind === "pc-score" && !validPcScoreSummary(structured)) {
     return null;
   }
