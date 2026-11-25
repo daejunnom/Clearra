@@ -4239,17 +4239,36 @@ fn typed_pc_tiling_one_root_finishes_a_valid_empty_solution_family() {
     let hardware_limit = 12.min(WorkerPolicy::hardware_worker_limit());
     let expected_workers =
         WorkerPolicy::Fixed(11).effective_for_hardware_limit(false, hardware_limit);
+    let preparation = WasmDistributedCoordinator::prepare(&runtime, command)
+        .expect("empty one-root typed PC tiling preparation");
     if expected_workers < 2 {
-        assert!(matches!(
-            WasmDistributedCoordinator::prepare(&runtime, command)
-                .expect("empty one-root typed PC tiling preparation"),
-            WasmDistributedPreparation::Serial
-        ));
+        assert!(matches!(preparation, WasmDistributedPreparation::Serial));
         return;
     }
+    let coordinator = match preparation {
+        WasmDistributedPreparation::Coordinator(coordinator) => coordinator,
+        WasmDistributedPreparation::Serial => {
+            panic!("empty one-root typed PC tiling must retain its admitted worker pool")
+        }
+        WasmDistributedPreparation::Ready(result) => panic!(
+            "empty one-root typed PC tiling completed during preparation: {:?}",
+            result.app_response()
+        ),
+    };
+    assert_eq!(coordinator.worker_count(), expected_workers);
+    assert_eq!(coordinator.requested_compute_workers(), expected_workers);
+    assert!(coordinator.root_task_parallel());
+    assert!(coordinator.verification_required());
+    assert!(!coordinator.producer_completed());
+    drop(coordinator);
+
     let coordinator = completed_distributed_cpu_source(&runtime, command);
     assert_eq!(coordinator.worker_count(), expected_workers);
-    assert!(coordinator.root_task_parallel());
+    assert_eq!(coordinator.requested_compute_workers(), expected_workers);
+    assert!(coordinator.producer_completed());
+    // Completion consumes the root producer into its result merger. The
+    // topology predicate describes that live producer, not retained pool width.
+    assert!(!coordinator.root_task_parallel());
     // Preserve the helper's two-role protocol simulation separately from
     // the admitted pool width checked above; it does not spawn N threads.
     let distributed = finish_distributed_cpu_source(coordinator, 2);

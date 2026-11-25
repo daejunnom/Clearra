@@ -304,10 +304,10 @@ async function tilingArtifactCase(expectedIdentity, manifest) {
   const label = 'typed-tiling-artifact-preparation-and-initial-hold';
   const ctx = await context('null');
   const page = await ctx.newPage();
-  const held = draws => `clearra pc tiling --board-mask 0 --height 6 --pieces 15 --queue ${'O'.repeat(draws)} --hold O --backend cpu`;
+  const held = draws => `clearra pc tiling --lines 6 --board-mask 0 --height 6 --pieces 15 --queue ${'O'.repeat(draws)} --hold O --backend cpu`;
   const prepareCommands = [
     'clearra pc tiling --lines 2 --queue OOOOO --backend cpu',
-    'clearra pc tiling --board-mask 0 --height 2 --pieces 5 --queue OOOOO --no-hold --backend cpu',
+    'clearra pc tiling --lines 2 --board-mask 0 --height 2 --pieces 5 --queue OOOOO --no-hold --backend cpu',
     held(14), held(16)
   ].map(command => `${command} --workers 8 --use-all-cpu-threads`);
   const runCommand = `${held(14)} --workers 1 --use-all-cpu-threads`;

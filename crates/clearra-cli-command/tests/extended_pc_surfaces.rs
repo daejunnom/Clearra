@@ -11,7 +11,7 @@ use clearra_core_domain::{
 };
 use clearra_host_contract::ProductResultPayloadContent;
 use clearra_objectives::policy::objective_policy::ObjectivePolicy;
-use clearra_pc_graph::request::SupplyWindowSize;
+use clearra_pc_graph::request::{PcExecutionPolicy, SupplyWindowSize, WorkerPolicy};
 
 const INPUTS: &str =
     include_str!("../../../tests/fixtures/contracts/extended_pc_surface_input.v1.tsv");
@@ -47,6 +47,27 @@ fn selected_i_drawing(input: &[&str]) -> String {
     .unwrap()
 }
 
+fn assert_tiling_worker_policy(policy: &PcExecutionPolicy, workers: usize, source: &str) {
+    // Pc/Scenario keep compute authority in the query policy. Their outer
+    // AppRequest budget starts at its default and is not the requested pool.
+    assert_eq!(
+        policy.worker_policy(),
+        WorkerPolicy::Fixed(workers),
+        "{source}"
+    );
+    assert_eq!(policy.worker_hardware_limit(), 12, "{source}");
+    assert!(!policy.use_all_logical_processors(), "{source}");
+    #[cfg(target_family = "wasm")]
+    let hardware_limit = 12;
+    #[cfg(not(target_family = "wasm"))]
+    let hardware_limit = 12.min(WorkerPolicy::hardware_worker_limit());
+    assert_eq!(
+        policy.workers(),
+        WorkerPolicy::Fixed(workers).effective_for_hardware_limit(false, hardware_limit),
+        "{source}"
+    );
+}
+
 #[test]
 fn canonical_pc_tiling_lowering_preserves_long_fixed_supplies_and_worker_policy() {
     for (lines, locks) in [(2, 5), (6, 15), (8, 20), (24, 60)] {
@@ -71,7 +92,6 @@ fn canonical_pc_tiling_lowering_preserves_long_fixed_supplies_and_worker_policy(
                     Some(ProductCapabilityContract::PcTiling),
                     "{source}"
                 );
-                assert_eq!(request.resource_budget().workers(), workers as u16);
                 match request.command() {
                     AppCommand::Pc(command) => {
                         assert!(hold);
@@ -79,7 +99,7 @@ fn canonical_pc_tiling_lowering_preserves_long_fixed_supplies_and_worker_policy(
                         assert!(query.hold_policy().is_enabled());
                         assert_eq!(usize::from(query.target().lines()), lines);
                         assert_eq!(query.queue().len(), queue.len());
-                        assert_eq!(query.execution_policy().workers(), workers);
+                        assert_tiling_worker_policy(query.execution_policy(), workers, &source);
                         assert_eq!(query.objective(), ObjectivePolicy::tiling());
                     }
                     AppCommand::Scenario(command) => {
@@ -90,7 +110,7 @@ fn canonical_pc_tiling_lowering_preserves_long_fixed_supplies_and_worker_policy(
                         assert_eq!(query.piece_window().max_pieces(), locks);
                         assert_eq!(query.exact_pieces(), Some(locks));
                         assert_eq!(query.remaining_queue().len(), queue.len());
-                        assert_eq!(query.execution_policy().workers(), workers);
+                        assert_tiling_worker_policy(query.execution_policy(), workers, &source);
                         assert_eq!(query.objective(), ObjectivePolicy::tiling());
                     }
                     other => panic!("typed tiling lowered to an unexpected command: {other:?}"),
@@ -131,7 +151,7 @@ fn canonical_scenario_tiling_preserves_multi_bag_supply_windows_and_initial_hold
         assert_eq!(query.allow_hold(), hold_option != "--no-hold");
         assert_eq!(query.piece_window().max_pieces(), locks);
         assert_eq!(query.exact_pieces(), Some(locks));
-        assert_eq!(query.execution_policy().workers(), 8);
+        assert_tiling_worker_policy(query.execution_policy(), 8, &source);
         assert_eq!(query.objective(), ObjectivePolicy::tiling());
     }
 }

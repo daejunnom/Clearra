@@ -35,10 +35,17 @@ fn typed_tiling_fifteen_locks_with_initial_hold_and_long_source_prepare_exactly(
     let app = AppContext::new(
         AppServices::default().with_core_executor(AppCoreExecutorService::wasm_cpu()),
     );
+    let hardware_limit = if cfg!(target_family = "wasm") {
+        8
+    } else {
+        8.min(WorkerPolicy::hardware_worker_limit())
+    };
     for workers in [1, 8] {
+        let expected_workers =
+            WorkerPolicy::Fixed(workers).effective_for_hardware_limit(true, hardware_limit);
         for source_draws in [14, 16] {
             let command = format!(
-                "clearra pc tiling --board-mask 0 --height 6 --pieces 15 \
+                "clearra pc tiling --lines 6 --board-mask 0 --height 6 --pieces 15 \
                  --queue {} --hold O --backend cpu --workers {workers} --use-all-cpu-threads",
                 "O".repeat(source_draws)
             );
@@ -53,7 +60,11 @@ fn typed_tiling_fifteen_locks_with_initial_hold_and_long_source_prepare_exactly(
             assert_eq!(query.exact_pieces(), Some(15));
             assert_eq!(query.hold_state().piece(), Some(PieceKind::O));
             assert!(query.allow_hold());
-            assert_eq!(query.execution_policy().workers(), workers);
+            assert_eq!(
+                query.execution_policy().worker_policy(),
+                WorkerPolicy::Fixed(workers)
+            );
+            assert_eq!(query.execution_policy().workers(), expected_workers);
             assert_eq!(
                 query
                     .remaining_queue()
@@ -77,15 +88,7 @@ fn typed_tiling_fifteen_locks_with_initial_hold_and_long_source_prepare_exactly(
             assert_eq!(problem.visible_height(), 6);
             assert_eq!(problem.objective().kind(), ObjectiveKind::Tiling);
             assert_eq!(problem.initial_hold().hold_piece(), Some(PieceKind::O));
-            let hardware_limit = if cfg!(target_family = "wasm") {
-                8
-            } else {
-                8.min(WorkerPolicy::hardware_worker_limit())
-            };
-            assert_eq!(
-                problem.backend_policy().workers(),
-                WorkerPolicy::Fixed(workers).effective_for_hardware_limit(true, hardware_limit)
-            );
+            assert_eq!(problem.backend_policy().workers(), expected_workers);
             assert_eq!(
                 problem
                     .piece_source()

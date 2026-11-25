@@ -266,8 +266,8 @@ fn tiling_option_combinations_preserve_long_windows_and_occupied_hold_without_en
                     .with_allow_hold(hold_enabled)
                     .with_hold_piece(held)
                     .with_supply_window_size(SupplyWindowSize::new(draws))
-                    .with_objective(ObjectivePolicy::tiling())
-                    .with_count_policy(PcCountPolicy::CountUnique);
+                    .with_count_policy(PcCountPolicy::CountUnique)
+                    .with_objective(ObjectivePolicy::tiling());
                     let command = ScenarioAppCommand::new(query.clone()).with_result_projection(
                         PcResultProjection::TilingFamilyV1(
                             PcTilingIngressOrigin::CanonicalPcTiling,
@@ -313,8 +313,8 @@ fn tiling_option_combinations_retain_the_shared_compiler_supply_bounds() {
     )
     .with_exact_pieces(Some(15))
     .with_allow_hold(false)
-    .with_objective(ObjectivePolicy::tiling())
-    .with_count_policy(PcCountPolicy::CountUnique);
+    .with_count_policy(PcCountPolicy::CountUnique)
+    .with_objective(ObjectivePolicy::tiling());
     for (draws, expected) in [
         (
             14,
