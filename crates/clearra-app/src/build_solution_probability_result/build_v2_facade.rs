@@ -573,7 +573,11 @@ impl BuildSetupV1Request {
             // These queue kinds are rejected by this finite Setup ingress.
             _ => requested,
         };
-        actual_upper.min(requested)
+        if requested == 0 {
+            actual_upper
+        } else {
+            actual_upper.min(requested)
+        }
     }
 }
 
@@ -2555,6 +2559,49 @@ mod tests {
             [colored_identity(0, 0xf), colored_identity(1, 0xf)],
         )
         .expect("same-mask target candidates")
+    }
+
+    #[test]
+    fn setup_score_unlimited_pattern_projection_accounts_for_the_complete_source() {
+        use clearra_pc_graph::request::{PcExecutionPolicy, SupplyWindowSize};
+        use clearra_supply::queue::queue_pattern_expression::QueuePatternExpression;
+
+        for (source, actual_patterns, source_length) in [
+            (
+                PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::I])),
+                1_usize,
+                1,
+            ),
+            (
+                PcQueueInput::pattern_expression(
+                    QueuePatternExpression::parse("[IO][IO]", 0).unwrap(),
+                ),
+                4,
+                2,
+            ),
+            (PcQueueInput::Standard7Bag, 42, 2),
+        ] {
+            for (budget, expected) in [(0, actual_patterns), (3, actual_patterns.min(3))] {
+                let core = PcScenarioQuery::new(
+                    PcScenarioBoard::standard_10(4, 0),
+                    source.clone(),
+                    PieceWindow::new(1),
+                )
+                .with_exact_pieces(Some(1))
+                .with_allow_hold(true)
+                .with_supply_window_size(SupplyWindowSize::new(source_length))
+                .with_execution_policy(PcExecutionPolicy::default().with_max_patterns(budget));
+                let query = BuildProbabilityQuery::new(core, one_piece_query().field())
+                    .with_solution_probability_policy(BuildSolutionProbabilityPolicy::Include);
+                let setup = BuildSetupV1Request::new(
+                    query,
+                    colored_target("pattern-projection"),
+                    BuildObjective::Unique,
+                )
+                .unwrap();
+                assert_eq!(setup.setup_score_max_patterns(), expected);
+            }
+        }
     }
 
     #[test]

@@ -1338,3 +1338,15 @@ test('PC tiling preserves the explicit pattern-universe ceiling across Web and D
   const absent = commandTokens(production.buildWorkspaceCommand(pcTilingBase()));
   assert.equal(hasOption(absent, '--max-patterns'), false);
 });
+
+test('zero pattern budget keeps the unlimited default across PC Web and Desktop modes', () => {
+  for (const scoreMode of ['off', 'tiling', 'path', 'minimum-cover', 'failed-queue']) {
+    const base = { ...production.createDefaultWorkspaceRequest(), scoreMode, queue: 'P7P7' };
+    const automatic = production.buildWorkspaceCommandArguments(base);
+    const unlimited = { ...base, maxPatterns: 0 };
+    assert.deepEqual(production.buildWorkspaceCommandArguments(unlimited), automatic, scoreMode);
+    assert.deepEqual(production.workspaceRequestForDesktop(unlimited, 'en').arguments, automatic, scoreMode);
+    const bounded = production.buildWorkspaceCommandArguments({ ...base, maxPatterns: 23 });
+    assert.equal(optionValue(bounded, '--max-patterns'), '23', scoreMode);
+  }
+});

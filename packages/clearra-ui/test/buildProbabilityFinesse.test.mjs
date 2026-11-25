@@ -227,6 +227,39 @@ test('the GUI accepts only bounded geometry placements matching hard-drop locks'
   })?.representativeWitness, null);
 });
 
+test('the GUI retains a native representative witness with a long source queue', () => {
+  const report = JSON.parse(JSON.stringify({
+    metric: 'inputs',
+    mode: 'search',
+    pattern_knowledge: 'oracle',
+    complete: true,
+    exact_total_inputs: '1',
+    representative_witness: {
+      policy: 'oracle',
+      solution_key: 'long-source-solution',
+      pattern_ids: [0],
+      queue: Array(1025).fill('I'),
+      total_inputs: 1,
+      input_sequence: ['hard-drop'],
+      placements: [{ piece: 'I', rotation: 0, x: 0, y: 0 }]
+    },
+    policy_results: []
+  }));
+  const witness = buildProbabilityFinesseView(report)?.representativeWitness;
+  assert.equal(witness?.queue.length, 1025);
+  assert.deepEqual(witness, report.representative_witness);
+  assert.deepEqual(representativeWitnessExportForSolution(witness, 'long-source-solution'), {
+    solutionKey: 'long-source-solution',
+    totalInputs: 1,
+    inputSequence: ['hard-drop'],
+    placements: [{ piece: 'I', rotation: 0, x: 0, y: 0 }]
+  });
+
+  // Validate every original source entry, including the previously hidden tail.
+  report.representative_witness.queue[1024] = 'invalid-piece';
+  assert.equal(buildProbabilityFinesseView(report)?.representativeWitness, null);
+});
+
 test('only the selected representative solution card receives the witness export', () => {
   const witness = {
     policy: 'oracle',

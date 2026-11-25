@@ -1147,11 +1147,10 @@ impl WebCommandRequest {
                         .supply_window_size
                         .is_some_and(|window| window.source_pieces() > max_source_pieces)
                 {
-                    return Err(invalid(if self.lines > 6 {
-                        "pc score accepts at most 61 source pieces"
-                    } else {
-                        "pc score accepts at most 16 source pieces"
-                    }));
+                    return Err(WebCommandError::new(
+                        WebCommandErrorCode::InvalidValue,
+                        format!("pc score accepts at most {max_source_pieces} source pieces"),
+                    ));
                 }
                 let score = self.objective.score();
                 let expected_objective = if matches!(

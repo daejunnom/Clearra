@@ -53,7 +53,7 @@ export function createDefaultSetupScoreRequest(): SetupScoreRequest {
     scoreProfile: 'tetrio',
     initialB2B: 0,
     rule: 'srs-plus',
-    maxPatterns: 100_000,
+    maxPatterns: 0,
     workers: defaultWorkerCount(),
     useAllLogicalProcessors: false
   };
@@ -87,9 +87,9 @@ export function setupScoreValidationCodes(
     errors.push('initial_b2b_invalid');
   }
   if (
-    !Number.isInteger(request.maxPatterns) ||
-    request.maxPatterns < 1 ||
-    request.maxPatterns > 100_000
+    !Number.isSafeInteger(request.maxPatterns) ||
+    request.maxPatterns < 0 ||
+    request.maxPatterns > 0xffff_ffff
   ) {
     errors.push('max_patterns_invalid');
   }
@@ -169,7 +169,7 @@ function validSetupScoreSource(
 ): boolean {
   const parsed = parseBrowserQueueInput(source);
   if (!parsed || (kind === 'queue' && parsed.kind !== 'fixed')) return false;
-  return !continuation || parsed.sequenceLength <= 16;
+  return !continuation || parsed.sequenceLength <= 0xffff;
 }
 
 function normalizedSetupScoreSource(source: string): string {

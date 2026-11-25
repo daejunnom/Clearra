@@ -1878,7 +1878,7 @@ fn parse_setup_score_command(
                 if max_patterns.is_some() {
                     return Err(repeated_setup_score_option(option));
                 }
-                max_patterns = Some(parse_positive(
+                max_patterns = Some(parse_nonnegative_usize(
                     next_value(tokens, &mut cursor, option)?,
                     option,
                 )?);
@@ -3026,7 +3026,10 @@ fn parse_forward_command(
     if ren && piece_source.sequence_len() > clearra_forward_search::MAX_REN_QUEUE_PIECES {
         return Err(WebCommandError::new(
             WebCommandErrorCode::InvalidValue,
-            "REN search accepts at most 22 queue pieces",
+            format!(
+                "REN search accepts at most {} queue pieces",
+                clearra_forward_search::MAX_REN_QUEUE_PIECES
+            ),
         ));
     }
     if spin_finder && spin_profile == SpinProfileId::Disabled {

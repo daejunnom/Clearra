@@ -157,7 +157,7 @@
       solution_source_invalid: 'enterAContinuationQueueOrPatternOf',
       clear_height_invalid: 'clearHeightMustBeBetween1And',
       initial_b2b_invalid: 'initialB2bIsOutOfRange',
-      max_patterns_invalid: 'maximumPatternsMustBeBetween1And',
+      max_patterns_invalid: 'maximumPatternsMustBeNonnegative',
       worker_count_invalid: 'workerCountMustBePositive'
     };
     return componentMessage(language, messages[code]);
@@ -232,7 +232,11 @@
       <label><span>{componentMessage(language, 'scoreProfile')}</span><select value={request.scoreProfile} on:change={(event) => updateRequest({ scoreProfile: (event.currentTarget as HTMLSelectElement).value as SetupScoreRequest['scoreProfile'] })}><option value="tetrio">tetrio</option><option value="guideline">guideline</option><option value="jstris-ultra">jstris-ultra</option></select></label>
       <label><span>{componentMessage(language, 'initialB2b')}</span><input type="number" min="0" value={request.initialB2B} on:input={(event) => updateRequest({ initialB2B: Number((event.currentTarget as HTMLInputElement).value) })} /></label>
       <label><span>{componentMessage(language, 'rule')}</span><select value={request.rule} on:change={(event) => updateRequest({ rule: (event.currentTarget as HTMLSelectElement).value as SetupScoreRequest['rule'] })}><option value="srs-plus">srs-plus</option><option value="srs">srs</option><option value="srs-x">srs-x</option><option value="jstris-180">jstris-180</option><option value="no-kick">no-kick</option></select></label>
-      <label><span>{componentMessage(language, 'maximumPatterns')}</span><input type="number" min="1" max="100000" value={request.maxPatterns} on:input={(event) => updateRequest({ maxPatterns: Number((event.currentTarget as HTMLInputElement).value) })} /></label>
+      <label>
+        <span>{componentMessage(language, 'maximumPatterns')}</span>
+        <input type="number" min="0" max="4294967295" value={request.maxPatterns} on:input={(event) => updateRequest({ maxPatterns: Number((event.currentTarget as HTMLInputElement).value) })} />
+        <small>{componentMessage(language, 'zeroPatternsMeansUnlimited')}</small>
+      </label>
       <label><span>{componentMessage(language, 'workers')}</span><input type="number" min="1" value={request.workers} disabled={request.useAllLogicalProcessors} on:input={(event) => updateRequest({ workers: Number((event.currentTarget as HTMLInputElement).value) })} /></label>
       <label class="check-row"><input type="checkbox" checked={request.holdEnabled} on:change={(event) => updateRequest({ holdEnabled: (event.currentTarget as HTMLInputElement).checked })} /><span>{componentMessage(language, 'enableSetupHold')}</span></label>
       <label class="check-row"><input type="checkbox" checked={request.useAllLogicalProcessors} on:change={(event) => updateRequest({ useAllLogicalProcessors: (event.currentTarget as HTMLInputElement).checked })} /><span>{componentMessage(language, 'allLogicalProcessors')}</span></label>

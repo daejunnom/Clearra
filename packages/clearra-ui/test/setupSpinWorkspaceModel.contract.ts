@@ -79,8 +79,26 @@ assert.deepEqual(setupScoreDesktop.arguments, buildSetupScoreCommandArguments(se
 assert.equal(optionValue(setupScoreDesktop.arguments, '--setup-queue'), 'I');
 assert.equal(optionValue(setupScoreDesktop.arguments, '--solution-queue'), 'OTSJ');
 assert.equal(optionValue(setupScoreDesktop.arguments, '--backend'), 'cpu');
+assert.equal(optionValue(setupScoreDesktop.arguments, '--max-patterns'), '0');
 assert.equal(setupScoreDesktop.arguments.includes('--no-backend-fallback'), true);
 assert.equal('max_memory_mib' in setupScoreDesktop, false);
+
+for (const maxPatterns of [0, 100_001, 0xffff_ffff]) {
+  const request = { ...setupScore, maxPatterns };
+  assert.deepEqual(setupScoreValidationCodes(request), []);
+  assert.equal(optionValue(buildSetupScoreCommandArguments(request), '--max-patterns'), String(maxPatterns));
+}
+for (const maxPatterns of [-1, 0.5, 0x1_0000_0000, Number.NaN]) {
+  assert.ok(setupScoreValidationCodes({ ...setupScore, maxPatterns }).includes('max_patterns_invalid'));
+}
+for (const solutionSource of ['I'.repeat(17), 'I'.repeat(0xffff)]) {
+  assert.deepEqual(setupScoreValidationCodes({ ...setupScore, solutionSource }), []);
+}
+assert.deepEqual(setupScoreValidationCodes({
+  ...setupScore, solutionSourceKind: 'patterns', solutionSource: 'P7P7P7'
+}), []);
+assert.ok(setupScoreValidationCodes({ ...setupScore, solutionSource: 'I'.repeat(0x1_0000) }).includes('solution_source_invalid'));
+assert.ok(setupScoreValidationCodes({ ...setupScore, clearHeight: 7 }).includes('clear_height_invalid'));
 
 const patternedScore = {
   ...setupScore,

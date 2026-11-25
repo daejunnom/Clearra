@@ -604,7 +604,7 @@ export function buildWorkspaceCommandArguments(request: SolverWorkspaceRequest):
     tokens.push('--rule', request.rule);
     tokens.push(request.tablebaseEnabled ? '--tablebase' : '--no-tablebase');
     tokens.push(...searchExecutionCommandArguments(workspaceSearchExecution(request)));
-    if (request.maxPatterns !== undefined) {
+    if (request.maxPatterns !== undefined && request.maxPatterns !== 0) {
       tokens.push('--max-patterns', String(Math.max(1, Math.trunc(request.maxPatterns))));
     }
   } else if (request.scoreMode === 'minimum-cover') {
@@ -615,7 +615,7 @@ export function buildWorkspaceCommandArguments(request: SolverWorkspaceRequest):
       tokens.push('--spin-profile', request.spinProfile, '--preserve-b2b');
     }
     tokens.push(...searchExecutionCommandArguments(workspaceSearchExecution(request)));
-    if (request.maxPatterns !== undefined) {
+    if (request.maxPatterns !== undefined && request.maxPatterns !== 0) {
       tokens.push('--max-patterns', String(Math.max(1, Math.trunc(request.maxPatterns))));
     }
     const pinned = [...new Set(request.pinnedSolutionKeys)];
@@ -636,12 +636,12 @@ export function buildWorkspaceCommandArguments(request: SolverWorkspaceRequest):
       tokens.push('--spin-profile', request.spinProfile, '--preserve-b2b');
     }
     tokens.push(...searchExecutionCommandArguments(workspaceSearchExecution(request)));
-    if (request.maxPatterns !== undefined) {
+    if (request.maxPatterns !== undefined && request.maxPatterns !== 0) {
       tokens.push('--max-patterns', String(Math.max(1, Math.trunc(request.maxPatterns))));
     }
   } else {
     tokens.push(...searchExecutionCommandArguments(workspaceSearchExecution(request)));
-    if (request.maxPatterns !== undefined) {
+    if (request.maxPatterns !== undefined && request.maxPatterns !== 0) {
       tokens.push('--max-patterns', String(Math.max(1, Math.trunc(request.maxPatterns))));
     }
   }

@@ -132,7 +132,7 @@ function validRepresentativeWitness(
   const witness = report.representative_witness;
   if (!witness || !['oracle', 'visible-7'].includes(witness.policy)) return null;
   if (!Number.isSafeInteger(witness.total_inputs) || witness.total_inputs < 0) return null;
-  if (!Array.isArray(witness.queue) || witness.queue.length > 1024 ||
+  if (!Array.isArray(witness.queue) ||
     !witness.queue.every((piece) => typeof piece === 'string' && FINESSE_PIECES.has(piece))) {
     return null;
   }

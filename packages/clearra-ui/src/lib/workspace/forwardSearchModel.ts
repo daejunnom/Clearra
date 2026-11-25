@@ -14,7 +14,8 @@ import {
 } from './cliCommandModel.ts';
 
 const MAX_DAMAGE = 0xffff_ffff;
-export const MAX_REN_QUEUE_PIECES = 65_535;
+export const MAX_FORWARD_QUEUE_PIECES = 65_535;
+export const MAX_REN_QUEUE_PIECES = MAX_FORWARD_QUEUE_PIECES;
 export { MAX_FORWARD_CHAIN } from './forwardSearchLimits.ts';
 
 export type ForwardTool = 'damage' | 'spin-finder' | 'ren';
@@ -52,7 +53,7 @@ export type ForwardSearchRequest = {
 
 export type ForwardSearchValidationCode =
   | 'forward_queue_invalid'
-  | 'forward_pattern_too_long'
+  | 'forward_queue_too_long'
   | 'ren_queue_too_long'
   | 'forward_height_invalid'
   | 'minimum_damage_invalid'
@@ -90,17 +91,8 @@ export function forwardSearchValidationCodes(
   const queue = parseBrowserQueueInput(request.queue);
   if (!queue || (request.tool !== 'spin-finder' && queue.kind !== 'fixed')) {
     errors.push('forward_queue_invalid');
-  } else if (
-    request.tool === 'ren' &&
-    queue.sequenceLength > MAX_REN_QUEUE_PIECES
-  ) {
-    errors.push('ren_queue_too_long');
-  } else if (
-    request.tool === 'spin-finder' &&
-    queue.kind === 'pattern' &&
-    queue.sequenceLength > 8
-  ) {
-    errors.push('forward_pattern_too_long');
+  } else if (queue.sequenceLength > MAX_FORWARD_QUEUE_PIECES) {
+    errors.push(request.tool === 'ren' ? 'ren_queue_too_long' : 'forward_queue_too_long');
   }
   if (!Number.isInteger(request.height) || request.height < 1 || request.height > 24) {
     errors.push('forward_height_invalid');

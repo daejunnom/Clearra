@@ -1319,6 +1319,31 @@ fn canonical_setup_score_accepts_the_two_independent_pattern_sources() {
 }
 
 #[test]
+fn setup_score_unlimited_patterns_and_long_continuation_reach_the_shared_app_ingress() {
+    let document = setup_score_ctk3_document();
+    let setup_pattern = "[IO]".repeat(17);
+    let continuation = "I".repeat(17);
+    let base = format!(
+        "clearra setup score --document-format ctk3 --document {document} --setup-patterns {setup_pattern} --solution-queue {continuation} --clear 2"
+    );
+    for budget in ["", " --max-patterns 0", " --max-patterns 131072"] {
+        let source = format!("{base}{budget}");
+        let request = CliCommandParser::parse(&source)
+            .expect("shared CLI/WASM Setup score syntax")
+            .to_app_request()
+            .expect("complete source beyond the former GUI limits");
+        assert!(matches!(request.command(), AppCommand::SetupScore(_)));
+    }
+    let bounded = CliCommandParser::parse(&format!("{base} --max-patterns 100000"))
+        .expect("an explicit source budget remains valid syntax")
+        .to_app_request();
+    assert!(
+        bounded.is_err(),
+        "the caller-selected source budget remains enforced"
+    );
+}
+
+#[test]
 fn setup_score_accepts_independent_exact_accelerator_switches() {
     let document = setup_score_ctk3_document();
     let base = format!(

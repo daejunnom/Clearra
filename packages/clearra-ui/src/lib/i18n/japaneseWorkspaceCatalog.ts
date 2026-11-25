@@ -611,7 +611,7 @@ export const japaneseWorkspaceMessages = Object.freeze({
   initial_b2b_invalid: '初期B2Bは0〜65,535の整数にしてください。',
   minimum_damage_invalid: '最小火力は0〜4,294,967,295の整数にしてください。',
   forward_queue_invalid: '有効な固定ミノ順を入力してください。スピン探索ではミノ順パターンも使用できます。',
-  forward_pattern_too_long: 'スピン探索のパターンで生成できるミノは最大8個です。それ以上は固定ミノ順を使用してください。',
+  forward_queue_too_long: '前方探索の入力には、最大65,535個のミノを指定できます。',
   ren_queue_too_long: 'REN探索では最大65,535個の厳密な固定ミノ順を使用できます。',
   forward_height_invalid: 'フィールドの高さは1〜24の整数にしてください。',
   initial_combo_invalid: '初期コンボは0〜65,535の整数にしてください。',
