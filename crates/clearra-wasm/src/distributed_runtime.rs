@@ -1660,10 +1660,11 @@ impl WasmDistributedCoordinator {
                 .map_err(|error| {
                 distributed_error("E_WASM_DISTRIBUTED_SETUP_START", error.reason())
             })?;
-            if producer.task_count() < 2 {
-                return Ok(WasmDistributedPreparation::Serial);
-            }
-            let worker_count = requested_workers.min(producer.task_count() + 1);
+            // Initial source cardinality controls active work, not the
+            // admitted pool. Setup still computes its shared graph here, so
+            // the browser keeps its existing source-one + remote-(N-1)
+            // accounting while preserving the full requested N budget.
+            let worker_count = requested_workers;
             return Ok(WasmDistributedPreparation::Coordinator(Self {
                 prepared: Some(DistributedPreparedSearch::Setup(prepared)),
                 producer: Some(DistributedCandidateProducer::Setup(producer)),
@@ -1944,7 +1945,7 @@ impl WasmDistributedCoordinator {
         } else if WasmPcRootProducer::supports(problem)
             && selected_product_backend == Some(WasmProductSearchBackend::Cpu)
         {
-            let producer = WasmPcRootProducer::new(problem)
+            let producer = WasmPcRootProducer::new_with_workers(problem, worker_count)
                 .map_err(|reason| distributed_error("E_WASM_DISTRIBUTED_START", reason))?;
             let root_count = producer.root_count();
             if root_count == 0 {
@@ -1967,13 +1968,14 @@ impl WasmDistributedCoordinator {
         {
             let producer = match pc_tiling_terminal_resource_authority {
                 Some((authority, checked_external_retained_upper_bound_bytes)) => {
-                    WasmTilingRootProducer::new_shared_under_authority(
+                    WasmTilingRootProducer::new_shared_under_authority_with_workers(
                         prepared.problem_arc(),
                         checked_external_retained_upper_bound_bytes,
                         authority,
+                        worker_count,
                     )
                 }
-                None => WasmTilingRootProducer::new(problem),
+                None => WasmTilingRootProducer::new_with_workers(problem, worker_count),
             }
             .map_err(|reason| distributed_error("E_WASM_DISTRIBUTED_START", reason))?;
             let root_count = producer.root_count();
@@ -4239,32 +4241,11 @@ impl WasmDistributedVerifierRuntime {
             let candidates = decode_candidate_batch(input).map_err(|error| {
                 distributed_error("E_WASM_DISTRIBUTED_TILING_TASK_INVALID", error.reason())
             })?;
-            let mut roots = Vec::new();
-            roots.try_reserve_exact(candidates.len()).map_err(|_| {
-                distributed_error(
-                    "E_WASM_DISTRIBUTED_TILING_TASK_INVALID",
-                    "wasm_tiling_root_batch_storage_unavailable",
-                )
-            })?;
-            for candidate in &candidates {
-                if !candidate.row_ids().is_empty() {
-                    return Err(distributed_error(
-                        "E_WASM_DISTRIBUTED_TILING_TASK_INVALID",
-                        "wasm_tiling_root_task_rows_must_be_empty",
-                    ));
-                }
-                roots.push((
-                    candidate.pass_index(),
-                    u32::try_from(candidate.ordinal()).map_err(|_| {
-                        distributed_error(
-                            "E_WASM_DISTRIBUTED_TILING_TASK_INVALID",
-                            "wasm_tiling_root_ordinal_overflow",
-                        )
-                    })?,
-                    candidate.target_index(),
-                ));
-            }
-            verifier.enqueue(&roots).map_err(|reason| {
+            // Root packets carry either the original empty payload or one
+            // versioned ordinal-window descriptor. The source's admitted
+            // partition count travels with the task; workers never resolve
+            // hardware/worker policy independently for the same root.
+            verifier.enqueue_packets(&candidates).map_err(|reason| {
                 distributed_error("E_WASM_DISTRIBUTED_TILING_TASK_INVALID", reason)
             })?;
             let (partial, has_pending_work, verified_candidates) =
@@ -5701,6 +5682,58 @@ mod build_probability_partial_ingress_tests {
         assert_eq!(bounded_producer_work_budget(16_384, true, false), 2_048);
         assert_eq!(bounded_producer_work_budget(2_048, false, false), 2_048);
         assert_eq!(bounded_producer_work_budget(2_048, true, true), 1);
+    }
+
+    #[test]
+    fn setup_preparation_preserves_fixed_and_all_cpu_budgets_before_graph_work() {
+        use clearra_pc_graph::request::WorkerPolicy;
+        #[cfg(target_family = "wasm")]
+        let hardware = 8;
+        #[cfg(not(target_family = "wasm"))]
+        let hardware = 8.min(WorkerPolicy::hardware_worker_limit());
+        let runtime = WasmCommandRuntime::default()
+            .with_host_capabilities(crate::WasmHostCapabilities::new(8, false, false));
+        for (policy, worker_argument) in [
+            (WorkerPolicy::Fixed(1), "--workers 1"),
+            (WorkerPolicy::Fixed(2), "--workers 2"),
+            (WorkerPolicy::Fixed(8), "--workers 8"),
+            (WorkerPolicy::Auto, ""),
+        ] {
+            let expected = policy.effective_for_hardware_limit(true, hardware);
+            let command = format!(
+                "clearra setup-finder --remaining IOT {worker_argument} --use-all-cpu-threads"
+            );
+            let prepared = WasmDistributedCoordinator::prepare(&runtime, &command).unwrap();
+            if expected == 1 {
+                assert!(matches!(prepared, WasmDistributedPreparation::Serial));
+                continue;
+            }
+            let WasmDistributedPreparation::Coordinator(mut coordinator) = prepared else {
+                panic!("admitted Setup pool must survive preparation");
+            };
+            assert_eq!(coordinator.worker_count(), expected);
+            assert_eq!(coordinator.requested_compute_workers(), expected);
+            assert!(coordinator.worker_initialization_deferred());
+            // The shared graph still runs on one compute source. Keeping this
+            // false prevents an accidental N-remote + source oversubscription.
+            assert!(!coordinator.root_task_parallel());
+            assert!(matches!(
+                coordinator.producer,
+                Some(DistributedCandidateProducer::Setup(_))
+            ));
+            coordinator.cancel();
+            assert!(matches!(
+                coordinator.advance_producer(1, 1).unwrap(),
+                WasmDistributedProducerAdvance::Cancelled
+            ));
+        }
+        let observed = WasmDistributedCoordinator::prepare(
+            &runtime,
+            "clearra setup-finder --remaining IOT --workers 8 --use-all-cpu-threads \
+             --queue-knowledge visible-7",
+        )
+        .unwrap();
+        assert!(matches!(observed, WasmDistributedPreparation::Serial));
     }
 
     struct RecordingIngressAuthority {

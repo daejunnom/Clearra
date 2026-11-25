@@ -20,7 +20,7 @@ use super::{
         WasmDistributedGeometrySummary, WasmDistributedProgress, WasmDistributedResultMerger,
         WasmDistributedVerifier,
     },
-    geometry::{GeometryAdvance, GeometrySearch},
+    geometry::{GeometryAdvance, GeometryCandidatePartition, GeometrySearch},
     mix_order_independent_candidate_digest,
     result::{canonical_tiling_rank_by_source, WasmExactSearchSession},
     uses_order_independent_pc_candidate_digest,
@@ -30,6 +30,40 @@ const ROOT_ADVANCE_WORK_BUDGET: usize = 32 * 1024;
 const PC_ROOT_VERIFY_CANDIDATE_BUDGET: usize = 64;
 const PC_ROOT_LOCAL_ORDINAL_BITS: u32 = 32;
 const NO_TILING_ROOT: u32 = u32::MAX;
+const ROOT_PARTITION_PACKET_V1: u32 = 0x4352_5031;
+
+fn root_partition_count(roots: usize, workers: usize) -> Result<u32, &'static str> {
+    if roots == 0 {
+        return Err("wasm_tiling_root_set_empty");
+    }
+    u32::try_from(workers.max(1).div_ceil(roots))
+        .map_err(|_| "wasm_tiling_root_partition_count_overflow")
+}
+
+fn partitioned_root_count(roots: usize, partitions: u32) -> Result<usize, &'static str> {
+    roots
+        .checked_mul(partitions as usize)
+        .filter(|count| *count <= NO_TILING_ROOT as usize)
+        .ok_or("wasm_tiling_root_count_overflow")
+}
+
+fn root_packet(
+    ordinal: usize,
+    pass_index: u8,
+    family_index: u32,
+    partition_count: u32,
+) -> WasmCandidatePacket {
+    let descriptor = if partition_count == 1 {
+        Vec::new()
+    } else {
+        vec![
+            ROOT_PARTITION_PACKET_V1,
+            (ordinal % partition_count as usize) as u32,
+            partition_count,
+        ]
+    };
+    WasmCandidatePacket::for_pass(ordinal as u64, pass_index, family_index, descriptor)
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct WasmPackedTilingIdentity {
@@ -242,7 +276,7 @@ pub struct WasmTilingRootProducer {
     passes: Vec<TilingRootProducerPass>,
     next_pass: usize,
     build_probability: Option<TilingBuildProbabilityMerge>,
-    root_count: usize,
+    task_count: usize,
     finished: bool,
     shared_external_retained_upper_bound_bytes: Option<u128>,
 }
@@ -251,6 +285,7 @@ struct TilingRootProducerPass {
     merger: WasmDistributedResultMerger,
     root_order: Vec<u32>,
     next_root: usize,
+    partition_count: u32,
 }
 
 struct TilingBuildProbabilityMerge {
@@ -316,15 +351,34 @@ impl WasmTilingRootProducer {
     }
 
     pub fn new(problem: &SearchProblem) -> Result<Self, &'static str> {
+        Self::new_with_workers(problem, problem.backend_policy().workers())
+    }
+
+    pub fn new_with_workers(problem: &SearchProblem, workers: usize) -> Result<Self, &'static str> {
         let session = WasmExactSearchSession::new_external_geometry(problem)
             .map_err(super::distributed::map_error)?;
-        Self::from_sessions(vec![session], None, None)
+        Self::from_sessions(vec![session], None, None, workers)
     }
 
     pub fn new_shared_under_authority(
         problem: std::sync::Arc<SearchProblem>,
         checked_external_retained_upper_bound_bytes: u128,
         authority: &crate::WasmCpuTerminalResourceAuthority,
+    ) -> Result<Self, &'static str> {
+        let workers = problem.backend_policy().workers();
+        Self::new_shared_under_authority_with_workers(
+            problem,
+            checked_external_retained_upper_bound_bytes,
+            authority,
+            workers,
+        )
+    }
+
+    pub fn new_shared_under_authority_with_workers(
+        problem: std::sync::Arc<SearchProblem>,
+        checked_external_retained_upper_bound_bytes: u128,
+        authority: &crate::WasmCpuTerminalResourceAuthority,
+        workers: usize,
     ) -> Result<Self, &'static str> {
         let shared_external_retained_upper_bound_bytes =
             Self::checked_shared_external_retained_upper_bound(problem.as_ref())
@@ -339,6 +393,7 @@ impl WasmTilingRootProducer {
             vec![session],
             None,
             Some(shared_external_retained_upper_bound_bytes),
+            workers,
         )
     }
 
@@ -372,6 +427,7 @@ impl WasmTilingRootProducer {
                 pattern_weights,
             }),
             None,
+            problem.backend_policy().workers(),
         )
     }
 
@@ -397,12 +453,13 @@ impl WasmTilingRootProducer {
         sessions: Vec<WasmExactSearchSession>,
         build_probability: Option<TilingBuildProbabilityMerge>,
         shared_external_retained_upper_bound_bytes: Option<u128>,
+        workers: usize,
     ) -> Result<Self, &'static str> {
         let mut passes = Vec::new();
         passes
             .try_reserve_exact(sessions.len())
             .map_err(|_| "wasm_tiling_root_pass_storage_unavailable")?;
-        let mut root_count = 0_usize;
+        let mut task_count_total = 0_usize;
         for mut session in sessions {
             let root_order = session
                 .distributed_tiling_root_order()
@@ -410,11 +467,16 @@ impl WasmTilingRootProducer {
             if root_order.is_empty() {
                 return Err("wasm_tiling_root_set_empty");
             }
-            root_count = root_count
-                .checked_add(root_order.len())
+            // Preserve the existing natural-root fast path once it supplies
+            // the pool. A small root set hands out bounded consecutive leaf
+            // windows; no Geometry work runs on this management producer.
+            let partition_count = root_partition_count(root_order.len(), workers)?;
+            let task_count = partitioned_root_count(root_order.len(), partition_count)?;
+            task_count_total = task_count_total
+                .checked_add(task_count)
                 .ok_or("wasm_tiling_root_count_overflow")?;
             session
-                .prepare_distributed_tiling_root_runs(root_order.len())
+                .prepare_distributed_tiling_root_runs(task_count)
                 .map_err(super::distributed::map_error)?;
             passes.push(TilingRootProducerPass {
                 merger: WasmDistributedResultMerger::from_session(
@@ -424,13 +486,14 @@ impl WasmTilingRootProducer {
                 ),
                 root_order,
                 next_root: 0,
+                partition_count,
             });
         }
         let producer = Self {
             passes,
             next_pass: 0,
             build_probability,
-            root_count,
+            task_count: task_count_total,
             finished: false,
             shared_external_retained_upper_bound_bytes,
         };
@@ -490,21 +553,19 @@ impl WasmTilingRootProducer {
         for offset in 0..self.passes.len() {
             let pass_index = (self.next_pass + offset) % self.passes.len();
             let pass = &mut self.passes[pass_index];
-            if pass.next_root >= pass.root_order.len() {
+            if pass.next_root >= pass.root_order.len() * pass.partition_count as usize {
                 continue;
             }
             let root_ordinal = pass.next_root;
-            let family_index = pass.root_order[root_ordinal];
+            let family_index = pass.root_order[root_ordinal / pass.partition_count as usize];
             pass.next_root += 1;
             self.next_pass = (pass_index + 1) % self.passes.len();
-            return Ok(WasmCandidateProducerAdvance::Candidate(
-                WasmCandidatePacket::for_pass(
-                    root_ordinal as u64,
-                    u8::try_from(pass_index).map_err(|_| "wasm_tiling_pass_index_overflow")?,
-                    family_index,
-                    Vec::new(),
-                ),
-            ));
+            return Ok(WasmCandidateProducerAdvance::Candidate(root_packet(
+                root_ordinal,
+                u8::try_from(pass_index).map_err(|_| "wasm_tiling_pass_index_overflow")?,
+                family_index,
+                pass.partition_count,
+            )));
         }
         self.finished = true;
         Ok(WasmCandidateProducerAdvance::Completed(
@@ -562,7 +623,7 @@ impl WasmTilingRootProducer {
                 .iter()
                 .map(|pass| pass.merger.tiling_candidate_count())
                 .fold(0_usize, usize::saturating_add),
-            candidate_family_count: Some(self.root_count as u128),
+            candidate_family_count: Some(self.task_count as u128),
             coverage_checks: self
                 .passes
                 .iter()
@@ -573,8 +634,13 @@ impl WasmTilingRootProducer {
         }
     }
 
-    pub const fn root_count(&self) -> usize {
-        self.root_count
+    /// Natural piece-multiset roots, independent of their scheduling windows.
+    pub fn root_count(&self) -> usize {
+        self.passes.iter().map(|pass| pass.root_order.len()).sum()
+    }
+
+    pub const fn task_count(&self) -> usize {
+        self.task_count
     }
 }
 
@@ -654,6 +720,8 @@ pub struct WasmPcRootProducer {
     merger: WasmDistributedResultMerger,
     root_order: Vec<u32>,
     next_root: usize,
+    partition_count: u32,
+    task_count: usize,
     digest: PcRootDigestAccumulator,
     check_worker_digest: bool,
     finished: bool,
@@ -868,6 +936,10 @@ impl WasmPcRootProducer {
     }
 
     pub fn new(problem: &SearchProblem) -> Result<Self, &'static str> {
+        Self::new_with_workers(problem, problem.backend_policy().workers())
+    }
+
+    pub fn new_with_workers(problem: &SearchProblem, workers: usize) -> Result<Self, &'static str> {
         if !Self::supports(problem) {
             return Err("wasm_pc_root_problem_unsupported");
         }
@@ -879,7 +951,9 @@ impl WasmPcRootProducer {
         if root_order.is_empty() {
             return Err("wasm_pc_root_set_empty");
         }
-        let digest = PcRootDigestAccumulator::new(root_order.len())?;
+        let partition_count = root_partition_count(root_order.len(), workers)?;
+        let task_count = partitioned_root_count(root_order.len(), partition_count)?;
+        let digest = PcRootDigestAccumulator::new(task_count)?;
         let check_worker_digest = problem.output_policy().retains_candidate_digest();
         let merger = WasmDistributedResultMerger::from_session(
             session
@@ -890,6 +964,8 @@ impl WasmPcRootProducer {
             merger,
             root_order,
             next_root: 0,
+            partition_count,
+            task_count,
             digest,
             check_worker_digest,
             finished: false,
@@ -906,12 +982,19 @@ impl WasmPcRootProducer {
         if control.is_cancelled() {
             return Ok(WasmCandidateProducerAdvance::Cancelled);
         }
-        if let Some(family_index) = self.root_order.get(self.next_root).copied() {
+        if let Some(family_index) = self
+            .root_order
+            .get(self.next_root / self.partition_count as usize)
+            .copied()
+        {
             let ordinal = self.next_root;
             self.next_root += 1;
-            return Ok(WasmCandidateProducerAdvance::Candidate(
-                WasmCandidatePacket::new(ordinal as u64, family_index, Vec::new()),
-            ));
+            return Ok(WasmCandidateProducerAdvance::Candidate(root_packet(
+                ordinal,
+                0,
+                family_index,
+                self.partition_count,
+            )));
         }
         self.finished = true;
         Ok(WasmCandidateProducerAdvance::Completed(
@@ -956,6 +1039,10 @@ impl WasmPcRootProducer {
 
     pub fn root_count(&self) -> usize {
         self.root_order.len()
+    }
+
+    pub const fn task_count(&self) -> usize {
+        self.task_count
     }
 }
 
@@ -1073,11 +1160,14 @@ struct TilingRootTask {
     pass_index: u8,
     ordinal: u32,
     family_index: u32,
+    partition_index: u32,
+    partition_count: u32,
 }
 
 struct ActiveTilingRoot {
     task: TilingRootTask,
     search: GeometrySearch,
+    partition: Option<GeometryCandidatePartition>,
     identities: Vec<WasmPackedTilingIdentity>,
     pc_candidate_count: usize,
     pc_candidate_digest: u64,
@@ -1243,6 +1333,44 @@ impl WasmTilingRootWorker {
                 pass_index,
                 ordinal,
                 family_index,
+                partition_index: 0,
+                partition_count: 1,
+            });
+        }
+        Ok(())
+    }
+
+    pub fn enqueue_packets(&mut self, packets: &[WasmCandidatePacket]) -> Result<(), &'static str> {
+        self.pending_roots
+            .try_reserve(packets.len())
+            .map_err(|_| "wasm_tiling_root_queue_storage_unavailable")?;
+        for packet in packets {
+            let pass = self
+                .passes
+                .get(usize::from(packet.pass_index()))
+                .ok_or("wasm_tiling_root_pass_invalid")?;
+            if packet.target_index() as usize >= pass.family.len() {
+                return Err("wasm_tiling_root_index_invalid");
+            }
+            let ordinal = u32::try_from(packet.ordinal())
+                .ok()
+                .filter(|ordinal| *ordinal != NO_TILING_ROOT)
+                .ok_or("wasm_tiling_root_ordinal_overflow")?;
+            let (partition_index, partition_count) = match packet.row_ids() {
+                [] => (0, 1),
+                [ROOT_PARTITION_PACKET_V1, index, count]
+                    if *count >= 2 && *index < *count && ordinal % *count == *index =>
+                {
+                    (*index, *count)
+                }
+                _ => return Err("wasm_tiling_root_partition_descriptor_invalid"),
+            };
+            self.pending_roots.push_back(TilingRootTask {
+                pass_index: packet.pass_index(),
+                ordinal,
+                family_index: packet.target_index(),
+                partition_index,
+                partition_count,
             });
         }
         Ok(())
@@ -1295,9 +1423,18 @@ impl WasmTilingRootWorker {
                 let search =
                     GeometrySearch::new(universe, &family, pass.catalog.required_cells(), false)
                         .map_err(super::distributed::map_error)?;
+                let partition = if task.partition_count == 1 {
+                    None
+                } else {
+                    Some(GeometryCandidatePartition::new(
+                        task.partition_index,
+                        task.partition_count,
+                    )?)
+                };
                 self.active_root = Some(ActiveTilingRoot {
                     task,
                     search,
+                    partition,
                     identities: Vec::new(),
                     pc_candidate_count: 0,
                     pc_candidate_digest: 0,
@@ -1323,7 +1460,11 @@ impl WasmTilingRootWorker {
                     .passes
                     .get(usize::from(active.task.pass_index))
                     .ok_or("wasm_tiling_root_pass_invalid")?;
-                match active.search.advance(&pass.catalog) {
+                let advance = match active.partition.as_mut() {
+                    Some(partition) => active.search.advance_partitioned(&pass.catalog, partition),
+                    None => active.search.advance(&pass.catalog),
+                };
+                match advance {
                     GeometryAdvance::Pending => RootGeometryStep::Pending,
                     GeometryAdvance::Candidate(candidate) => {
                         // The serial session filters before candidate rank,
@@ -1569,14 +1710,256 @@ impl WasmTilingRootWorker {
 
 #[cfg(test)]
 mod tests {
-    use super::{WasmPcRootProducer, WasmTilingRootAdvance, WasmTilingRootWorker};
+    use super::*;
     use crate::WasmCpuSearchBackend;
     use clearra_core_domain::execution_cancellation::ExecutionControl;
+    use clearra_core_domain::piece::piece_kind::PieceKind;
+    use clearra_objectives::policy::objective_policy::ObjectivePolicy;
     use clearra_pc_graph::request::{
         PcCountPolicy, PcExecutionPolicy, PcQueueInput, PcScenarioBoard, PcScenarioQuery,
         PieceWindow,
     };
     use clearra_problem::{ProblemCompiler, SearchProblem};
+    use clearra_supply::queue::fixed_sequence::FixedSequence;
+    use std::collections::BTreeSet;
+
+    fn o_query(height: u16, occupied: u64, pieces: usize) -> PcScenarioQuery {
+        PcScenarioQuery::new(
+            PcScenarioBoard::standard_10(height, occupied),
+            PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::O; pieces])),
+            PieceWindow::new(pieces),
+        )
+        .with_allow_hold(false)
+        .with_exact_pieces(Some(pieces))
+        .with_min_remaining_queue(0)
+        .with_count_policy(PcCountPolicy::CountUnique)
+        .with_retained_trace_limit(1)
+        .with_execution_policy(
+            PcExecutionPolicy::mvp_default()
+                .with_workers(1)
+                .with_worker_hardware_limit(1),
+        )
+    }
+
+    fn drain_worker(worker: &mut WasmTilingRootWorker) -> Vec<WasmTilingRootChunk> {
+        let mut chunks = Vec::new();
+        let control = ExecutionControl::default();
+        for _ in 0..1_000 {
+            let chunk = match worker.advance(17, &control).expect("bounded root advance") {
+                WasmTilingRootAdvance::Pending(chunk) | WasmTilingRootAdvance::Completed(chunk) => {
+                    chunk
+                }
+                WasmTilingRootAdvance::Cancelled => panic!("unexpected cancellation"),
+            };
+            if !chunk.is_empty() {
+                chunks.push(chunk);
+            }
+            if !worker.has_pending_work() {
+                return chunks;
+            }
+        }
+        panic!("small root-window fixture exceeded its finite advance bound");
+    }
+
+    fn o_tiling_problem(height: u16, occupied: u64, pieces: usize) -> SearchProblem {
+        ProblemCompiler::compile_scenario_pc_tiling(
+            &o_query(height, occupied, pieces).with_objective(ObjectivePolicy::tiling()),
+        )
+        .expect("small typed tiling fixture")
+    }
+
+    fn tiling_with_partitions(
+        problem: &SearchProblem,
+        workers: usize,
+        expected_count: usize,
+    ) -> crate::CoreExecutionResult {
+        // This tests real task production/worker/merge code sequentially, so
+        // the CI host does not need eight physical or admitted compute slots.
+        let control = ExecutionControl::default();
+        let mut producer = WasmTilingRootProducer::new_with_workers(problem, workers).unwrap();
+        assert_eq!(producer.root_count(), 1);
+        assert_eq!(producer.task_count(), workers);
+        let mut packets = Vec::new();
+        let summary = loop {
+            match producer.advance(&control).unwrap() {
+                WasmCandidateProducerAdvance::Candidate(packet) => packets.push(packet),
+                WasmCandidateProducerAdvance::Completed(summary) => break summary,
+                _ => panic!("management-only root source must not search"),
+            }
+        };
+        assert_eq!(packets.len(), workers);
+        assert_eq!(producer.progress().geometry_nodes, 0);
+        let mut identities = BTreeSet::new();
+        let mut nonempty = 0;
+        let mut family_count = 0_u128;
+        let mut completed = 0;
+        // Reverse task completion preserves per-task chunk order and exercises
+        // the existing canonical run merger independently of arrival order.
+        for packet in packets.into_iter().rev() {
+            let mut worker = WasmTilingRootWorker::new(problem).unwrap();
+            worker.enqueue_packets(&[packet]).unwrap();
+            let chunks = drain_worker(&mut worker);
+            let emitted = chunks
+                .iter()
+                .map(|chunk| chunk.identities().len())
+                .sum::<usize>();
+            nonempty += usize::from(emitted != 0);
+            for chunk in chunks {
+                completed += chunk.completed_roots();
+                family_count += chunk.candidate_family_count().unwrap();
+                for identity in chunk.identities() {
+                    assert!(identities.insert(identity.packed_rows()), "windows overlap");
+                }
+                producer.absorb(&chunk).unwrap();
+                let before_replay = producer.progress().candidates;
+                producer
+                    .absorb(&chunk)
+                    .expect("identical receipt replay is idempotent");
+                assert_eq!(producer.progress().candidates, before_replay);
+                let mut changed = chunk.clone();
+                changed.expanded_nodes = changed.expanded_nodes.saturating_add(1);
+                assert!(
+                    producer.absorb(&changed).is_err(),
+                    "changed receipt must fail closed"
+                );
+            }
+        }
+        assert_eq!(
+            completed, workers,
+            "empty windows also commit terminal receipts"
+        );
+        assert_eq!(identities.len(), expected_count);
+        assert_eq!(family_count, expected_count as u128);
+        assert_eq!(nonempty, workers.min(expected_count));
+        let mut merger = producer.into_merger().unwrap();
+        merger.finish(&summary, workers).unwrap()
+    }
+
+    #[test]
+    fn tiling_root_windows_match_small_canonical_family_and_empty_ranges() {
+        for (height, pieces, count, expected_hash) in [
+            (2, 5, 1, "cts1:21fffe814548e2c1"),
+            (4, 10, 243, "cts1:6e75b2a9f36fe5a2"),
+        ] {
+            let problem = o_tiling_problem(height, 0, pieces);
+            let mut serial_keys = None;
+            for workers in [1, 2, 8] {
+                let result = tiling_with_partitions(&problem, workers, count);
+                let store = result
+                    .tiling_solution_page_store()
+                    .expect("canonical page store");
+                assert_eq!(store.len(), count);
+                assert_eq!(store.normalized_hash(), expected_hash);
+                let keys = store.page_keys(0, count).unwrap();
+                assert!(keys.windows(2).all(|pair| pair[0] < pair[1]));
+                if let Some(reference) = &serial_keys {
+                    assert_eq!(
+                        &keys, reference,
+                        "ordered canonical family at {workers} tasks"
+                    );
+                } else {
+                    serial_keys = Some(keys);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn pc_root_windows_preserve_filtered_ordinal_and_physical_results() {
+        let occupied = (0..4).fold(0_u64, |mask, row| mask | (0x3f0_u64 << (row * 10)));
+        for filtered_empty in [false, true] {
+            let mut query = o_query(4, occupied, 4);
+            if filtered_empty {
+                query = query.with_allowed_colored_solution_identities(std::iter::empty());
+            }
+            let problem = ProblemCompiler::compile_scenario_pc(&query).unwrap();
+            let control = ExecutionControl::default();
+            let reference = WasmCpuSearchBackend::execute_with_control(&problem, &control).unwrap();
+            for workers in [1, 2, 8] {
+                let mut producer = WasmPcRootProducer::new_with_workers(&problem, workers).unwrap();
+                assert_eq!(producer.root_count(), 1);
+                assert_eq!(producer.task_count(), workers);
+                let mut packets = Vec::new();
+                let summary = loop {
+                    match producer.advance(&control).unwrap() {
+                        WasmCandidateProducerAdvance::Candidate(packet) => packets.push(packet),
+                        WasmCandidateProducerAdvance::Completed(summary) => break summary,
+                        _ => panic!("root production is control-only"),
+                    }
+                };
+                let mut results = Vec::new();
+                for packet in packets.into_iter().rev() {
+                    let mut worker = WasmTilingRootWorker::new_for_pc_unique(&problem).unwrap();
+                    worker.enqueue_packets(&[packet]).unwrap();
+                    for chunk in drain_worker(&mut worker) {
+                        producer.absorb(&chunk).unwrap();
+                        producer
+                            .absorb(&chunk)
+                            .expect("same PC summary replay is idempotent");
+                    }
+                    results.push(worker.finish_pc().unwrap());
+                }
+                let mut merger = producer.into_merger().unwrap();
+                for result in results {
+                    merger.absorb(&result).unwrap();
+                }
+                let result = merger.finish(&summary, workers).unwrap();
+                for field in [
+                    "packing_candidate_count",
+                    "packing_candidate_set_digest",
+                    "unique_solution_count",
+                    "normalized_solution_set_hash",
+                ] {
+                    assert_eq!(
+                        result.field(field),
+                        reference.field(field),
+                        "{field}, workers={workers}"
+                    );
+                }
+                assert_eq!(
+                    result.normalized_solution_keys(),
+                    reference.normalized_solution_keys()
+                );
+                assert_eq!(result.path_steps(), reference.path_steps());
+            }
+        }
+    }
+
+    #[test]
+    fn root_partition_descriptors_fail_closed_and_keep_multiroot_fast_path() {
+        assert_eq!(root_partition_count(9, 8), Ok(1));
+        assert_eq!(root_partition_count(1, 8), Ok(8));
+        assert!(root_partition_count(0, 8).is_err());
+        assert!(partitioned_root_count(usize::MAX, 2).is_err());
+        let problem = o_tiling_problem(2, 0, 5);
+        let mut worker = WasmTilingRootWorker::new(&problem).unwrap();
+        for payload in [
+            vec![ROOT_PARTITION_PACKET_V1, 0, 0],
+            vec![ROOT_PARTITION_PACKET_V1, 2, 2],
+            vec![ROOT_PARTITION_PACKET_V1, 1, 2],
+            vec![ROOT_PARTITION_PACKET_V1 + 1, 0, 2],
+        ] {
+            assert!(worker
+                .enqueue_packets(&[WasmCandidatePacket::new(0, 0, payload)])
+                .is_err());
+            assert!(!worker.has_pending_work());
+        }
+        let mut producer = WasmTilingRootProducer::new_with_workers(&problem, 8).unwrap();
+        let WasmCandidateProducerAdvance::Candidate(packet) =
+            producer.advance(&ExecutionControl::default()).unwrap()
+        else {
+            panic!("first bounded window");
+        };
+        worker.enqueue_packets(&[packet]).unwrap();
+        let cancelled = ExecutionControl::default();
+        cancelled.cancellation.handle().cancel();
+        assert!(matches!(
+            worker.advance(17, &cancelled).unwrap(),
+            WasmTilingRootAdvance::Cancelled
+        ));
+        assert_eq!(worker.progress().geometry_nodes, 0);
+        assert_eq!(worker.progress().candidates, 0);
+    }
 
     fn pc_root_problem(policy: PcExecutionPolicy, filtered_empty: bool) -> SearchProblem {
         let mut query = PcScenarioQuery::new(

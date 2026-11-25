@@ -2301,6 +2301,10 @@ struct FamilyEnumerator {
     // Counts the existing immutable geometry expression only. It supplies no
     // positive physical/source proof. Shared once, only for subtree skipping.
     prefix_counts: Option<Arc<Vec<u128>>>,
+    // An exact ordinal window over the existing immutable family. This is
+    // scheduling only: every retained leaf still passes the ordinary caller's
+    // Geometry/BuildUp/supply path. Counts provide no positive solver proof.
+    candidate_window: Option<GeometryCandidateWindow>,
     #[cfg(feature = "parallel")]
     candidate_count: Option<u128>,
 }
@@ -2348,6 +2352,7 @@ impl FamilyEnumerator {
                 retained_limit_bytes: None,
                 prefix: PhysicalPrefixSummary::default(),
                 prefix_counts: None,
+                candidate_window: None,
                 #[cfg(feature = "parallel")]
                 candidate_count,
             },
@@ -2393,6 +2398,7 @@ impl FamilyEnumerator {
             retained_limit_bytes: Some(retained_limit_bytes),
             prefix: PhysicalPrefixSummary::default(),
             prefix_counts: None,
+            candidate_window: None,
             #[cfg(feature = "parallel")]
             candidate_count: None,
         };
@@ -2476,6 +2482,7 @@ impl FamilyEnumerator {
                     ..PhysicalPrefixSummary::default()
                 },
                 prefix_counts: prefix_counts.as_ref().map(Arc::clone),
+                candidate_window: None,
                 #[cfg(feature = "parallel")]
                 candidate_count: Some(seed.weight),
             });
@@ -2532,6 +2539,15 @@ impl FamilyEnumerator {
         catalog: &GeometryCatalog,
         work_budget: usize,
     ) -> Result<FamilyEnumerationAdvance, ()> {
+        if self
+            .candidate_window
+            .is_some_and(|window| window.remaining_take == 0)
+        {
+            self.tasks.clear();
+            self.active_task = None;
+            self.prefix_counts = None;
+            return Ok(FamilyEnumerationAdvance::Complete);
+        }
         let mut work = 0_usize;
         while let Some(mut task) = if YIELD {
             self.active_task.take().or_else(|| self.tasks.pop())
@@ -2548,6 +2564,24 @@ impl FamilyEnumerator {
                 }
                 if task.family == FAMILY_INVALID {
                     break;
+                }
+                if let Some(window) = self.candidate_window.as_mut() {
+                    if PHYSICAL || SKIP {
+                        return Err(());
+                    }
+                    if window.remaining_skip != 0 {
+                        let weight =
+                            exact_traversal_weight(task, self.prefix_counts.as_deref().ok_or(())?)
+                                .ok_or(())?;
+                        if window.remaining_skip >= weight {
+                            window.remaining_skip -= weight;
+                            break;
+                        }
+                    } else {
+                        // Once the start has been reached, ordinary traversal
+                        // needs no count table. Release it before leaf work.
+                        self.prefix_counts = None;
+                    }
                 }
                 if PHYSICAL && task.physical_prefix_state & PREFIX_IMPOSSIBLE == 0 {
                     if task.physical_prefix_state & PREFIX_DEPENDENCY_VERIFIED == 0 {
@@ -2601,6 +2635,12 @@ impl FamilyEnumerator {
                         return Err(());
                     }
                     let mut candidate = self.candidate(catalog, task.depth).ok_or(())?;
+                    if let Some(window) = self.candidate_window.as_mut() {
+                        if window.remaining_skip != 0 || window.remaining_take == 0 {
+                            return Err(());
+                        }
+                        window.remaining_take -= 1;
+                    }
                     if PHYSICAL {
                         candidate.physically_impossible =
                             task.physical_prefix_state & PREFIX_IMPOSSIBLE != 0;
@@ -2653,7 +2693,65 @@ impl FamilyEnumerator {
                 }
             }
         }
+        if self
+            .candidate_window
+            .is_some_and(|window| window.remaining_skip != 0 || window.remaining_take != 0)
+        {
+            return Err(());
+        }
         Ok(FamilyEnumerationAdvance::Complete)
+    }
+
+    fn select_candidate_partition(
+        &mut self,
+        partition: &GeometryCandidatePartition,
+        counts: Option<Vec<u128>>,
+    ) -> Result<Option<u128>, &'static str> {
+        if self.active_task.is_some()
+            || self.tasks.len() > 1
+            || self.candidate_window.is_some()
+            || self.prefix.mode != PhysicalPrefixMode::Disabled
+            || self.retained_limit_bytes.is_some()
+        {
+            return Err("wasm_geometry_partition_state_invalid");
+        }
+        let total = self.tasks.first().map_or(Some(0), |task| {
+            exact_traversal_weight(*task, counts.as_deref()?)
+        });
+        let Some(total) = total else {
+            // An unavailable exact count must never manufacture disjoint
+            // ranges. Retain the original stream on exactly one task; its
+            // siblings are empty and the original unknown-count semantics
+            // survive. No complete/positive certificate is inferred here.
+            if partition.index == 0 {
+                return Ok(None);
+            }
+            self.tasks.clear();
+            return Ok(Some(0));
+        };
+        let start = partition.boundary(total, partition.index)?;
+        let end = partition.boundary(total, partition.index + 1)?;
+        let take = end
+            .checked_sub(start)
+            .ok_or("wasm_geometry_partition_range_invalid")?;
+        if take == 0 {
+            self.tasks.clear();
+        } else {
+            self.candidate_window = Some(GeometryCandidateWindow {
+                remaining_skip: start,
+                remaining_take: take,
+            });
+            if start != 0 {
+                self.prefix_counts = Some(Arc::new(
+                    counts.ok_or("wasm_geometry_partition_counts_missing")?,
+                ));
+            }
+        }
+        #[cfg(feature = "parallel")]
+        {
+            self.candidate_count = Some(take);
+        }
+        Ok(Some(take))
     }
 
     fn push_task(&mut self, task: TraversalTask) -> Result<(), ()> {
@@ -2716,6 +2814,45 @@ enum FamilyEnumerationAdvance {
     Complete,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct GeometryCandidateWindow {
+    remaining_skip: u128,
+    remaining_take: u128,
+}
+
+/// A bounded transport task over one natural multiset root. Preparation stays
+/// on its compute owner and reuses the normal completed-family count handoff.
+pub(super) struct GeometryCandidatePartition {
+    index: u32,
+    count: u32,
+    initialized: bool,
+}
+
+impl GeometryCandidatePartition {
+    pub fn new(index: u32, count: u32) -> Result<Self, &'static str> {
+        if count < 2 || index >= count {
+            return Err("wasm_geometry_partition_descriptor_invalid");
+        }
+        Ok(Self {
+            index,
+            count,
+            initialized: false,
+        })
+    }
+
+    fn boundary(&self, total: u128, index: u32) -> Result<u128, &'static str> {
+        if index > self.count {
+            return Err("wasm_geometry_partition_descriptor_invalid");
+        }
+        // floor(total * index / count), without overflowing total * index.
+        let count = u128::from(self.count);
+        (total / count)
+            .checked_mul(u128::from(index))
+            .and_then(|whole| whole.checked_add((total % count) * u128::from(index) / count))
+            .ok_or("wasm_geometry_partition_range_overflow")
+    }
+}
+
 fn prefix_count_owner_bytes(counts: &Vec<u128>) -> usize {
     core::mem::size_of::<Vec<u128>>()
         + 2 * core::mem::size_of::<usize>()
@@ -2743,6 +2880,158 @@ mod family_enumerator_stack_tests {
             None,
         )
         .0
+    }
+
+    #[test]
+    fn ordinal_partition_boundaries_cover_without_overflow_or_overlap() {
+        for total in [0_u128, 1, 243, u128::MAX] {
+            for count in [2, 8] {
+                let partition = GeometryCandidatePartition::new(0, count).unwrap();
+                let mut previous = 0;
+                let mut covered = 0_u128;
+                for index in 0..count {
+                    let start = partition.boundary(total, index).unwrap();
+                    let end = partition.boundary(total, index + 1).unwrap();
+                    assert_eq!(start, previous);
+                    assert!(end >= start);
+                    covered = covered.checked_add(end - start).unwrap();
+                    previous = end;
+                }
+                assert_eq!(previous, total);
+                assert_eq!(covered, total);
+            }
+        }
+        assert!(GeometryCandidatePartition::new(0, 1).is_err());
+        assert!(GeometryCandidatePartition::new(8, 8).is_err());
+        let largest = GeometryCandidatePartition::new(u32::MAX - 1, u32::MAX).unwrap();
+        assert_eq!(largest.boundary(u128::MAX, u32::MAX), Ok(u128::MAX));
+    }
+
+    #[test]
+    fn ordinal_partition_accounts_its_one_table_and_preserves_bounded_authority() {
+        let mut family = GeometrySolutionFamily::new();
+        let left = family.append(21, FAMILY_EMPTY).unwrap();
+        let right = family.append(22, FAMILY_EMPTY).unwrap();
+        let root = family.union(left, right).unwrap();
+        let mut counts = None;
+        let (mut enumerator, total) = FamilyEnumerator::from_completed_family(
+            Arc::from([]),
+            family,
+            root,
+            1,
+            Some(&mut counts),
+        );
+        assert_eq!(total, Some(2));
+        let counts = counts.unwrap();
+        let expected_table_bytes = prefix_count_owner_bytes(&counts);
+        let before = enumerator.retained_bytes();
+        let partition = GeometryCandidatePartition::new(1, 2).unwrap();
+        assert_eq!(
+            enumerator.select_candidate_partition(&partition, Some(counts)),
+            Ok(Some(1))
+        );
+        assert_eq!(enumerator.retained_bytes(), before + expected_table_bytes);
+        assert_eq!(enumerator.candidate_window.unwrap().remaining_skip, 1);
+        assert!(enumerator
+            .select_candidate_partition(&partition, None)
+            .is_err());
+
+        let mut bounded = FamilyEnumerator::try_new_bounded(
+            Arc::from([]),
+            GeometrySolutionFamily::new(),
+            FAMILY_EMPTY,
+            0,
+            u128::MAX,
+        )
+        .unwrap();
+        let retained = bounded.retained_bytes();
+        assert!(bounded
+            .select_candidate_partition(&partition, None)
+            .is_err());
+        assert_eq!(bounded.retained_limit_bytes, Some(u128::MAX));
+        assert_eq!(bounded.retained_bytes(), retained);
+    }
+
+    #[test]
+    fn ordinal_partition_without_exact_counts_keeps_one_complete_owner() {
+        for index in 0..8 {
+            let mut enumerator = enumerator();
+            let partition = GeometryCandidatePartition::new(index, 8).unwrap();
+            let count = enumerator
+                .select_candidate_partition(&partition, None)
+                .unwrap();
+            assert_eq!(count, if index == 0 { None } else { Some(0) });
+            assert_eq!(enumerator.tasks.len(), usize::from(index == 0));
+            assert!(enumerator.prefix_counts.is_none());
+        }
+    }
+
+    #[test]
+    fn ordinal_partition_reassembles_the_original_small_leaf_stream() {
+        use clearra_core_domain::piece::piece_kind::PieceKind;
+        use clearra_pc_graph::request::{
+            PcCountPolicy, PcExecutionPolicy, PcQueueInput, PcScenarioBoard, PcScenarioQuery,
+            PieceWindow,
+        };
+        use clearra_problem::ProblemCompiler;
+        use clearra_supply::queue::fixed_sequence::FixedSequence;
+
+        // Two four-row O strips have only 3^2=9 inverse-row tilings. This
+        // exercises nested Product/Union continuations without a large run.
+        let occupied = (0..4).fold(0_u64, |mask, row| mask | (0x3f0_u64 << (row * 10)));
+        let query = PcScenarioQuery::new(
+            PcScenarioBoard::standard_10(4, occupied),
+            PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::O; 4])),
+            PieceWindow::new(4),
+        )
+        .with_allow_hold(false)
+        .with_exact_pieces(Some(4))
+        .with_min_remaining_queue(0)
+        .with_count_policy(PcCountPolicy::CountUnique)
+        .with_objective(clearra_objectives::policy::objective_policy::ObjectivePolicy::tiling())
+        .with_execution_policy(PcExecutionPolicy::default().with_workers(1));
+        let problem = ProblemCompiler::compile_scenario_pc_tiling(&query).unwrap();
+        let catalog = GeometryCatalog::compile(&problem).unwrap();
+        let universe = problem.piece_source().materialized_universe().unwrap();
+        let family = universe.packing_multiset_family_for_execution(
+            4,
+            problem.initial_hold(),
+            false,
+            super::super::packing_hold_projection(&problem),
+        );
+        let collect = |partition: Option<(u32, u32)>| {
+            let mut search =
+                GeometrySearch::new(universe, &family, catalog.required_cells(), false).unwrap();
+            let mut partition = partition
+                .map(|(index, count)| GeometryCandidatePartition::new(index, count).unwrap());
+            let mut identities = Vec::new();
+            for _ in 0..100_000 {
+                let step = match partition.as_mut() {
+                    Some(partition) => search.advance_partitioned(&catalog, partition),
+                    None => search.advance(&catalog),
+                };
+                match step {
+                    GeometryAdvance::Pending => {}
+                    GeometryAdvance::Candidate(candidate) => identities.push(candidate.identity),
+                    GeometryAdvance::Complete => return identities,
+                    GeometryAdvance::ResourceIncomplete(reason) => panic!("{reason}"),
+                }
+            }
+            panic!("nine-family traversal exceeded its finite work bound");
+        };
+        let serial = collect(None);
+        assert_eq!(serial.len(), 9);
+        for count in [2, 8] {
+            let mut reconstructed = Vec::new();
+            for index in 0..count {
+                let window = collect(Some((index, count)));
+                let start = serial.len() * index as usize / count as usize;
+                let end = serial.len() * (index + 1) as usize / count as usize;
+                assert_eq!(window, serial[start..end]);
+                reconstructed.extend(window);
+            }
+            assert_eq!(reconstructed, serial);
+        }
     }
 
     #[test]
@@ -4105,6 +4394,37 @@ impl GeometrySearch {
 
     pub fn advance(&mut self, catalog: &GeometryCatalog) -> GeometryAdvance {
         self.advance_internal(catalog, None, None)
+    }
+
+    pub fn advance_partitioned(
+        &mut self,
+        catalog: &GeometryCatalog,
+        partition: &mut GeometryCandidatePartition,
+    ) -> GeometryAdvance {
+        if partition.initialized {
+            return self.advance(catalog);
+        }
+        if self.target_preparation.is_none() && self.compiler.is_none() {
+            return GeometryAdvance::ResourceIncomplete("wasm_geometry_partition_state_invalid");
+        }
+        let mut counts = None;
+        let advance = self.advance_internal(catalog, None, Some(&mut counts));
+        if self.target_preparation.is_none() && self.compiler.is_none() {
+            if !matches!(advance, GeometryAdvance::Pending) {
+                return advance;
+            }
+            let Some(enumerator) = self.enumerator.as_mut() else {
+                return GeometryAdvance::ResourceIncomplete(
+                    "wasm_geometry_partition_enumerator_missing",
+                );
+            };
+            match enumerator.select_candidate_partition(partition, counts) {
+                Ok(count) => self.candidate_family_count = count,
+                Err(reason) => return GeometryAdvance::ResourceIncomplete(reason),
+            }
+            partition.initialized = true;
+        }
+        advance
     }
 
     pub fn advance_with_retained_limit(

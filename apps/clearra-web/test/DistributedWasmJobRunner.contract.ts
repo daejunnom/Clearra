@@ -246,6 +246,53 @@ assert.deepEqual(
     'the control-only source is never counted as active compute');
 }
 
+// A deferred Setup plan must keep its admitted capacity even when preparation
+// exposes only one task. Its source still owns one compute slot; this does not
+// turn that source into a control-only root coordinator or add an extra slot.
+{
+  const initializedWorkerCounts: number[] = [];
+  const deferredEvents: ClearraWasmWorkerEvent[] = [];
+  let producedInitialization = false;
+  let finishedWorkers = 0;
+  await new DistributedWasmJobRunner({
+    ...wasm,
+    distributed_progress: () => ({
+      ...wasm.distributed_progress(), candidateFamilyCount: '1'
+    }),
+    distributed_produce: () => {
+      if (!producedInitialization) {
+        producedInitialization = true;
+        return { status: 'initialization' as const, initialization: new ArrayBuffer(0) };
+      }
+      return { status: 'completed' as const };
+    },
+    distributed_finish: (jobId: number, count: number) => {
+      finishedWorkers = count;
+      return wasm.distributed_finish(jobId, count);
+    }
+  } as ClearraWasmModule, 417, 'setup-deferred-admitted-capacity', {
+    logicalProcessorCount: 8,
+    webGpuAvailable: false,
+    crossOriginIsolated: false,
+    transferByteCap: 32 * 1024 * 1024
+  }, {
+    ...pool,
+    async initialize(_initialization: unknown, count: number) {
+      initializedWorkerCounts.push(count);
+    },
+    async finish() { return 7; },
+    progressSnapshot: () => ({ ...emptyProgress, readyWorkers: 7, workerCount: 7 })
+  } as never).run('clearra setup --remaining I --workers 8 --use-all-cpu-threads', {
+    ...plan, workerCount: 8, workerInitialization: null, deferredInitialization: true
+  }, event => deferredEvents.push(event));
+  assert.deepEqual(initializedWorkerCounts, [7]);
+  assert.equal(finishedWorkers, 8);
+  const searching = deferredEvents.find(event => event.event === 'progress' &&
+    event.progress.telemetry?.phase === 'searching');
+  assert.ok(searching && searching.event === 'progress');
+  assert.equal(searching.progress.telemetry?.worker_count, 8);
+}
+
 // The tail policy counts roots already issued, not only the slower roots whose
 // worker results have returned. Compact PC and Tiling expose different fields.
 for (const testCase of [

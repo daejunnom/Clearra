@@ -71,7 +71,6 @@
         <QueueTextInput
           class="workspace-queue-input"
           value={request.remaining}
-          maxlength="16"
           placeholder="IOTSZJL"
           spellcheck="false"
           aria-invalid={validationCodes.length > 0}
@@ -85,7 +84,6 @@
           <QueueTextInput
             class="workspace-queue-input"
             value={request.qbQueue}
-            maxlength="64"
             placeholder="OS"
             spellcheck="false"
             aria-invalid={validationCodes.length > 0}
@@ -99,7 +97,6 @@
         <QueueTextInput
           class="workspace-queue-input"
           value={request.nextCycleRemaining}
-          maxlength="7"
           placeholder={label('setupNextCycleOptionalPlaceholder')}
           spellcheck="false"
           aria-invalid={validationCodes.length > 0}

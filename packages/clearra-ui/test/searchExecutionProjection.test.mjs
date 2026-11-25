@@ -759,6 +759,46 @@ test('setup QB input keeps exact prefixes distinct from explicit pattern languag
   );
 });
 
+test('setup inputs preserve long pattern text and separated residues across product options', () => {
+  const pieces = 'IOTSZJL';
+  const qbQueue = [...'IOTSZJLIOT'].map(piece =>
+    `[^${[...pieces].filter(other => other !== piece).join('')}]`).join('');
+  assert.equal(qbQueue.length, 90);
+  for (const candidatePriority of ['all', 'build', 'pc']) {
+    for (const queueKnowledge of ['oracle', 'visible-7']) {
+      const request = {
+        ...production.createDefaultSetupFinderRequest(),
+        searchMode: 'qb', remaining: ' I ', qbQueue,
+        nextCycleRemaining: 'I, O, T, S, Z',
+        candidatePriority, queueKnowledge, useAllLogicalProcessors: true
+      };
+      assert.deepEqual(production.setupFinderValidationCodes(request), []);
+      const arguments_ = production.buildSetupFinderCommandArguments(request, 8);
+      assert.deepEqual(arguments_.slice(0, 3), ['clearra', 'setup',
+        candidatePriority === 'all' ? 'joint' : candidatePriority]);
+      assert.equal(optionValue(arguments_, '--remaining'), 'I');
+      assert.equal(optionValue(arguments_, '--next-cycle-remaining'), 'IOTSZ');
+      assert.equal(optionValue(arguments_, '--qb'), qbQueue);
+      assert.equal(optionValue(arguments_, '--queue-knowledge'), queueKnowledge);
+      assert.equal(optionValue(arguments_, '--auto-workers'), '8');
+      assert.equal(hasOption(arguments_, '--use-all-cpu-threads'), true);
+      assert.deepEqual(production.setupFinderRequestForDesktop(request, 'en', 8).arguments,
+        arguments_);
+    }
+  }
+  const separated = { ...production.createDefaultSetupFinderRequest(),
+    remaining: 'I, O, T, S, Z, J, L', nextCycleRemaining: 'I, O, T, S' };
+  assert.ok(separated.remaining.length > 16 && separated.nextCycleRemaining.length > 7);
+  assert.deepEqual(production.setupFinderValidationCodes(separated), []);
+  const arguments_ = production.buildSetupFinderCommandArguments(separated, 8);
+  assert.equal(optionValue(arguments_, '--remaining'), 'IOTSZJL');
+  assert.equal(optionValue(arguments_, '--next-cycle-remaining'), 'IOTS');
+  const oversized = { ...separated, searchMode: 'qb', remaining: 'TI',
+    nextCycleRemaining: '', qbQueue };
+  assert.deepEqual(production.setupFinderValidationCodes(oversized),
+    ['setup_qb_combined_count_invalid']);
+});
+
 test('PC score mode transitions canonicalize inactive Desktop profiles', () => {
   const scored = {
     ...production.createDefaultWorkspaceRequest(),

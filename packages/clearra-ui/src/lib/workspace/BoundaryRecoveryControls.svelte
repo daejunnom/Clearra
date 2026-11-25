@@ -34,7 +34,7 @@
   <section class="workspace-control-section">
     <h2 class="workspace-control-heading"><Database size={16} strokeWidth={1.8} />{standard('source')}</h2>
     <label class="workspace-field"><span>{label('recoveryQueue')}</span>
-      <QueueTextInput class="workspace-queue-input" value={request.queue} maxlength="65535" placeholder="IOTSZJL"
+      <QueueTextInput class="workspace-queue-input" value={request.queue} placeholder="IOTSZJL"
         spellcheck="false" on:value={(event) => dispatch('change', updateRecoveryQueue(request, event.detail))} />
     </label>
     <div class="workspace-field-grid">

@@ -163,6 +163,71 @@ function tilingKeySequenceHash(keys) {
   return `cts1:${hash.toString(16).padStart(16, '0')}`;
 }
 
+async function setupInputPreservationCase() {
+  const label = 'setup-inputs-preserve-pattern-text-and-separated-residues';
+  const ctx = await context('null', 8);
+  const page = await ctx.newPage();
+  const errors = [];
+  page.on('pageerror', error => errors.push(String(error)));
+  const pieces = 'IOTSZJL';
+  const qbQueue = [...'IOTSZJLIOT'].map(piece =>
+    `[^${[...pieces].filter(other => other !== piece).join('')}]`).join('');
+  const typeInput = async (input, value) => {
+    await input.fill('');
+    // Real key events exercise the browser's maxlength behavior; assigning an
+    // input value directly could miss the truncation this regression covers.
+    await input.pressSequentially(value);
+    assert.equal(await input.inputValue(), value);
+  };
+  try {
+    await page.goto(`http://127.0.0.1:4194${base}/?tool=setup`);
+    await page.locator('.product-tabs').waitFor();
+    const remaining = page.getByRole('textbox', { name: /^Remaining pieces\b/u });
+    const nextCycle = page.getByRole('textbox', { name: /^Next-cycle remaining pieces\b/u });
+    const mode = page.getByRole('combobox', { name: /^Setup type\b/u });
+    await typeInput(remaining, 'I, O, T, S, Z, J, L');
+    await typeInput(nextCycle, 'I, O, T, S');
+    assert.equal(await page.locator('.workspace-validation li').count(), 0);
+    await typeInput(remaining, ' I ');
+    await typeInput(nextCycle, 'I, O, T, S, Z');
+    await mode.selectOption('qb');
+    const qb = page.getByRole('textbox', { name: /^QB supply\b/u });
+    await typeInput(qb, qbQueue);
+    await page.locator('.queue-knowledge-field select').selectOption('visible-7');
+    await page.locator('.worker-policy-control input[type="checkbox"]').check();
+    await page.waitForFunction(() =>
+      document.querySelector('.worker-authority')?.getAttribute('data-workers-effective') === '8');
+    assert.equal(await page.locator('.workspace-validation li').count(), 0);
+    const run = page.getByRole('button', { name: 'Run search', exact: true });
+    assert.equal(await run.isEnabled(), true);
+    await mode.selectOption('oracle');
+    await mode.selectOption('qb');
+    assert.equal(await qb.inputValue(), qbQueue, 'inactive mode roundtrip must retain the full pattern');
+    await nextCycle.fill('');
+    await remaining.fill('TI');
+    assert.equal(await run.isEnabled(), false, 'the real eleven-piece Setup contract still applies');
+    assert.equal(await page.locator('.workspace-validation li').count(), 1);
+    await remaining.fill('I');
+    assert.equal(await run.isEnabled(), true);
+    assert.equal(await qb.getAttribute('maxlength'), null);
+    assert.equal(await remaining.getAttribute('maxlength'), null);
+    assert.equal(await nextCycle.getAttribute('maxlength'), null);
+    assert.deepEqual(errors, []);
+    results.push({ case: label, result: 'passed', patternCharacters: qbQueue.length,
+      sourcePieces: 10, combinedSetupPieces: 11, workersRequested: 8,
+      inactiveModeRoundtrip: true, oversizedInputRejected: true, executionRequested: false });
+  } catch (error) {
+    const failure = error instanceof Error ? error : new Error(String(error));
+    await writeFile(resolve(reportRoot, `failed-${label}.json`), JSON.stringify({
+      source: process.env.CLEARRA_SOURCE_COMMIT, failure: failure.stack, errors, qbQueue,
+      body: (await page.locator('body').innerText().catch(() => 'unavailable')).slice(0, 16384)
+    }, null, 2) + '\n');
+    failures.push(failure);
+    results.push({ case: label, result: 'failed', message: failure.message });
+    console.error(`surface_case=${label} status=failed: ${failure.stack}`);
+  } finally { await ctx.close(); }
+}
+
 function assertTilingFinal(final, height, expectedIdentity) {
   assert.equal(final?.event, 'final_response');
   assert.equal(final.response.status, 'success', JSON.stringify(final.response.diagnostics));
@@ -170,11 +235,11 @@ function assertTilingFinal(final, height, expectedIdentity) {
   assert.deepEqual(final.response.runtime_identity, expectedIdentity);
   const report = final.search_report;
   assert.ok(report, 'typed tiling must publish its real search report');
-  assert.ok(height === 2 || height === 6, 'the all-O oracle covers the declared fixtures');
-  // Raw tiling restores cleared rows. In each two-column strip, the six
-  // original rows have 5!! = 15 perfect matchings, independently across five
-  // strips. Only 2L has a single family; 6L has 15^5, paged in groups of 100.
-  const expectedCount = height === 2 ? 1 : 759375;
+  assert.ok(height === 2 || height === 4, 'the all-O oracle covers the declared fixtures');
+  // Raw tiling restores cleared rows. Each two-column strip has 3 perfect
+  // matchings at 4L, independently across five strips. Its 3^5 = 243 families
+  // exercise real paging without enumerating the much larger empty 6L field.
+  const expectedCount = height === 2 ? 1 : 243;
   const initialCount = Math.min(expectedCount, 100);
   const pageCoversFamily = initialCount === expectedCount;
   assert.equal(report.count_complete, true);
@@ -193,10 +258,9 @@ function assertTilingFinal(final, height, expectedIdentity) {
     assert.equal(report.normalized_solution_set_hash, 'cts1:21fffe814548e2c1');
     assert.equal(tilingKeySequenceHash(report.normalized_solution_keys), 'cts1:21fffe814548e2c1');
   } else {
-    // Independent row-pairing oracle: enumerate each strip's 15 matchings,
-    // stream all 15^5 sorted unions, and hash canonical keys with NUL separators.
-    assert.equal(report.normalized_solution_set_hash, 'cts1:59e019e77228884b');
-    assert.equal(tilingKeySequenceHash(report.normalized_solution_keys), 'cts1:9decf65d9737bdc5');
+    // Independent four-row perfect-matching oracle, at most 243 identities.
+    assert.equal(report.normalized_solution_set_hash, 'cts1:6e75b2a9f36fe5a2');
+    assert.equal(tilingKeySequenceHash(report.normalized_solution_keys), 'cts1:aaa4082273b54329');
   }
   return report;
 }
@@ -262,7 +326,7 @@ async function tilingUiCase({ height, hold, workers }, expectedIdentity) {
     const initialKeys = await completedKeys(page, report.normalized_solution_keys.length, label);
     assert.deepEqual(initialKeys, report.normalized_solution_keys);
     let loadedKeys = initialKeys;
-    if (height === 6) {
+    if (height === 4) {
       await page.locator('.load-more-row button').click();
       await page.waitForFunction(() =>
         document.querySelectorAll('.solution-gallery > li[data-solution-key]').length === 200,
@@ -274,8 +338,8 @@ async function tilingUiCase({ height, hold, workers }, expectedIdentity) {
       });
       loadedKeys = await completedKeys(page, 200, `${label}: second page`);
       assert.deepEqual(loadedKeys.slice(0, 100), initialKeys);
-      assert.equal(tilingKeySequenceHash(loadedKeys.slice(100)), 'cts1:92d3377fca11e2b5');
-      assert.equal(tilingKeySequenceHash(loadedKeys), 'cts1:a2b4e63ada08f855');
+      assert.equal(tilingKeySequenceHash(loadedKeys.slice(100)), 'cts1:0935484371546619');
+      assert.equal(tilingKeySequenceHash(loadedKeys), 'cts1:44c1a0c5833a953d');
       assert.equal(await page.locator('.invalid-solution').count(), 0);
     }
     assert.deepEqual(errors, [], 'result-page loading must not raise a page error');
@@ -306,7 +370,8 @@ async function tilingUiCase({ height, hold, workers }, expectedIdentity) {
 
 // The original product WASM runs in a real browser worker. The page only
 // observes it and owns the same 60-second acceptance deadline as UI cases.
-// Long inputs stop after preparation; only the finite all-O tiling is searched.
+// Large geometry stops after preparation. Only a one-family 2L field is
+// searched, with a long explicit source window and an occupied initial hold.
 function stagedTilingProbeWorker() {
   self.onmessage = async ({ data }) => {
     try {
@@ -367,7 +432,8 @@ async function tilingArtifactCase(expectedIdentity, manifest) {
     'clearra pc tiling --lines 2 --board-mask 0 --height 2 --pieces 5 --queue OOOOO --no-hold --backend cpu',
     held(14), held(16)
   ].map(command => `${command} --workers 8 --use-all-cpu-threads`);
-  const runCommand = `${held(14)} --workers 1 --use-all-cpu-threads`;
+  const runCommand = `clearra pc tiling --lines 2 --board-mask 0 --height 2 --pieces 5 \
+    --queue ${'O'.repeat(16)} --source-pieces 16 --hold O --backend cpu --workers 1 --use-all-cpu-threads`;
   try {
     await page.goto(`http://127.0.0.1:4194${base}/?tool=pc`);
     await page.evaluate(({ source, prepareCommands, runCommand, base, bindingsPath, wasmPath }) => {
@@ -397,9 +463,13 @@ async function tilingArtifactCase(expectedIdentity, manifest) {
       assert.equal(preparation.completionWorkers, 8);
     }
     const final = validateWasmProbeTerminal({ ...outcome, expectedRuntimeIdentity: expectedIdentity });
-    const report = assertTilingFinal(final, 6, expectedIdentity);
+    const report = assertTilingFinal(final, 2, expectedIdentity);
+    assert.equal(report.source_sequence_length, 16, 'the explicit source window must survive execution');
+    assert.equal(report.workers_used, 1);
     results.push({ case: label, result: 'passed', preparedCases: prepareCommands.length,
-      geometryLocks: 15, initialHold: 'O', sourceDraws: 14, solutionCount: report.unique_solution_count,
+      preparedGeometryLocks: 15, preparedSourceDraws: [14, 16],
+      executedGeometryLocks: 5, initialHold: 'O', sourceDraws: 16, explicitSourceWindow: 16,
+      solutionCount: report.unique_solution_count,
       initialPageCount: report.normalized_solution_keys.length,
       normalizedSolutionSetHash: report.normalized_solution_set_hash });
   } catch (error) {
@@ -700,10 +770,13 @@ try {
       })}`);
     } finally { await ctx.close(); }
   }
+  await setupInputPreservationCase();
   for (const workers of [1, 8]) for (const hold of [false, true]) {
     await tilingUiCase({ height: 2, hold, workers }, expectedIdentity);
   }
-  await tilingUiCase({ height: 6, hold: true, workers: 8 }, expectedIdentity);
+  for (const workers of [1, 8]) {
+    await tilingUiCase({ height: 4, hold: true, workers }, expectedIdentity);
+  }
   await tilingArtifactCase(expectedIdentity, manifest);
   const report = { source: process.env.CLEARRA_SOURCE_COMMIT, results, failedCases: failures.length };
   await writeFile(resolve(reportRoot, 'results.json'), JSON.stringify(report, null, 2) + '\n');

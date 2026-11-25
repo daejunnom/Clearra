@@ -487,12 +487,10 @@ export class DistributedWasmJobRunner {
           if (verifierInitialization) {
             throw new Error('distributed worker initialization was produced more than once');
           }
-          effectiveVerifierCount = plan.deferredInitialization
-            ? boundedVerifierCount(
-                verifierCount,
-                this.wasm.distributed_progress().candidateFamilyCount
-              )
-            : verifierCount;
+          // Preparation can reveal fewer immediately available tasks than
+          // admitted compute owners. Keep that capacity stable, including for
+          // deferred Setup initialization; availability is a separate counter.
+          effectiveVerifierCount = verifierCount;
           this.poolOwned = true;
           verifierInitialization = this.pool.initialize(
             produced.initialization,
@@ -1191,15 +1189,4 @@ function verifierRecoveryMode(plan: ClearraDistributedPlan): ClearraVerifierReco
     return 'atomic-task';
   }
   return 'replay-state';
-}
-
-function boundedVerifierCount(requested: number, taskCount: string | null): number {
-  if (taskCount === null) return requested;
-  try {
-    const tasks = BigInt(taskCount);
-    if (tasks <= 0n) return 1;
-    return Math.max(1, Math.min(requested, Number(tasks)));
-  } catch {
-    return requested;
-  }
 }
