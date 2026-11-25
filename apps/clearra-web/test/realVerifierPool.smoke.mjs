@@ -479,6 +479,57 @@ async function extendedBuildProductWithoutAccelerators() {
   }
 }
 
+async function extendedBuildTilingWithoutAccelerators() {
+  // Tiling materializes geometry only. Its high-row producer must cross the
+  // real pool without claiming Build verification or queue coverage.
+  const projectTiling = (terminal, workers) => {
+    assert.equal(terminal.event, 'final_response', JSON.stringify(terminal));
+    assert.equal(terminal.response.status, 'success', JSON.stringify(terminal.response.diagnostics));
+    assert.deepEqual(terminal.response.runtime_identity, manifest.build.runtime_identity);
+    assert.equal(terminal.response.result?.kind, 'build-probability');
+    const report = terminal.search_report;
+    assert.equal(report.workers_used, workers);
+    if (workers > 1) assert.equal(report.cpu_parallel_execution, true);
+    for (const field of ['solution_count_calculated', 'solution_set_materialized',
+      'solution_keys_complete', 'count_complete']) assert.equal(report[field], true, field);
+    for (const field of ['buildability_verified', 'coverage_calculated',
+      'probability_calculated', 'probability_complete']) assert.equal(report[field], false, field);
+    assert.equal(report.unique_solution_count, 1);
+    assert.equal(report.covered_pattern_count, 0);
+    assert.equal(report.coverage_probability, 'not-calculated');
+    assert.equal(report.total_build_order_nodes, 0);
+    assert.equal(report.coverage_product_edge_checks, 0);
+    return { keys: report.normalized_solution_keys, hash: report.normalized_solution_set_hash,
+      count: report.unique_solution_count, covered: report.covered_pattern_count,
+      probability: report.coverage_probability };
+  };
+  for (const [height, baseHex, targetHex] of [
+    [8, 'f03c0f03c0f03c0f', '3c00000000000000000'],
+    [10, 'f03c0f03c0f03c0f03c0f', '3c0000000000000000000000']
+  ]) {
+    assert.ok(BigInt(`0x${targetHex}`) > 0xffffffffffffffffn);
+    const base = `clearra build-probability --base-mask 0x${baseHex} ` +
+      `--target-mask 0x${targetHex} --height ${height} --queue I --source-pieces 1 ` +
+      '--no-hold --no-mirror --queue-knowledge oracle --aggregate tiling ' +
+      '--result-mode all-solutions --backend cpu --no-backend-fallback';
+    const baseline = projectTiling(await new WasmJobRunner(wasm).run(
+      `${base} --workers 1`, () => {}), 1);
+    assert.deepEqual(baseline.keys, [
+      `ctk2|height=${height}|initial=${baseHex.padStart(64, '0')}|placements=I:${targetHex.padStart(64, '0')}`
+    ], 'the complete tiling result must retain the actual high-row target');
+    const before = verifierConsumes();
+    const actual = await distributed(`${base} --workers 2`, { synopsis: null, pack: null }, {
+      expectedFullHeight: true,
+      expectedWorkerCount: 2,
+      projectTerminal: terminal => projectTiling(terminal, 2)
+    });
+    assert.deepEqual(actual, baseline, `extended Build tiling all-solutions height=${height}`);
+    assert.ok(verifierConsumes() > before,
+      'an extended Build tiling candidate must cross the actual production Worker transport');
+    console.log(`real_web_extended_build_tiling=passed height=${height} workers_requested=2 workers_used=2 solutions=1`);
+  }
+}
+
 async function signedAcceleratorCases() {
   for (let profile = 0; profile < profiles.length; profile++) {
     for (const input of ['existing', 'empty']) {
@@ -522,6 +573,7 @@ try {
       ['forced-7L', 'forced-8L', 'forced-12L', 'forced-24L']);
     await oneIProductWithoutAccelerators();
     await extendedBuildProductWithoutAccelerators();
+    await extendedBuildTilingWithoutAccelerators();
   }
   // The older smoke always requested per-solution probabilities and therefore
   // bypassed the ordinary GUI's PcRoots producer entirely. Use real solver

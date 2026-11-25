@@ -923,11 +923,22 @@ impl ExtendedBuildProbabilitySession {
                 bytes.checked_add(core::mem::size_of::<ExtendedInverseCatalog>() as u128 + 32)
             })
             .and_then(|bytes| {
-                bytes.checked_add(
-                    super::extended_pc_search::checked_pc_family_problem_nested_retained_bytes(
-                        problem,
-                    )?,
-                )
+                // Build's supply shell may use Tiling + Trace without owning
+                // typed PC tiling authority. Charge the actual purpose's
+                // retained owners, as the live session projection does.
+                let problem_bytes = match purpose {
+                    ExtendedFamilyPurpose::Build => {
+                        super::build_probability::checked_build_probability_problem_nested_retained_bytes(
+                            problem,
+                        )
+                    }
+                    ExtendedFamilyPurpose::Pc => {
+                        super::extended_pc_search::checked_pc_family_problem_nested_retained_bytes(
+                            problem,
+                        )
+                    }
+                }?;
+                bytes.checked_add(problem_bytes)
             })
             .ok_or(WasmExactSearchError::InvalidProblem(
                 "extended_geometry_memory_projection_unavailable",
@@ -5019,6 +5030,102 @@ mod tests {
     use clearra_supply::queue::fixed_sequence::FixedSequence;
 
     use super::*;
+
+    #[test]
+    fn extended_tiling_build_uses_build_memory_projection_under_finite_budget() {
+        use clearra_objectives::policy::objective_policy::ObjectivePolicy;
+
+        for (height, base, target) in [
+            (8, 0xf03c0f03c0f03c0f_u128, 0x3c00000000000000000_u128),
+            (
+                10,
+                0xf03c0f03c0f03c0f03c0f_u128,
+                0x3c0000000000000000000000_u128,
+            ),
+        ] {
+            let words = |mask: u128| [mask as u64, (mask >> 64) as u64, 0, 0];
+            let field = BuildProbabilityField::from_words(height, words(base), words(target))
+                .expect("the occupied top row retains the extended height");
+            assert_eq!(field.height(), height);
+            let query = PcScenarioQuery::new(
+                PcScenarioBoard::standard_10(u16::from(height), 0),
+                PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::I])),
+                PieceWindow::new(1),
+            )
+            .with_exact_pieces(Some(1))
+            .with_allow_hold(false)
+            .with_count_policy(PcCountPolicy::CountUnique)
+            .with_objective(ObjectivePolicy::tiling())
+            .with_retained_trace_limit(1);
+            let problem = ProblemCompiler::compile_scenario_pc(&query).unwrap();
+            // The Build shell must remain distinct from both typed PC owners.
+            assert!(problem.checked_pc_family_pointee_retained_bytes().is_none());
+            assert!(problem.checked_pc_tiling_pointee_retained_bytes().is_none());
+            assert!(
+                problem
+                    .checked_build_probability_pointee_retained_bytes()
+                    .is_some()
+            );
+            let unbounded = ExecutionMemoryBound::unbounded_for_problem(&problem).unwrap();
+            let finite = unbounded.with_cap(4 * 1024 * 1024).unwrap();
+            let mut session = ExtendedBuildProbabilitySession::new_with_memory_bound(
+                &problem,
+                field,
+                BuildProbabilityAggregation::TilingOnly,
+                finite,
+            )
+            .expect("a measured Build owner must not require PC capability authority");
+            let control = ExecutionControl::default();
+            let mut completed = None;
+            for _ in 0..4096 {
+                match session
+                    .advance(128, &control)
+                    .expect("finite tiling search")
+                {
+                    BuildProbabilityAdvance::Pending => {}
+                    BuildProbabilityAdvance::Completed(result) => {
+                        completed = Some(result);
+                        break;
+                    }
+                    BuildProbabilityAdvance::Cancelled => panic!("uncancelled tiling fixture"),
+                }
+            }
+            let result = completed.expect("one I must finish within the test-only slice bound");
+            assert_eq!(
+                result.normalized_solution_keys(),
+                [format!(
+                    "ctk2|height={height}|initial={base:064x}|placements=I:{target:064x}"
+                )]
+            );
+            for (name, expected) in [
+                ("unique_solution_count", "1"),
+                ("materialized_pattern_count", "1"),
+                ("count_complete", "true"),
+                ("buildability_verified", "false"),
+                ("coverage_calculated", "false"),
+                ("probability_calculated", "false"),
+                ("probability_complete", "false"),
+                ("covered_pattern_count", "0"),
+                ("coverage_probability", "not-calculated"),
+            ] {
+                assert_eq!(
+                    result.field(name),
+                    Some(expected),
+                    "{name}, height={height}"
+                );
+            }
+
+            assert!(matches!(
+                ExtendedBuildProbabilitySession::new_with_memory_bound(
+                    &problem,
+                    field,
+                    BuildProbabilityAggregation::TilingOnly,
+                    unbounded.with_cap(1).unwrap(),
+                ),
+                Err(WasmExactSearchError::ResourceAdmission(_))
+            ));
+        }
+    }
 
     #[test]
     fn shared_build_preparation_reuses_exact_owners_and_accounts_backing_once() {

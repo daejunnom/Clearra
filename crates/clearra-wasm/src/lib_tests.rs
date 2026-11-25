@@ -2894,6 +2894,69 @@ fn distributed_extended_build_probability_keeps_high_rows_and_exact_worker_resul
 }
 
 #[test]
+fn distributed_extended_build_tiling_keeps_high_rows_without_claiming_coverage() {
+    let runtime = WasmCommandRuntime::default()
+        .with_host_capabilities(WasmHostCapabilities::new(4, false, false));
+    for (height, base_mask, target_mask) in [
+        (8, 0xf03c0f03c0f03c0f_u128, 0x3c00000000000000000_u128),
+        (
+            10,
+            0xf03c0f03c0f03c0f03c0f_u128,
+            0x3c0000000000000000000000_u128,
+        ),
+    ] {
+        // Tiling owns Geometry evidence, so it must not borrow the ordinary
+        // PC capability or claim Build verification and queue coverage.
+        let command = format!(
+            "clearra build-probability --base-mask 0x{base_mask:x} \
+             --target-mask 0x{target_mask:x} --height {height} --queue I \
+             --source-pieces 1 --no-hold --no-mirror --queue-knowledge oracle \
+             --aggregate tiling --result-mode all-solutions \
+             --backend cpu --no-backend-fallback"
+        );
+        let serial = runtime
+            .run_command_text(&format!("{command} --workers 1"))
+            .expect("serial high-row Build tiling result");
+        let source = completed_distributed_cpu_source(&runtime, &format!("{command} --workers 2"));
+        assert_eq!(source.mode(), WasmDistributedMode::CpuMulti);
+        assert_eq!(source.worker_count(), 2);
+        assert!(source.verification_required());
+        assert!(source.progress().candidates > 0);
+        let distributed = finish_distributed_cpu_source(source, 2);
+        let serial_report = serial.search_report().expect("serial Build tiling report");
+        let distributed_report = distributed
+            .search_report()
+            .expect("distributed Build tiling report");
+        let expected_key = format!(
+            "ctk2|height={height}|initial={base_mask:064x}|placements=I:{target_mask:064x}"
+        );
+        for report in [serial_report, distributed_report] {
+            assert_eq!(report.normalized_solution_keys, vec![expected_key.clone()]);
+            assert_eq!(report.unique_solution_count, 1);
+            assert!(report.solution_count_calculated);
+            assert!(report.solution_set_materialized);
+            assert!(report.solution_keys_complete);
+            assert!(report.count_complete);
+            assert!(!report.buildability_verified);
+            assert!(!report.coverage_calculated);
+            assert!(!report.probability_calculated);
+            assert!(!report.probability_complete);
+            assert_eq!(report.covered_pattern_count, 0);
+            assert_eq!(report.coverage_probability, "not-calculated");
+            assert_eq!(report.total_build_order_nodes, 0);
+            assert_eq!(report.coverage_product_edge_checks, 0);
+        }
+        assert_eq!(
+            distributed_report.normalized_solution_set_hash,
+            serial_report.normalized_solution_set_hash
+        );
+        assert_eq!(serial_report.workers_used, 1);
+        assert_eq!(distributed_report.workers_used, 2);
+        assert!(distributed_report.cpu_parallel_execution);
+    }
+}
+
+#[test]
 fn original_p7p7_extended_build_prepares_distributed_without_running_search() {
     let runtime = WasmCommandRuntime::default()
         .with_host_capabilities(WasmHostCapabilities::new(4, false, false));
