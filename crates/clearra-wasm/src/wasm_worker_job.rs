@@ -170,16 +170,9 @@ impl JobProgress {
 }
 
 fn job_progress_from_execution(item: ExecutionProgress) -> JobProgress {
-    let total = item.total.unwrap_or_else(|| {
-        if matches!(
-            item.stage,
-            "build-geometry" | "build-candidates" | "build-verification"
-        ) {
-            0
-        } else {
-            item.completed.max(1)
-        }
-    });
+    // Zero is the worker wire contract for an unknown denominator. A live
+    // counter must never manufacture its own total (and appear 100% complete).
+    let total = item.total.unwrap_or(0);
     JobProgress::new(
         u32::try_from(item.completed).unwrap_or(u32::MAX),
         u32::try_from(total).unwrap_or(u32::MAX),
@@ -1650,8 +1643,17 @@ mod ownership_tests {
     };
 
     #[test]
-    fn build_cooperative_progress_preserves_unknown_totals_and_counter_saturation() {
-        for stage in ["build-geometry", "build-candidates", "build-verification"] {
+    fn cooperative_progress_preserves_unknown_totals_and_counter_saturation() {
+        for stage in [
+            "build-geometry",
+            "build-candidates",
+            "build-verification",
+            "geometry",
+            "buildup",
+            "recovery-minimum",
+            "cover-minimum",
+            "execution-replay",
+        ] {
             let progress =
                 super::job_progress_from_execution(super::ExecutionProgress::new(stage, 123, None));
             assert_eq!(progress.label, stage);

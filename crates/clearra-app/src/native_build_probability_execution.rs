@@ -483,6 +483,7 @@ fn drive_native_build_probability(
     available.extend(0..request_senders.len());
     let mut in_flight = 0_usize;
     let mut summary = None;
+    let mut emitted_candidates = 0_u64;
     while summary.is_none() || in_flight != 0 {
         while summary.is_none() {
             let Some(worker_index) = available.pop_front() else {
@@ -515,7 +516,8 @@ fn drive_native_build_probability(
                     component: "wasm_cpu_worker_pool_unavailable",
                 })?;
             in_flight = in_flight.saturating_add(1);
-            control.report_progress("build-probability-candidates", count as u64, None);
+            emitted_candidates = emitted_candidates.saturating_add(count as u64);
+            control.report_progress("build-probability-candidates", emitted_candidates, None);
         }
         if in_flight == 0 {
             if summary.is_some() {

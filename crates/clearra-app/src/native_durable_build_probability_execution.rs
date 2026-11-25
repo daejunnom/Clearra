@@ -1410,6 +1410,7 @@ fn drive_durable_build_probability<J: DelegationJournal, C: NativeDurableClock>(
     }
 
     let mut summary = None;
+    let mut emitted_candidates = 0_u64;
     while summary.is_none() {
         let mut wave = Vec::new();
         wave.try_reserve_exact(request_senders.len())
@@ -1455,7 +1456,8 @@ fn drive_durable_build_probability<J: DelegationJournal, C: NativeDurableClock>(
                 )?;
                 live_tokens.push(pending.token.clone());
                 wave.push(pending);
-                control.report_progress("build-probability-candidates", count as u64, None);
+                emitted_candidates = emitted_candidates.saturating_add(count as u64);
+                control.report_progress("build-probability-candidates", emitted_candidates, None);
             }
             if summary.is_some() {
                 break;
