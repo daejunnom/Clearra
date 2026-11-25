@@ -4863,7 +4863,7 @@ mod tests {
     }
 
     #[test]
-    fn omit_partials_forbid_public_coverage_but_b2b_omit_keeps_private_normalized_coverage() {
+    fn omit_partials_forbid_public_coverage_and_filtered_b2b_omit_keeps_global_authority() {
         let compact_problem = exact_probability_problem(4, 1, PcSolutionProbabilityPolicy::Omit);
         let compact_field =
             BuildProbabilityField::from_words_preserving_height(4, [0; 4], [0xf, 0, 0, 0])
@@ -4921,7 +4921,23 @@ mod tests {
             distributed.normalized_solution_coverages(),
             serial.normalized_solution_coverages()
         );
-        assert_eq!(distributed.normalized_solution_coverages().len(), 1);
+        for result in [&serial, &distributed] {
+            assert!(result.solution_coverages().is_empty());
+            assert!(result.normalized_solution_coverages().is_empty());
+            assert_eq!(
+                result.unique_field("execution_constraint_materialized"),
+                Some("true")
+            );
+            assert_eq!(
+                result.unique_field("b2b_preservation_evaluation_basis"),
+                Some("filtered-build-order-language"),
+            );
+            assert_eq!(
+                result.unique_field("b2b_preserving_pattern_count"),
+                Some("1")
+            );
+            assert_eq!(result.unique_field("coverage_probability"), Some("0.5"));
+        }
     }
 
     #[test]
@@ -4950,7 +4966,7 @@ mod tests {
     }
 
     #[test]
-    fn distributed_finesse_rebuilds_mixed_spawn_coverage_and_solution_coverage() {
+    fn distributed_finesse_rebuilds_mixed_spawn_coverage_under_filtered_b2b_omit() {
         let (problem, field) = mixed_spawn_problem();
         let serial = run_serial(&problem, field);
         let distributed = run_distributed(&problem, field);
@@ -4968,6 +4984,17 @@ mod tests {
             serial.normalized_solution_coverages()
         );
         assert_eq!(distributed.finesse_report(), serial.finesse_report());
+        // Finesse retains its own costed language and successful queue proof;
+        // the Omit policy need not keep a second per-solution coverage owner.
+        let finesse = serial.finesse_report().expect("rebuilt finesse evidence");
+        assert!(finesse.complete());
+        assert_eq!(finesse.policy_results().len(), 2);
+        for policy in finesse.policy_results() {
+            assert!(policy.complete(), "{}", policy.policy());
+            assert_eq!(policy.successful_unique_queue_count(), Some(1));
+            assert_eq!(policy.total_unique_queue_count(), Some(2));
+            assert_eq!(policy.successful_probability_mass(), Some("0.5"));
+        }
         for field in [
             "piece_source_id",
             "pattern_universe_id",
@@ -5005,13 +5032,21 @@ mod tests {
             serial.field("coverage_aggregation_availability"),
             Some("available")
         );
-        assert_eq!(serial.normalized_solution_coverages().len(), 1);
-        assert_eq!(
-            serial.normalized_solution_coverages()[0]
-                .covered_patterns()
-                .count_ones(),
-            1
-        );
+        for result in [&serial, &distributed] {
+            assert!(result.normalized_solution_coverages().is_empty());
+            assert_eq!(
+                result.unique_field("execution_constraint_materialized"),
+                Some("true")
+            );
+            assert_eq!(
+                result.unique_field("b2b_preservation_evaluation_basis"),
+                Some("filtered-build-order-language"),
+            );
+            assert_eq!(
+                result.unique_field("b2b_preserving_pattern_count"),
+                Some("1")
+            );
+        }
     }
 
     #[test]

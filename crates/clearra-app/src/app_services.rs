@@ -778,20 +778,25 @@ impl AppCoreExecutorService {
     }
 
     /// Runs the exact generic post-processing/public-surface path while moving
-    /// the single chance transient out of that boundary, then reattaches it
-    /// solely for the closed App product finalizer. The finalizer consumes it
-    /// before returning any response.
+    /// the single PC coverage transient out of that boundary, then reattaches
+    /// it solely for the closed App product finalizer. Chance and minimum cover
+    /// share this storage seam but retain their own validation contracts.
     pub(crate) fn postprocess_pc_chance_result_before_public_surface(
         &self,
         expected_problem: &SearchProblem,
         result: CoreExecutionResult,
         control: &ExecutionControl,
     ) -> Result<CoreExecutionResult, CoreExecutionError> {
-        crate::pc_chance_probability_result::validate_pc_chance_before_public_surface(
-            expected_problem,
-            &result,
-        )
-        .map_err(|error| CoreExecutionError::Pc(error.to_string()))?;
+        if expected_problem
+            .pc_chance_evidence_policy()
+            .retains_pc_probability_v2_evidence()
+        {
+            crate::pc_chance_probability_result::validate_pc_chance_before_public_surface(
+                expected_problem,
+                &result,
+            )
+            .map_err(|error| CoreExecutionError::Pc(error.to_string()))?;
+        }
         let (result, chance_evidence) = result.into_pc_chance_transient_parts();
         let result = self.postprocess_search_result(result, control)?;
         Ok(match chance_evidence {

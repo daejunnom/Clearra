@@ -3003,7 +3003,7 @@ fn original_p7p7_extended_build_prepares_distributed_without_running_search() {
         assert!(!source.root_task_parallel());
         assert_eq!(source.progress().candidates, 0);
     }
-    let all = command.replace("--workers 2", "--workers 12");
+    let all = command.replace("--workers 2", "--workers 12 --use-all-cpu-threads");
     let WasmDistributedPreparation::Coordinator(source) = WasmDistributedCoordinator::prepare(
         &runtime,
         &format!("{all} --preserve-b2b --spin-profile all-spin-plus"),
@@ -3750,12 +3750,30 @@ fn assert_build_coverage_aggregation_is_coherent(report: &WasmSearchReport) {
             .expect("canonical coverage source row count"),
         report.unique_solution_count
     );
-    assert_eq!(
-        search_summary_field(report, "coverage_row_count")
-            .parse::<usize>()
-            .expect("canonical coverage row count"),
-        report.unique_solution_count
-    );
+    // The late B2B pass adds this legacy alias. Extended Build filters its
+    // language before coverage and publishes the source-row authority above
+    // directly, without running that late pass merely to create an alias.
+    if let Some((_, row_count)) = report
+        .summary_fields
+        .iter()
+        .find(|(key, _)| key == "coverage_row_count")
+    {
+        assert_eq!(
+            row_count
+                .parse::<usize>()
+                .expect("canonical coverage row count"),
+            report.unique_solution_count
+        );
+    } else {
+        assert_eq!(
+            report.backend_selected,
+            "wasm-cpu-build-probability-extended"
+        );
+        assert_eq!(
+            search_summary_field(report, "b2b_preservation_evaluation_basis"),
+            "filtered-build-order-language"
+        );
+    }
     let pattern_count = search_summary_field(report, "materialized_pattern_count")
         .parse::<usize>()
         .expect("canonical materialized pattern count");

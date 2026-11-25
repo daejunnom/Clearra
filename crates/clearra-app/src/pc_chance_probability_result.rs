@@ -1335,13 +1335,11 @@ mod constraint_tests {
                 let validated = authority
                     .validate_execution_result(&problem, &result)
                     .expect("filtered rows remain the exact probability authority");
-                if height == 4 {
-                    assert_eq!(validated.report().covered_pattern_count(), 1);
-                    assert_eq!(validated.report().weighted_probability(), "1");
-                } else if profile == SpinProfileSelection::TSpins {
-                    assert_eq!(validated.report().covered_pattern_count(), 0);
-                    assert_eq!(validated.report().weighted_probability(), "0");
-                }
+                // Both one-I fixtures finish in a perfect clear. The PC
+                // exception preserves B2B even for the one-line clear, for
+                // every spin recognition profile.
+                assert_eq!(validated.report().covered_pattern_count(), 1);
+                assert_eq!(validated.report().weighted_probability(), "1");
                 assert!(result.exact_scoring_execution_batches().is_empty());
                 assert!(result.postprocess_pattern_weights().is_empty());
                 assert_eq!(

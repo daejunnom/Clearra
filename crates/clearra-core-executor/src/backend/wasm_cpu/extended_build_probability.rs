@@ -4164,6 +4164,16 @@ impl ExtendedBuildProbabilitySession {
                 self.truncated_reason.unwrap_or("none"),
             ),
         ];
+        if self.problem.pc_chance_evidence_policy() == PcChanceEvidencePolicy::PcProbabilityV2 {
+            // The validated Chance route owns probability rows only. Match
+            // the compact producer's explicit request flags before App checks
+            // the filtered authority; missing flags are not an implicit false.
+            fields.extend([
+                field("postprocess_scoring_requested", false),
+                field("postprocess_pc_save_requested", false),
+                field("postprocess_pc_path_requested", false),
+            ]);
+        }
         if policy_requested {
             let metrics = self
                 .pc_observation

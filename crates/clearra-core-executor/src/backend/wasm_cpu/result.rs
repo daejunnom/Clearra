@@ -7902,6 +7902,13 @@ mod tests {
                 result.field("execution_constraint_materialized"),
                 Some("true")
             );
+            for name in [
+                "postprocess_scoring_requested",
+                "postprocess_pc_save_requested",
+                "postprocess_pc_path_requested",
+            ] {
+                assert_eq!(result.unique_field(name), Some("false"), "{name}, {spin:?}");
+            }
             let evidence = result.pc_chance_coverage_evidence().unwrap();
             assert!(evidence.problem().matches_search_problem(&problem));
             assert!(evidence.complete());
@@ -7948,6 +7955,13 @@ mod tests {
             result.field("execution_constraint_materialized"),
             Some("true")
         );
+        for name in [
+            "postprocess_scoring_requested",
+            "postprocess_pc_save_requested",
+            "postprocess_pc_path_requested",
+        ] {
+            assert_eq!(result.unique_field(name), Some("false"), "{name}");
+        }
         let evidence = result.pc_chance_coverage_evidence().unwrap();
         assert!(evidence.complete());
         assert!(evidence.rows().is_empty());
