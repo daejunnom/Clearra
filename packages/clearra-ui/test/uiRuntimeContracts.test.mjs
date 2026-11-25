@@ -661,6 +661,7 @@ test('root-only warmup loads WASM without prewarming verifiers and can later exp
     requestedPrewarmWorkerCount: 1, deferredTablebaseRequested: false,
     tablebaseRequested: false, active: null, runtimePrewarm: null,
     pendingRuntimePrewarm: null, failClosed: false,
+    dedicatedManagerWorker: null,
     completedPrewarmWorkerCount: 0, completedRootOnlyPrewarm: false,
     loadedWasm: null, runtimePrewarmGeneration: 0,
     lifecycleOwnerId: 'test', RUNTIME_PREWARM_TIMEOUT_MS: 30000,
@@ -758,6 +759,7 @@ test('in-flight warmup applies only the latest policy and respects worker lifeti
     let resolvePeers;
     const peerGate = new Promise((resolve) => { resolvePeers = resolve; });
     const peers = [];
+    let managerReleases = 0;
     const state = {
       normalizeRuntimeWarmupPolicy: production.normalizeRuntimeWarmupPolicy,
       resolveWorkerAuthority: (_snapshot, workers) => ({ workersEffective: workers }),
@@ -765,6 +767,7 @@ test('in-flight warmup applies only the latest policy and respects worker lifeti
       requestedPrewarmWorkerCount: 1, deferredTablebaseRequested: false,
       tablebaseRequested: false, active: null, runtimePrewarm: null,
       pendingRuntimePrewarm: null, failClosed: false,
+      dedicatedManagerWorker: null,
       completedPrewarmWorkerCount: 0, completedRootOnlyPrewarm: false,
       loadedWasm: null, runtimePrewarmGeneration: 0, gpuWarmup: null,
       gpuWarmupGeneration: 0, gpuWarmupCompleted: false,
@@ -778,6 +781,7 @@ test('in-flight warmup applies only the latest policy and respects worker lifeti
         if (scenario === 'already-started') await peerGate;
       },
       withTimeout: (promise) => promise, disposeDistributedWorkers: () => {},
+      releaseSourceManager: () => { managerReleases += 1; },
       releasePc4TablebaseAssets: () => {}, releaseJobResources: () => {},
       closeFailClosedWorker: () => { state.failClosed = true; }, console
     };
@@ -803,6 +807,7 @@ test('in-flight warmup applies only the latest policy and respects worker lifeti
     await first;
     if (state.runtimePrewarm) await state.runtimePrewarm;
     assert.deepEqual(peers, ['root-to-full', 'already-started'].includes(scenario) ? [7] : [], scenario);
+    assert.equal(managerReleases, scenario === 'dispose' ? 1 : 0, scenario);
     if (scenario === 'foreground' || scenario === 'dispose') {
       assert.equal(state.loadedWasm, null, scenario);
       assert.equal(state.pendingRuntimePrewarm, null, scenario);
@@ -848,6 +853,7 @@ test('active search retains the latest warmup policy, while cancellation remains
       deferredTablebaseRequested: false, tablebaseRequested: false, active: null,
       runtimePrewarm: null, pendingRuntimePrewarm: null, runtimePrewarmGeneration: 0,
       completedPrewarmWorkerCount: 0, completedRootOnlyPrewarm: false, failClosed: false,
+      dedicatedManagerWorker: null, lastExecutionUsedDedicatedManager: false,
       nextJobId: 1, loadedWasm: wasm, lifecycleOwnerId: 'test', RUNTIME_PREWARM_TIMEOUT_MS: 30000,
       setTablebaseRequested: () => {}, postStarted: () => {}, interruptIncompleteRuntimePrewarm: () => {},
       wasmHostCapabilities: () => ({}), releaseProductPages: () => {},

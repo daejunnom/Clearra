@@ -68,8 +68,27 @@ if (Test-StartTestsWindows) {
         $savedWireBinding = @{}
         foreach ($name in $script:ClearraBuildTransactionEnvironmentNames) { $savedWireBinding[$name] = [Environment]::GetEnvironmentVariable($name,'Process') }
         try {
-            Set-ClearraBuildTransactionEnvironment $interrupted.record
-            Assert-ArtifactPathCondition (Test-ArtifactPathThrows { Get-ClearraInheritedBuildTransaction $linuxWireSource 'product' }) 'windows_cannot_claim_foreign_owner_even_with_matching_local_pid'
+            # Historical schema3 records remain readable catalog evidence, not
+            # live schema4 owners. Forge only the foreign environment binding
+            # for this rejection probe; never install it through the live owner
+            # setter or add incremental provenance to its persisted marker.
+            $foreignBinding = @{
+                CLEARRA_BUILD_ROOT = $wireRoot
+                CLEARRA_BUILD_PURPOSE = 'product'
+                CLEARRA_BUILD_SOURCE_ROOT = $interrupted.record.source_root
+                CLEARRA_BUILD_SOURCE_ID = $interrupted.record.source_id
+                CLEARRA_BUILD_SESSION_ID = $interrupted.record.session_id
+                CLEARRA_BUILD_TRANSACTION_ROOT = $interrupted.record.transaction_root
+                CLEARRA_BUILD_CACHE_OWNER_PID = [string]$interrupted.record.owner_pid
+                CLEARRA_BUILD_CACHE_SESSION_KEY = $interrupted.record.session_id
+                CARGO_TARGET_DIR = $interrupted.record.cargo_target_dir
+                CARGO_INCREMENTAL = '0'
+            }
+            foreach ($name in $foreignBinding.Keys) { [Environment]::SetEnvironmentVariable($name,[string]$foreignBinding[$name],'Process') }
+            $foreignOwnerError = $null
+            try { Get-ClearraInheritedBuildTransaction $linuxWireSource 'product' | Out-Null }
+            catch { $foreignOwnerError = $_.Exception.Message }
+            Assert-ArtifactPathCondition ($foreignOwnerError -eq 'A foreign-platform build owner cannot be inherited by Windows.') 'windows_cannot_claim_foreign_owner_even_with_matching_local_pid'
         } finally {
             foreach ($name in $script:ClearraBuildTransactionEnvironmentNames) { [Environment]::SetEnvironmentVariable($name,$savedWireBinding[$name],'Process') }
         }
