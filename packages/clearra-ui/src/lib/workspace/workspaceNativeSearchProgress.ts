@@ -64,6 +64,7 @@ export function nativeSearchProgressCounter(
     case 'geometry':
     case 'build-geometry':
     case 'wasm-exact-cover':
+    case 'forward-search':
       return 'geometry_nodes';
     case 'build-candidates':
     case 'build-probability-candidates':
@@ -82,12 +83,15 @@ export function nativeSearchProgressCounter(
 }
 
 export function isSearchPostprocessLabel(label: string | undefined): boolean {
-  return label === 'postprocess' || label === 'pc-minimals-finalize'
+  return label === 'postprocess' || label === 'setup-finalize'
+    || label === 'pc-minimals-finalize' || label === 'pc-score-minimals-finalize'
+    || label === 'build-minimals-finalize' || label === 'build-score-minimals-finalize'
+    || label === 'spin-structure-cover-minimals-finalize'
     || label?.startsWith('complete-replay-') === true
     || label?.startsWith('execution-') === true
     || label === 'setup-score-reduction'
     || label === 'result-projection' || label === 'result-publish'
-    || label === 'cover-minimum';
+    || label === 'cover-minimum' || label === 'recovery-minimum';
 }
 
 // Desktop publishes one labeled scalar at a time; retain independent
@@ -104,10 +108,39 @@ export function mergeNativeSearchProgress(
       ? { ...previous, phase: 'postprocessing', producer_complete: true }
       : previous;
   }
+  if (previous?.phase === 'postprocessing') return previous;
+  const setupPass = label === 'setup-geometry' ? 0
+    : label === 'setup-graph' ? 1
+      : label === 'setup-coverage' ? 3 : null;
+  if (setupPass !== null) {
+    // These native events count pipeline stages, not search nodes. Preserve
+    // their phase while leaving work counters unavailable until measured.
+    const snapshot = previous ?? emptyTelemetry;
+    return {
+      ...snapshot,
+      pass_index: setupPass,
+      pass_count: 4,
+      availability: { ...snapshot.availability, pass_index: true, pass_count: true },
+      exactness: { ...snapshot.exactness, pass_index: true, pass_count: true }
+    };
+  }
+  if (label === 'forward-search-patterns') {
+    if (done === undefined || !Number.isSafeInteger(done) || done < 0) return previous;
+    const snapshot = previous ?? emptyTelemetry;
+    const totalKnown = Number.isSafeInteger(total) && total > 0;
+    return {
+      ...snapshot,
+      pass_index: done,
+      pass_count: totalKnown ? total : 0,
+      availability: { ...snapshot.availability, pass_index: true, pass_count: totalKnown },
+      exactness: { ...snapshot.exactness,
+        pass_index: done < 0xffff_ffff,
+        pass_count: totalKnown && total < 0xffff_ffff }
+    };
+  }
   const counter = nativeSearchProgressCounter(label, total);
   if (
     counter === null || done === undefined || !Number.isSafeInteger(done) || done < 0
-    || previous?.phase === 'postprocessing'
   ) return previous;
 
   const snapshot = previous ?? emptyTelemetry;

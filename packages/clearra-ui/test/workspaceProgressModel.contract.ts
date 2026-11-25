@@ -176,7 +176,12 @@ for (const profile of ['pc', 'build'] as const) {
     .find(metric => metric.labelKey === 'progressMetricChecks')?.value, '456');
 }
 
-for (const label of ['execution-score', 'execution-coverage', 'execution-replay', 'setup-score-reduction']) {
+for (const label of [
+  'execution-score', 'execution-coverage', 'execution-replay', 'setup-score-reduction',
+  'pc-score-minimals-finalize', 'build-minimals-finalize', 'build-score-minimals-finalize',
+  'spin-structure-cover-minimals-finalize', 'recovery-minimum', 'setup-finalize',
+  'result-projection', 'result-publish', 'cover-minimum'
+]) {
   const progress = mergeNativeSearchProgress(telemetry(), label, 37, 100);
   assert.ok(progress);
   const finalizing = buildWorkspaceProgressModel({ ...input('pc', progress),
@@ -235,6 +240,33 @@ assert.deepEqual(coarseGeometry.stages.map((stage) => stage.status), ['complete'
 assert.equal(coarseGeometry.stages[1].total, null);
 const coarseSetup = buildWorkspaceProgressModel({ ...scalarInput, profile: 'setup', progressLabel: 'setup-coverage' });
 assert.deepEqual(coarseSetup.stages.map((stage) => stage.status), ['complete', 'complete', 'complete', 'running', 'pending']);
+
+let nativeSetup: ReturnType<typeof mergeNativeSearchProgress> = null;
+for (const [label, expected] of [
+  ['setup-geometry', ['complete', 'running', 'pending', 'pending', 'pending']],
+  ['setup-graph', ['complete', 'complete', 'running', 'pending', 'pending']],
+  ['setup-coverage', ['complete', 'complete', 'complete', 'running', 'pending']],
+  ['setup-finalize', ['complete', 'complete', 'complete', 'complete', 'running']]
+] as const) {
+  nativeSetup = mergeNativeSearchProgress(nativeSetup, label, 1, 4);
+  assert.ok(nativeSetup);
+  const model = buildWorkspaceProgressModel(input('setup', nativeSetup));
+  assert.deepEqual(model.stages.map(stage => stage.status), expected);
+  assert.equal(nativeSetup.availability.geometry_nodes, false,
+    'coarse setup stage counts must never become Geometry node counts');
+}
+
+const forwardPatterns = mergeNativeSearchProgress(null, 'forward-search-patterns', 3, 20);
+const forwardStates = mergeNativeSearchProgress(forwardPatterns, 'forward-search', 120, 0);
+assert.ok(forwardStates);
+const forwardProjection = buildWorkspaceProgressModel(input('spin', forwardStates));
+assert.equal(forwardProjection.stages.find(stage => stage.id === 'patterns')?.done, '3');
+assert.equal(forwardProjection.stages.find(stage => stage.id === 'patterns')?.total, '20');
+assert.equal(forwardProjection.stages.find(stage => stage.id === 'forward')?.metrics
+  .find(metric => metric.labelKey === 'progressMetricStates')?.value, '120');
+const unknownForwardTotal = mergeNativeSearchProgress(null, 'forward-search-patterns', 3, 0);
+assert.ok(unknownForwardTotal);
+assert.equal(unknownForwardTotal.availability.pass_count, false);
 
 const tiling = buildWorkspaceProgressModel(
   input('tiling', telemetry({ candidates_emitted: 20 }))

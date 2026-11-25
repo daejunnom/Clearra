@@ -16,6 +16,7 @@
     "./wasm-artifact-generation": "./src/lib/wasm/wasmArtifactGeneration.ts",
     "./wasm-host": "./src/lib/wasm/hostCapabilitySnapshot.ts",
     "./wasm-lifecycle": "./src/lib/wasm/wasmWorkerLifecycle.ts",
+    "./search-progress": "./src/lib/workspace/workspaceNativeSearchProgress.ts",
     "./workspace": "./src/lib/workspace/index.ts"
   },
   "peerDependencies": {

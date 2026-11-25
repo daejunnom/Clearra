@@ -202,14 +202,14 @@ const buildNodes = buildProgress('build-verification', 48);
 assert.ok(buildNodes.event === 'progress');
 assert.equal(buildNodes.progress.telemetry?.build_nodes, 48);
 assert.equal(buildNodes.progress.telemetry?.geometry_nodes, 1_024);
+const saturated = buildProgress('build-geometry', 0xffff_ffff);
+assert.ok(saturated.event === 'progress');
+assert.equal(saturated.progress.telemetry?.exactness.geometry_nodes, false);
 const finalized = buildProgress('postprocess', 0);
 assert.ok(finalized.event === 'progress');
 assert.equal(finalized.progress.telemetry?.producer_complete, true);
 assert.equal(finalized.progress.telemetry?.phase, 'postprocessing');
 assert.equal(finalized.progress.telemetry?.build_nodes, 48);
-const saturated = buildProgress('build-geometry', 0xffff_ffff);
-assert.ok(saturated.event === 'progress');
-assert.equal(saturated.progress.telemetry?.exactness.geometry_nodes, false);
 assert.equal(serialStart.progress.telemetry?.availability.geometry_nodes, false,
   'prior snapshots must not mutate after a later progress event');
 
@@ -224,3 +224,38 @@ const replayModel = buildWorkspaceProgressModel({
 assert.equal(replayModel.stages.find((stage) => stage.id === 'geometry')?.status, 'complete');
 assert.equal(replayModel.stages.find((stage) => stage.id === 'verify')?.status, 'complete');
 assert.equal(replayModel.stages.find((stage) => stage.id === 'finalize')?.status, 'running');
+
+for (const label of [
+  'execution-coverage', 'execution-score', 'execution-replay', 'cover-minimum',
+  'build-minimals-finalize', 'build-score-minimals-finalize', 'pc-score-minimals-finalize',
+  'spin-structure-cover-minimals-finalize', 'setup-score-reduction',
+  'recovery-minimum', 'result-projection', 'result-publish'
+]) {
+  const liveProjection = new SerialSearchProgress(initialSerialProgress);
+  const projected = liveProjection.project({
+    ...initialSerialProgress,
+    progress: { ...initialSerialProgress.progress, label, done: 7, total: 19, telemetry: undefined }
+  });
+  assert.ok(projected.event === 'progress');
+  assert.equal(projected.progress.telemetry?.phase, 'postprocessing', label);
+  assert.equal(projected.progress.telemetry?.producer_complete, true, label);
+  const model = buildWorkspaceProgressModel({
+    profile: 'build', status: 'running', progressLabel: label,
+    progressDone: 7, progressTotal: 19, telemetry: projected.progress.telemetry ?? null
+  });
+  assert.equal(model.stages.find(stage => stage.id === 'finalize')?.done, '7', label);
+  assert.equal(model.stages.find(stage => stage.id === 'finalize')?.total, '19', label);
+}
+
+const setupProjection = new SerialSearchProgress(initialSerialProgress);
+const setupGraph = setupProjection.project({
+  ...initialSerialProgress,
+  progress: { ...initialSerialProgress.progress, label: 'setup-graph', done: 2, total: 4, telemetry: undefined }
+});
+assert.ok(setupGraph.event === 'progress');
+const setupModel = buildWorkspaceProgressModel({
+  profile: 'setup', status: 'running', progressLabel: 'setup-graph',
+  progressDone: 2, progressTotal: 4, telemetry: setupGraph.progress.telemetry ?? null
+});
+assert.deepEqual(setupModel.stages.map(stage => stage.status),
+  ['complete', 'complete', 'running', 'pending', 'pending']);
