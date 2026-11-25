@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+## 0.9.3 - 2026-11-26
+
+- Apply Build B2B preservation inside the existing exact build-order language
+  before original-supply coverage, avoiding eager multi-bag queue and weight
+  materialization for ordinary constrained Build searches.
+- Match compact standard-bag admission to its actual index-free source
+  representation while retaining requested coverage and worker reservations.
+- Preserve structured execution failures across Web manager and verifier
+  workers, and show the corresponding localized cause in Web and desktop.
+- Keep Discord job responses alive during computation without extending the
+  execution deadline, and distinguish transport timeouts from search deadlines.
+- Bind P7P4 diagnostics to the public Path command, original queue universe,
+  requested CPU policy, native result identity, and actual spawned arguments.
+- Reuse exact replay counts for source-verified queues that differ only after
+  every reachable draw, while retaining all original manifest entries.
+- Add bounded P7P7 preparation, option-combination, serial/distributed parity,
+  and pending HTTP response regressions without full six-line enumeration.
+- Add a protected read-only diagnostic for bounded, sanitized Cloud Run
+  operation timing and HTTP status evidence.
+
 ## 0.9.2 - 2026-11-26
 
 - Preserve long queue and multi-bag inputs, occupied Hold supply, and full-height
