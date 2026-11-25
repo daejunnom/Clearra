@@ -42,7 +42,9 @@ const UNION_LEVEL_COUNT: usize = 32;
 pub(super) struct ExtendedGeometryCandidate {
     rows: [u32; MAX_EXTENDED_PIECES],
     row_count: u8,
-    pub pattern_index: Arc<PatternPiecePositionIndex>,
+    // Boolean standard-bag evaluation uses the exact piece-order language
+    // directly; only the materialized product needs position bitplanes.
+    pub pattern_index: Option<Arc<PatternPiecePositionIndex>>,
 }
 
 impl ExtendedGeometryCandidate {
@@ -63,7 +65,23 @@ pub(super) enum ExtendedGeometryAdvance {
 #[derive(Clone)]
 pub(super) struct GeometryTarget {
     pub counts: [u8; 7],
-    pub pattern_index: Arc<PatternPiecePositionIndex>,
+    pub pattern_index: Option<Arc<PatternPiecePositionIndex>>,
+}
+
+/// Immutable targets exported once by the admitted producer. The producer's
+/// geometry continues to account for the index payloads; this owner accounts
+/// for the additional target slice even while many verifier Arcs borrow it.
+#[derive(Clone)]
+pub(super) struct ExtendedGeometrySharedTargets {
+    targets: Arc<[GeometryTarget]>,
+}
+
+impl ExtendedGeometrySharedTargets {
+    pub(super) fn checked_retained_bytes(&self) -> Option<u128> {
+        (self.targets.len() as u128)
+            .checked_mul(core::mem::size_of::<GeometryTarget>() as u128)?
+            .checked_add(32)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -658,7 +676,7 @@ impl ExtendedFamilyEnumerator {
         Some(ExtendedGeometryCandidate {
             rows: self.rows,
             row_count,
-            pattern_index: Arc::clone(&target.pattern_index),
+            pattern_index: target.pattern_index.clone(),
         })
     }
 
@@ -676,6 +694,9 @@ pub(super) struct ExtendedGeometrySearch {
     compiler: Option<ExtendedFamilyCompiler>,
     enumerator: Option<ExtendedFamilyEnumerator>,
     external_targets: Option<Arc<[GeometryTarget]>>,
+    // Only the typed native Build preparation sets this flag. Its producer
+    // accounts for the backing explicitly, independent of Arc strong counts.
+    external_targets_accounted_by_preparation: bool,
     pattern_index_bytes: usize,
     expanded_nodes: usize,
     domain_pruned_states: usize,
@@ -696,6 +717,24 @@ impl ExtendedGeometrySearch {
         catalog: &ExtendedInverseCatalog,
         bound: ExecutionMemoryBound,
         coexisting_bytes: u128,
+    ) -> Result<Self, WasmExactSearchError> {
+        Self::new_bounded_with_pattern_indexes(
+            universe,
+            family,
+            catalog,
+            bound,
+            coexisting_bytes,
+            true,
+        )
+    }
+
+    pub fn new_bounded_with_pattern_indexes(
+        universe: &MaterializedPatternUniverse,
+        family: &PackingMultisetFamily,
+        catalog: &ExtendedInverseCatalog,
+        bound: ExecutionMemoryBound,
+        coexisting_bytes: u128,
+        compile_pattern_indexes: bool,
     ) -> Result<Self, WasmExactSearchError> {
         let piece_count = catalog.required_cells().count_ones() as usize / 4;
         let sequence_len = match universe.structure() {
@@ -725,7 +764,7 @@ impl ExtendedGeometrySearch {
                     .ok_or_else(memory_projection_error)?,
             )
             .ok_or_else(memory_projection_error)?;
-        for group in family.groups() {
+        for group in family.groups().iter().filter(|_| compile_pattern_indexes) {
             let local = group.shared_pattern_bits().count_ones() as u128;
             let index_bytes = local
                 .checked_mul(4)
@@ -762,13 +801,23 @@ impl ExtendedGeometrySearch {
         bound
             .ensure(observed, future)
             .map_err(WasmExactSearchError::resource_admission)?;
-        Self::new(universe, family, catalog)
+        Self::new_with_pattern_indexes(universe, family, catalog, compile_pattern_indexes)
     }
 
+    #[cfg(test)]
     pub fn new(
         universe: &MaterializedPatternUniverse,
         family: &PackingMultisetFamily,
         catalog: &ExtendedInverseCatalog,
+    ) -> Result<Self, WasmExactSearchError> {
+        Self::new_with_pattern_indexes(universe, family, catalog, true)
+    }
+
+    fn new_with_pattern_indexes(
+        universe: &MaterializedPatternUniverse,
+        family: &PackingMultisetFamily,
+        catalog: &ExtendedInverseCatalog,
+        compile_pattern_indexes: bool,
     ) -> Result<Self, WasmExactSearchError> {
         let required_cells = catalog.required_cells();
         let required_piece_count = required_cells.count_ones() as usize / 4;
@@ -789,21 +838,25 @@ impl ExtendedGeometrySearch {
             {
                 continue;
             }
-            let membership = group.shared_pattern_bits();
-            let pattern_index = Arc::new(
-                PatternPiecePositionIndex::compile_subset_before(
-                    universe,
-                    membership.as_ref(),
-                    universe.pattern_count(),
-                )
-                .map_err(|_| {
-                    WasmExactSearchError::InvalidProblem(
-                        "wasm_extended_pattern_index_compile_failed",
+            let pattern_index = if compile_pattern_indexes {
+                let membership = group.shared_pattern_bits();
+                let index = Arc::new(
+                    PatternPiecePositionIndex::compile_subset_before(
+                        universe,
+                        membership.as_ref(),
+                        universe.pattern_count(),
                     )
-                })?,
-            );
-            pattern_index_bytes =
-                pattern_index_bytes.saturating_add(pattern_index.retained_bytes());
+                    .map_err(|_| {
+                        WasmExactSearchError::InvalidProblem(
+                            "wasm_extended_pattern_index_compile_failed",
+                        )
+                    })?,
+                );
+                pattern_index_bytes = pattern_index_bytes.saturating_add(index.retained_bytes());
+                Some(index)
+            } else {
+                None
+            };
             targets.push(GeometryTarget {
                 counts,
                 pattern_index,
@@ -837,6 +890,7 @@ impl ExtendedGeometrySearch {
             compiler,
             enumerator: None,
             external_targets: None,
+            external_targets_accounted_by_preparation: false,
             pattern_index_bytes,
             expanded_nodes: 0,
             domain_pruned_states: 0,
@@ -874,6 +928,7 @@ impl ExtendedGeometrySearch {
             compiler: None,
             enumerator: None,
             external_targets: None,
+            external_targets_accounted_by_preparation: false,
             pattern_index_bytes: 0,
             expanded_nodes: 0,
             domain_pruned_states: 0,
@@ -918,6 +973,27 @@ impl ExtendedGeometrySearch {
         let mut verifier = Self::private_verifier_placeholder();
         verifier.external_targets = Some(targets);
         Some(verifier)
+    }
+
+    /// Export is permitted only before producer enumeration starts. It uses
+    /// the same immutable extraction as PC; no source index is recompiled.
+    /// The caller preflights `checked_external_verifier_future_bytes` and
+    /// retains the returned owner until all delegated verifiers are drained.
+    pub(super) fn shared_verifier_targets(&self) -> Option<ExtendedGeometrySharedTargets> {
+        if self.external_targets.is_some() || self.enumerator.is_some() || !self.is_compiling() {
+            return None;
+        }
+        let verifier = self.external_verifier_from_owner()?;
+        Some(ExtendedGeometrySharedTargets {
+            targets: verifier.external_targets?,
+        })
+    }
+
+    pub(super) fn from_shared_verifier_targets(targets: &ExtendedGeometrySharedTargets) -> Self {
+        let mut verifier = Self::private_verifier_placeholder();
+        verifier.external_targets = Some(Arc::clone(&targets.targets));
+        verifier.external_targets_accounted_by_preparation = true;
+        verifier
     }
 
     pub fn is_compiling(&self) -> bool {
@@ -1218,7 +1294,7 @@ impl ExtendedGeometrySearch {
         Some(ExtendedGeometryCandidate {
             rows,
             row_count: row_ids.len() as u8,
-            pattern_index: Arc::clone(&target.pattern_index),
+            pattern_index: target.pattern_index.clone(),
         })
     }
 
@@ -1300,8 +1376,10 @@ impl ExtendedGeometrySearch {
                 .as_ref()
                 .map_or(0, ExtendedFamilyEnumerator::retained_bytes)
             + self.external_targets.as_ref().map_or(0, |targets| {
-                usize::from(Arc::strong_count(targets) == 1)
-                    * targets.len()
+                usize::from(
+                    !self.external_targets_accounted_by_preparation
+                        && Arc::strong_count(targets) == 1,
+                ) * targets.len()
                     * core::mem::size_of::<GeometryTarget>()
             })
     }

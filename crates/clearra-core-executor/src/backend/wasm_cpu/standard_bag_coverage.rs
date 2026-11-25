@@ -1,3 +1,4 @@
+use crate::resource::{ExecutionMemoryBound, ExecutionMemoryOwner};
 #[cfg(any(test, feature = "local-search-ab"))]
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
@@ -932,6 +933,8 @@ pub(super) struct StandardBagCoverage {
     global_merge_saturated_skips: usize,
     first_witness_calls: usize,
     first_witness_mode_transitions: usize,
+    resource_boundary: Option<StandardBagResourceBoundary>,
+    resource_owner: Option<ExecutionMemoryOwner>,
     #[cfg(feature = "placement-dependency-pc")]
     boolean_membership: membership::BooleanMembershipCache,
     #[cfg(all(feature = "parallel", feature = "placement-dependency-pc"))]
@@ -940,7 +943,102 @@ pub(super) struct StandardBagCoverage {
     p7p4_capture: P7P4CaptureCache,
 }
 
+#[derive(Clone, Copy)]
+struct StandardBagResourceBoundary {
+    bound: ExecutionMemoryBound,
+    outside_retained_bytes: u128,
+}
+
 impl StandardBagCoverage {
+    /// Pre-admit this before constructing an unshared request. It includes
+    /// both table buffers and possible Vec-to-box relocation while the old
+    /// buffers coexist, plus the immutable Arc allocation. A caller using an
+    /// already initialized shared request may conservatively use this bound.
+    pub fn checked_creation_future_bytes(universe: &MaterializedPatternUniverse) -> Option<u128> {
+        let MaterializedPatternUniverseStructure::Standard7BagLexicographic { sequence_len } =
+            universe.structure()
+        else {
+            return Some(0);
+        };
+        let sequence_len = u8::try_from(sequence_len).ok()?;
+        let max_source_depth = sequence_len.checked_add(1)?;
+        let cursor_bytes =
+            StandardBagCursorTransitions::checked_storage_len(max_source_depth)? as u128;
+        let suffix_bytes = (usize::from(sequence_len) as u128)
+            .checked_add(1)?
+            .checked_mul(STANDARD_BAG_MASK_COUNT as u128)?
+            .checked_mul(core::mem::size_of::<u128>() as u128)?;
+        cursor_bytes
+            .checked_add(suffix_bytes)?
+            .checked_mul(2)?
+            .checked_add(core::mem::size_of::<StandardBagRequestTables>() as u128)?
+            .checked_add(2 * core::mem::size_of::<usize>() as u128)
+    }
+
+    pub fn set_resource_boundary(
+        &mut self,
+        bound: ExecutionMemoryBound,
+        coexisting_retained_bytes: u128,
+    ) {
+        self.resource_boundary = Some(StandardBagResourceBoundary {
+            bound,
+            outside_retained_bytes: coexisting_retained_bytes,
+        });
+    }
+
+    #[cfg_attr(
+        all(feature = "local-search-ab", not(target_family = "wasm")),
+        track_caller
+    )]
+    fn ensure_growth(&self, future: Option<u128>) -> Result<(), WasmExactSearchError> {
+        let Some(boundary) = self.resource_boundary else {
+            return Ok(());
+        };
+        // Existing backing was admitted before its allocation and stays owned
+        // until an explicit retained checkpoint. Filling spare capacity needs
+        // no replacement reservation or shared-budget mutex acquisition.
+        if future == Some(0) {
+            return Ok(());
+        }
+        let Some(required) =
+            future.and_then(|bytes| (self.retained_bytes() as u128).checked_add(bytes))
+        else {
+            return boundary
+                .bound
+                .ensure(u128::MAX, 1)
+                .map_err(WasmExactSearchError::resource_admission);
+        };
+        if let Some(owner) = &self.resource_owner {
+            let private = boundary
+                .outside_retained_bytes
+                .checked_add(required)
+                .ok_or_else(|| {
+                    WasmExactSearchError::resource_admission(
+                        boundary
+                            .bound
+                            .ensure(u128::MAX, 1)
+                            .expect_err("overflow-sized memory cannot be admitted"),
+                    )
+                })?;
+            owner
+                .ensure(private)
+                .map_err(WasmExactSearchError::resource_admission)
+        } else {
+            boundary
+                .bound
+                .ensure(boundary.outside_retained_bytes, required)
+                .map_err(WasmExactSearchError::resource_admission)
+        }
+    }
+
+    pub fn set_resource_owner(&mut self, owner: Option<ExecutionMemoryOwner>) {
+        self.resource_owner = owner;
+    }
+
+    fn optional_growth_admitted(&self, future: Option<u128>) -> bool {
+        future.is_some() && self.ensure_growth(future).is_ok()
+    }
+
     pub fn supports(
         universe: &MaterializedPatternUniverse,
         initial_hold: HoldAutomatonState,
@@ -1086,6 +1184,8 @@ impl StandardBagCoverage {
             global_merge_saturated_skips: 0,
             first_witness_calls: 0,
             first_witness_mode_transitions: 0,
+            resource_boundary: None,
+            resource_owner: None,
             #[cfg(feature = "placement-dependency-pc")]
             boolean_membership: membership::BooleanMembershipCache::default(),
             #[cfg(all(feature = "parallel", feature = "placement-dependency-pc"))]
@@ -1198,6 +1298,11 @@ impl StandardBagCoverage {
                 "wasm_standard_bag_coverage_shape_mismatch",
             ));
         }
+        self.ensure_growth(
+            PatternBitSet::checked_external_words_materialize_union_future_bytes(
+                self.materialized_pattern_count,
+            ),
+        )?;
         let mut words = Vec::new();
         words.try_reserve_exact(expected_word_count).map_err(|_| {
             WasmExactSearchError::InvalidProblem("wasm_standard_bag_coverage_storage_unavailable")
@@ -1234,6 +1339,11 @@ impl StandardBagCoverage {
     pub fn materialize_root(&self, root: u32) -> Result<PatternBitSet, WasmExactSearchError> {
         self.require_coverage_root_mode()?;
         let word_count = self.materialized_pattern_count.div_ceil(u64::BITS as usize);
+        self.ensure_growth(
+            PatternBitSet::checked_external_words_materialize_union_future_bytes(
+                self.materialized_pattern_count,
+            ),
+        )?;
         let mut words = Vec::new();
         words.try_reserve_exact(word_count).map_err(|_| {
             WasmExactSearchError::InvalidProblem("wasm_standard_bag_coverage_storage_unavailable")
@@ -2015,7 +2125,33 @@ impl StandardBagCoverage {
 
         let root = self.intern_node(source.depth, source.bag_remainder, children)?;
         // Admission failure only skips caching; the exact root remains valid.
-        let _ = self.product_memo.try_insert(key, root);
+        if let Some(boundary) = self.resource_boundary {
+            let memo_retained = self.product_memo.retained_payload_bytes()
+                + self.product_memo.directory_retained_bytes();
+            let outside_memo = boundary
+                .outside_retained_bytes
+                .checked_add((self.retained_bytes() - memo_retained) as u128);
+            let owner = self.resource_owner.as_ref();
+            let _ = self
+                .product_memo
+                .try_insert_guarded(key, root, |retained, future| {
+                    outside_memo.is_some_and(|outside| {
+                        (retained as u128)
+                            .checked_add(future)
+                            .is_some_and(|required| {
+                                if let Some(owner) = owner {
+                                    outside
+                                        .checked_add(required)
+                                        .is_some_and(|bytes| owner.ensure(bytes).is_ok())
+                                } else {
+                                    boundary.bound.ensure(outside, required).is_ok()
+                                }
+                            })
+                    })
+                });
+        } else {
+            let _ = self.product_memo.try_insert(key, root);
+        }
         Ok(root)
     }
 
@@ -2069,18 +2205,7 @@ impl StandardBagCoverage {
                 reference = node.next_same_bucket;
             }
         }
-        self.nodes.try_reserve(1).map_err(|_| {
-            WasmExactSearchError::InvalidProblem("wasm_standard_bag_node_storage_unavailable")
-        })?;
-        self.node_summaries.try_reserve(1).map_err(|_| {
-            WasmExactSearchError::InvalidProblem("wasm_standard_bag_node_storage_unavailable")
-        })?;
-        self.node_levels.try_reserve(1).map_err(|_| {
-            WasmExactSearchError::InvalidProblem("wasm_standard_bag_node_storage_unavailable")
-        })?;
-        self.node_valid_masks.try_reserve(1).map_err(|_| {
-            WasmExactSearchError::InvalidProblem("wasm_standard_bag_node_storage_unavailable")
-        })?;
+        self.reserve_node_storage()?;
         let reference = u32::try_from(self.nodes.len() + 2).map_err(|_| {
             WasmExactSearchError::InvalidProblem("wasm_standard_bag_node_index_overflow")
         })?;
@@ -2172,7 +2297,9 @@ impl StandardBagCoverage {
         {
             return Ok(root);
         }
-        if self.union_memo.try_reserve(1).is_ok() {
+        if self.optional_growth_admitted(self.union_memo.checked_reserve_future_bytes(1))
+            && self.union_memo.try_reserve(1).is_ok()
+        {
             self.union_memo.insert(key, root);
         }
         Ok(root)
@@ -2336,6 +2463,12 @@ impl StandardBagCoverage {
         }
         if self.global_words.is_empty() {
             let word_count = self.materialized_pattern_count.div_ceil(u64::BITS as usize);
+            let future = if word_count > self.global_words.capacity() {
+                (word_count as u128).checked_mul(core::mem::size_of::<u64>() as u128)
+            } else {
+                Some(0)
+            };
+            self.ensure_growth(future)?;
             self.global_words
                 .try_reserve_exact(word_count)
                 .map_err(|_| {
@@ -2416,6 +2549,15 @@ impl StandardBagCoverage {
         if !self.bucket_heads.is_empty() || self.interning_disabled {
             return;
         }
+        let future = if INITIAL_BUCKET_COUNT > self.bucket_heads.capacity() {
+            (INITIAL_BUCKET_COUNT as u128).checked_mul(core::mem::size_of::<u32>() as u128)
+        } else {
+            Some(0)
+        };
+        if !self.optional_growth_admitted(future) {
+            self.interning_disabled = true;
+            return;
+        }
         if self
             .bucket_heads
             .try_reserve_exact(INITIAL_BUCKET_COUNT)
@@ -2438,6 +2580,12 @@ impl StandardBagCoverage {
             self.interning_disabled = true;
             return;
         };
+        if !self.optional_growth_admitted(
+            (new_count as u128).checked_mul(core::mem::size_of::<u32>() as u128),
+        ) {
+            self.interning_disabled = true;
+            return;
+        }
         let mut grown = Vec::new();
         if grown.try_reserve_exact(new_count).is_err() {
             self.interning_disabled = true;
@@ -2455,6 +2603,39 @@ impl StandardBagCoverage {
             grown[bucket] = index as u32 + 2;
         }
         self.bucket_heads = grown;
+    }
+
+    fn reserve_node_storage(&mut self) -> Result<(), WasmExactSearchError> {
+        if self.resource_boundary.is_some() {
+            let future = checked_node_vec_growth(&self.nodes)
+                .and_then(|bytes| bytes.checked_add(checked_node_vec_growth(&self.node_summaries)?))
+                .and_then(|bytes| bytes.checked_add(checked_node_vec_growth(&self.node_levels)?))
+                .and_then(|bytes| {
+                    bytes.checked_add(checked_node_vec_growth(&self.node_valid_masks)?)
+                });
+            // All four capacities are admitted before the first reserve. Each
+            // old allocation is already retained; the future is the sum of
+            // whole replacement buffers, not the capacity deltas.
+            self.ensure_growth(future)?;
+            reserve_node_vec(&mut self.nodes)?;
+            reserve_node_vec(&mut self.node_summaries)?;
+            reserve_node_vec(&mut self.node_levels)?;
+            reserve_node_vec(&mut self.node_valid_masks)?;
+        } else {
+            self.nodes
+                .try_reserve(1)
+                .map_err(|_| node_storage_error())?;
+            self.node_summaries
+                .try_reserve(1)
+                .map_err(|_| node_storage_error())?;
+            self.node_levels
+                .try_reserve(1)
+                .map_err(|_| node_storage_error())?;
+            self.node_valid_masks
+                .try_reserve(1)
+                .map_err(|_| node_storage_error())?;
+        }
+        Ok(())
     }
 
     fn poll_cancellation(
@@ -2476,6 +2657,31 @@ fn decision_hash(level: u8, valid_piece_mask: u8, children: &[u32; 7]) -> u64 {
         hash = mix_digest(hash, u64::from(*child));
     }
     hash
+}
+
+fn node_storage_error() -> WasmExactSearchError {
+    WasmExactSearchError::InvalidProblem("wasm_standard_bag_node_storage_unavailable")
+}
+
+fn checked_node_vec_growth<T>(values: &Vec<T>) -> Option<u128> {
+    let needed = values.len().checked_add(1)?;
+    if needed <= values.capacity() {
+        return Some(0);
+    }
+    (needed.checked_next_power_of_two()? as u128).checked_mul(core::mem::size_of::<T>() as u128)
+}
+
+fn reserve_node_vec<T>(values: &mut Vec<T>) -> Result<(), WasmExactSearchError> {
+    let needed = values.len().checked_add(1).ok_or_else(node_storage_error)?;
+    if needed > values.capacity() {
+        let capacity = needed
+            .checked_next_power_of_two()
+            .ok_or_else(node_storage_error)?;
+        values
+            .try_reserve_exact(capacity - values.len())
+            .map_err(|_| node_storage_error())?;
+    }
+    Ok(())
 }
 
 fn compile_suffix_counts(sequence_len: u8) -> Result<Vec<u128>, WasmExactSearchError> {
@@ -2655,6 +2861,169 @@ mod supply_automaton_tests {
             SupplyProvenanceId(0x77),
         );
         (universe, initial)
+    }
+
+    #[test]
+    fn bounded_standard_bag_nodes_are_admitted_before_any_replacement_allocation() {
+        let mut coverage = coverage_for_len(2, false);
+        let outside = 173_u128;
+        let initial = coverage.retained_bytes() as u128;
+        let one_node = (core::mem::size_of::<DecisionNode>()
+            + core::mem::size_of::<DecisionSummary>()
+            + 2) as u128;
+        let mut first = [REJECT; 7];
+        first[0] = ACCEPT;
+        coverage.set_resource_boundary(
+            ExecutionMemoryBound::for_test_cap(initial + outside + one_node - 1),
+            outside,
+        );
+        assert!(matches!(
+            coverage.intern_node(0, FULL_STANDARD_BAG, first),
+            Err(WasmExactSearchError::ResourceAdmission(_))
+        ));
+        assert_eq!(coverage.retained_bytes() as u128, initial);
+        assert_eq!(coverage.nodes.capacity(), 0);
+        assert_eq!(coverage.node_summaries.capacity(), 0);
+        assert_eq!(coverage.node_levels.capacity(), 0);
+        assert_eq!(coverage.node_valid_masks.capacity(), 0);
+        assert_eq!(
+            coverage.bucket_heads.capacity(),
+            0,
+            "optional growth was declined"
+        );
+
+        coverage.set_resource_boundary(
+            ExecutionMemoryBound::for_test_cap(initial + outside + one_node),
+            outside,
+        );
+        let first_root = coverage.intern_node(0, FULL_STANDARD_BAG, first).unwrap();
+        let retained = coverage.retained_bytes() as u128;
+        let mut second = [REJECT; 7];
+        second[1] = ACCEPT;
+        // Both old and new buffers must fit while growing one node to two.
+        coverage.set_resource_boundary(
+            ExecutionMemoryBound::for_test_cap(retained + outside + 2 * one_node - 1),
+            outside,
+        );
+        assert!(matches!(
+            coverage.intern_node(0, FULL_STANDARD_BAG, second),
+            Err(WasmExactSearchError::ResourceAdmission(_))
+        ));
+        assert_eq!(coverage.retained_bytes() as u128, retained);
+        assert_eq!(coverage.nodes.len(), 1);
+        assert_eq!(coverage.nodes[reference_index(first_root)].children, first);
+        coverage.set_resource_boundary(
+            ExecutionMemoryBound::for_test_cap(retained + outside + 2 * one_node),
+            outside,
+        );
+        coverage.intern_node(0, FULL_STANDARD_BAG, second).unwrap();
+        assert_eq!(coverage.nodes.len(), 2);
+    }
+
+    #[test]
+    fn bounded_standard_bag_growth_respects_other_workers_live_memory() {
+        use crate::resource::SharedExecutionMemoryBudget;
+
+        let mut coverage = coverage_for_len(2, false);
+        let outside = 173_u128;
+        let initial = coverage.retained_bytes() as u128;
+        let one_node = (core::mem::size_of::<DecisionNode>()
+            + core::mem::size_of::<DecisionSummary>()
+            + 2) as u128;
+        let cap = initial + outside + 4096;
+        let bound = ExecutionMemoryBound::for_test_cap(cap);
+        let budget = SharedExecutionMemoryBudget::new(bound, 0, 2).unwrap();
+        let control = budget.admitted_peak_bytes();
+        let owner = budget.owner(0);
+        let peer = budget.owner(1);
+        owner.ensure(initial + outside).unwrap();
+        peer.ensure(4096 - control - one_node + 1).unwrap();
+        coverage.set_resource_boundary(bound, outside);
+        coverage.set_resource_owner(Some(owner));
+
+        let mut children = [REJECT; 7];
+        children[0] = ACCEPT;
+        assert!(matches!(
+            coverage.intern_node(0, FULL_STANDARD_BAG, children),
+            Err(WasmExactSearchError::ResourceAdmission(_))
+        ));
+        assert_eq!(coverage.retained_bytes() as u128, initial);
+        assert_eq!(coverage.nodes.capacity(), 0);
+
+        // The same exact allocation can proceed after the peer has dropped
+        // its backing. No private per-worker cap or worker-width change occurs.
+        peer.release_after_drop().unwrap();
+        let root = coverage
+            .intern_node(0, FULL_STANDARD_BAG, children)
+            .unwrap();
+        assert_eq!(coverage.nodes[reference_index(root)].children, children);
+        assert!(budget.admitted_peak_bytes() <= cap);
+    }
+
+    #[test]
+    fn bounded_standard_bag_declines_optional_caches_and_keeps_exact_ordinals() {
+        let (_, initial) = request_fixture(2);
+        let universe = PatternUniverseMaterializer::standard_7_bag(2, 0, 0x77).unwrap();
+        let make = || {
+            StandardBagCoverage::for_universe(&universe, initial, true, false)
+                .unwrap()
+                .unwrap()
+        };
+        let mut reference = make();
+        let mut bounded = make();
+        // Required payload is already admitted. No optional table gets new
+        // credit, and computing exact nodes must still work without its cache.
+        bounded.nodes.reserve_exact(256);
+        bounded.node_summaries.reserve_exact(256);
+        bounded.node_levels.reserve_exact(256);
+        bounded.node_valid_masks.reserve_exact(256);
+        let retained = bounded.retained_bytes() as u128;
+        let outside = 91;
+        bounded.set_resource_boundary(
+            ExecutionMemoryBound::for_test_cap(retained + outside),
+            outside,
+        );
+        let mut language = PieceOrderLanguageCache::default();
+        let root = language
+            .canonicalize(&branching_piece_language(2, 0))
+            .unwrap();
+        let control = ExecutionControl::default();
+        let expected = reference.cover_language(&language, root, &control).unwrap();
+        let expected_words = reference.materialize_root(expected.root).unwrap();
+        assert!(expected.covers_any_pattern);
+        for _ in 0..2 {
+            let actual = bounded.cover_language(&language, root, &control).unwrap();
+            assert_eq!(actual.covered_pattern_count, expected.covered_pattern_count);
+            assert_eq!(actual.witness_pattern_id, expected.witness_pattern_id);
+            bounded.merge_global(actual.root).unwrap();
+        }
+        assert_eq!(bounded.product_memo.len(), 0);
+        assert_eq!(bounded.union_memo.len(), 0);
+        assert_eq!(bounded.bucket_heads.capacity(), 0);
+        let pending_root = bounded.epoch_global_root;
+        assert!(matches!(
+            bounded.flush_and_recycle_local_cache(),
+            Err(WasmExactSearchError::ResourceAdmission(_))
+        ));
+        assert_eq!(bounded.global_words.capacity(), 0);
+        assert_eq!(
+            bounded.epoch_global_root, pending_root,
+            "failed flush retained the proof"
+        );
+
+        let words = universe.pattern_count().div_ceil(64) as u128 * 8;
+        let materialize = PatternBitSet::checked_external_words_materialize_union_future_bytes(
+            universe.pattern_count(),
+        )
+        .unwrap();
+        bounded.set_resource_boundary(
+            ExecutionMemoryBound::for_test_cap(retained + outside + words + materialize),
+            outside,
+        );
+        bounded.flush_and_recycle_local_cache().unwrap();
+        assert_eq!(bounded.materialize_global().unwrap(), expected_words);
+        assert_eq!(bounded.epoch_global_root, REJECT);
+        assert!(bounded.nodes.is_empty());
     }
 
     #[test]

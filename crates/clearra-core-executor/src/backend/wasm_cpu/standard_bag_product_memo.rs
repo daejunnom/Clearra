@@ -1,4 +1,6 @@
-use super::compact_exact_u64_map::{ExactU64MemoMap, ExactU64MemoStorage};
+use super::compact_exact_u64_map::{
+    checked_hash_reserve_future_bytes, ExactU64MemoMap, ExactU64MemoStorage,
+};
 
 use std::{
     collections::HashMap,
@@ -216,10 +218,45 @@ impl StandardBagProductMemo {
         key: StandardBagProductMemoKey,
         value: u32,
     ) -> Result<Option<u32>, ProductMemoAdmissionError> {
+        self.try_insert_impl::<false>(key, value, |_, _| true)
+    }
+
+    /// `admit` sees this memo's currently retained payload/directory and the
+    /// whole new allocation while its old storage remains live. Rejection
+    /// only declines a cache entry or optional layout promotion.
+    pub fn try_insert_guarded(
+        &mut self,
+        key: StandardBagProductMemoKey,
+        value: u32,
+        admit: impl FnMut(usize, u128) -> bool,
+    ) -> Result<Option<u32>, ProductMemoAdmissionError> {
+        self.try_insert_impl::<true>(key, value, admit)
+    }
+
+    #[inline]
+    fn try_insert_impl<const GUARDED: bool>(
+        &mut self,
+        key: StandardBagProductMemoKey,
+        value: u32,
+        mut admit: impl FnMut(usize, u128) -> bool,
+    ) -> Result<Option<u32>, ProductMemoAdmissionError> {
         #[cfg(test)]
         if self.failed_admissions_remaining != 0 {
             self.failed_admissions_remaining -= 1;
             return Err(ProductMemoAdmissionError::Capacity);
+        }
+        if let ProductMemoStorage::StateMajor(memo) = &self.storage {
+            if memo.row_index(key).is_none() {
+                return Err(ProductMemoAdmissionError::OutOfScope);
+            }
+        }
+        if GUARDED {
+            let future = self
+                .checked_insert_future_bytes(key)
+                .ok_or(ProductMemoAdmissionError::Capacity)?;
+            if future != 0 && !admit(self.retained_bytes(), future) {
+                return Err(ProductMemoAdmissionError::Capacity);
+            }
         }
         let previous = match &mut self.storage {
             ProductMemoStorage::Flat(memo) => {
@@ -243,9 +280,37 @@ impl StandardBagProductMemo {
             }
         };
         if previous.is_none() {
-            self.maybe_promote();
+            self.maybe_promote(&mut admit);
         }
         Ok(previous)
+    }
+
+    fn retained_bytes(&self) -> usize {
+        self.retained_payload_bytes()
+            .saturating_add(self.directory_retained_bytes())
+    }
+
+    fn checked_insert_future_bytes(&self, key: StandardBagProductMemoKey) -> Option<u128> {
+        match &self.storage {
+            ProductMemoStorage::Flat(memo) => memo.checked_reserve_future_bytes(1),
+            ProductMemoStorage::StateMajor(memo) => {
+                let index = memo.row_index(key)?;
+                let directory = if memo.rows.is_empty() {
+                    (memo.row_count() as u128)
+                        .checked_mul(core::mem::size_of::<Option<StateMajorRow>>() as u128)?
+                } else {
+                    0
+                };
+                let row = memo.rows.get(index).and_then(Option::as_ref);
+                let row_future = checked_hash_reserve_future_bytes(
+                    row.map_or(0, StateMajorRow::capacity),
+                    row.map_or(0, StateMajorRow::len),
+                    1,
+                    core::mem::size_of::<(u32, u32)>(),
+                )?;
+                directory.checked_add(row_future)
+            }
+        }
     }
 
     /// Deterministic admission-failure fixture, absent from every product and
@@ -388,19 +453,19 @@ impl StandardBagProductMemo {
     /// Copy first, then atomically replace: even a late allocation failure keeps
     /// every exact entry and the newly computed root in the flat source.
     #[inline]
-    fn maybe_promote(&mut self) {
+    fn maybe_promote(&mut self, admit: &mut impl FnMut(usize, u128) -> bool) {
         if self.policy != StandardBagProductMemoLayout::Adaptive {
             return;
         }
         if let (Some(policy), ProductMemoStorage::Flat(source)) = (&self.adaptive, &self.storage) {
             if source.len() >= policy.next_check_len {
-                self.promote_flat();
+                self.promote_flat(admit);
             }
         }
     }
 
     #[cold]
-    fn promote_flat(&mut self) {
+    fn promote_flat(&mut self, admit: &mut impl FnMut(usize, u128) -> bool) {
         let Some(policy) = &mut self.adaptive else {
             return;
         };
@@ -412,6 +477,17 @@ impl StandardBagProductMemo {
         #[cfg(test)]
         if self.fail_promotion {
             policy.next_check_len = usize::MAX;
+            return;
+        }
+        // copy_from retains the flat source while building a row directory,
+        // its population scratch, and all destination row maps. Sum the whole
+        // new surfaces; no post-allocation measurement authorizes a promotion.
+        let Some(future) =
+            StateMajorProductMemo::checked_copy_future_bytes(source.len(), policy.max_source_depth)
+        else {
+            return;
+        };
+        if !admit(source.retained_payload_bytes(), future) {
             return;
         }
         let candidate = match StateMajorProductMemo::copy_from(source, policy.max_source_depth) {
@@ -569,6 +645,23 @@ impl StateMajorProductMemo {
         })?;
         target.entry_count = source.len();
         Ok(target)
+    }
+
+    fn checked_copy_future_bytes(entries: usize, max_source_depth: u8) -> Option<u128> {
+        let rows = (usize::from(max_source_depth) + 1).checked_mul(128 * 8)?;
+        let directory_and_counts = (rows as u128).checked_mul(
+            (core::mem::size_of::<Option<StateMajorRow>>() + core::mem::size_of::<usize>()) as u128,
+        )?;
+        // The sum of nonempty row populations is exactly entries. Applying
+        // the per-row SwissTable upper bound is linear in that population;
+        // there can be at most min(entries, rows) trailing control groups.
+        directory_and_counts
+            .checked_add(
+                (entries as u128)
+                    .checked_mul(4)?
+                    .checked_mul(core::mem::size_of::<(u32, u32)>() as u128 + 1)?,
+            )?
+            .checked_add((entries.min(rows) as u128).checked_mul(16)?)
     }
 
     #[inline]
@@ -786,7 +879,6 @@ mod tests {
         );
         assert!(treatment.directory_retained_bytes() > 0);
         assert_eq!(reference.directory_retained_bytes(), 0);
-        assert_exact_row_capacity(&treatment);
     }
 
     #[test]
@@ -822,8 +914,6 @@ mod tests {
             Err(ProductMemoAdmissionError::OutOfScope)
         );
         assert_eq!(bounded.directory_retained_bytes(), 0);
-        assert_exact_row_capacity(&bounded);
-        assert_exact_row_capacity(&memo);
     }
 
     #[test]
@@ -931,6 +1021,68 @@ mod tests {
             ExactU64MemoStorage::Reference,
             max_source_depth,
         )
+    }
+
+    #[test]
+    fn bounded_product_memo_rejects_growth_before_allocating_and_keeps_live_keys() {
+        let first = StandardBagProductMemoKey::new(4, 0, FULL_STANDARD_BAG, 0);
+        for layout in [
+            StandardBagProductMemoLayout::Flat,
+            StandardBagProductMemoLayout::StateMajor,
+        ] {
+            let mut memo = StandardBagProductMemo::new(layout, ExactU64MemoStorage::Compact, 1);
+            assert_eq!(
+                memo.try_insert_guarded(first, 19, |retained, future| {
+                    assert_eq!(retained, 0);
+                    assert!(future > 0);
+                    false
+                }),
+                Err(ProductMemoAdmissionError::Capacity)
+            );
+            assert_eq!(memo.len(), 0);
+            assert_eq!(memo.retained_bytes(), 0);
+            memo.try_insert_guarded(first, 19, |_, _| true).unwrap();
+            let before = memo.retained_bytes();
+            // Existing capacity can cache another exact key with no growth.
+            let second = StandardBagProductMemoKey::new(5, 0, FULL_STANDARD_BAG, 0);
+            memo.try_insert_guarded(second, 23, |_, _| {
+                panic!("spare capacity must not reacquire aggregate admission")
+            })
+            .unwrap();
+            assert_eq!(memo.get(&first), Some(&19));
+            assert_eq!(memo.get(&second), Some(&23));
+            assert_eq!(memo.retained_bytes(), before);
+        }
+    }
+
+    #[test]
+    fn bounded_product_memo_declines_promotion_before_copying_the_flat_owner() {
+        let key = StandardBagProductMemoKey::new(0, 0, FULL_STANDARD_BAG, 0);
+        let mut memo = adaptive(1);
+        memo.adaptive.as_mut().unwrap().next_check_len = 1;
+        let mut calls = 0;
+        assert_eq!(
+            memo.try_insert_guarded(key, 13, |retained, future| {
+                calls += 1;
+                if calls == 1 {
+                    assert_eq!(retained, 0);
+                    assert!(future > 0);
+                    true
+                } else {
+                    assert!(retained > 0, "old flat owner is still charged");
+                    assert!(
+                        future >= StateMajorProductMemo::checked_copy_future_bytes(1, 1).unwrap()
+                    );
+                    false
+                }
+            }),
+            Ok(None)
+        );
+        assert_eq!(calls, 2);
+        assert_eq!(memo.get(&key), Some(&13));
+        assert_eq!(memo.layout(), StandardBagProductMemoLayout::Flat);
+        assert_eq!(memo.directory_retained_bytes(), 0);
+        assert_eq!(memo.promotion_counts(), (1, 0));
     }
 
     #[test]

@@ -325,6 +325,21 @@ impl WasmBuildProbabilitySession {
         let pass_count = usize::from(mirror_distinct) + 1;
         let allocation_plan = if score_requested {
             ExecutionAdmissionPlan::finesse_score(problem)
+        } else if !original.is_compact()
+            && super::extended_build_probability::ExtendedBuildProbabilitySession::uses_standard_bag_coverage(
+                problem,
+                aggregation,
+                finesse_metric.requested(),
+            )?
+        {
+            ExecutionAdmissionPlan::symbolic_build_probability_with_verifiers(
+                problem,
+                pass_count,
+                0,
+            )
+            .ok_or(WasmExactSearchError::InvalidProblem(
+                "wasm_build_probability_symbolic_admission_projection_overflow",
+            ))?
         } else {
             ExecutionAdmissionPlan::build_probability(problem, pass_count)
         };
@@ -4927,6 +4942,46 @@ pub(super) fn checked_finesse_material_vec_retained_bytes(
 }
 
 #[cfg(test)]
+pub(super) fn inverse_dependency_build_fixture(
+    height: u8,
+    cyclic: bool,
+) -> (SearchProblem, BuildProbabilityField) {
+    use clearra_pc_graph::request::{PcQueueInput, PcScenarioBoard, PcScenarioQuery, PieceWindow};
+    use clearra_problem::ProblemCompiler;
+    use clearra_supply::queue::fixed_sequence::FixedSequence;
+
+    let (base, target, queue) = if cyclic {
+        // Each operation needs a row that the other operation would clear.
+        let t = (0b111 << 12) | (1 << 33);
+        let z = (0b11 << 23) | (0b11 << 4);
+        let target = t | z;
+        (
+            ((1_u64 << 40) - 1) & !target,
+            target,
+            vec![PieceKind::T, PieceKind::Z],
+        )
+    } else {
+        (0x3f0, 0x0f, vec![PieceKind::I])
+    };
+    let piece_count = queue.len();
+    let query = PcScenarioQuery::new(
+        PcScenarioBoard::standard_10(u16::from(height), base),
+        PcQueueInput::fixed_sequence(FixedSequence::new(queue)),
+        PieceWindow::new(piece_count),
+    )
+    .with_exact_pieces(Some(piece_count))
+    .with_allow_hold(false);
+    let problem = ProblemCompiler::compile_scenario_pc(&query).unwrap();
+    let field = BuildProbabilityField::from_words_preserving_height(
+        height,
+        [base, 0, 0, 0],
+        [target, 0, 0, 0],
+    )
+    .unwrap();
+    (problem, field)
+}
+
+#[cfg(test)]
 fn checked_finesse_report_build_future_upper_bound(
     materials: &[FinesseSearchMaterial],
     pattern_knowledge: FinessePatternKnowledge,
@@ -6501,7 +6556,8 @@ mod finesse_integration_tests {
     fn build_probability_six_line_descriptor_fails_before_compact_or_extended_allocation() {
         let query = OpeningPcSearchQuery::new(PcTarget::six_lines())
             .with_execution_policy(PcExecutionPolicy::default().with_max_memory_mib(Some(1024)));
-        let problem = ProblemCompiler::compile_opening_pc(&query).expect("lazy six-line descriptor");
+        let problem =
+            ProblemCompiler::compile_opening_pc(&query).expect("lazy six-line descriptor");
         let compact =
             BuildProbabilityField::from_words_preserving_height(6, [0; 4], [0; 4]).unwrap();
         let extended =

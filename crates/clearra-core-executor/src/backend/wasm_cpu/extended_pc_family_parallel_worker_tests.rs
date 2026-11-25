@@ -23,6 +23,72 @@ use super::{
 const WORKERS: usize = 2;
 const HEIGHT: u8 = 7;
 
+#[test]
+fn symbolic_worker_finalization_keeps_digest_bytes_in_aggregate_admission() {
+    let query = PcScenarioQuery::new(
+        PcScenarioBoard::standard_10(8, 0),
+        PcQueueInput::standard_7_bag(),
+        PieceWindow::new(2),
+    )
+    .with_exact_pieces(Some(2))
+    .with_supply_window_size(clearra_pc_graph::request::SupplyWindowSize::new(2))
+    .with_allow_hold(true)
+    .with_count_policy(PcCountPolicy::CountUnique)
+    .with_queue_observation_policy(clearra_supply::QueueObservationPolicy::FullQueueOracle);
+    let problem = ProblemCompiler::compile_scenario_pc(&query).unwrap();
+    let field =
+        BuildProbabilityField::from_words_preserving_height(8, [0; 4], [0x0003_00cf, 0, 0, 0])
+            .unwrap();
+    let engine = ExtendedBuildProbabilitySession::new(
+        &problem,
+        field,
+        clearra_problem::BuildProbabilityAggregation::Buildability,
+    )
+    .unwrap();
+    assert!(engine.standard_bag_coverage.is_some());
+    let mut worker = WorkerResult {
+        engine,
+        digests: vec![DigestSegment {
+            first_ordinal: 0,
+            values: vec![0; 4_096],
+        }],
+        private_peak_bytes: 0,
+        bounded_rows: None,
+        terminal_base: None,
+    };
+    let future = PatternBitSet::checked_external_words_materialize_union_future_bytes(
+        worker.engine.covered_patterns.pattern_count(),
+    )
+    .unwrap();
+    let retained = worker.checked_retained_bytes::<false>().unwrap();
+    let original_bound = worker.engine.memory_bound;
+    // The aggregate also owns its control block and owner array. Read their
+    // admitted size before adding the live worker and finalization projection.
+    let control_bytes = SharedExecutionMemoryBudget::new(original_bound, 0, 1)
+        .unwrap()
+        .admitted_peak_bytes();
+    let required = control_bytes + retained + future;
+    for shortage in [1, 0] {
+        let bound = original_bound.with_cap(required - shortage).unwrap();
+        let aggregate = SharedExecutionMemoryBudget::new(bound, 0, 1).unwrap();
+        worker.engine.memory_bound = bound;
+        worker.engine.private_memory_owner = Some(aggregate.owner(0));
+        worker.settle_without_branch::<false>().unwrap();
+        assert_eq!(worker.engine.coexisting_retained_bytes, 0);
+        let result = worker.finalize_source_coverage::<false>();
+        if shortage == 1 {
+            assert!(matches!(
+                result,
+                Err(WasmExactSearchError::ResourceAdmission(_))
+            ));
+        } else {
+            result.expect("the exact aggregate live-plus-finalization cap must suffice");
+            assert_eq!(aggregate.admitted_peak_bytes(), required);
+        }
+        assert_eq!(worker.engine.coexisting_retained_bytes, 0);
+    }
+}
+
 fn fixture() -> (SearchProblem, BuildProbabilityField) {
     let mut holes = Board256Mask::EMPTY;
     for row in 0..u16::from(HEIGHT) {

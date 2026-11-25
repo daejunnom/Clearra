@@ -21,6 +21,10 @@ wasm-stage-profiling = [
 ]
 online-pc4-tablebase = ["dep:clearra-pc4-tablebase", "dep:serde_json"]
 
+[[example]]
+name = "oracle_ctk3_bench"
+required-features = ["parallel"]
+
 [dependencies]
 clearra-build-coverage = { path = "../clearra-build-coverage" }
 clearra-core-domain = { path = "../clearra-core-domain" }
@@ -55,3 +59,4 @@ getrandom = "0.4.3"
 clearra-accelerator-product-host = { path = "../clearra-accelerator-product-host" }
 clearra-accelerator-runtime = { path = "../clearra-accelerator-runtime" }
 fumen = "0.1.2"
+serde_json.workspace = true

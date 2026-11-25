@@ -89,6 +89,30 @@ impl ExecutionAdmissionPlan {
         )
     }
 
+    /// The admitted Boolean standard-bag path retains the original-ID bitmap
+    /// but owns no per-pattern position index or explicit sequence array.
+    /// Selection of that exact execution mode belongs to the Build backend.
+    /// Mutable language/decision arenas remain subject to their runtime owner
+    /// checks; this plan covers source-proportional preparation and reduction.
+    pub(crate) fn symbolic_build_probability_with_verifiers(
+        problem: &SearchProblem,
+        pass_count: usize,
+        verifier_count: usize,
+    ) -> Option<Self> {
+        let passes = pass_count.max(1) as u128;
+        let replicas = (verifier_count as u128).checked_add(1)?;
+        // Global DD flush, its exported bitmap, and the reducer can coexist.
+        let copies = passes.checked_mul(3)?.checked_mul(replicas)?;
+        let source_rows = (problem.supply().source_sequence_length() as u128).checked_add(2)?;
+        // Canonical cursor transitions plus suffix counts for every bag mask,
+        // with old/new temporary coexistence and small owner/table overhead.
+        let tables = source_rows
+            .checked_mul(128)?
+            .checked_mul(2 * (7 + 16))?
+            .checked_add(64 * 1024)?;
+        Some(Self::new(copies, 0, tables.checked_mul(replicas)?).with_compute_units(replicas))
+    }
+
     // Native packing registries consume this projection only when that backend is linked.
     #[allow(dead_code)]
     pub(crate) fn native_packing(problem: &CPackingProblem, worker_count: usize) -> Option<Self> {

@@ -26,7 +26,9 @@ use super::{
     extended_board::{compact_logical_board, merge_deleted_rows, place_and_clear, ExtendedBoard},
     extended_geometry::ExtendedGeometryCandidate,
     extended_inverse_catalog::ExtendedInverseCatalog,
-    extended_reachability::{ExtendedReachabilityWorkspace, ExtendedReachableLocks},
+    extended_reachability::{
+        ExtendedHarddropReachability, ExtendedReachabilityWorkspace, ExtendedReachableLocks,
+    },
     mix_digest, piece_index, WasmExactSearchError,
 };
 
@@ -443,7 +445,40 @@ fn build_extended_order_graph_mode<const EARLY_B2B_PRUNING: bool>(
     b2b_policy: Option<BackToBackEdgePolicy>,
     control: &ExecutionControl,
 ) -> Result<ExtendedBuildOrderResult, WasmExactSearchError> {
+    build_extended_order_graph_mode_with_options::<EARLY_B2B_PRUNING>(
+        catalog,
+        candidate,
+        workspace,
+        remaining_node_budget,
+        spin_candidate,
+        finesse_problem,
+        finesse_spin_coverage_requested,
+        b2b_policy,
+        control,
+        true,
+        true,
+    )
+}
+
+// The two options are explicit only for exact oracle comparisons in tests;
+// production callers always enable both proven sufficient/necessary checks.
+#[allow(clippy::too_many_arguments)]
+fn build_extended_order_graph_mode_with_options<const EARLY_B2B_PRUNING: bool>(
+    catalog: &ExtendedInverseCatalog,
+    candidate: &ExtendedGeometryCandidate,
+    workspace: &mut ExtendedBuildOrderWorkspace,
+    remaining_node_budget: usize,
+    spin_candidate: Option<(u64, String)>,
+    finesse_problem: Option<&SearchProblem>,
+    finesse_spin_coverage_requested: bool,
+    b2b_policy: Option<BackToBackEdgePolicy>,
+    control: &ExecutionControl,
+    reachability_prefilter: bool,
+    harddrop_proof: bool,
+) -> Result<ExtendedBuildOrderResult, WasmExactSearchError> {
     let geometry_only = finesse_problem.is_some();
+    let plain_harddrop_proof =
+        harddrop_proof && !geometry_only && spin_candidate.is_none() && b2b_policy.is_none();
     let mut finesse_geometry_span =
         geometry_only.then(|| SearchStageSpan::begin(ExecutorSearchStage::FinesseGeometry));
     let rows = candidate.row_ids();
@@ -558,6 +593,8 @@ fn build_extended_order_graph_mode<const EARLY_B2B_PRUNING: bool>(
         }
 
         let (board, deleted_rows) = projection.state_for_subset(subset);
+        let harddrop = plain_harddrop_proof
+            .then(|| ExtendedHarddropReachability::new(projection.width, board));
         // Reserve all children and concrete edges for this one visited node
         // before any Vec/HashMap growth. The bound is independent of scheduling
         // and uses the real catalog realization counts, not the final solution
@@ -711,20 +748,24 @@ fn build_extended_order_graph_mode<const EARLY_B2B_PRUNING: bool>(
                 continue;
             }
             let piece_slot = piece_index(piece);
-            if (!geometry_only || spin_candidate.is_some()) && lock_sets[piece_slot].is_none() {
+            if !reachability_prefilter
+                && (!geometry_only || spin_candidate.is_some())
+                && lock_sets[piece_slot].is_none()
+            {
                 lock_sets[piece_slot] = Some(workspace.reachability.reachable_locks_with_scoring(
                     board,
                     piece,
                     spin_candidate.is_some() || b2b_policy.is_some(),
                 ));
             }
-            let locks = lock_sets[piece_slot].as_ref();
             let mut build_edge_added = false;
             for realization in catalog.instantiations(row_id, deleted_rows) {
-                let lock_reachable = locks.is_some_and(|locks| {
+                let known_reachable = lock_sets[piece_slot].as_ref().map(|locks| {
                     locks.contains(realization.rotation, realization.x, realization.lock_y)
                 });
-                if (!geometry_only && !lock_reachable) || board.intersects(realization.lock_mask) {
+                if (!geometry_only && known_reachable == Some(false))
+                    || board.intersects(realization.lock_mask)
+                {
                     continue;
                 }
                 let (next_board, cleared_physical, cleared_lines) = place_and_clear(
@@ -738,6 +779,36 @@ fn build_extended_order_graph_mode<const EARLY_B2B_PRUNING: bool>(
                     continue;
                 };
                 if next_board != expected_board || next_deleted != expected_deleted {
+                    continue;
+                }
+                // A realization that cannot reach the exact child board can
+                // never contribute an edge. Delay full movement traversal
+                // until these rule-independent checks pass. The positive
+                // translation proof is restricted to ordinary buildability;
+                // evidence-bearing modes still acquire their complete locks.
+                let harddrop_reachable = known_reachable.is_none()
+                    && harddrop
+                        .as_ref()
+                        .is_some_and(|proof| proof.contains(realization));
+                if (!geometry_only || spin_candidate.is_some())
+                    && lock_sets[piece_slot].is_none()
+                    && !harddrop_reachable
+                {
+                    lock_sets[piece_slot] =
+                        Some(workspace.reachability.reachable_locks_with_scoring(
+                            board,
+                            piece,
+                            spin_candidate.is_some() || b2b_policy.is_some(),
+                        ));
+                }
+                let locks = lock_sets[piece_slot].as_ref();
+                let lock_reachable = known_reachable.unwrap_or_else(|| {
+                    harddrop_reachable
+                        || locks.is_some_and(|locks| {
+                            locks.contains(realization.rotation, realization.x, realization.lock_y)
+                        })
+                });
+                if !geometry_only && !lock_reachable {
                     continue;
                 }
                 // Resolve a destination without retaining a rejected state.
@@ -1379,6 +1450,321 @@ mod finesse_tests {
 
     use super::super::extended_geometry::ExtendedGeometrySearch;
     use super::*;
+
+    use super::super::build_probability::inverse_dependency_build_fixture;
+
+    #[test]
+    fn extended_reachability_prefilter_preserves_physical_finesse_and_scoring_graphs() {
+        for cyclic in [false, true] {
+            let (problem, field) = inverse_dependency_build_fixture(8, cyclic);
+            let catalog = ExtendedInverseCatalog::compile(field).unwrap();
+            let universe = problem.piece_source().materialized_universe().unwrap();
+            let family = universe.packing_multiset_family_for_execution(
+                field.target_piece_count(),
+                problem.initial_hold(),
+                problem.supply().hold_enabled(),
+                super::super::packing_hold_projection(&problem),
+            );
+            let geometry = ExtendedGeometrySearch::new(universe, &family, &catalog).unwrap();
+            let placements = if cyclic {
+                vec![
+                    (PieceKind::T, (0b111_u64 << 12) | (1_u64 << 33)),
+                    (PieceKind::Z, (0b11_u64 << 23) | (0b11_u64 << 4)),
+                ]
+            } else {
+                vec![(PieceKind::I, 0x0f)]
+            };
+            let rows = placements
+                .iter()
+                .map(|&(piece, cells)| {
+                    catalog
+                        .skeletons()
+                        .iter()
+                        .position(|row| row.piece == piece && row.cells.words() == [cells, 0, 0, 0])
+                        .expect("the exact inverse realization belongs to the catalog")
+                        as u32
+                })
+                .collect::<Vec<_>>();
+            let candidate = geometry.external_candidate(&catalog, &rows).unwrap();
+            let key = ExtendedTilingKey::from_candidate(&catalog, &candidate)
+                .canonical_key(catalog.initial_board(), catalog.height());
+
+            for (geometry_only, scoring, b2b) in [
+                (false, false, false),
+                (false, true, false),
+                (false, false, true),
+                (false, true, true),
+                (true, false, false),
+                (true, true, false),
+            ] {
+                let run = |prefilter, harddrop| {
+                    let mut workspace = ExtendedBuildOrderWorkspace::new(
+                        catalog.width(),
+                        catalog.height(),
+                        problem.kick_profile().profile_id(),
+                    );
+                    let result = build_extended_order_graph_mode_with_options::<false>(
+                        &catalog,
+                        &candidate,
+                        &mut workspace,
+                        0,
+                        scoring.then(|| (0, key.clone())),
+                        geometry_only.then_some(&problem),
+                        scoring,
+                        b2b.then(|| BackToBackEdgePolicy::new(SpinProfileSelection::TSpins)),
+                        &ExecutionControl::default(),
+                        prefilter,
+                        harddrop,
+                    )
+                    .unwrap();
+                    let ExtendedBuildOrderResult::Complete {
+                        graph,
+                        finesse_language,
+                        spin_graph,
+                        searched_nodes,
+                        reachability_states,
+                        ..
+                    } = result
+                    else {
+                        panic!("the bounded fixture has no node limit")
+                    };
+                    (
+                        graph,
+                        finesse_language,
+                        spin_graph,
+                        searched_nodes,
+                        reachability_states,
+                    )
+                };
+                // Pass the mode directly: concurrent tests never mutate the
+                // process-wide local A/B environment.
+                let eager = run(false, false);
+                let lazy = run(true, false);
+                let proof = run(true, true);
+                for optimized in [&lazy, &proof] {
+                    assert_eq!(eager.0.root, optimized.0.root);
+                    assert_eq!(eager.0.nodes.len(), optimized.0.nodes.len());
+                    for (index, (left, right)) in
+                        eager.0.nodes.iter().zip(&optimized.0.nodes).enumerate()
+                    {
+                        assert_eq!(
+                            (left.depth, left.live, left.accepting()),
+                            (right.depth, right.live, right.accepting())
+                        );
+                        assert_eq!(eager.0.edges(index), optimized.0.edges(index));
+                        assert_eq!(eager.0.piece_edges(index), optimized.0.piece_edges(index));
+                    }
+                    match (&eager.1, &optimized.1) {
+                        (Some(left), Some(right)) => {
+                            assert_eq!(left.root, right.root);
+                            let nodes = |language: &PreparedFinesseLanguage| {
+                                language
+                                    .nodes
+                                    .iter()
+                                    .map(|node| {
+                                        (
+                                            node.edge_start,
+                                            node.edge_count,
+                                            node.depth,
+                                            node.accepting,
+                                            node.source_board,
+                                        )
+                                    })
+                                    .collect::<Vec<_>>()
+                            };
+                            let edges = |language: &PreparedFinesseLanguage| {
+                                language
+                                    .edges
+                                    .iter()
+                                    .map(|edge| {
+                                        (
+                                            edge.child,
+                                            edge.piece,
+                                            edge.cost,
+                                            edge.transition_order,
+                                            edge.action_key,
+                                            edge.terminal_evidence,
+                                        )
+                                    })
+                                    .collect::<Vec<_>>()
+                            };
+                            assert_eq!(nodes(left), nodes(right));
+                            assert_eq!(edges(left), edges(right));
+                        }
+                        (None, None) => {}
+                        _ => panic!("finesse ownership must not depend on prefilter mode"),
+                    }
+                    assert_eq!(eager.2, optimized.2);
+                    assert_eq!(eager.3, optimized.3);
+                    assert!(optimized.4 <= eager.4);
+                }
+                if !cyclic && !geometry_only && !scoring && !b2b {
+                    assert!(lazy.4 > 0);
+                    assert_eq!(proof.4, 0, "the open I is proved without a BFS");
+                } else {
+                    assert_eq!(proof.4, lazy.4, "evidence modes keep their complete BFS");
+                }
+                if cyclic && (!geometry_only || scoring) {
+                    // Both operations require the other's cleared row. Their
+                    // empty instantiation lists must not trigger any BFS.
+                    assert!(eager.4 > 0);
+                    assert_eq!(lazy.4, 0);
+                    assert!(!lazy.0.nodes[lazy.0.root as usize].live);
+                } else if !cyclic {
+                    assert!(lazy.0.nodes[lazy.0.root as usize].live);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn extended_harddrop_proof_preserves_oracle_graph_coverage_counts_and_witnesses() {
+        use clearra_pc_graph::request::{
+            PcScenarioBoard, PcScenarioQuery, PieceWindow, SupplyWindowSize,
+        };
+        use clearra_problem::BuildProbabilityField;
+        use clearra_supply::{pattern_universe::PatternPiecePositionIndex, QueueObservationPolicy};
+
+        use super::super::{
+            buildup::representative_pattern_path, coverage_product::CoverageProductEvaluator,
+            extended_geometry::ExtendedGeometrySearch, packing_hold_projection,
+        };
+
+        for (base, placements, needs_fallback) in [
+            (
+                0,
+                [(PieceKind::I, 0x0f), (PieceKind::O, 0x0003_00c0)],
+                false,
+            ),
+            // I clears the bottom row by a straight drop. O reaches beneath
+            // the shelf through its side, before or after that clear. This
+            // exercises proofs and successful full-search fallback together.
+            (
+                0x3f0 | (0xf0_u64 << 40),
+                [(PieceKind::I, 0x0f), (PieceKind::O, 0x0300_c000)],
+                true,
+            ),
+        ] {
+            let query = PcScenarioQuery::new(
+                PcScenarioBoard::standard_10(8, base),
+                PcQueueInput::standard_7_bag(),
+                PieceWindow::new(2),
+            )
+            .with_exact_pieces(Some(2))
+            .with_supply_window_size(SupplyWindowSize::new(2))
+            .with_allow_hold(true)
+            .with_queue_observation_policy(QueueObservationPolicy::FullQueueOracle);
+            let problem = ProblemCompiler::compile_scenario_pc(&query).unwrap();
+            let target = placements[0].1 | placements[1].1;
+            let field = BuildProbabilityField::from_words_preserving_height(
+                8,
+                [base, 0, 0, 0],
+                [target, 0, 0, 0],
+            )
+            .unwrap();
+            let catalog = ExtendedInverseCatalog::compile(field).unwrap();
+            let universe = problem.piece_source().materialized_universe().unwrap();
+            let family = universe.packing_multiset_family_for_execution(
+                field.target_piece_count(),
+                problem.initial_hold(),
+                problem.supply().hold_enabled(),
+                packing_hold_projection(&problem),
+            );
+            let geometry = ExtendedGeometrySearch::new(universe, &family, &catalog).unwrap();
+            let rows = placements.map(|(piece, cells)| {
+                catalog
+                    .skeletons()
+                    .iter()
+                    .position(|row| row.piece == piece && row.cells.words() == [cells, 0, 0, 0])
+                    .unwrap() as u32
+            });
+            let candidate = geometry.external_candidate(&catalog, &rows).unwrap();
+            let run = |harddrop| {
+                let mut workspace = ExtendedBuildOrderWorkspace::new(
+                    catalog.width(),
+                    catalog.height(),
+                    problem.kick_profile().profile_id(),
+                );
+                let ExtendedBuildOrderResult::Complete {
+                    graph,
+                    searched_nodes,
+                    reachability_states,
+                    ..
+                } = build_extended_order_graph_mode_with_options::<false>(
+                    &catalog,
+                    &candidate,
+                    &mut workspace,
+                    0,
+                    None,
+                    None,
+                    false,
+                    None,
+                    &ExecutionControl::default(),
+                    true,
+                    harddrop,
+                )
+                .unwrap()
+                else {
+                    panic!("the finite two-piece graph must complete")
+                };
+                (graph, searched_nodes, reachability_states)
+            };
+            let baseline = run(false);
+            let proof = run(true);
+            assert_eq!(baseline.0.root, proof.0.root);
+            assert_eq!(baseline.0.nodes.len(), proof.0.nodes.len());
+            assert_eq!(baseline.1, proof.1);
+            assert!(baseline.2 > 0);
+            assert!(proof.2 < baseline.2);
+            if needs_fallback {
+                assert!(proof.2 > 0);
+            } else {
+                assert_eq!(proof.2, 0);
+            }
+            for (index, (left, right)) in baseline.0.nodes.iter().zip(&proof.0.nodes).enumerate() {
+                assert_eq!(
+                    (left.depth, left.live, left.accepting()),
+                    (right.depth, right.live, right.accepting())
+                );
+                assert_eq!(baseline.0.edges(index), proof.0.edges(index));
+                assert_eq!(baseline.0.piece_edges(index), proof.0.piece_edges(index));
+            }
+            let index = PatternPiecePositionIndex::compile(universe).unwrap();
+            for count_paths in [false, true] {
+                let evaluate = |graph: &BuildOrderGraph| {
+                    CoverageProductEvaluator::default()
+                        .evaluate(
+                            graph,
+                            &index,
+                            problem.initial_hold(),
+                            problem.supply().hold_enabled(),
+                            problem.supply().projects_unplaced_lookahead(),
+                            problem.supply().projects_standard_bag_lookahead(),
+                            count_paths,
+                            false,
+                            &ExecutionControl::default(),
+                        )
+                        .unwrap()
+                };
+                let expected = evaluate(&baseline.0);
+                let actual = evaluate(&proof.0);
+                assert_eq!(actual.coverage_bits, expected.coverage_bits);
+                assert_eq!(actual.coverage_bits.count_ones(), 2);
+                assert_eq!(actual.path_count, expected.path_count);
+                assert_eq!(actual.count_complete, expected.count_complete);
+            }
+            for ordinal in 0..universe.pattern_count() {
+                let sequence = universe.sequence(
+                    clearra_coverage::pattern::pattern_id::PatternId::new(ordinal),
+                );
+                assert_eq!(
+                    representative_pattern_path(&problem, &proof.0, sequence.as_ref(), None),
+                    representative_pattern_path(&problem, &baseline.0, sequence.as_ref(), None),
+                    "original queue ordinal {ordinal}",
+                );
+            }
+        }
+    }
 
     #[test]
     fn extended_build_order_preallocation_refusal_keeps_private_vectors_unchanged() {

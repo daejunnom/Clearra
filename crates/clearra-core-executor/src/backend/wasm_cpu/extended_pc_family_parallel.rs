@@ -325,6 +325,21 @@ impl WorkerResult {
             )
             .map_err(WasmExactSearchError::resource_admission)
     }
+
+    fn finalize_source_coverage<const RETAIN_ROWS: bool>(
+        &mut self,
+    ) -> Result<(), WasmExactSearchError> {
+        // A final DD-to-ordinal bitmap still coexists with the worker's
+        // digest and row buffers. An owner reservation replaces the prior
+        // value, so every nested allocator must retain those bytes explicitly.
+        self.engine.coexisting_retained_bytes = self
+            .checked_auxiliary_retained_bytes::<RETAIN_ROWS>()
+            .ok_or_else(projection_error)?;
+        let finalized = self.engine.finalize_standard_bag_coverage();
+        self.engine.coexisting_retained_bytes = 0;
+        finalized?;
+        self.settle_without_branch::<RETAIN_ROWS>()
+    }
 }
 
 impl ExtendedBuildProbabilitySession {
@@ -904,7 +919,9 @@ fn run_worker(
         drop(branch);
         result.settle_without_branch::<false>()?;
     }
-    result.settle_without_branch::<false>()?;
+    // Finish the Boolean DD on the admitted compute worker. The coordinator
+    // only unions original source ordinals and never performs this search work.
+    result.finalize_source_coverage::<false>()?;
     Ok(result)
 }
 
@@ -1038,7 +1055,7 @@ pub(in crate::backend::wasm_cpu) mod cooperative {
                         take_worker_branch(&shared.queue, &shared.queued_memory, &self.result)?;
                 }
                 let Some(branch) = self.branch.as_mut() else {
-                    self.result.settle_without_branch::<RETAIN_ROWS>()?;
+                    self.result.finalize_source_coverage::<RETAIN_ROWS>()?;
                     self.done = true;
                     break;
                 };
