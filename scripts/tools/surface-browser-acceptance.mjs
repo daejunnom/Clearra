@@ -151,6 +151,18 @@ function emptyOTilingKey(height) {
   return `ctk1|initial=0000000000000000|placements=${placements.join(',')}`;
 }
 
+function tilingKeySequenceHash(keys) {
+  let hash = 0xcbf29ce484222325n;
+  const encoder = new TextEncoder();
+  for (const key of keys) {
+    for (const byte of encoder.encode(key)) {
+      hash = BigInt.asUintN(64, (hash ^ BigInt(byte)) * 0x100000001b3n);
+    }
+    hash = BigInt.asUintN(64, hash * 0x100000001b3n); // Canonical NUL separator.
+  }
+  return `cts1:${hash.toString(16).padStart(16, '0')}`;
+}
+
 function assertTilingFinal(final, height, expectedIdentity) {
   assert.equal(final?.event, 'final_response');
   assert.equal(final.response.status, 'success', JSON.stringify(final.response.diagnostics));
@@ -158,12 +170,34 @@ function assertTilingFinal(final, height, expectedIdentity) {
   assert.deepEqual(final.response.runtime_identity, expectedIdentity);
   const report = final.search_report;
   assert.ok(report, 'typed tiling must publish its real search report');
+  assert.ok(height === 2 || height === 6, 'the all-O oracle covers the declared fixtures');
+  // Raw tiling restores cleared rows. In each two-column strip, the six
+  // original rows have 5!! = 15 perfect matchings, independently across five
+  // strips. Only 2L has a single family; 6L has 15^5, paged in groups of 100.
+  const expectedCount = height === 2 ? 1 : 759375;
+  const initialCount = Math.min(expectedCount, 100);
+  const pageCoversFamily = initialCount === expectedCount;
   assert.equal(report.count_complete, true);
-  assert.equal(report.solution_keys_complete, true);
+  assert.equal(report.solution_count_calculated, true);
+  assert.equal(report.solution_set_materialized, true);
+  assert.equal(report.solution_keys_materialized_count, initialCount);
+  assert.equal(report.solution_keys_complete, pageCoversFamily);
+  assert.equal(report.solution_page_available, !pageCoversFamily);
   assert.equal(report.resource_truncated, false);
-  assert.equal(report.unique_solution_count, 1);
-  assert.deepEqual(report.normalized_solution_keys, [emptyOTilingKey(height)]);
-  if (height === 2) assert.equal(report.normalized_solution_set_hash, 'cts1:21fffe814548e2c1');
+  assert.equal(report.unique_solution_count, expectedCount);
+  assert.equal(report.normalized_solution_keys.length, initialCount);
+  assert.equal(new Set(report.normalized_solution_keys).size, initialCount);
+  assert.deepEqual(report.normalized_solution_keys, [...report.normalized_solution_keys].sort());
+  if (height === 2) {
+    assert.deepEqual(report.normalized_solution_keys, [emptyOTilingKey(height)]);
+    assert.equal(report.normalized_solution_set_hash, 'cts1:21fffe814548e2c1');
+    assert.equal(tilingKeySequenceHash(report.normalized_solution_keys), 'cts1:21fffe814548e2c1');
+  } else {
+    // Independent row-pairing oracle: enumerate each strip's 15 matchings,
+    // stream all 15^5 sorted unions, and hash canonical keys with NUL separators.
+    assert.equal(report.normalized_solution_set_hash, 'cts1:59e019e77228884b');
+    assert.equal(tilingKeySequenceHash(report.normalized_solution_keys), 'cts1:9decf65d9737bdc5');
+  }
   return report;
 }
 
@@ -225,14 +259,37 @@ async function tilingUiCase({ height, hold, workers }, expectedIdentity) {
     assert.equal(observed.terminals.length, 1, 'typed tiling must emit one successful terminal');
     const report = assertTilingFinal(observed.terminals[0], height, expectedIdentity);
     assert.equal(report.workers_used, workers, 'typed tiling must retain the requested compute pool width');
-    assert.deepEqual(await completedKeys(page, 1, label), [emptyOTilingKey(height)]);
+    const initialKeys = await completedKeys(page, report.normalized_solution_keys.length, label);
+    assert.deepEqual(initialKeys, report.normalized_solution_keys);
+    let loadedKeys = initialKeys;
+    if (height === 6) {
+      await page.locator('.load-more-row button').click();
+      await page.waitForFunction(() =>
+        document.querySelectorAll('.solution-gallery > li[data-solution-key]').length === 200,
+      null, { timeout: 60000 });
+      // SolutionGallery keeps the control disabled until its explicit page
+      // load and bounded speculative prefetch have both released the owner.
+      await page.locator('.load-more-row button:not([disabled])').waitFor({
+        state: 'visible', timeout: 60000
+      });
+      loadedKeys = await completedKeys(page, 200, `${label}: second page`);
+      assert.deepEqual(loadedKeys.slice(0, 100), initialKeys);
+      assert.equal(tilingKeySequenceHash(loadedKeys.slice(100)), 'cts1:92d3377fca11e2b5');
+      assert.equal(tilingKeySequenceHash(loadedKeys), 'cts1:a2b4e63ada08f855');
+      assert.equal(await page.locator('.invalid-solution').count(), 0);
+    }
+    assert.deepEqual(errors, [], 'result-page loading must not raise a page error');
+    assert.deepEqual(await page.evaluate(() => window.__clearraTilingObserved.workerErrors), [],
+      'result-page loading must not raise a worker error');
     await writeFile(resolve(reportRoot, `${label}.json`), JSON.stringify({
-      command: observed.commands[0], terminal: observed.terminals[0]
+      command: observed.commands[0], terminal: observed.terminals[0], loadedPageKeys: loadedKeys
     }, null, 2) + '\n');
     results.push({ case: label, result: 'passed', height, hold, advertisedLogicalProcessors: workers,
       actualLogicalProcessors: await page.evaluate(() => window.__clearraAcceptanceActualLogical),
       requestedWorkers: workers, workersUsed: report.workers_used,
-      solutionCount: 1, normalizedSolutionSetHash: report.normalized_solution_set_hash });
+      solutionCount: report.unique_solution_count, initialPageCount: initialKeys.length,
+      loadedPageKeyCount: loadedKeys.length, loadedPageKeyHash: tilingKeySequenceHash(loadedKeys),
+      normalizedSolutionSetHash: report.normalized_solution_set_hash });
   } catch (error) {
     const failure = error instanceof Error ? error : new Error(String(error));
     const observed = await page.evaluate(() => window.__clearraTilingObserved).catch(() => null);
@@ -342,7 +399,8 @@ async function tilingArtifactCase(expectedIdentity, manifest) {
     const final = validateWasmProbeTerminal({ ...outcome, expectedRuntimeIdentity: expectedIdentity });
     const report = assertTilingFinal(final, 6, expectedIdentity);
     results.push({ case: label, result: 'passed', preparedCases: prepareCommands.length,
-      geometryLocks: 15, initialHold: 'O', sourceDraws: 14, solutionCount: 1,
+      geometryLocks: 15, initialHold: 'O', sourceDraws: 14, solutionCount: report.unique_solution_count,
+      initialPageCount: report.normalized_solution_keys.length,
       normalizedSolutionSetHash: report.normalized_solution_set_hash });
   } catch (error) {
     const failure = error instanceof Error ? error : new Error(String(error));
