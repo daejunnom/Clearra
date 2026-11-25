@@ -1338,6 +1338,32 @@ test("Clearra executor preserves an output-limit cause and phase from the job se
   });
 });
 
+test("Clearra executor identifies HTTP idle timeouts without retaining private failure text", async () => {
+  for (const code of ["UND_ERR_HEADERS_TIMEOUT", "UND_ERR_BODY_TIMEOUT", "UND_ERR_CONNECT_TIMEOUT"]) {
+    const executor = new ClearraJobExecutor({
+      endpoint: "https://jobs.example.test/jobs",
+      authorizationToken: "job-token",
+      fetch: async (_url, request) => {
+        if (request.method === "DELETE") return new Response(null, { status: 204 });
+        const error = new TypeError("private transport details", {
+          cause: Object.assign(new Error("private URL or input"), { code }),
+        });
+        if (code === "UND_ERR_BODY_TIMEOUT") {
+          return new Response(new ReadableStream({ start(controller) { controller.error(error); } }));
+        }
+        throw error;
+      },
+    });
+    await assert.rejects(executor.execute(["pc", "--lines", "4"]), (error) => {
+      assert.equal(error.name, "JobTransportTimeoutError");
+      assert.equal(error.code, code);
+      assert.equal(error.failureCode, "transport-timeout");
+      assert.doesNotMatch(error.message, /private|URL|input/);
+      return true;
+    });
+  }
+});
+
 test("Clearra executor forwards caller cancellation to the remote job", async () => {
   const controller = new AbortController();
   const requests = [];

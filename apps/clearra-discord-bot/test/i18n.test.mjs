@@ -121,6 +121,11 @@ test("public validation and operation errors hide deployment details", () => {
   );
   assert.equal(operation, "The request could not be completed. Please try again.");
   assert.doesNotMatch(operation, /Cloud Run|job service|https:/i);
+  const connectionTimeout = operationErrorText(Object.assign(new Error("private transport"), {
+    failureCode: "transport-timeout",
+  }), "ko");
+  assert.match(connectionTimeout, /연결 대기 시간이 초과/);
+  assert.doesNotMatch(connectionTimeout, /private|transport/);
 
   assert.doesNotMatch(t("en", "search.busy"), /server|worker|engine/i);
   assert.doesNotMatch(t("ko", "search.busy"), /서버|워커|엔진/u);

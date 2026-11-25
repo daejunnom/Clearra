@@ -33,6 +33,7 @@ const CATALOGS = Object.freeze({
     "search.busy": "Clearra is busy. Please try again shortly.",
     "search.cancelled": "The search was cancelled.",
     "search.timeout": "The calculation exceeded its time limit. Please try again.",
+    "search.connection_timeout": "The connection timed out before the search result arrived. Please try again.",
     "search.failed": "The request could not be completed. Please try again.",
     "search.no_text": "Clearra completed without text output.",
     "search.auto_target": "Automatic PC target: {lines}",
@@ -262,6 +263,7 @@ const CATALOGS = Object.freeze({
     "search.busy": "요청이 많습니다. 잠시 후 다시 시도해 주세요.",
     "search.cancelled": "탐색이 취소되었습니다.",
     "search.timeout": "제한 시간 안에 연산을 마치지 못했습니다. 다시 시도해 주세요.",
+    "search.connection_timeout": "탐색 결과를 받기 전에 연결 대기 시간이 초과되었습니다. 다시 시도해 주세요.",
     "search.failed": "요청을 완료할 수 없습니다. 다시 시도해 주세요.",
     "search.no_text": "Clearra가 텍스트 출력 없이 작업을 완료했습니다.",
     "search.auto_target": "자동 PC 목표: {lines}",
@@ -523,7 +525,9 @@ export function validationErrorText(error, locale) {
 export function operationErrorText(error, locale) {
   const message = error instanceof Error ? error.message : String(error ?? "");
   let key = "search.failed";
-  if (error?.name === "AbortError" || /cancel(?:led|ed)/i.test(message)) {
+  if (error?.failureCode === "transport-timeout") {
+    key = "search.connection_timeout";
+  } else if (error?.name === "AbortError" || /cancel(?:led|ed)/i.test(message)) {
     key = "search.cancelled";
   } else if (/time(?:d)? out|time limit|deadline/i.test(message)) {
     key = "search.timeout";

@@ -1049,13 +1049,13 @@ export class ClearraJobExecutor {
       if (submitted) await this.cancel(jobId);
       if (controller.signal.aborted) {
         if (timedOut) {
-          throw new Error(
+          throw Object.assign(new Error(
             `Clearrabot search exceeded the ${timeoutLabel(commandTimeoutMs)} time limit.`,
-          );
+          ), { name: "DeadlineExceededError", failureCode: "deadline" });
         }
         throw abortError("Clearra search was cancelled.");
       }
-      if (error instanceof Error) throw error;
+      if (error instanceof Error) throw jobTransportTimeout(error) ?? error;
       throw new Error("Clearra job service request failed.");
     } finally {
       clearTimeout(timeout);
@@ -1076,6 +1076,8 @@ export class ClearraJobExecutor {
       });
     } catch (error) {
       if (options.signal?.aborted) throw error;
+      const transportTimeout = jobTransportTimeout(error);
+      if (transportTimeout) throw transportTimeout;
       const detail = error instanceof Error ? `: ${error.message}` : "";
       throw new Error(`Clearra job service could not be reached${detail}`);
     }
@@ -1127,6 +1129,16 @@ export class ClearraJobExecutor {
       clearTimeout(timeout);
     }
   }
+}
+
+function jobTransportTimeout(error) {
+  const code = error?.code ?? error?.cause?.code;
+  if (!["UND_ERR_HEADERS_TIMEOUT", "UND_ERR_BODY_TIMEOUT", "UND_ERR_CONNECT_TIMEOUT"].includes(code)) {
+    return null;
+  }
+  return Object.assign(new Error("The search connection timed out before its result arrived."), {
+    name: "JobTransportTimeoutError", code, failureCode: "transport-timeout",
+  });
 }
 
 function normalizeJobEndpoint(value) {
@@ -1314,7 +1326,7 @@ function executionDiagnostics(value) {
   if (!value || typeof value !== "object") return {};
   const output = {};
   const stages = ["queue", "prepare", "execute", "artifact", "projection", "render", "delivery"];
-  const failureCodes = ["engine-oom", "engine-signal", "engine-exit", "output-limit", "deadline", "cancelled", "result-validation"];
+  const failureCodes = ["engine-oom", "engine-signal", "engine-exit", "output-limit", "deadline", "transport-timeout", "cancelled", "result-validation"];
   if (failureCodes.includes(value.failureCode)) output.failureCode = value.failureCode;
   if (stages.includes(value.failureStage)) output.failureStage = value.failureStage;
   if (Number.isSafeInteger(value.exitCode)) output.exitCode = value.exitCode;

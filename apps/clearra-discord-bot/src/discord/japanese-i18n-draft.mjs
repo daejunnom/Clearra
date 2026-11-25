@@ -29,6 +29,7 @@ export const JAPANESE_DISCORD_MESSAGES = Object.freeze({
   "search.busy": "Clearraは処理中です。しばらくしてからもう一度お試しください。",
   "search.cancelled": "検索をキャンセルしました。",
   "search.timeout": "計算が制限時間を超えました。もう一度お試しください。",
+  "search.connection_timeout": "検索結果を受信する前に接続がタイムアウトしました。もう一度お試しください。",
   "search.failed": "リクエストを完了できませんでした。もう一度お試しください。",
   "search.no_text": "Clearraはテキスト出力なしで処理を完了しました。",
   "search.auto_target": "自動PC目標: {lines}",

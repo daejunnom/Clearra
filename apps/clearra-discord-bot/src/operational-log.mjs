@@ -11,7 +11,7 @@ import {
 const SCOPES = new Set(["gateway", "interaction", "job"]);
 const KINDS = new Set(["slash", "text", "render", "search"]);
 const STATUSES = new Set(["succeeded", "failed", "cancelled", "delegated"]);
-const FAILURE_CODES = new Set(["engine-oom", "engine-signal", "engine-exit", "output-limit", "deadline", "cancelled", "result-validation"]);
+const FAILURE_CODES = new Set(["engine-oom", "engine-signal", "engine-exit", "output-limit", "deadline", "transport-timeout", "cancelled", "result-validation"]);
 const OPERATION_STAGES = new Set(["queue", "prepare", "execute", "artifact", "projection", "render", "delivery"]);
 const PROCESS_SIGNALS = new Set(["SIGTERM", "SIGKILL", "SIGABRT", "SIGSEGV", "SIGBUS", "SIGILL", "SIGFPE", "SIGINT"]);
 const TIMEOUT_CLASSES = new Set([

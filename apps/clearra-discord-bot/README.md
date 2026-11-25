@@ -312,7 +312,12 @@ this distinct label drives setup-only progress notices without changing the
 15-minute engine limit.
 
 For slash and text commands, `clearra-current-job` keeps `POST /jobs` open until
-Clearra finishes. Each instance accepts one request and has no durable
+Clearra finishes. After admission it sends the response headers immediately
+and JSON whitespace every 15 seconds, followed by one terminal JSON object.
+This prevents independent HTTP headers/body idle timeouts from cancelling an
+active search before its original absolute deadline. Heartbeats neither extend
+that deadline nor start another execution; disconnecting the owning request
+still cancels and drains its process. Each instance accepts one request and has no durable
 distributed queue. The approved minimum of zero accepts cold-start latency;
 expired, cancelled, overflowed, or terminated work fails closed instead of
 starting after its useful Discord lifetime.

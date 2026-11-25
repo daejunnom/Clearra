@@ -1,0 +1,67 @@
+name: Read Discord Runtime Operations
+
+on:
+  workflow_dispatch:
+    inputs:
+      expected_main:
+        description: Exact trusted main commit running this read-only diagnostic
+        required: true
+        type: string
+      revision:
+        description: Exact clearra-current-job revision to inspect
+        required: true
+        type: string
+      since:
+        description: Inclusive UTC start (ISO 8601), at most 24 hours before until
+        required: true
+        type: string
+      until:
+        description: Inclusive UTC end (ISO 8601)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  operations:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: discord-path-confirmation
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+      CLEARRA_DIAGNOSTIC_EXPECTED_MAIN: ${{ inputs.expected_main }}
+      CLEARRA_DIAGNOSTIC_REVISION: ${{ inputs.revision }}
+      CLEARRA_DIAGNOSTIC_SINCE: ${{ inputs.since }}
+      CLEARRA_DIAGNOSTIC_UNTIL: ${{ inputs.until }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.23.2
+      - name: Verify the log sanitizer and dependency-free execution contract
+        run: node --test scripts/release/collect-cloud-runtime-operations.test.mjs
+      - name: Validate exact main, revision, and bounded interval before authentication
+        run: node scripts/release/collect-cloud-runtime-operations.mjs --validate-only
+      - name: Authenticate the existing protected identity for a read-only log query
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
+      - uses: google-github-actions/setup-gcloud@v2
+      - name: Read at most 1000 entries and retain only validated operational metadata
+        run: node scripts/release/collect-cloud-runtime-operations.mjs
+      - name: Preserve the sanitized operation report
+        uses: actions/upload-artifact@v4
+        with:
+          name: discord-runtime-operations-${{ github.run_id }}-${{ github.run_attempt }}
+          path: _local/artifacts/diagnostics/cloud-runtime/${{ github.run_id }}-${{ github.run_attempt }}/operations.json
+          if-no-files-found: error
+          retention-days: 7

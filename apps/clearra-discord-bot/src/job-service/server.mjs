@@ -15,12 +15,15 @@ import {
 
 const JOB_PROTOCOL = "clearra.job.v1";
 const JOB_ID_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/;
+const JOB_RESPONSE_HEARTBEAT_MS = 15_000;
 
 export class ClearraJobService {
   constructor(config, runner, options = {}) {
     this.config = config;
     this.runner = runner;
     this.now = options.now ?? Date.now;
+    this.setInterval = options.setInterval ?? setInterval;
+    this.clearInterval = options.clearInterval ?? clearInterval;
     this.logger = options.logger ?? console;
     this.operationalScope = options.operationalScope ?? null;
     this.runtimeIdentity = config.runtimeIdentity
@@ -126,8 +129,7 @@ export class ClearraJobService {
         }));
         return;
       }
-      const terminal = await existing.promise;
-      if (!response.writableEnded) sendJson(response, 200, terminal);
+      await this.sendTerminalJob(request, response, existing, false);
       return;
     }
     if (this.activeJobs >= this.config.maxConcurrentJobs) {
@@ -151,18 +153,51 @@ export class ClearraJobService {
     this.activeJobs += 1;
     entry.promise = this.runJob(job, entry);
 
-    const abortOnDisconnect = () => {
-      if (!response.writableEnded && entry.state === "running") {
-        controller.abort();
+    await this.sendTerminalJob(request, response, entry, true);
+  }
+
+  async sendTerminalJob(request, response, entry, ownsExecution) {
+    if (entry.terminal) {
+      sendJson(response, 200, entry.terminal);
+      return;
+    }
+    let heartbeat = null;
+    const clearHeartbeat = () => {
+      if (heartbeat !== null) this.clearInterval(heartbeat);
+      heartbeat = null;
+    };
+    const onDisconnect = () => {
+      clearHeartbeat();
+      if (ownsExecution && !response.writableEnded && entry.state === "running") {
+        entry.controller.abort();
       }
     };
-    request.once("aborted", abortOnDisconnect);
-    response.once("close", abortOnDisconnect);
-    const terminal = await entry.promise;
-    request.removeListener("aborted", abortOnDisconnect);
-    response.removeListener("close", abortOnDisconnect);
-    if (!response.writableEnded && !response.destroyed) {
-      sendJson(response, 200, terminal);
+    request.once("aborted", onDisconnect);
+    response.once("close", onDisconnect);
+    try {
+      // Keep one request attached to its execution owner. Waiting silently for
+      // the final JSON trips Node fetch's independent 300 s headers/body idle
+      // timeouts even when the job's absolute deadline still has time left.
+      // JSON whitespace keeps the response alive without publishing a partial
+      // result, moving the job between instances, or extending its deadline.
+      response.writeHead(200, {
+        "content-type": "application/json; charset=utf-8",
+        "cache-control": "no-store, no-transform",
+      });
+      response.write("\n");
+      heartbeat = this.setInterval(() => {
+        if (response.writableEnded || response.destroyed) clearHeartbeat();
+        else response.write("\n");
+      }, JOB_RESPONSE_HEARTBEAT_MS);
+      heartbeat.unref?.();
+      const terminal = await entry.promise;
+      if (!response.writableEnded && !response.destroyed) {
+        response.end(JSON.stringify(terminal));
+      }
+    } finally {
+      clearHeartbeat();
+      request.removeListener("aborted", onDisconnect);
+      response.removeListener("close", onDisconnect);
     }
   }
 
