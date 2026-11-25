@@ -3020,6 +3020,10 @@ fn extended_build_b2b_option_combinations_match_bounded_compact_reference() {
     let _resource_guard = typed_pc_distributed_test_guard();
     let runtime = WasmCommandRuntime::default()
         .with_host_capabilities(WasmHostCapabilities::new(4, false, false));
+    // Ordinary parsing contracts empty display rows. This test-only selector
+    // preserves the same occupied cells while forcing the extended backend;
+    // no extra block may change a PC or spin fixture merely to raise height.
+    let extended_runtime = runtime.clone().with_preserved_build_height_for_test();
     for (base, target, queue) in [
         (0_u64, 0xf_u64, "I"),
         (0x803f0, 0xf, "I"),
@@ -3044,6 +3048,10 @@ fn extended_build_b2b_option_combinations_match_bounded_compact_reference() {
                     "--hold empty",
                     "--include-mirror --finesse inputs --pattern-knowledge both",
                 ),
+                (
+                    "--hold empty",
+                    "--include-mirror --finesse inputs --pattern-knowledge both --solution-probabilities",
+                ),
             ] {
                 let command = format!(
                     "clearra build-probability --base-mask 0x{base:x} --target-mask 0x{target:x} \
@@ -3054,12 +3062,24 @@ fn extended_build_b2b_option_combinations_match_bounded_compact_reference() {
                 let compact = runtime
                     .run_command_text(&format!("{command} --height 4 --workers 1"))
                     .unwrap_or_else(|error| panic!("compact {command}: {error:?}"));
-                let extended = runtime
-                    .run_command_text(&format!("{command} --height 8 --workers 1"))
+                let extended_command = format!("{command} --height 8 --workers 1");
+                let request = extended_runtime
+                    .compile_command_text(&extended_command)
+                    .expect("bounded extended request");
+                let AppCommand::BuildProbability(build) = request.command() else {
+                    panic!("the matrix must retain its Build request");
+                };
+                assert!(!build.query().field().is_compact(), "{extended_command}");
+                assert_eq!(build.query().field().height(), 8, "{extended_command}");
+                let extended = extended_runtime
+                    .run_command_text(&extended_command)
                     .unwrap_or_else(|error| panic!("extended {command}: {error:?}"));
-                let distributed =
-                    run_distributed_cpu(&runtime, &format!("{command} --height 8 --workers 2"));
+                let distributed = run_distributed_cpu(
+                    &extended_runtime,
+                    &format!("{command} --height 8 --workers 2"),
+                );
                 let reference = compact.search_report().expect("bounded compact B2B report");
+                assert_eq!(reference.backend_selected, "wasm-cpu-build-probability");
                 for result in [&extended, &distributed] {
                     assert_eq!(
                         result.app_response().status(),
@@ -3068,6 +3088,21 @@ fn extended_build_b2b_option_combinations_match_bounded_compact_reference() {
                         result.app_response()
                     );
                     let report = result.search_report().expect("bounded extended B2B report");
+                    assert_eq!(
+                        report.backend_selected,
+                        "wasm-cpu-build-probability-extended",
+                        "{command}"
+                    );
+                    for (name, expected) in [
+                        ("board_storage", "board256-canonical"),
+                        ("execution_constraint_materialized", "true"),
+                        ("b2b_preservation_evaluation_basis", "filtered-build-order-language"),
+                    ] {
+                        assert!(
+                            report.summary_fields.iter().any(|(key, value)| key == name && value == expected),
+                            "{command}: missing {name}={expected}"
+                        );
+                    }
                     assert_eq!(
                         report.unique_solution_count, reference.unique_solution_count,
                         "{command}"

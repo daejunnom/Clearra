@@ -3823,6 +3823,8 @@ pub struct WasmCommandRuntime {
     app_context: AppContext,
     host_capabilities: WasmHostCapabilities,
     online_pc4_snapshot: Option<clearra_pc4_tablebase::ActivatedSnapshot>,
+    #[cfg(test)]
+    preserve_build_height_for_test: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -3858,7 +3860,17 @@ impl WasmCommandRuntime {
             app_context,
             host_capabilities: WasmHostCapabilities::default(),
             online_pc4_snapshot: None,
+            #[cfg(test)]
+            preserve_build_height_for_test: false,
         }
+    }
+
+    /// Compare compact and extended execution over identical occupied cells.
+    /// Production ingress still contracts empty display rows normally.
+    #[cfg(test)]
+    pub(crate) fn with_preserved_build_height_for_test(mut self) -> Self {
+        self.preserve_build_height_for_test = true;
+        self
     }
 
     pub fn with_host_capabilities(mut self, capabilities: WasmHostCapabilities) -> Self {
@@ -4037,6 +4049,17 @@ impl WasmCommandRuntime {
             self.host_capabilities.logical_processor_count(),
         )
         .map_err(WasmCommandRuntimeError::from_cli_command)?;
+        #[cfg(test)]
+        let request = if self.preserve_build_height_for_test {
+            match request.build_probability_input().cloned() {
+                Some(input) => {
+                    request.with_build_probability(input.with_visible_height_preserved(true))
+                }
+                None => request,
+            }
+        } else {
+            request
+        };
         Ok(request)
     }
 
