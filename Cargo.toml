@@ -79,6 +79,16 @@ unsafe_code = "forbid"
 # argument evaluation. Keep all required state transitions outside it.
 debug_assert_with_mut_call = "deny"
 
+[profile.test]
+# Multiple product feature sets share one bounded test build slot. Basic
+# optimization shrinks their object files; disabling local LTO avoids retaining
+# a second pre-LTO copy in the incremental cache. Keep every runtime check.
+opt-level = 1
+codegen-units = 16
+lto = "off"
+debug-assertions = true
+overflow-checks = true
+
 [profile.release]
 lto = "thin"
 codegen-units = 1
