@@ -46,7 +46,7 @@ try{
   async function open(){await page.goto('http://127.0.0.1:4194/?tool=recovery');await page.locator('.recovery-field-editor').waitFor();await page.locator('.dimension-field input').fill('12');await expect(page.locator('.recovery-field-editor .board button')).toHaveCount(120);}
   const outer=name=>page.locator('.field-palette').getByRole('button',{name,exact:true});
   const add=()=>page.getByRole('button',{name:'Add middle field',exact:true}).click();
-  const remove=()=>page.getByRole('button',{name:'Remove stage (at least 4 middle fields)',exact:true});
+  const remove=()=>page.getByRole('button',{name:'Remove stage (keep one middle field)',exact:true});
   async function paint(xs){const buttons=page.locator('.recovery-field-editor .board button');for(const index of xs){const x=index%10,y=Math.floor(index/10);await buttons.nth((11-y)*10+x).click();}}
   async function run(label,expected,action){
    const n=await page.evaluate(()=>window.observed.finals.length),start=performance.now();
@@ -72,12 +72,15 @@ try{
    let text='';for(let i=0;i<100;i++){text=await page.evaluate(()=>navigator.clipboard.readText());if(/^ctk3[@b_]/u.test(text))break;await page.waitForTimeout(50);}
    assert.match(text,/^ctk3[@b_]/u);await writeFile(resolve(out,`${label}-${advertised}.ctk`),text);return codec.decodeCtk3Exact(text).pages;
   }
-  await open();await outer('Middle').click();await paint([0,1,10,11]);
+  await open();await expect(remove()).toBeDisabled();
+  await add();await expect(page.locator('.middle-palette button')).toHaveCount(2);await expect(remove()).toBeEnabled();
+  await remove().click();await expect(page.locator('.middle-palette button')).toHaveCount(0);await expect(page.locator('.recovery-supplies .workspace-queue-input')).toHaveCount(2);await expect(remove()).toBeDisabled();
+  await outer('Middle').click();await paint([0,1,10,11]);
   await add();await paint([20,21,30,31]);await add();await paint([40,41,50,51]);
-  await expect(page.locator('.middle-palette button')).toHaveCount(3);await expect(remove()).toBeDisabled();
+  await expect(page.locator('.middle-palette button')).toHaveCount(3);await expect(remove()).toBeEnabled();
   await outer('Result').click();await paint([60,61,70,71]);
   await add();await expect(remove()).toBeEnabled();await remove().click();
-  await expect(page.locator('.middle-palette button')).toHaveCount(3);await expect(remove()).toBeDisabled();
+  await expect(page.locator('.middle-palette button')).toHaveCount(3);await expect(remove()).toBeEnabled();
   const supplies=page.locator('.recovery-supplies .workspace-queue-input');await expect(supplies).toHaveCount(4);
   for(const input of await supplies.all())await input.fill('[IO]');
   await page.getByRole('combobox',{name:'Maximum early placements',exact:true}).selectOption('0');

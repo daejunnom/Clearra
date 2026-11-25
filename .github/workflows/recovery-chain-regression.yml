@@ -6,7 +6,7 @@ on:
 permissions:
   contents: read
 concurrency:
-  group: recovery-chain-regression-${{ github.ref }}
+  group: recovery-chain-regression-${{ github.ref }}-${{ github.sha }}
   cancel-in-progress: false
 env:
   CLEARRA_BUILD_PURPOSE: experiment
@@ -16,8 +16,11 @@ env:
   CLEARRA_ENGINE_BUILD_ID: ${{ github.sha }}
 jobs:
   contracts:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
+    env:
+      # Keep runtime assertions without generating full native test debug symbols.
+      CARGO_PROFILE_TEST_DEBUG: '0'
     steps:
       - uses: actions/checkout@v4
         with:
