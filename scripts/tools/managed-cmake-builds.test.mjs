@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { buildSourceId } from './clearra-build-policy.mjs';
+import { BUILD_STORAGE_LEASE, buildSourceId } from './clearra-build-policy.mjs';
 
 const sourceRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const guardPath = join(sourceRoot, 'core-c/cmake/clearra_build_root.cmake');
@@ -57,11 +57,12 @@ async function runPolicy({ session = true, binary = 'managed', outputs = [] } = 
         incremental_seed_session_id: null, incremental_seed_snapshot_sha256: null,
       }));
       await writeFile(join(root, '.leases', `experiment-${sourceId}.lock`), JSON.stringify(lease));
+      await writeFile(join(root, '.leases', BUILD_STORAGE_LEASE), JSON.stringify(lease));
       Object.assign(environment, {
         CLEARRA_BUILD_ROOT: root, CLEARRA_BUILD_PURPOSE: 'experiment', CLEARRA_BUILD_SOURCE_ROOT: sourceRoot,
         CLEARRA_BUILD_SOURCE_ID: sourceId, CLEARRA_BUILD_SESSION_ID: sessionId,
         CLEARRA_BUILD_CACHE_SESSION_KEY: sessionId,
-        CLEARRA_BUILD_TRANSACTION_ROOT: transaction, CARGO_TARGET_DIR: cargoTarget,
+        CLEARRA_BUILD_TRANSACTION_ROOT: transaction, CARGO_TARGET_DIR: cargoTarget, CARGO_INCREMENTAL: '1',
         CLEARRA_BUILD_CACHE_OWNER_PID: String(process.pid),
       });
     }

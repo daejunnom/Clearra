@@ -20,6 +20,16 @@ const fields = {
 };
 const pathFields = new Set(['source_root', 'transaction_root', 'cargo_target_dir']);
 
+export function buildIncrementalMode(purpose, environment = process.env) {
+  const requested = environment.CARGO_INCREMENTAL;
+  if (requested !== undefined && requested !== null && requested !== '' && !['0', '1'].includes(requested)) {
+    throw new Error('CARGO_INCREMENTAL must be 0 or 1 when explicitly configured');
+  }
+  // Local experiments keep their reusable compiler cache. One-shot CI may
+  // decline it; product generations always retain the non-incremental policy.
+  return purpose === 'experiment' && requested !== '0' ? 'enabled' : 'disabled';
+}
+
 export function buildPathIdentity(value) {
   if (typeof value !== 'string' || !value || value.includes('\0')) throw new Error('Clearra build path is missing or invalid');
   if (/^[A-Za-z]:[\\/]/u.test(value)) return win32.resolve(value).replaceAll('\\', '/').toLowerCase();
@@ -126,8 +136,8 @@ export function assertBuildRecord(marker, root, directory) {
         !Number.isSafeInteger(marker.compiler_input_file_count) || marker.compiler_input_file_count < 0 ||
         !/^[a-f0-9]{64}$/u.test(marker.incremental_context_sha256) ||
         !['enabled', 'disabled'].includes(marker.incremental_cache_mode) ||
-        (marker.purpose === 'experiment' ? marker.incremental_cache_mode !== 'enabled' : marker.incremental_cache_mode !== 'disabled') ||
-        (!seedIsNull && !seedIsValid) || (marker.purpose === 'product' && !seedIsNull)) {
+        (marker.purpose === 'product' && marker.incremental_cache_mode !== 'disabled') ||
+        (!seedIsNull && !seedIsValid) || (marker.incremental_cache_mode === 'disabled' && !seedIsNull)) {
       throw new Error('Invalid Clearra incremental build provenance');
     }
   }
@@ -161,6 +171,9 @@ export function assertManagedBuildTransaction({ environment = process.env, platf
   const marker = JSON.parse(readFileSync(markerPath, 'utf8').replace(/^\uFEFF/u, ''));
   assertBuildRecord(marker, expectedRoot, transaction);
   if (marker.schema_version !== BUILD_TRANSACTION_SCHEMA || marker.status !== 'active' || !['experiment', 'product'].includes(marker.purpose)) throw new Error('Clearra requires an active managed build transaction');
+  if (environment.CARGO_INCREMENTAL !== (marker.incremental_cache_mode === 'enabled' ? '1' : '0')) {
+    throw new Error('Clearra build incremental mode differs from its active owner');
+  }
   if (environment.CLEARRA_BUILD_CACHE_SESSION_KEY !== marker.session_id) throw new Error('Clearra build session alias binding mismatch');
   for (const [field, name] of Object.entries(fields)) {
     const expected = pathFields.has(field) ? buildPathIdentity(marker[field]) : String(marker[field]);

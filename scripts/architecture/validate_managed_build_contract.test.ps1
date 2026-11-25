@@ -26,9 +26,19 @@ Assert-Policy $true
 $script:overrides['.cargo/config.toml'] = $config + "`nrustc-wrapper = `"rustc`"`n"
 Assert-Policy $true
 $script:overrides.Clear()
+$cache = Read-Text 'scripts/lib/clearra-artifact-cache.ps1'
+$script:overrides['scripts/lib/clearra-artifact-cache.ps1'] = $cache.Replace(
+    "`$Record.incremental_cache_mode -eq 'enabled'", "`$Record.purpose -eq 'experiment'")
+Assert-Policy $true
+$script:overrides.Clear()
+$transactionRecord = Read-Text 'scripts/lib/clearra-build-transaction-record.ps1'
+$script:overrides['scripts/lib/clearra-build-transaction-record.ps1'] = $transactionRecord.Replace(
+    " -and `$requested -ne '0'", '')
+Assert-Policy $true
+$script:overrides.Clear()
 $helpers = Read-Text 'scripts/lib/clearra-path-helpers.ps1'
 $script:overrides['scripts/lib/clearra-path-helpers.ps1'] = $helpers.Replace(
     "throw 'Repository-local legacy cleanup is forbidden during build initialization; use an explicit reviewed cleanup plan.'",
     "Remove-Item -LiteralPath 'not-executed' -Recurse")
 Assert-Policy $true
-'managed build architecture policy: 5 cases passed'
+'managed build architecture policy: 7 cases passed'

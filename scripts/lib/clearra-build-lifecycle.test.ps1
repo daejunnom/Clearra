@@ -24,6 +24,12 @@ Assert-ArtifactPathCondition (Test-ArtifactPathThrows { Assert-ClearraRequestedB
 Assert-ArtifactPathCondition ((Assert-ClearraRequestedBuildPath 'core-c-cache' $fixtureSource -Purpose product) -eq 'core-c-cache') 'preflight_relative_product_name_needs_no_generation'
 Assert-ArtifactPathCondition (Test-ArtifactPathThrows { Assert-ClearraRequestedBuildPath (Join-Path $canonicalFixtureRoot 'experiments/other/current/core') $fixtureSource }) 'preflight_other_experiment_path_rejected'
 Assert-ArtifactPathCondition (-not (Test-Path -LiteralPath $canonicalFixtureRoot)) 'all_path_validation_preceded_mkdir'
+foreach ($invalidIncremental in @('2','false',' ')) {
+    $env:CARGO_INCREMENTAL = $invalidIncremental
+    Assert-ArtifactPathCondition (Test-ArtifactPathThrows { Initialize-ClearraBuildArtifactCache -RepositoryRoot $fixtureSource }) 'invalid_incremental_mode_rejected_before_mutation'
+}
+Remove-Item Env:\CARGO_INCREMENTAL
+Assert-ArtifactPathCondition (-not (Test-Path -LiteralPath $canonicalFixtureRoot)) 'invalid_incremental_mode_created_no_catalog'
 
 $launcherPreparation = (Get-Command Initialize-ClearraNativeRustcLauncher).ScriptBlock
 try {
@@ -118,6 +124,28 @@ $second = Initialize-ClearraBuildArtifactCache -RepositoryRoot $fixtureSource
 Assert-ArtifactPathCondition ($second.transaction_root -eq $experimentRoot -and $second.session_id -ne $firstSession -and
     (Test-Path -LiteralPath $oldDependency) -and $second.incremental_seed_session_id -eq $firstSession -and
     $second.incremental_seed_snapshot_sha256 -eq $first.compiler_snapshot_sha256) 'new_experiment_reuses_only_complete_compiler_cache_with_provenance'
+Complete-ClearraBuildTransaction
+Exit-ClearraBuildArtifactCacheUsage
+
+$env:CARGO_INCREMENTAL = '0'
+$oneShot = Initialize-ClearraBuildArtifactCache -RepositoryRoot $fixtureSource
+Assert-ArtifactPathCondition ($env:CARGO_INCREMENTAL -eq '0' -and $oneShot.incremental_cache_mode -eq 'disabled' -and
+    $null -eq $oneShot.incremental_seed_session_id -and -not (Test-Path -LiteralPath $oldDependency)) 'one_shot_experiment_retires_prior_incremental_cache'
+$sameOneShot = Initialize-ClearraBuildArtifactCache -RepositoryRoot $fixtureSource
+Assert-ArtifactPathCondition ($sameOneShot.session_id -eq $oneShot.session_id -and $env:CARGO_INCREMENTAL -eq '0') 'nested_one_shot_preserves_disabled_incremental_mode'
+$env:CARGO_INCREMENTAL = '1'
+Assert-ArtifactPathCondition (Test-ArtifactPathThrows { Initialize-ClearraBuildArtifactCache -RepositoryRoot $fixtureSource }) 'active_incremental_mode_cannot_change'
+$env:CARGO_INCREMENTAL = '0'
+$oneShotOutput = Join-Path (Get-ClearraCargoTargetDir) 'one-shot-output'
+New-Item -ItemType Directory -Path (Split-Path -Parent $oneShotOutput) -Force | Out-Null
+[IO.File]::WriteAllText($oneShotOutput, 'completed fixture output')
+Complete-ClearraBuildTransaction
+Exit-ClearraBuildArtifactCacheUsage
+Assert-ArtifactPathCondition ($env:CARGO_INCREMENTAL -eq '0') 'one_shot_owner_restores_explicit_policy'
+Remove-Item Env:\CARGO_INCREMENTAL
+$resumedLocal = Initialize-ClearraBuildArtifactCache -RepositoryRoot $fixtureSource
+Assert-ArtifactPathCondition ($env:CARGO_INCREMENTAL -eq '1' -and $null -eq $resumedLocal.incremental_seed_session_id -and
+    -not (Test-Path -LiteralPath $oneShotOutput)) 'local_default_resumes_without_one_shot_cache_seed'
 Complete-ClearraBuildTransaction
 Exit-ClearraBuildArtifactCacheUsage
 

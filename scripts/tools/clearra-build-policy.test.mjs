@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { acquireBuildOwner, buildCompilerSnapshot, retainProductBuildGenerations } from './clearra-build-owner.mjs';
 import { acquireManagedTransientDirectory } from './managed-transient-directory.mjs';
 import { assertDefaultBenchmarkRustEnvironment } from './benchmark-rust-environment.mjs';
-import { BUILD_TRANSACTION_MARKER, assertBuildPathWithin, assertCargoOutputArguments, assertManagedBuildTransaction, buildPathIdentity, buildSourceId, canonicalBuildRoot, canonicalNativeBuildPath, nativeBuildPath } from './clearra-build-policy.mjs';
+import { BUILD_TRANSACTION_MARKER, assertBuildPathWithin, assertBuildRecord, assertCargoOutputArguments, assertManagedBuildTransaction, buildPathIdentity, buildSourceId, canonicalBuildRoot, canonicalNativeBuildPath, nativeBuildPath } from './clearra-build-policy.mjs';
 
 function cleanBuildEnvironment() {
   const environment = { ...process.env };
@@ -163,6 +163,47 @@ test('experimental source purpose reuses only a complete compiler cache with pro
   await assert.rejects(stat(join(target, 'old-hashed-dependency.rlib')), { code: 'ENOENT' });
   assert.equal(third.transaction.incremental_seed_session_id, null);
   await third.finish(false);
+});
+
+test('one-shot experiments honor explicit zero without retaining or seeding incremental outputs', async t => {
+  const options = await fixture(t);
+  const local = await acquireBuildOwner(options);
+  const oldCache = join(local.transaction.cargo_target_dir, 'old-incremental-cache');
+  await writeFile(oldCache, 'completed local compiler cache');
+  await local.finish(true);
+
+  const environment = { ...options.environment, CARGO_INCREMENTAL: '0' };
+  const once = await acquireBuildOwner({ ...options, environment });
+  assert.equal(once.environment.CARGO_INCREMENTAL, '0');
+  assert.equal(once.transaction.incremental_cache_mode, 'disabled');
+  assert.equal(once.transaction.incremental_seed_session_id, null);
+  await assert.rejects(stat(oldCache), { code: 'ENOENT' });
+  const inherited = await acquireBuildOwner({ ...options, environment: once.environment });
+  assert.equal(inherited.environment.CARGO_INCREMENTAL, '0');
+  await inherited.finish(true);
+  await assert.rejects(acquireBuildOwner({ ...options,
+    environment: { ...once.environment, CARGO_INCREMENTAL: '1' } }), /incremental mode/u);
+  assert.throws(() => assertBuildRecord({ ...once.transaction,
+    incremental_seed_session_id: local.transaction.session_id,
+    incremental_seed_snapshot_sha256: local.transaction.compiler_snapshot_sha256 },
+  once.environment.CLEARRA_BUILD_ROOT, once.transaction.transaction_root), /incremental build provenance/u);
+  await writeFile(oldCache, 'completed one-shot output');
+  await once.finish(true);
+
+  const resumed = await acquireBuildOwner(options);
+  assert.equal(resumed.environment.CARGO_INCREMENTAL, '1');
+  assert.equal(resumed.transaction.incremental_seed_session_id, null);
+  await assert.rejects(stat(oldCache), { code: 'ENOENT' });
+  await resumed.finish(true);
+});
+
+test('invalid explicit incremental modes fail before creating a build catalog', async t => {
+  const options = await fixture(t);
+  for (const value of ['2', 'false', ' ']) {
+    await assert.rejects(acquireBuildOwner({ ...options,
+      environment: { ...options.environment, CARGO_INCREMENTAL: value } }), /CARGO_INCREMENTAL must be 0 or 1/u);
+  }
+  await assert.rejects(stat(options.environment.LOCALAPPDATA), { code: 'ENOENT' });
 });
 
 test('a moving compiler input cannot seal a reusable experiment snapshot', async t => {
@@ -338,6 +379,7 @@ test('active generation without a lease and nested aliases fail closed', async t
 
 test('Node and PowerShell reuse the same lease without nested completion', { skip: process.platform !== 'win32' }, async t => {
   const options = await fixture(t);
+  options.environment.CARGO_INCREMENTAL = '0';
   const owner = await acquireBuildOwner(options);
   const helper = fileURLToPath(new URL('../lib/clearra-path-helpers.ps1', import.meta.url));
   const paths = fileURLToPath(new URL('./clearra-build-paths.mjs', import.meta.url));
@@ -355,7 +397,7 @@ test('Node and PowerShell reuse the same lease without nested completion', { ski
   assert.equal(buildPathIdentity(guardProjection.root), buildPathIdentity(owner.environment.CLEARRA_BUILD_ROOT), JSON.stringify(guardProjection));
   for (const wrapper of [owner.environment.RUSTC_WRAPPER, owner.environment.RUSTC_WRAPPER.replaceAll('\\', '/')]) {
     const nested = spawnSync('pwsh', ['-NoProfile', '-NonInteractive', '-Command',
-      "$ErrorActionPreference='Stop'; . $env:CLEARRA_TEST_HELPER; Ensure-ClearraBuildArtifactCache -RepositoryRoot $env:CLEARRA_BUILD_SOURCE_ROOT; if(Test-ClearraBuildTransactionOwner){throw 'nested became owner'}; Get-ClearraCargoTargetDir; Exit-ClearraBuildArtifactCacheUsage"],
+      "$ErrorActionPreference='Stop'; . $env:CLEARRA_TEST_HELPER; Ensure-ClearraBuildArtifactCache -RepositoryRoot $env:CLEARRA_BUILD_SOURCE_ROOT; if(Test-ClearraBuildTransactionOwner){throw 'nested became owner'}; if($env:CARGO_INCREMENTAL -ne '0'){throw 'nested enabled incremental compilation'}; Get-ClearraCargoTargetDir; Exit-ClearraBuildArtifactCacheUsage"],
       { env: { ...childEnv, RUSTC_WRAPPER: wrapper }, encoding: 'utf8', windowsHide: true });
     assert.equal(nested.status, 0, JSON.stringify(guardProjection) + '\n' + nested.stderr + nested.stdout);
     assert.equal(buildPathIdentity(nested.stdout.trim()), buildPathIdentity(owner.transaction.cargo_target_dir));
@@ -369,7 +411,7 @@ test('Node and PowerShell reuse the same lease without nested completion', { ski
   await owner.finish(true);
   const environment = { ...cleanBuildEnvironment(), ...options.environment, CLEARRA_TEST_SOURCE: options.sourceRoot, CLEARRA_TEST_HELPER: helper, CLEARRA_TEST_PATHS: paths };
   const reverse = spawnSync('pwsh', ['-NoProfile', '-NonInteractive', '-Command',
-    "$ErrorActionPreference='Stop'; . $env:CLEARRA_TEST_HELPER; try { Ensure-ClearraBuildArtifactCache -RepositoryRoot $env:CLEARRA_TEST_SOURCE; node $env:CLEARRA_TEST_PATHS --field cargo-target; if($LASTEXITCODE -ne 0){throw 'Node rejected PS owner'}; Complete-ClearraBuildTransaction } finally { Exit-ClearraBuildArtifactCacheUsage }"], { env: environment, encoding: 'utf8', windowsHide: true });
+    "$ErrorActionPreference='Stop'; . $env:CLEARRA_TEST_HELPER; try { Ensure-ClearraBuildArtifactCache -RepositoryRoot $env:CLEARRA_TEST_SOURCE; if($env:CARGO_INCREMENTAL -ne '0'){throw 'PowerShell enabled incremental compilation'}; node $env:CLEARRA_TEST_PATHS --field cargo-target; if($LASTEXITCODE -ne 0){throw 'Node rejected PS owner'}; Complete-ClearraBuildTransaction } finally { Exit-ClearraBuildArtifactCacheUsage }"], { env: environment, encoding: 'utf8', windowsHide: true });
   assert.equal(reverse.status, 0, reverse.stderr + reverse.stdout);
   assert.equal(buildPathIdentity(reverse.stdout.trim()), buildPathIdentity(owner.transaction.cargo_target_dir));
   const product = await acquireBuildOwner({ ...options, purpose: 'product' });

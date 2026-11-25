@@ -9,7 +9,7 @@ import { prepareRustcLauncher } from './prepare-clearra-rustc-launcher.mjs';
 import { assertManagedTransientSlotsRetired } from './managed-transient-directory.mjs';
 import { BUILD_STORAGE_POLICY, checkBuildStorage, monitorBuildStorage } from './clearra-build-capacity.mjs';
 import { BUILD_STORAGE_LEASE, BUILD_TRANSACTION_MARKER, BUILD_TRANSACTION_SCHEMA, FORBIDDEN_BUILD_ALIASES, assertBuildRecord, assertBuildPathWithin, assertNoBuildLinks, assertManagedBuildTransaction,
-  buildPathIdentity, buildSourceId, canonicalBuildRoot, canonicalNativeBuildPath, nativeBuildPath } from './clearra-build-policy.mjs';
+  buildIncrementalMode, buildPathIdentity, buildSourceId, canonicalBuildRoot, canonicalNativeBuildPath, nativeBuildPath } from './clearra-build-policy.mjs';
 
 const authorityRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const buildInputRoots = ['apps', 'assets', 'core-c', 'crates', 'packages', 'scripts', 'tests', 'tools'];
@@ -262,6 +262,7 @@ export async function acquireBuildOwner({ sourceRoot, purpose = 'experiment', en
     if (transaction.purpose !== purpose) throw new Error('Nested build purpose cannot change');
     return { environment, transaction, finish: async () => {}, monitor: () => async () => {} };
   }
+  const incrementalMode = buildIncrementalMode(purpose, environment);
   const root = canonicalBuildRoot(environment);
   const sourceId = buildSourceId(sourceRoot);
   const sessionId = randomBytes(16).toString('hex');
@@ -289,7 +290,7 @@ export async function acquireBuildOwner({ sourceRoot, purpose = 'experiment', en
   const marker = { schema_version: BUILD_TRANSACTION_SCHEMA, purpose, source_root: sourceRoot, source_id: sourceId, session_id: sessionId,
     transaction_root: transactionRoot, cargo_target_dir: cargoTarget, owner_pid: process.pid, status: 'active', created_utc: created, completed_utc: null,
     compiler_snapshot_sha256: compilerSnapshot.sourceSha256, compiler_input_file_count: compilerSnapshot.inputFileCount,
-    incremental_cache_mode: purpose === 'experiment' ? 'enabled' : 'disabled', incremental_context_sha256: compilerSnapshot.contextSha256,
+    incremental_cache_mode: incrementalMode, incremental_context_sha256: compilerSnapshot.contextSha256,
     incremental_seed_session_id: null, incremental_seed_snapshot_sha256: null };
   const identity = leaseIdentity(marker);
   assertNoBuildLinks(resolve(root, '.leases'));
@@ -335,7 +336,7 @@ export async function acquireBuildOwner({ sourceRoot, purpose = 'experiment', en
         assertBuildRecord(previous, root, transactionRoot);
         if (previous.status === 'active') throw new Error('An active experimental generation cannot be replaced, even without a lease');
         if (previous.source_id !== sourceId || previous.purpose !== purpose || buildPathIdentity(previous.transaction_root) !== buildPathIdentity(transactionRoot)) throw new Error('Experimental current slot has a different owner');
-        const reusable = previous.schema_version === BUILD_TRANSACTION_SCHEMA && previous.status === 'complete' &&
+        const reusable = incrementalMode === 'enabled' && previous.schema_version === BUILD_TRANSACTION_SCHEMA && previous.status === 'complete' &&
           previous.incremental_cache_mode === 'enabled' && previous.incremental_context_sha256 === compilerSnapshot.contextSha256 &&
           await retainExperimentCompilerCache(previous, root, identity);
         if (reusable) {
@@ -359,7 +360,7 @@ export async function acquireBuildOwner({ sourceRoot, purpose = 'experiment', en
     CLEARRA_BUILD_SOURCE_ROOT: sourceRoot, CLEARRA_BUILD_SOURCE_ID: sourceId, CLEARRA_BUILD_SESSION_ID: sessionId,
     CLEARRA_BUILD_TRANSACTION_ROOT: transactionRoot, CLEARRA_BUILD_CACHE_OWNER_PID: String(process.pid),
     CLEARRA_BUILD_CACHE_SESSION_KEY: sessionId, CARGO_TARGET_DIR: cargoTarget,
-    CARGO_INCREMENTAL: purpose === 'experiment' ? '1' : '0', RUSTC_WRAPPER: guard };
+    CARGO_INCREMENTAL: incrementalMode === 'enabled' ? '1' : '0', RUSTC_WRAPPER: guard };
   if (process.platform !== 'win32' && /^[A-Za-z]:\//u.test(buildPathIdentity(root))) childEnvironment.LOCALAPPDATA = buildPathIdentity(root).replace(/\/Clearra\/build$/iu, '').replaceAll('/', '\\');
   let finished = false;
   const owner = {

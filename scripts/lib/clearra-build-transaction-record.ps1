@@ -19,6 +19,16 @@ function Get-ClearraBuildPurpose {
     return $purpose
 }
 
+function Get-ClearraBuildIncrementalMode([string]$Purpose) {
+    $requested = $env:CARGO_INCREMENTAL
+    if ($null -ne $requested -and $requested -ne '' -and $requested -notin @('0','1')) {
+        throw 'CARGO_INCREMENTAL must be 0 or 1 when explicitly configured.'
+    }
+    # Local experiments retain their compiler cache; one-shot CI can opt out.
+    if ($Purpose -eq 'experiment' -and $requested -ne '0') { return 'enabled' }
+    return 'disabled'
+}
+
 function Get-ClearraExpectedRustcWrapper {
     if ((Test-StartTestsWindows) -and -not [string]::IsNullOrWhiteSpace($env:CLEARRA_BUILD_TRANSACTION_ROOT)) {
         # Normalize both sides of the Node/PowerShell boundary before comparing
@@ -93,10 +103,9 @@ function Read-ClearraBuildTransactionRecord([string]$TransactionRoot) {
             -not [long]::TryParse([string]$record.compiler_input_file_count, [ref]$inputCount) -or $inputCount -lt 0 -or
             $record.incremental_context_sha256 -notmatch '^[0-9a-f]{64}$' -or
             $record.incremental_cache_mode -notin @('enabled','disabled') -or
-            ($record.purpose -eq 'experiment' -and $record.incremental_cache_mode -ne 'enabled') -or
             ($record.purpose -eq 'product' -and $record.incremental_cache_mode -ne 'disabled') -or
             (-not $seedIsNull -and -not $seedIsValid) -or
-            ($record.purpose -eq 'product' -and -not $seedIsNull)) {
+            ($record.incremental_cache_mode -eq 'disabled' -and -not $seedIsNull)) {
             throw "Invalid managed incremental build provenance: $marker"
         }
     }
@@ -238,6 +247,10 @@ function Get-ClearraInheritedBuildTransaction([string]$RepositoryRoot, [string]$
         [string]::IsNullOrWhiteSpace($env:CARGO_TARGET_DIR) -or
         -not ([IO.Path]::GetFullPath($env:CARGO_TARGET_DIR)).Equals($record.cargo_target_dir, $comparison)) {
         throw 'Inherited build transaction purpose/source/session/path binding mismatch.'
+    }
+    $expectedIncremental = if ($record.incremental_cache_mode -eq 'enabled') { '1' } else { '0' }
+    if ($env:CARGO_INCREMENTAL -ne $expectedIncremental) {
+        throw 'Inherited build incremental mode differs from its active owner.'
     }
     try { $owner = [Diagnostics.Process]::GetProcessById([int]$record.owner_pid) }
     catch { throw 'Inherited build owner is no longer active.' }

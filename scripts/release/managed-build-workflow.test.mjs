@@ -46,6 +46,14 @@ for (const [name, source] of workflows) {
   });
 }
 
+test('one-shot candidate and product acceptance builds explicitly disable incremental compiler caches', () => {
+  for (const name of ['candidate-preflight.yml', 'release-cli.yml']) {
+    const source = workflows.get(name);
+    assert.equal((source.match(/^  CARGO_INCREMENTAL: '0'$/gmu) ?? []).length, 1, name);
+    assert.doesNotMatch(source, /^ {4,}CARGO_INCREMENTAL:/mu, `${name} must inherit the workflow policy`);
+  }
+});
+
 test('workflow source gate rejects an unowned Cargo mutation and stale-target handoff', () => {
   const source = workflows.get('candidate-preflight.yml');
   assert.throws(() => assertManagedCargoSteps(source.replaceAll(

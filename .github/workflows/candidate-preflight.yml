@@ -18,6 +18,10 @@ on:
 permissions:
   contents: read
 
+env:
+  # Hosted candidates run once and never publish reusable compiler caches.
+  CARGO_INCREMENTAL: '0'
+
 concurrency:
   # Preserve feedback and source-bound artifacts for an older SHA while the
   # next correctness fix is checked. Repeated requests for one SHA still merge.

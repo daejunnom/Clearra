@@ -80,7 +80,7 @@ function Set-ClearraBuildTransactionEnvironment($Record) {
         CLEARRA_BUILD_CACHE_OWNER_PID = [string]$Record.owner_pid
         CLEARRA_BUILD_CACHE_SESSION_KEY = $Record.session_id
         CARGO_TARGET_DIR = $Record.cargo_target_dir
-        CARGO_INCREMENTAL = if ($Record.purpose -eq 'experiment') { '1' } else { '0' }
+        CARGO_INCREMENTAL = if ($Record.incremental_cache_mode -eq 'enabled') { '1' } else { '0' }
         RUSTC_WRAPPER = (Get-ClearraExpectedRustcWrapper)
     }
     foreach ($name in $values.Keys) { [Environment]::SetEnvironmentVariable($name, [string]$values[$name], 'Process') }
@@ -144,6 +144,7 @@ function Initialize-ClearraBuildArtifactCache(
         Initialize-ClearraNativeRustcLauncher
         return $inherited
     }
+    $incrementalMode = Get-ClearraBuildIncrementalMode $Purpose
     $sourceId = Get-ClearraBuildSourceIdentity $source
     $session = [Guid]::NewGuid().ToString('N')
     $generation = [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssfffZ') + '-' + $session
@@ -162,7 +163,7 @@ function Initialize-ClearraBuildArtifactCache(
         owner_pid = $PID; status = 'active'; created_utc = [DateTime]::UtcNow.ToString('o'); completed_utc = $null
         compiler_snapshot_sha256 = $compilerSnapshot.source_snapshot_sha256
         compiler_input_file_count = $compilerSnapshot.input_file_count
-        incremental_cache_mode = if ($Purpose -eq 'experiment') { 'enabled' } else { 'disabled' }
+        incremental_cache_mode = $incrementalMode
         incremental_context_sha256 = $compilerSnapshot.incremental_context_sha256
         incremental_seed_session_id = $null
         incremental_seed_snapshot_sha256 = $null
@@ -190,7 +191,7 @@ function Initialize-ClearraBuildArtifactCache(
             if ($previous.status -eq 'active') {
                 throw 'An active or interrupted experiment requires explicit owner-aware recovery.'
             }
-            $reusable = $previous.schema_version -eq 4 -and $previous.status -eq 'complete' -and
+            $reusable = $incrementalMode -eq 'enabled' -and $previous.schema_version -eq 4 -and $previous.status -eq 'complete' -and
                 $previous.incremental_cache_mode -eq 'enabled' -and
                 $previous.incremental_context_sha256 -eq $compilerSnapshot.incremental_context_sha256 -and
                 (Preserve-ClearraExperimentCompilerCache $previous $lease)

@@ -97,7 +97,16 @@ function Invoke-WasmProductSourceContracts {
         '--', '--test-threads=1',
         ':::',
         $CargoPath, 'test', '--locked', '-p', 'clearra-app',
+        '--features', 'parallel',
         '--test', 'extended_pc_tiling', 'tiling_option_combinations',
+        '--', '--test-threads=1',
+        ':::',
+        # Keep the native source-owner regressions in the required gate. Both
+        # use small residual fields and reuse the preceding app feature build.
+        $CargoPath, 'test', '--locked', '-p', 'clearra-app',
+        '--features', 'parallel',
+        '--test', 'extended_pc_tiling', '--test', 'native_continue_worker_ownership',
+        'native_product_parallel_',
         '--', '--test-threads=1'
     ) 'clearra-wasm source and host contract execution'
 }
