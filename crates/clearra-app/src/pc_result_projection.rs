@@ -1074,7 +1074,9 @@ fn validate_pc_score_queue_contract(
                     .checked_retained_capacity_bytes()
                     .is_some_and(|bytes| bytes <= PC_SCORE_MAX_QUERY_QUEUE_RETAINED_BYTES)
                 && expression.explicit_sequences().is_none_or(|sequences| {
-                    sequences.iter().all(|sequence| sequence.len() <= max_source_pieces)
+                    sequences
+                        .iter()
+                        .all(|sequence| sequence.len() <= max_source_pieces)
                 }) =>
         {
             Ok(())

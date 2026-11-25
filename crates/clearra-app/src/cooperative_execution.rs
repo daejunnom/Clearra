@@ -2271,7 +2271,11 @@ impl CooperativeAppExecution {
             .with_contract_context(command_kind)
             .with_validation_diagnostics(validation_report);
         Self::from_prepared_minimum(
-            context, response, command_kind, output_policy, resource_budget,
+            context,
+            response,
+            command_kind,
+            output_policy,
+            resource_budget,
             CooperativeMinimumPreparation::SpinCover(preparation),
         )
     }
@@ -2304,7 +2308,9 @@ impl CooperativeAppExecution {
     /// used by the ordinary CLI product. No minimum cardinality enters here.
     pub fn enable_minimum_parallel(&mut self, partitions: usize) -> Result<(), &'static str> {
         if let CooperativeExecutionState::PcReplayFinalize(finalize) = &mut self.state {
-            finalize.preparation.enable_parallel(partitions)
+            finalize
+                .preparation
+                .enable_parallel(partitions)
                 .map_err(|_| "replay parallel preparation rejected")?;
         }
         if let CooperativeExecutionState::MinimumFinalize(finalize) = &mut self.state {
@@ -2371,31 +2377,53 @@ impl CooperativeAppExecution {
     /// is immutable execution data, never a replacement product authority.
     pub fn replay_parallel_query(&self) -> Option<&crate::PcReplayParallelQuery> {
         match &self.state {
-            CooperativeExecutionState::PcReplayFinalize(finalize) => finalize.preparation.parallel_query(),
-            _ => None,
-        }
-    }
-
-    pub fn replay_parallel_preparation_memory(&self, partitions: usize) -> Option<(u128, u128, u128)> {
-        match &self.state {
             CooperativeExecutionState::PcReplayFinalize(finalize) => {
-                let (cap, retained) = finalize.preparation.parallel_memory_envelope()?;
-                Some((cap, retained, finalize.preparation.checked_parallel_preparation_bytes(partitions)?))
+                finalize.preparation.parallel_query()
             }
             _ => None,
         }
     }
 
-    pub fn take_replay_parallel_task(&mut self, control: &ExecutionControl) -> Result<Option<crate::PcReplayParallelTask>, crate::PcReplayPageError> {
+    pub fn replay_parallel_preparation_memory(
+        &self,
+        partitions: usize,
+    ) -> Option<(u128, u128, u128)> {
+        match &self.state {
+            CooperativeExecutionState::PcReplayFinalize(finalize) => {
+                let (cap, retained) = finalize.preparation.parallel_memory_envelope()?;
+                Some((
+                    cap,
+                    retained,
+                    finalize
+                        .preparation
+                        .checked_parallel_preparation_bytes(partitions)?,
+                ))
+            }
+            _ => None,
+        }
+    }
+
+    pub fn take_replay_parallel_task(
+        &mut self,
+        control: &ExecutionControl,
+    ) -> Result<Option<crate::PcReplayParallelTask>, crate::PcReplayPageError> {
         match &mut self.state {
-            CooperativeExecutionState::PcReplayFinalize(finalize) => finalize.preparation.take_parallel_task(control),
+            CooperativeExecutionState::PcReplayFinalize(finalize) => {
+                finalize.preparation.take_parallel_task(control)
+            }
             _ => Ok(None),
         }
     }
 
-    pub fn accept_replay_parallel_receipt(&mut self, receipt: crate::PcReplayParallelReceipt, control: &ExecutionControl) -> Result<(), crate::PcReplayPageError> {
+    pub fn accept_replay_parallel_receipt(
+        &mut self,
+        receipt: crate::PcReplayParallelReceipt,
+        control: &ExecutionControl,
+    ) -> Result<(), crate::PcReplayPageError> {
         match &mut self.state {
-            CooperativeExecutionState::PcReplayFinalize(finalize) => finalize.preparation.accept_parallel_receipt(receipt, control),
+            CooperativeExecutionState::PcReplayFinalize(finalize) => finalize
+                .preparation
+                .accept_parallel_receipt(receipt, control),
             _ => Err("complete_replay_parallel_finalizer_inactive".into()),
         }
     }

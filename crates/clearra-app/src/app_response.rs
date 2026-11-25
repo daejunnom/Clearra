@@ -829,8 +829,14 @@ impl AppResponse {
         let Some(AppRenderModel::SpinStructure(report)) = &self.render_model else {
             return None;
         };
-        self.result.as_ref()?.checked_retained_capacity_bytes()?
-            .checked_add(self.diagnostics.validation().checked_retained_capacity_bytes()?)?
+        self.result
+            .as_ref()?
+            .checked_retained_capacity_bytes()?
+            .checked_add(
+                self.diagnostics
+                    .validation()
+                    .checked_retained_capacity_bytes()?,
+            )?
             .checked_add(self.backend_report.checked_retained_capacity_bytes()?)?
             .checked_add(self.resource_report.checked_retained_capacity_bytes()?)?
             .checked_add(self.capability_report.checked_retained_capacity_bytes()?)?

@@ -5061,11 +5061,9 @@ mod tests {
             // The Build shell must remain distinct from both typed PC owners.
             assert!(problem.checked_pc_family_pointee_retained_bytes().is_none());
             assert!(problem.checked_pc_tiling_pointee_retained_bytes().is_none());
-            assert!(
-                problem
-                    .checked_build_probability_pointee_retained_bytes()
-                    .is_some()
-            );
+            assert!(problem
+                .checked_build_probability_pointee_retained_bytes()
+                .is_some());
             let unbounded = ExecutionMemoryBound::unbounded_for_problem(&problem).unwrap();
             let finite = unbounded.with_cap(4 * 1024 * 1024).unwrap();
             let mut session = ExtendedBuildProbabilitySession::new_with_memory_bound(

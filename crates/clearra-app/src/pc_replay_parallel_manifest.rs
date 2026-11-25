@@ -132,7 +132,9 @@ impl PcReplaySourceBuildSession {
             let capacity = wave_capacity.min(cells - first);
             let workspace_headers = bytes::<LanguageLease<'_>>(control.parallelism())?
                 .checked_add(core::mem::size_of::<Mutex<LiveMemory>>() as u128)
-                .and_then(|n| n.checked_add(core::mem::size_of::<Mutex<VecDeque<(usize, usize)>>>() as u128))
+                .and_then(|n| {
+                    n.checked_add(core::mem::size_of::<Mutex<VecDeque<(usize, usize)>>>() as u128)
+                })
                 .ok_or(OVERFLOW)?;
             self.guard_additional(
                 bytes::<(usize, usize)>(capacity)?
@@ -146,19 +148,29 @@ impl PcReplaySourceBuildSession {
             let mut geometry = self.next_geometry;
             let mut pattern = self.next_pattern;
             while counts.len() < capacity && geometry < self.pending.len() {
-                if control.is_cancelled() { return Err("complete_replay_cancelled".into()); }
-                match self.source.next_possible_pattern(&self.pending[geometry].1, pattern)? {
+                if control.is_cancelled() {
+                    return Err("complete_replay_cancelled".into());
+                }
+                match self
+                    .source
+                    .next_possible_pattern(&self.pending[geometry].1, pattern)?
+                {
                     Some(next) => {
                         counts.push_back((geometry * patterns + next, 0));
                         pattern = next + 1;
                     }
-                    None => { geometry += 1; pattern = 0; }
+                    None => {
+                        geometry += 1;
+                        pattern = 0;
+                    }
                 }
             }
             if counts.is_empty() {
                 // Every remaining cell was rejected by the original source's
                 // necessary-supply proof. No successful queue was sampled away.
-                while self.next_geometry < self.pending.len() { self.finish_geometry()?; }
+                while self.next_geometry < self.pending.len() {
+                    self.finish_geometry()?;
+                }
                 break;
             }
             let count = counts.len();
@@ -189,7 +201,10 @@ impl PcReplaySourceBuildSession {
                 },
                 |lease, tasks| {
                     for offset in tasks {
-                        let ordinal = counts.lock().map_err(|_| PcReplayPageError::from("complete_replay_worker_failed"))?[offset].0;
+                        let ordinal = counts.lock().map_err(|_| {
+                            PcReplayPageError::from("complete_replay_worker_failed")
+                        })?[offset]
+                            .0;
                         let geometry = ordinal / patterns;
                         let pattern = ordinal % patterns;
                         let locations = &self.pending[geometry].1;
@@ -239,7 +254,8 @@ impl PcReplaySourceBuildSession {
                         lease.map(admission)?;
                         counts.lock().map_err(|_| {
                             PcReplayPageError::from("complete_replay_worker_failed")
-                        })?[offset].1 = witnesses;
+                        })?[offset]
+                            .1 = witnesses;
                         let done = completed.fetch_add(1, Ordering::AcqRel) + 1;
                         control.report_progress(
                             "execution-replay",

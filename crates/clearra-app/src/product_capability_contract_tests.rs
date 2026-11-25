@@ -3524,7 +3524,10 @@ fn pc_score_final_binding_shares_the_maximum_fixed_sequence_and_matches_fieldwis
 fn pc_score_contract_rejects_a_fixed_sequence_above_the_supply_cursor_bound() {
     let query = PcScenarioQuery::new(
         PcScenarioBoard::standard_10(1, 0x3f0),
-        PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::I; usize::from(u16::MAX) + 1])),
+        PcQueueInput::fixed_sequence(FixedSequence::new(vec![
+            PieceKind::I;
+            usize::from(u16::MAX) + 1
+        ])),
         PieceWindow::new(1),
     )
     .with_exact_pieces(Some(1))
