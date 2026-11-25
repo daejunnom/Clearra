@@ -5686,20 +5686,17 @@ mod build_probability_partial_ingress_tests {
 
     #[test]
     fn setup_preparation_preserves_fixed_and_all_cpu_budgets_before_graph_work() {
-        use clearra_pc_graph::request::WorkerPolicy;
-        #[cfg(target_family = "wasm")]
-        let hardware = 8;
-        #[cfg(not(target_family = "wasm"))]
-        let hardware = 8.min(WorkerPolicy::hardware_worker_limit());
         let runtime = WasmCommandRuntime::default()
             .with_host_capabilities(crate::WasmHostCapabilities::new(8, false, false));
-        for (policy, worker_argument) in [
-            (WorkerPolicy::Fixed(1), "--workers 1"),
-            (WorkerPolicy::Fixed(2), "--workers 2"),
-            (WorkerPolicy::Fixed(8), "--workers 8"),
-            (WorkerPolicy::Auto, ""),
+        // Setup carries the parsed browser-host budget in AppRequest; it does
+        // not compile a PcExecutionPolicy that re-clamps to this test process's
+        // native hardware. These are preparation budgets, not native threads.
+        for (worker_argument, expected) in [
+            ("--workers 1", 1),
+            ("--workers 2", 2),
+            ("--workers 8", 8),
+            ("", 8), // Auto + all uses every advertised logical processor.
         ] {
-            let expected = policy.effective_for_hardware_limit(true, hardware);
             let command = format!(
                 "clearra setup-finder --remaining IOT {worker_argument} --use-all-cpu-threads"
             );

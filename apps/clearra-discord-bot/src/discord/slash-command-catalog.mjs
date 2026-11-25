@@ -41,6 +41,8 @@ const MANAGE_GUILD_PERMISSION = String(1n << 5n);
 const FIELD_MAX_LENGTH = 6000;
 const NEXT_MAX_LENGTH = 2048;
 const OPTIONAL_SETTINGS_MAX_LENGTH = 256;
+// Preserve Setup pattern formatting up to Discord's string-option bound.
+const SETUP_TEXT_MAX_LENGTH = 6000;
 const DOCUMENT_MAX_LENGTH = 6000;
 
 export const BUILTIN_KICKTABLES = Object.freeze([
@@ -920,7 +922,7 @@ function registrationOptions(input, capabilityId = null) {
           "remaining",
           "Unordered 1–7-piece inventory; only IOTSZJL, with at most one duplicate kind",
           false,
-          64,
+          SETUP_TEXT_MAX_LENGTH,
         ),
         setupPriorityOption(),
         setupMaximumPiecesOption(),
@@ -929,12 +931,13 @@ function registrationOptions(input, capabilityId = null) {
           "next-cycle-remaining",
           "Exact next-cycle residue; required count depends on the current remaining inventory",
           false,
-          64,
+          SETUP_TEXT_MAX_LENGTH,
         ),
         setupLengthOption(),
         kicktableOption(true),
         nativeSettingsOption(
           "Options: mode, qb, and post-cycle-borrow as space-separated key=value entries",
+          SETUP_TEXT_MAX_LENGTH,
         ),
       ]);
     case "setup-v2":
@@ -943,16 +946,16 @@ function registrationOptions(input, capabilityId = null) {
           "remaining",
           "Unordered 1–7-piece inventory; only IOTSZJL, with at most one duplicate kind",
           false,
-          64,
+          SETUP_TEXT_MAX_LENGTH,
         ),
         setupModeOption(),
-        stringOption("qb", "Exact next-bag prefix or queue pattern; required only in QB mode", false, 64),
+        stringOption("qb", "Exact next-bag prefix or queue pattern; required only in QB mode", false, SETUP_TEXT_MAX_LENGTH),
         setupQueueKnowledgeOption(),
         stringOption(
           "next-cycle-remaining",
           "Exact next-cycle residue; required count depends on the current remaining inventory",
           false,
-          64,
+          SETUP_TEXT_MAX_LENGTH,
         ),
         onOffOption("post-cycle-borrow", "Allow one next-cycle borrow when the residue permits it", "off"),
         setupLengthOption(),
@@ -1729,12 +1732,12 @@ function catSettingsOption() {
   );
 }
 
-function nativeSettingsOption(description) {
+function nativeSettingsOption(description, maxLength = OPTIONAL_SETTINGS_MAX_LENGTH) {
   return stringOption(
     "options",
     description,
     false,
-    OPTIONAL_SETTINGS_MAX_LENGTH,
+    maxLength,
   );
 }
 

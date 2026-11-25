@@ -31,6 +31,8 @@ export { DISCORD_PACKED_OPTION_KEYS } from "./slash-packed-options.mjs";
 
 const FIELD_MAX_LENGTH = 6000;
 const NEXT_MAX_LENGTH = 2048;
+// Discord's string-option transport bound; Setup piece counts are checked below.
+const SETUP_TEXT_MAX_LENGTH = 6000;
 const OPERATION_DOCUMENT_MAX_SOURCE_CHARS = 2_000_000;
 const OPERATION_DOCUMENT_MAX_PAGES = 4096;
 const FUMEN_TRANSFORMS = new Set([
@@ -2601,7 +2603,7 @@ function setupScoreSupplyArguments(values, role) {
 
 function setupFinderArguments(command, values) {
   const remaining = setupInventory(
-    requiredText(values, "remaining", 64),
+    requiredText(values, "remaining", SETUP_TEXT_MAX_LENGTH),
     "remaining",
   );
   const defaultPriority = String(command.setupPriority ?? "").toLowerCase();
@@ -2640,7 +2642,7 @@ function setupFinderArguments(command, values) {
     output.push("--queue-knowledge", normalized);
   }
 
-  const nextCycleSource = optionalText(values, "next-cycle-remaining", 64);
+  const nextCycleSource = optionalText(values, "next-cycle-remaining", SETUP_TEXT_MAX_LENGTH);
   if (nextCycleSource !== null) {
     const nextCycleRemaining = setupInventory(
       nextCycleSource,
@@ -2678,7 +2680,7 @@ function setupFinderArguments(command, values) {
 
 function setupNamedArguments(values, remaining) {
   const requestedMode = optionalText(values, "mode", 16);
-  const qbSource = optionalText(values, "qb", 64);
+  const qbSource = optionalText(values, "qb", SETUP_TEXT_MAX_LENGTH);
   let mode = requestedMode === null ? null : normalizedChoice(requestedMode);
   if (mode !== null && !new Set(["oracle", "qb"]).has(mode)) {
     throw invalidOption("mode", "mode must be oracle or qb.");
@@ -2695,7 +2697,7 @@ function setupNamedArguments(values, remaining) {
   if (qbSource !== null) {
     let qb;
     try {
-      qb = parseQueuePatternSource(qbSource, { name: "qb", maxLength: 64 });
+      qb = parseQueuePatternSource(qbSource, { name: "qb", maxLength: SETUP_TEXT_MAX_LENGTH });
     } catch (error) {
       throw invalidOption("qb", error instanceof Error ? error.message : String(error));
     }
@@ -2723,7 +2725,7 @@ function normalizedSetupChoice(value) {
 }
 
 function setupInventory(value, name) {
-  const pieces = pieceInventory(value, name);
+  const pieces = pieceInventory(value.replace(/[\s,]/gu, ""), name);
   if (pieces.length < 1 || pieces.length > 7) {
     throw invalidOption(name, `${name} must contain from 1 through 7 pieces.`);
   }

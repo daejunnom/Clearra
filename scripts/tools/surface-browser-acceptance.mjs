@@ -269,13 +269,16 @@ async function tilingUiCase({ height, hold, workers }, expectedIdentity) {
   const label = `tiling-${height}L-hold-${hold ? 'on' : 'off'}-workers-${workers}`;
   const ctx = await context('null', workers);
   await ctx.addInitScript(() => {
-    window.__clearraTilingObserved = { commands: [], terminals: [], workerErrors: [] };
+    window.__clearraTilingObserved = { commands: [], progress: [], terminals: [], workerErrors: [] };
     const Original = window.Worker;
     window.Worker = class extends Original {
       constructor(...args) {
         super(...args);
         this.acceptanceOwnsRun = false;
         this.addEventListener('message', event => {
+          if (this.acceptanceOwnsRun && event.data?.event === 'progress') {
+            window.__clearraTilingObserved.progress.push(event.data);
+          }
           if (this.acceptanceOwnsRun &&
               ['final_response', 'failed', 'cancelled', 'terminated'].includes(event.data?.event)) {
             window.__clearraTilingObserved.terminals.push(event.data);
@@ -321,8 +324,31 @@ async function tilingUiCase({ height, hold, workers }, expectedIdentity) {
     assert.match(observed.commands[0], new RegExp(`(?:^| )--workers ${workers}(?: |$)`, 'u'));
     assert.match(observed.commands[0], /(?:^| )--use-all-cpu-threads(?: |$)/u);
     assert.equal(observed.terminals.length, 1, 'typed tiling must emit one successful terminal');
-    const report = assertTilingFinal(observed.terminals[0], height, expectedIdentity);
-    assert.equal(report.workers_used, workers, 'typed tiling must retain the requested compute pool width');
+    const final = observed.terminals[0];
+    const report = assertTilingFinal(final, height, expectedIdentity);
+    const distributedProgress = observed.progress.filter(event => event.job_id === final.job_id &&
+      event.progress?.telemetry?.execution_mode === 'distributed');
+    assert.ok(Number.isSafeInteger(report.workers_used), 'finished worker count must be an exact integer');
+    assert.ok(report.workers_used >= 1 && report.workers_used <= workers,
+      'finished workers must stay within the admitted compute pool');
+    if (workers === 1) {
+      assert.equal(report.workers_used, 1);
+    } else {
+      assert.ok(distributedProgress.length > 0, 'requested parallel tiling must enter distributed execution');
+      for (const phase of ['searching', 'merging']) {
+        assert.ok(distributedProgress.some(event => event.progress.telemetry.phase === phase),
+          `distributed tiling must report its ${phase} phase`);
+      }
+      for (const event of distributedProgress) {
+        const telemetry = event.progress.telemetry;
+        assert.equal(telemetry.worker_count, workers, 'admitted compute capacity must remain stable');
+        assert.equal(telemetry.availability?.worker_count, true);
+        assert.equal(telemetry.exactness?.worker_count, true);
+      }
+    }
+    // Ready-first completion may retire initializers after all exact work has
+    // drained. Admission N and finished workers are separate contracts; this
+    // top-level listener does not observe nested verifier worker creation.
     const initialKeys = await completedKeys(page, report.normalized_solution_keys.length, label);
     assert.deepEqual(initialKeys, report.normalized_solution_keys);
     let loadedKeys = initialKeys;
@@ -346,11 +372,14 @@ async function tilingUiCase({ height, hold, workers }, expectedIdentity) {
     assert.deepEqual(await page.evaluate(() => window.__clearraTilingObserved.workerErrors), [],
       'result-page loading must not raise a worker error');
     await writeFile(resolve(reportRoot, `${label}.json`), JSON.stringify({
-      command: observed.commands[0], terminal: observed.terminals[0], loadedPageKeys: loadedKeys
+      command: observed.commands[0], progress: observed.progress,
+      terminal: final, loadedPageKeys: loadedKeys
     }, null, 2) + '\n');
     results.push({ case: label, result: 'passed', height, hold, advertisedLogicalProcessors: workers,
       actualLogicalProcessors: await page.evaluate(() => window.__clearraAcceptanceActualLogical),
       requestedWorkers: workers, workersUsed: report.workers_used,
+      distributedProgressSamples: distributedProgress.length,
+      admittedWorkerCounts: [...new Set(distributedProgress.map(event => event.progress.telemetry.worker_count))],
       solutionCount: report.unique_solution_count, initialPageCount: initialKeys.length,
       loadedPageKeyCount: loadedKeys.length, loadedPageKeyHash: tilingKeySequenceHash(loadedKeys),
       normalizedSolutionSetHash: report.normalized_solution_set_hash });

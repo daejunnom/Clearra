@@ -1613,6 +1613,167 @@ test("canonical setup QB options preserve exact and pattern supply semantics", (
   );
 });
 
+const SETUP_LOGICAL_TEN_PATTERN = [..."IOTSZJLIOT"]
+  .map((piece) => `[^${"IOTSZJL".replace(piece, "")}]`)
+  .join("");
+
+function setupInputCommands() {
+  return [
+    ...["joint", "build", "pc"].map((name) => findSlashCommand("setup").subcommands[name]),
+    ...["pc-setup", "best-setup", "dpc-finder"].map(findSlashCommand),
+  ];
+}
+
+function setupQbOptions(command, qb) {
+  return command.input === "setup-v2"
+    ? [{ name: "mode", value: "qb" }, { name: "qb", value: qb }]
+    : [{ name: "options", value: `mode=qb qb=${qb}` }];
+}
+
+test("setup input named QB preserves the 90-character ten-piece pattern", () => {
+  assert.equal(SETUP_LOGICAL_TEN_PATTERN.length, 90);
+  for (const command of setupInputCommands().filter((entry) => entry.input === "setup-v2")) {
+    for (const knowledge of ["full-queue", "visible-7"]) {
+      const args = buildSlashCommandArguments(command, [
+        { name: "remaining", value: "I" },
+        ...setupQbOptions(command, SETUP_LOGICAL_TEN_PATTERN),
+        { name: "queue-knowledge", value: knowledge },
+      ]);
+      assert.equal(args[args.indexOf("--qb") + 1], SETUP_LOGICAL_TEN_PATTERN);
+      assert.equal(args[args.indexOf("--queue-knowledge") + 1], knowledge === "full-queue" ? "oracle" : knowledge);
+      assert.throws(() => buildSlashCommandArguments(command, [
+        { name: "remaining", value: "TI" },
+        ...setupQbOptions(command, SETUP_LOGICAL_TEN_PATTERN),
+      ]), (error) => error?.code === "options.setup_qb_bag_capacity");
+    }
+  }
+});
+
+test("setup input packed QB preserves 90 and 272 characters with the same logical length", () => {
+  const alternatives = Array(3).fill(SETUP_LOGICAL_TEN_PATTERN).join(";");
+  assert.equal(alternatives.length, 272);
+  for (const command of setupInputCommands().filter((entry) => entry.input === "remaining")) {
+    for (const qb of [SETUP_LOGICAL_TEN_PATTERN, alternatives]) {
+      for (const knowledge of ["full-queue", "visible-7"]) {
+        const args = buildSlashCommandArguments(command, [
+          { name: "remaining", value: "I" },
+          ...setupQbOptions(command, qb),
+          { name: "queue-knowledge", value: knowledge },
+        ]);
+        assert.equal(args[args.indexOf("--qb") + 1], qb);
+        assert.equal(args[args.indexOf("--queue-knowledge") + 1], knowledge === "full-queue" ? "oracle" : knowledge);
+        assert.throws(() => buildSlashCommandArguments(command, [
+          { name: "remaining", value: "TI" },
+          ...setupQbOptions(command, qb),
+        ]), (error) => error?.code === "options.setup_qb_bag_capacity");
+      }
+    }
+  }
+});
+
+test("setup input inventories normalize whitespace and commas before semantic validation", () => {
+  for (const command of setupInputCommands()) {
+    for (const separator of [", ", ", \t\n".repeat(24)]) {
+      const remaining = `i${separator}`;
+      const nextCycle = [..."iotsz"].join(separator);
+      const args = buildSlashCommandArguments(command, [
+        { name: "remaining", value: remaining },
+        { name: "next-cycle-remaining", value: nextCycle },
+        ...setupQbOptions(command, SETUP_LOGICAL_TEN_PATTERN),
+      ]);
+      assert.equal(args[args.indexOf("--remaining") + 1], "I");
+      assert.equal(args[args.indexOf("--next-cycle-remaining") + 1], "IOTSZ");
+      assert.equal(args[args.indexOf("--qb") + 1], SETUP_LOGICAL_TEN_PATTERN);
+    }
+  }
+});
+
+test("setup input normalization retains invalid-piece duplicate cycle and QB rejection", () => {
+  for (const command of setupInputCommands()) {
+    for (const [remaining, message] of [
+      ["i, x", /IOTSZJL/u],
+      ["i, i, i", /at most one piece kind twice/u],
+      ["i, i, o, o", /at most one piece kind twice/u],
+      ["i, o, t, s, z, j, l, i", /1 through 7/u],
+      [", \t", /IOTSZJL/u],
+    ]) {
+      assert.throws(() => buildSlashCommandArguments(command, [
+        { name: "remaining", value: remaining },
+      ]), message);
+    }
+    for (const [nextCycle, message] of [
+      ["i, o, t, s", /exactly 5 pieces/u],
+      ["i, o, t, s, x", /IOTSZJL/u],
+      ["i, i, o, o, t", /at most one piece kind twice/u],
+    ]) {
+      assert.throws(() => buildSlashCommandArguments(command, [
+        { name: "remaining", value: "i, " },
+        { name: "next-cycle-remaining", value: nextCycle },
+      ]), message);
+    }
+    assert.throws(() => buildSlashCommandArguments(command, [
+      { name: "remaining", value: "t, i" },
+      ...setupQbOptions(command, SETUP_LOGICAL_TEN_PATTERN),
+    ]), (error) => error?.code === "options.setup_qb_bag_capacity");
+    for (const qb of ["II", "[^]", "IO;I"]) {
+      assert.throws(() => buildSlashCommandArguments(command, [
+        { name: "remaining", value: "i, " },
+        ...setupQbOptions(command, qb),
+      ]), /repeat a piece|invalid piece group|same piece count/u);
+    }
+    assert.throws(() => buildSlashCommandArguments(command, [
+      { name: "remaining", value: "i, " },
+      ...(command.input === "setup-v2"
+        ? [{ name: "post-cycle-borrow", value: "on" }]
+        : [{ name: "options", value: "post-cycle-borrow=on" }]),
+    ]), (error) => error?.code === "options.setup_borrow_cycle");
+  }
+});
+
+test("setup input accepts the 6000-character transport boundary and rejects 6001", () => {
+  for (const command of setupInputCommands()) {
+    const sourceBudget = 6000 - (command.input === "setup-v2" ? 0 : "mode=qb qb=".length);
+    const qb = SETUP_LOGICAL_TEN_PATTERN + ",".repeat(sourceBudget - SETUP_LOGICAL_TEN_PATTERN.length);
+    const args = buildSlashCommandArguments(command, [
+      { name: "remaining", value: `I${",".repeat(5999)}` },
+      { name: "next-cycle-remaining", value: `IOTSZ${",".repeat(5995)}` },
+      ...setupQbOptions(command, qb),
+    ]);
+    assert.equal(args[args.indexOf("--remaining") + 1], "I");
+    assert.equal(args[args.indexOf("--next-cycle-remaining") + 1], "IOTSZ");
+    assert.equal(args[args.indexOf("--qb") + 1], SETUP_LOGICAL_TEN_PATTERN);
+    assert.throws(() => buildSlashCommandArguments(command, [
+      { name: "remaining", value: "I" },
+      ...setupQbOptions(command, `${qb},`),
+    ]), /6000-character limit/u);
+    for (const [name, value] of [
+      ["remaining", `I${",".repeat(6000)}`],
+      ["next-cycle-remaining", `IOTSZ${",".repeat(5996)}`],
+    ]) {
+      assert.throws(() => buildSlashCommandArguments(command, [
+        ...(name === "remaining" ? [] : [{ name: "remaining", value: "I" }]),
+        { name, value },
+      ]), /6000-character limit/u);
+    }
+  }
+});
+
+test("setup input registration matches its transport limit without widening other packed options", () => {
+  for (const command of setupInputCommands()) {
+    for (const name of ["remaining", "next-cycle-remaining", command.input === "setup-v2" ? "qb" : "options"]) {
+      const option = command.registration.options.find((entry) => entry.name === name);
+      assert.equal(option?.max_length, 6000, `${command.name} ${name}`);
+    }
+  }
+  const damage = findSlashCommand("damage");
+  assert.equal(damage.registration.options.find((entry) => entry.name === "options")?.max_length, 256);
+  assert.throws(() => buildSlashCommandArguments(damage, [
+    { name: "field", value: "__________" },
+    { name: "next", value: "IOTS" },
+    { name: "options", value: `initial-combo=${"0".repeat(244)}` },
+  ]), /256-character limit/u);
+});
+
 test("setup ranking inventories and enums fail closed before execution", () => {
   const build = (options) =>
     buildSlashCommandArguments(findSlashCommand("pc-setup"), options);

@@ -6,6 +6,8 @@ import {
 } from "./queue-pattern-source.mjs";
 
 const SETTINGS_MAX_LENGTH = 256;
+// Setup carries a queue-pattern source inside this Discord string option.
+const SETUP_TEXT_MAX_LENGTH = 6000;
 const DAMAGE_SPIN_PROFILES = new Set([
   "disabled",
   "t-spin-simple",
@@ -67,7 +69,7 @@ export function setupFinderPackedArguments(command, values, remaining) {
     ["post-cycle-borrow", "post-cycle-borrow"],
     ["post_cycle_borrow", "post-cycle-borrow"],
     ["borrow", "post-cycle-borrow"],
-  ]));
+  ]), SETUP_TEXT_MAX_LENGTH);
   const output = [];
   const requestedMode = settings.has("mode")
     ? normalizedSetting(settings.get("mode"))
@@ -86,7 +88,7 @@ export function setupFinderPackedArguments(command, values, remaining) {
   if (qbSource !== null) {
     let qb;
     try {
-      qb = parseQueuePatternSource(qbSource, { name: "options qb", maxLength: 256 });
+      qb = parseQueuePatternSource(qbSource, { name: "options qb", maxLength: SETUP_TEXT_MAX_LENGTH });
     } catch (error) {
       throw invalidOption("qb", error instanceof Error ? error.message : String(error));
     }
@@ -304,8 +306,8 @@ export function finessePackedArguments(command, values) {
   return output;
 }
 
-export function parseSettings(command, values, aliases) {
-  const source = optionalText(values, "options", SETTINGS_MAX_LENGTH);
+export function parseSettings(command, values, aliases, maxLength = SETTINGS_MAX_LENGTH) {
+  const source = optionalText(values, "options", maxLength);
   const settings = new Map();
   if (!source) return settings;
   for (const token of tokenizeCommand(source)) {

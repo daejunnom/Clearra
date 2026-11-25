@@ -168,18 +168,19 @@ assert.deepEqual(
 );
 
 // PC-root distribution has a control-only source coordinator. An explicitly
-// admitted N-worker topology therefore starts and reports N compute workers;
-// it must not silently reserve one of those slots for the source loop.
-{
+// admitted N-worker topology initializes N compute workers and reports stable
+// capacity even when ready-first completion only finishes a smaller subset.
+// The source loop must not consume or add a compute slot in either case.
+for (const { requested, finished } of [{ requested: 2, finished: 2 }, { requested: 8, finished: 1 }]) {
   const initializedWorkerCounts: number[] = [];
   const rootBatchSizes: number[] = [];
   const rootEvents: ClearraWasmWorkerEvent[] = [];
   let rootWorkersUsed = 0;
   const rootProgress: ClearraVerifierPoolProgress = {
     ...completedProgress,
-    readyWorkers: 2,
-    activeWorkers: 2,
-    workerCount: 2
+    readyWorkers: finished,
+    activeWorkers: finished,
+    workerCount: requested
   };
   await new DistributedWasmJobRunner({
     ...wasm,
@@ -202,7 +203,7 @@ assert.deepEqual(
       }]);
     }
   } as ClearraWasmModule, 415, 'pc-root-control-only-source', {
-    logicalProcessorCount: 2,
+    logicalProcessorCount: requested,
     webGpuAvailable: false,
     crossOriginIsolated: false,
     transferByteCap: 32 * 1024 * 1024
@@ -211,24 +212,28 @@ assert.deepEqual(
     async initialize(_initialization: unknown, workerCount: number) {
       initializedWorkerCounts.push(workerCount);
     },
-    async finish() { return 2; },
+    async finish(_consumePartial: unknown, options?: { readySubset?: boolean }) {
+      assert.equal(options?.readySubset, true);
+      return finished;
+    },
     progressSnapshot: () => rootProgress
   } as never).run(
-    'clearra pc --lines 4 --count unique --workers 2',
-    { ...plan, rootTaskParallel: true },
+    `clearra pc --lines 4 --count unique --workers ${requested}`,
+    { ...plan, workerCount: requested, rootTaskParallel: true },
     (event) => rootEvents.push(event)
   );
-  assert.deepEqual(initializedWorkerCounts, [2]);
+  assert.deepEqual(initializedWorkerCounts, [requested]);
   assert.deepEqual(
     rootBatchSizes,
     [5],
     'large root families retain the measured five-root work-stealing ceiling'
   );
-  assert.equal(rootWorkersUsed, 2);
+  assert.equal(rootWorkersUsed, finished, 'the control-only source must not add a finished compute worker');
   const rootSearching = rootEvents.find((event) => event.event === 'progress' &&
     event.progress.telemetry?.phase === 'searching' &&
-    event.progress.telemetry.active_workers === 2);
-  assert.ok(rootSearching && rootSearching.event === 'progress', 'root-task telemetry reports both compute workers');
+    event.progress.telemetry.active_workers === finished);
+  assert.ok(rootSearching && rootSearching.event === 'progress', 'root-task telemetry reports actual active compute workers');
+  assert.equal(rootSearching.progress.telemetry?.worker_count, requested);
   assert.equal(rootSearching.progress.telemetry?.geometry_family_count, null,
     'the known count of roots is not a concrete candidate denominator');
   assert.equal(rootSearching.progress.telemetry?.availability.coverage_checks, false,
@@ -242,6 +247,7 @@ assert.deepEqual(
     event.progress.telemetry?.phase === 'merging');
   assert.ok(rootMerging && rootMerging.event === 'progress');
   assert.equal(rootMerging.progress.telemetry?.producer_complete, true);
+  assert.equal(rootMerging.progress.telemetry?.worker_count, requested);
   assert.equal(rootMerging.progress.telemetry?.active_workers, 0,
     'the control-only source is never counted as active compute');
 }

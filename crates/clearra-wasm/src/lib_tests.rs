@@ -4198,7 +4198,12 @@ fn typed_pc_tiling_one_root_keeps_the_product_neutral_coordinator() {
     assert_eq!(coordinator.worker_count(), expected_workers);
     assert!(coordinator.root_task_parallel());
     assert!(coordinator.verification_required());
-    assert_eq!(coordinator.progress().candidate_family_count, Some(1));
+    // This input has one natural piece-multiset root. Its preparation progress
+    // counts the N disjoint scheduling windows, not the one unsplit root.
+    assert_eq!(
+        coordinator.progress().candidate_family_count,
+        Some(expected_workers as u128)
+    );
     drop(coordinator);
 
     let distributed = run_distributed_cpu(&runtime, command);
