@@ -44,7 +44,6 @@ export const japaneseWorkspaceMessages = Object.freeze({
   playerInitialQueueLabel: '開始時のミノ順',
   playerInitialQueueHelp: 'IOTSZJLを任意の長さで順番に入力できます。複数のバッグにまたがっても構いません。入力したミノを使い切るとランダムな7バッグが続きます。大文字と小文字は区別せず、空白とカンマを使用できます。空欄の場合は最初からランダムなバッグを使います。',
   playerInitialQueueInvalid: 'I、O、T、S、Z、J、Lと空白、カンマのみを入力してください。',
-  playerInitialQueueTooLong: '開始時のミノ順には最大{max}個まで入力できます。',
   playerApplyInitialQueue: 'ミノ順を適用',
   playerUseRandomBag: 'ランダムな7バッグを使用',
   playerInitialQueueApplied: '開始時のミノ順を適用しました',

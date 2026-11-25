@@ -3,7 +3,6 @@
   import { createEventDispatcher } from 'svelte';
 
   import {
-    PLAYER_INITIAL_QUEUE_MAX_PIECES,
     PLAYER_UI_NUMBER_CONSTRAINTS,
     createDefaultPlayerUiSettings,
     formatPlayerInitialQueue,
@@ -45,7 +44,7 @@
   export let disabled = false;
   let garbageLinesValid = true;
   let initialQueueText = formatPlayerInitialQueue(settings.initialQueue);
-  let initialQueueError: 'invalid-piece' | 'too-long' | null = null;
+  let initialQueueError: 'invalid-piece' | null = null;
   let lastInitialQueueCanonical = initialQueueText;
 
   type CaptureBindingDetail = {
@@ -338,20 +337,17 @@
   }
 
   function initialQueueCopy(
-    key: 'label' | 'help' | 'invalid' | 'too-long' | 'apply' | 'random',
+    key: 'label' | 'help' | 'invalid' | 'apply' | 'random',
     currentLanguage: WorkspaceLanguage
   ): string {
     const messageKey = ({
       label: 'playerInitialQueueLabel',
       help: 'playerInitialQueueHelp',
       invalid: 'playerInitialQueueInvalid',
-      'too-long': 'playerInitialQueueTooLong',
       apply: 'playerApplyInitialQueue',
       random: 'playerUseRandomBag'
     } as const)[key];
-    return workspaceMessage(currentLanguage, messageKey, {
-      max: PLAYER_INITIAL_QUEUE_MAX_PIECES
-    });
+    return workspaceMessage(currentLanguage, messageKey);
   }
 
   function updateFieldInput(event: Event) {
@@ -630,7 +626,6 @@
           type="text"
           value={initialQueueText}
           placeholder="IOTSZJL"
-          maxlength={PLAYER_INITIAL_QUEUE_MAX_PIECES * 4}
           autocomplete="off"
           autocapitalize="characters"
           spellcheck="false"
@@ -646,10 +641,7 @@
         />
         {#if initialQueueError}
           <p id="player-next-error" class="field-error" role="alert">
-            {initialQueueCopy(
-              initialQueueError === 'too-long' ? 'too-long' : 'invalid',
-              language
-            )}
+            {initialQueueCopy('invalid', language)}
           </p>
         {/if}
       </div>

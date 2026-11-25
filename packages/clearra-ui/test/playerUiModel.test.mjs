@@ -194,32 +194,42 @@ test('an empty starting NEXT restores random-bag mode and malformed queues stay 
     queue: [],
     canonical: ''
   });
-  assert.deepEqual(model.parsePlayerInitialQueue('IOX'), {
-    ok: false,
-    reason: 'invalid-piece',
-    invalidToken: 'X'
-  });
-  assert.equal(
-    model.parsePlayerInitialQueue('I'.repeat(model.PLAYER_INITIAL_QUEUE_MAX_PIECES + 1)).reason,
-    'too-long'
-  );
+  for (const source of ['IOX', `${'IOTSZJL'.repeat(256)}X`]) {
+    assert.deepEqual(model.parsePlayerInitialQueue(source), {
+      ok: false,
+      reason: 'invalid-piece',
+      invalidToken: 'X'
+    });
+  }
 });
 
-test('starting NEXT persistence normalizes and clones its exact engine queue', () => {
-  const parsed = model.parsePlayerInitialQueue('t, i o');
-  assert.equal(parsed.ok, true);
-  const settings = model.createDefaultPlayerUiSettings();
-  settings.initialQueue = parsed.queue;
-  const restored = model.deserializePlayerUiSettings(
-    model.serializePlayerUiSettings(settings)
-  );
+test('starting NEXT persistence normalizes and clones complete short and long queues', () => {
+  for (const [source, canonical] of [
+    ['t, i o', 'TIO'],
+    ['i, o,t, s,z,j,l '.repeat(256), 'IOTSZJL'.repeat(256)]
+  ]) {
+    const parsed = model.parsePlayerInitialQueue(source);
+    assert.equal(parsed.ok, true);
+    assert.equal(parsed.canonical, canonical);
+    assert.deepEqual(parsed.queue, Array.from(canonical));
+    const settings = model.createDefaultPlayerUiSettings();
+    settings.initialQueue = parsed.queue;
+    const restored = model.deserializePlayerUiSettings(
+      model.serializePlayerUiSettings(settings)
+    );
 
-  assert.deepEqual(restored.initialQueue, ['T', 'I', 'O']);
-  assert.equal(model.formatPlayerInitialQueue(restored.initialQueue), 'TIO');
-  assert.notEqual(restored.initialQueue, settings.initialQueue);
+    assert.deepEqual(restored.initialQueue, Array.from(canonical));
+    assert.equal(model.formatPlayerInitialQueue(restored.initialQueue), canonical);
+    assert.notEqual(restored.initialQueue, settings.initialQueue);
 
-  settings.initialQueue = ['T', 'X'];
-  assert.throws(() => model.serializePlayerUiSettings(settings), /initialQueue/i);
+    settings.initialQueue = [...parsed.queue, 'X'];
+    assert.throws(() => model.serializePlayerUiSettings(settings), /initialQueue/i);
+    assert.throws(() => model.deserializePlayerUiSettings(JSON.stringify({
+      version: model.PLAYER_UI_SETTINGS_VERSION,
+      settings
+    })), /initialQueue/i);
+    assert.throws(() => model.formatPlayerInitialQueue(settings.initialQueue), /initial queue/i);
+  }
 });
 
 test('custom score tables round-trip without sharing mutable arrays', () => {

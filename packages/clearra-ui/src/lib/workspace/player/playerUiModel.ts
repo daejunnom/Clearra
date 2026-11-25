@@ -118,11 +118,10 @@ export type PlayerInitialQueueParseResult =
     }>
   | Readonly<{
       ok: false;
-      reason: 'invalid-piece' | 'too-long';
+      reason: 'invalid-piece';
       invalidToken?: string;
     }>;
 
-export const PLAYER_INITIAL_QUEUE_MAX_PIECES = 256;
 export const PLAYER_UI_SETTINGS_VERSION = 6;
 export const PLAYER_UI_SETTINGS_STORAGE_KEY = 'clearra.player.ui.v1';
 
@@ -413,9 +412,6 @@ export function parsePlayerInitialQueue(source: string): PlayerInitialQueueParse
     return { ok: false, reason: 'invalid-piece' };
   }
   const compact = source.replace(/[\s,]+/gu, '');
-  if (compact.length > PLAYER_INITIAL_QUEUE_MAX_PIECES) {
-    return { ok: false, reason: 'too-long' };
-  }
   const queue: PlayerPiece[] = [];
   for (const token of compact.toUpperCase()) {
     if (!isPlayerPiece(token)) {
@@ -434,11 +430,7 @@ export function formatPlayerInitialQueue(queue: readonly PlayerPiece[]): string 
 }
 
 function isValidPlayerInitialQueue(value: unknown): value is PlayerPiece[] {
-  return (
-    Array.isArray(value) &&
-    value.length <= PLAYER_INITIAL_QUEUE_MAX_PIECES &&
-    value.every(isPlayerPiece)
-  );
+  return Array.isArray(value) && value.every(isPlayerPiece);
 }
 
 function playerScoreModelsEqual(left: PlayerScoreModel, right: PlayerScoreModel): boolean {

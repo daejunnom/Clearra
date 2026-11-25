@@ -74,12 +74,12 @@ test('Japanese workspace phrases are translated while identifiers and native lan
 });
 
 test('readiness rejects missing keys and changed interpolation even after Japanese preparation', () => {
-  const invalid = { ...production.japaneseWorkspaceMessages, playerInitialQueueTooLong: '最大{limit}個です。' };
+  const invalid = { ...production.japaneseWorkspaceMessages, progressBuild: '実行検証状態 {limit}' };
   delete invalid.solutionCopyFailed;
   const readiness = production.workspaceCatalogReadiness(invalid);
   assert.equal(readiness.complete, false);
   assert.deepEqual(readiness.missingKeys, ['solutionCopyFailed']);
-  assert.deepEqual(readiness.placeholderMismatches, ['playerInitialQueueTooLong']);
+  assert.deepEqual(readiness.placeholderMismatches, ['progressBuild']);
 });
 
 test('every component phrase contains all known locales and identical placeholders', () => {
