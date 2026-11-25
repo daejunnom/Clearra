@@ -56,7 +56,7 @@ test('Japanese workspace phrases are translated while identifiers and native lan
   const invariantKeys = [
     'ctkDrawer', 'playerPps', 'playerScoreGuideline', 'playerB2b',
     'english', 'korean', 'queuePlaceholder', 'scoreProfileJstrisUltra',
-    'srsPlusAllMini', 'progressBuild'
+    'srsPlusAllMini'
   ];
   const unchanged = [];
   for (const key of production.WORKSPACE_MESSAGE_KEYS) {
@@ -69,6 +69,8 @@ test('Japanese workspace phrases are translated while identifiers and native lan
   }
   assert.deepEqual(unchanged, invariantKeys);
   assert.match(production.workspaceMessage('ja', 'pcSearch'), /探索/u);
+  assert.equal(production.japaneseWorkspaceMessages.progressBuild, '実行検証状態 {count}');
+  assert.equal(production.workspaceMessage('ja', 'progressBuild', { count: 17 }), '実行検証状態 17');
 });
 
 test('readiness rejects missing keys and changed interpolation even after Japanese preparation', () => {

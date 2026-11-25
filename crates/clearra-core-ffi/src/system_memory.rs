@@ -1,4 +1,4 @@
-//! Read-only operating-system capacity at the existing native unsafe boundary.
+//! Read-only operating-system capacity through the native FFI boundary.
 //! Capacity is stable physical/container memory, never a free-memory snapshot.
 
 pub fn native_memory_capacity_bytes() -> Option<u64> {
@@ -72,13 +72,7 @@ fn platform_capacity() -> Option<u64> {
 
 #[cfg(windows)]
 fn platform_capacity() -> Option<u64> {
-    use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
-    // SAFETY: this C record contains only integers, is initialized to zero,
-    // and remains uniquely borrowed for the synchronous system call.
-    let mut memory: MEMORYSTATUSEX = unsafe { core::mem::zeroed() };
-    memory.dwLength = core::mem::size_of::<MEMORYSTATUSEX>() as u32;
-    // SAFETY: dwLength identifies the complete writable record above.
-    (unsafe { GlobalMemoryStatusEx(&mut memory) } != 0).then_some(memory.ullTotalPhys)
+    crate::raw::system_memory::physical_capacity_bytes()
 }
 
 #[cfg(not(any(target_os = "linux", windows)))]

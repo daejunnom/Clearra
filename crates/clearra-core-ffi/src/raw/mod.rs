@@ -14,3 +14,5 @@ pub(crate) mod owned_packing_buffer;
 pub(crate) mod packing_candidate_sink;
 #[cfg(feature = "search-stage-profiling")]
 pub(crate) mod search_profile;
+#[cfg(windows)]
+pub(crate) mod system_memory;
