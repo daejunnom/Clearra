@@ -4,6 +4,7 @@ import type {
 } from '@clearra/ui/wasm';
 
 import { DistributedWasmJobRunner } from './DistributedWasmJobRunner';
+import type { DedicatedDistributedManager, DedicatedManagerFactory } from './DedicatedDistributedManager';
 import { withHostExecutionTiming } from './HostExecutionProfile';
 import { SerialSearchProgress } from './SerialSearchProgress';
 import type { SharedExecutionResourceAuthority } from './SharedExecutionResourceAuthority';
@@ -17,7 +18,7 @@ import type {
 } from './clearraWasmRuntime';
 
 export class ClearraProductJobRunner {
-  private activeRunner: WasmJobRunner | DistributedWasmJobRunner | null = null;
+  private activeRunner: WasmJobRunner | DistributedWasmJobRunner | DedicatedDistributedManager | null = null;
 
   constructor(
     private readonly wasm: ClearraWasmModule,
@@ -27,7 +28,8 @@ export class ClearraProductJobRunner {
     private readonly resourceAuthority?: SharedExecutionResourceAuthority,
     private readonly resourceWaitTimeoutMs?: number,
     private readonly legalBoardSynopsis?: AcceleratorWorkerSynopsis | null,
-    private readonly conditionedPack?: AcceleratorWorkerRelation | null
+    private readonly conditionedPack?: AcceleratorWorkerRelation | null,
+    private readonly dedicatedManager?: { create: DedicatedManagerFactory; release: () => void }
   ) {}
 
   async run(
@@ -56,6 +58,7 @@ export class ClearraProductJobRunner {
       onEvent(preparationProgressEvent(this.jobId));
       await distributed.acquire();
       if (options.tablebaseRequested) {
+        this.dedicatedManager?.release();
         if (!options.onlinePc4 || !this.wasm.configure_online_pc4) throw new Error('pc4_online_generation_unavailable');
         this.wasm.configure_online_pc4(options.onlinePc4);
         const online = new WasmJobRunner(this.wasm, options.onlinePc4);
@@ -63,15 +66,28 @@ export class ClearraProductJobRunner {
         try { return await online.run(commandText, emit); }
         finally { distributed.dispose(); this.wasm.configure_online_pc4(null); }
       }
-      const plan = distributed.prepare(commandText);
+      const plan = await distributed.prepare(commandText);
       if (preparationStarted !== null) preparationMs = performance.now() - preparationStarted;
+      if (plan.mode !== 'serial' && plan.mode !== 'ready' &&
+          plan.rootTaskParallel !== true && this.dedicatedManager) {
+        const manager = this.dedicatedManager.create({
+          wasm: this.wasm, jobId: this.jobId, lifecycleOwnerId: this.lifecycleOwnerId,
+          hostCapabilities: this.hostCapabilities,
+          legalBoardSynopsis: this.legalBoardSynopsis, conditionedPack: this.conditionedPack
+        });
+        const grant = distributed.handoffPreparedSource();
+        this.activeRunner = manager;
+        try { return await manager.run(commandText, plan, grant, emit, options); }
+        finally { distributed.dispose(); }
+      }
+      this.dedicatedManager?.release();
       if (plan.mode === 'ready') {
-        return distributed.finishPreparedResult(emit);
+        return await distributed.finishPreparedResult(emit);
       }
       if (plan.mode !== 'serial') {
         return await distributed.run(commandText, plan, emit, options);
       }
-      distributed.resetPreparedCoordinatorForSerial();
+      await distributed.resetPreparedCoordinatorForSerial();
       const serialProgress = new SerialSearchProgress(serialExecutionProgressEvent(this.jobId));
       onEvent(serialProgress.initialEvent);
       const serial = new WasmJobRunner(this.wasm);

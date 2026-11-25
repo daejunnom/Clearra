@@ -52,10 +52,10 @@ const pool = {
   finishTransportProfile() { return { schema: 'clearra.verifier-transport-profile.v1', timings: {} }; },
   async initialize() {},
   async enqueue() {},
-  async enqueueFromSource(takeTask: () => ArrayBuffer | null, consume: (receipt: ArrayBuffer) => void) {
-    const task = takeTask();
+  async enqueueFromSource(takeTask: () => ArrayBuffer | null | Promise<ArrayBuffer | null>, consume: (receipt: ArrayBuffer) => void | Promise<void>) {
+    const task = await takeTask();
     if (task === null) return false;
-    await (this.enqueue as (task: ArrayBuffer, consume: (receipt: ArrayBuffer) => void) => Promise<void>)(task, consume);
+    await (this.enqueue as (task: ArrayBuffer, consume: (receipt: ArrayBuffer) => void | Promise<void>) => Promise<void>)(task, consume);
     return true;
   },
   async waitForIdle() {},
@@ -1165,10 +1165,10 @@ const proofPool = {
       assert.equal(args[1], 2);
     }
   },
-  async enqueue(task: ArrayBuffer, merge: (value: ArrayBuffer) => void) {
+  async enqueue(task: ArrayBuffer, merge: (value: ArrayBuffer) => void | Promise<void>) {
     assert.equal(proofMode, true);
     assert.equal(new Uint8Array(task)[0], proofTasksIssued);
-    merge(task);
+    await merge(task);
   },
   async completeAtomicTasks() {
     assert.equal(proofReceiptsMerged, 4);
@@ -1243,14 +1243,14 @@ for (const workerCount of [1, 2, 8, 32]) {
       _recovery: unknown, _host: unknown, kind?: string) {
       if (kind === 'exact-at-most') assert.equal(count, workerCount, 'N compute slots stay on remote workers, including all-vCPU and N1');
     },
-    async enqueue(task: ArrayBuffer, merge: (receipt: ArrayBuffer) => void) { merge(task); },
+    async enqueue(task: ArrayBuffer, merge: (receipt: ArrayBuffer) => void | Promise<void>) { await merge(task); },
     async completeAtomicTasks() { remoteCompleted = true; return workerCount; },
     progressSnapshot() {
       return { ...completedProgress, activeWorkers: workerCount, readyWorkers: workerCount, workerCount };
     },
     cancelExactTasks() { throw new Error('a negative query cannot cancel siblings'); }
   } as never);
-  await runner.run('clearra pc minimals --patterns P7', { ...plan, workerCount }, (event) => {
+  await runner.run('clearra pc minimals --patterns P7', { ...plan, workerCount, rootTaskParallel: true }, (event) => {
     if (event.event === 'final_response' || event.event === 'failed') {
       const profile = (event as unknown as { search_profile: {
         core_marker: boolean; minimum_parallel: NonNullable<typeof minimumProfile>
@@ -1299,7 +1299,7 @@ for (const workerCount of [1, 2, 8, 32]) {
   let childrenMerged = 0;
   let parentDrained = false;
   const frontier = [1];
-  const pending = new Map<number, { key: ArrayBuffer; merge: (receipt: ArrayBuffer) => void }>();
+  const pending = new Map<number, { key: ArrayBuffer; merge: (receipt: ArrayBuffer) => void | Promise<void> }>();
   const merged: number[] = [];
   const key = (id: number) => { const bytes = new Uint8Array(56); bytes[55] = id; return bytes.buffer; };
   await new DistributedWasmJobRunner({
@@ -1311,6 +1311,9 @@ for (const workerCount of [1, 2, 8, 32]) {
     },
     distributed_finish_parallel_task() {
       lastIssued = frontier.shift() ?? 0;
+      // Simulate another source activity at the next microtask boundary: the
+      // task's routing identity must already be captured before that yield.
+      void Promise.resolve().then(() => { lastIssued = 255; });
       return lastIssued === 0 ? null : Uint8Array.of(lastIssued).buffer;
     },
     distributed_finish_parallel_last_task_key: () => key(lastIssued),
@@ -1336,15 +1339,19 @@ for (const workerCount of [1, 2, 8, 32]) {
     }
   }, 959, 'idle-parent-assistance', finishHost, {
     ...pool,
-    async enqueueFromSource(take: () => ArrayBuffer | null, merge: (receipt: ArrayBuffer) => void, readKey: () => ArrayBuffer) {
-      const task = take(); if (task === null) return false;
-      const id = new Uint8Array(task)[0]; pending.set(id, { key: readKey(), merge });
-      if (id !== 1) queueMicrotask(() => { pending.delete(id); merge(task); });
+    async enqueueFromSource(take: () => ArrayBuffer | null | Promise<ArrayBuffer | null>, merge: (receipt: ArrayBuffer) => void | Promise<void>, readKey: () => ArrayBuffer | Promise<ArrayBuffer>) {
+      const task = await take(); if (task === null) return false;
+      const id = new Uint8Array(task)[0];
+      const taskKey = await readKey();
+      assert.equal(new Uint8Array(taskKey)[55], id, 'local task/key reads share one source turn');
+      pending.set(id, { key: taskKey, merge });
+      if (id !== 1) { pending.delete(id); await merge(task); }
       return true;
     },
-    cancelRedundantExactTasks(redundant: (key: ArrayBuffer) => boolean) {
-      for (const [id, owner] of pending) if (redundant(owner.key)) {
-        pending.delete(id); owner.merge(Uint8Array.of(id).buffer);
+    async cancelRedundantExactTasks(redundant: (key: ArrayBuffer) => boolean | Promise<boolean>) {
+      for (const [id, owner] of pending) if (await redundant(owner.key)) {
+        if (pending.get(id) !== owner) continue;
+        pending.delete(id); await owner.merge(Uint8Array.of(id).buffer);
       }
     },
     async completeAtomicTasks() { assert.equal(pending.size, 0); return 2; },
@@ -1398,7 +1405,7 @@ for (const enabled of [false, true]) {
         initialized += 1;
       }
     },
-    async enqueue(task: ArrayBuffer, merge: (receipt: ArrayBuffer) => void) { merge(task); },
+    async enqueue(task: ArrayBuffer, merge: (receipt: ArrayBuffer) => void | Promise<void>) { await merge(task); },
     async waitForIdle() {
       if (merged.length >= 1) countWindowReleased = true;
       if (merged.length >= 2) pageReady = true;
@@ -1414,7 +1421,7 @@ let positiveCancellationWaves = 0;
 let positiveTransportComplete = false;
 const positiveProofPool = {
   ...pool,
-  async enqueue(task: ArrayBuffer, merge: (value: ArrayBuffer) => void) { merge(task); },
+  async enqueue(task: ArrayBuffer, merge: (value: ArrayBuffer) => void | Promise<void>) { await merge(task); },
   cancelExactTasks() { positiveCancellationWaves += 1; },
   async completeAtomicTasks() {
     assert.equal(positiveReceiptsMerged, positiveTasksIssued, 'positive witness still drains every issued receipt');
@@ -1603,7 +1610,7 @@ for (const sample of [
         pools.push(count);
       }
     },
-    async enqueue(task: ArrayBuffer, merge: (receipt: ArrayBuffer) => void) { merge(task); },
+    async enqueue(task: ArrayBuffer, merge: (receipt: ArrayBuffer) => void | Promise<void>) { await merge(task); },
     async completeAtomicTasks() { return sample.expected; },
     progressSnapshot() { return proofPool ? { ...emptyProgress, activeWorkers: sample.expected,
       readyWorkers: sample.expected, workerCount: sample.expected } : completedProgress; }
@@ -1699,13 +1706,13 @@ for (const sample of [
       });
       await ready;
     },
-    async enqueueFromSource(take: () => ArrayBuffer | null, merge: (receipt: ArrayBuffer) => void) {
+    async enqueueFromSource(take: () => ArrayBuffer | null | Promise<ArrayBuffer | null>, merge: (receipt: ArrayBuffer) => void | Promise<void>) {
       assert.ok(remoteInitializationStarted);
       dispatchWaitedForReady ||= !remoteInitializationCompleted;
       await ready;
-      const task = take();
+      const task = await take();
       if (task === null) return false;
-      merge(task);
+      await merge(task);
       return true;
     },
     async completeAtomicTasks() { drained = true; return 2; }

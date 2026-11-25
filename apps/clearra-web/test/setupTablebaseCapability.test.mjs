@@ -1,6 +1,22 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
+import {
+  buildWorkspaceCommand,
+  buildWorkspaceCommandArguments,
+  createDefaultWorkspaceRequest,
+  normalizeWorkspaceRequest,
+  workspaceRequestForDesktop
+} from '../../../packages/clearra-ui/src/lib/workspace/solverWorkspaceModel.ts';
+import {
+  buildSetupFinderCommand,
+  buildSetupFinderCommandArguments,
+  buildSetupPathDetailCommandArguments,
+  createDefaultSetupFinderRequest,
+  setupFinderRequestForDesktop
+} from '../../../packages/clearra-ui/src/lib/workspace/setupFinderModel.ts';
+import { serializeCliCommandArguments }
+  from '../../../packages/clearra-ui/src/lib/workspace/cliCommandModel.ts';
 
 const read = relative => readFile(new URL(relative, import.meta.url), 'utf8');
 
@@ -26,25 +42,36 @@ test('host qualification keeps PC and Setup target authority separate', async ()
   assert.match(worker, /setupSearchTargetLines:\s*setup_search_target_lines\s*\?\?\s*\[\]/u);
 });
 
-test('PC surface requires the selected profile and exact target receipt', async () => {
-  const controls = await read('../../../packages/clearra-ui/src/lib/workspace/SearchControls.svelte');
-  assert.match(controls, /profile\.pcSearchTargetLines\?\.includes\(lines\)/u);
-  assert.doesNotMatch(controls, /disabled=\{!pcTablebaseAvailable/u);
-  assert.doesNotMatch(controls, /if \(!pcTablebaseAvailable && request\.tablebaseEnabled\)/u);
-  assert.match(
-    controls,
-    /targetIdentityChanged[\s\S]*\{ \.\.\.next, tablebaseEnabled: false \}/u
-  );
-  assert.match(
-    controls,
-    /tablebaseStatus === 'loading'[\s\S]*\? 'loading'/u
-  );
-  assert.match(
-    controls,
-    /slot\.status === 'ready' && slot\.pcSearchTargetLines\?\.includes\(request\.lines\)/u
-  );
-  assert.doesNotMatch(controls, /request\.lines\s*!==\s*4/u);
+test('PC GUI defaults keep tablebase off through execution and both transports', async () => {
+  const defaults = createDefaultWorkspaceRequest();
+  assert.equal(defaults.tablebaseEnabled, false);
+  for (const scoreMode of ['off', 'tiling', 'minimum-cover', 'failed-queue',
+    'summary', 'score-finder', 'score-minimals', 'path']) {
+    const request = { ...defaults, scoreMode, workers: 7, queue: 'IJLOSTZ' };
+    assert.equal(normalizeWorkspaceRequest(request).tablebaseEnabled, false, scoreMode);
+    const args = buildWorkspaceCommandArguments(request);
+    assert.equal(args.includes('--tablebase'), false, scoreMode);
+    assert.equal(args.includes('--no-tablebase'), !['tiling', 'score-finder'].includes(scoreMode), scoreMode);
+    assert.equal(args[args.indexOf('--workers') + 1], '7', 'tablebase defaults must not reduce compute workers');
+    assert.equal(buildWorkspaceCommand(request), serializeCliCommandArguments(args), scoreMode);
+    assert.deepEqual(workspaceRequestForDesktop(request, 'ko').arguments, args, scoreMode);
+  }
+  // Explicit canonical callers retain the engine option. Geometry-only and
+  // score-finder projections keep their existing unsupported-option policy.
+  for (const scoreMode of ['off', 'path', 'minimum-cover', 'summary']) {
+    const request = { ...defaults, scoreMode, tablebaseEnabled: true };
+    assert.ok(buildWorkspaceCommandArguments(request).includes('--tablebase'), scoreMode);
+    assert.ok(workspaceRequestForDesktop(request, 'ko').arguments.includes('--tablebase'), scoreMode);
+  }
+  for (const scoreMode of ['tiling', 'score-finder']) {
+    const request = { ...defaults, scoreMode, tablebaseEnabled: true };
+    assert.equal(normalizeWorkspaceRequest(request).tablebaseEnabled, false, scoreMode);
+    assert.equal(buildWorkspaceCommandArguments(request).includes('--tablebase'), false, scoreMode);
+  }
 
+  const controls = await read('../../../packages/clearra-ui/src/lib/workspace/SearchControls.svelte');
+  assert.doesNotMatch(controls, /class="tablebase-control"|label\('tablebase'\)/u);
+  assert.match(controls, /targetIdentityChanged[\s\S]*\{ \.\.\.next, tablebaseEnabled: false \}/u);
   const workspace = await read('../../../packages/clearra-ui/src/lib/workspace/SolverWorkspace.svelte');
   assert.match(workspace, /profile\.pcSearchTargetLines\?\.includes\(request\.lines\)/u);
   assert.match(
@@ -63,19 +90,29 @@ test('PC surface requires the selected profile and exact target receipt', async 
   assert.match(japanese, /readerの準備完了だけでは利用できず/u);
 });
 
-test('Setup surface stays fail-closed until an exact SetupSearch target is qualified', async () => {
+test('Setup GUI defaults are off while explicit tablebase callers retain exact qualification', async () => {
+  const defaults = createDefaultSetupFinderRequest();
+  assert.equal(defaults.tablebaseEnabled, false);
+  for (const tablebaseEnabled of [false, true]) {
+    const request = { ...defaults, tablebaseEnabled, useAllLogicalProcessors: true };
+    const expectedOption = tablebaseEnabled ? '--tablebase' : '--no-tablebase';
+    const args = buildSetupFinderCommandArguments(request, 7);
+    assert.ok(args.includes(expectedOption));
+    assert.equal(args.includes(tablebaseEnabled ? '--no-tablebase' : '--tablebase'), false);
+    assert.equal(args[args.indexOf('--auto-workers') + 1], '7');
+    assert.ok(args.includes('--use-all-cpu-threads'));
+    assert.equal(buildSetupFinderCommand(request, 7), serializeCliCommandArguments(args));
+    assert.deepEqual(setupFinderRequestForDesktop(request, 'ko', 7).arguments, args);
+    const detail = { setupId: 'setup-1', conditionId: 'condition-1' };
+    const detailArgs = buildSetupPathDetailCommandArguments(request, detail, 1);
+    assert.ok(detailArgs.includes(expectedOption), 'path detail keeps the source request option');
+    assert.deepEqual(setupFinderRequestForDesktop(request, 'ko', 1, detail).arguments, detailArgs);
+  }
   const controls = await read('../../../packages/clearra-ui/src/lib/workspace/SetupFinderControls.svelte');
-  assert.match(controls, /export let tablebaseControlAvailable = false/u);
-  assert.match(controls, /\{#if tablebaseControlAvailable\}[\s\S]*class="tablebase-control"/u);
-  assert.match(controls, /setupSearchTargetLines\?\.includes\(4\)/u);
-  assert.doesNotMatch(controls, /disabled=\{!setupTablebaseAvailable\}/u);
-  assert.doesNotMatch(controls, /if \(!setupTablebaseAvailable && request\.tablebaseEnabled\)/u);
-  assert.match(controls, /tablebaseStatus === 'loading'[\s\S]*\? 'loading'/u);
-  assert.match(controls, /setupTablebaseHelp/u);
-  assert.doesNotMatch(controls, /label\('tablebaseHelp'\)/u);
+  assert.doesNotMatch(controls, /tablebaseControlAvailable|class="tablebase-control"|label\('tablebase'\)/u);
+  assert.match(controls, /next\.rule === request\.rule[\s\S]*\{ \.\.\.next, tablebaseEnabled: false \}/u);
 
   const workspace = await read('../../../packages/clearra-ui/src/lib/workspace/SetupFinderWorkspace.svelte');
-  assert.match(workspace, /tablebaseControlAvailable=\{runtime === 'web'\}/u);
   assert.match(workspace, /profile\.setupSearchTargetLines\?\.includes\(4\)/u);
   assert.match(workspace, /tablebaseBlocked[\s\S]*!setupTablebaseAvailable/u);
   assert.match(workspace, /runDisabled=\{validationCodes\.length > 0 \|\| tablebaseBlocked\}/u);

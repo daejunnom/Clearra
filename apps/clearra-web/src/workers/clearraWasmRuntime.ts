@@ -44,7 +44,7 @@ export type AcceleratorWorkerRelation = {
   identity: string;
   reservedBytes: number;
   maximumPeers: number;
-  answerQueries: (wire: ArrayBuffer) => ArrayBuffer;
+  answerQueries: (wire: ArrayBuffer) => ArrayBuffer | Promise<ArrayBuffer>;
 };
 export type ClearraWasmModule = {
   accelerator_catalog?: (kind: number, profile: number) => AcceleratorCatalogPlan;

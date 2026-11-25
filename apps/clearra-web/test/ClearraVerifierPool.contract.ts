@@ -997,8 +997,8 @@ assert.equal(latchWorker.cancellationIds.length, 1, 'previous query cancellation
   await selective.enqueueFromSource(() => Uint8Array.of(2).buffer, () => undefined, () => key(2));
   // Cancellation can arrive while the selected task is still publishing its
   // durable executable; it must latch for that task, but not the client's next.
-  selective.cancelRedundantExactTasks((value) => new Uint8Array(value)[55] === 1);
-  selective.cancelRedundantExactTasks((value) => new Uint8Array(value)[55] === 1);
+  await selective.cancelRedundantExactTasks((value) => new Uint8Array(value)[55] === 1);
+  await selective.cancelRedundantExactTasks((value) => new Uint8Array(value)[55] === 1);
   await selective.waitForIdle();
   assert.equal(selectiveWorkers.reduce((sum, worker) => sum + worker.cancellationIds.length, 0), 1);
   await selective.enqueueFromSource(() => Uint8Array.of(3).buffer, () => undefined, () => key(3));
@@ -1008,7 +1008,7 @@ assert.equal(latchWorker.cancellationIds.length, 1, 'previous query cancellation
   await selective.completeAtomicTasks();
   await selective.initialize(new ArrayBuffer(0), 1, undefined, 'selective-next-query');
   let staleKeys = 0;
-  selective.cancelRedundantExactTasks(() => { staleKeys += 1; return true; });
+  await selective.cancelRedundantExactTasks(() => { staleKeys += 1; return true; });
   assert.equal(staleKeys, 0, 'previous query routing keys are not retained');
   await assert.rejects(selective.enqueueFromSource(() => Uint8Array.of(4).buffer, () => undefined,
     () => new ArrayBuffer(16)), /full core identity/);
@@ -1781,3 +1781,128 @@ await bounded(
   'saturated telemetry finish',
   saturatedTelemetryPool.finish(() => undefined)
 );
+
+// The source may execute in a different worker. Its merge must finish before
+// the durable receipt is acknowledged or the next sealed result is applied.
+for (const outcome of ['complete', 'cancel', 'reject'] as const) {
+  const { pool, workers, authority } = await controlledFinishPool(`remote-merge-${outcome}`);
+  const entered = signal();
+  const release = signal();
+  const bothSealed = signal();
+  let applications = 0;
+  let acknowledgements = 0;
+  let sealedCount = 0;
+  const originalSeal = authority.resultSealed.bind(authority);
+  authority.resultSealed = async (...args) => {
+    await originalSeal(...args);
+    if (++sealedCount === 2) bothSealed.resolve();
+  };
+  const originalCommit = authority.resultAppliedAndCompleted.bind(authority);
+  authority.resultAppliedAndCompleted = async (...args) => {
+    acknowledgements += 1;
+    return originalCommit(...args);
+  };
+  const finished = pool.finish(async () => {
+    applications += 1;
+    if (applications === 1) {
+      entered.resolve();
+      await release.promise;
+      if (outcome === 'reject') throw new Error('remote source merge rejected');
+    }
+  });
+  const settled = finished.then(count => ({ count }), (error: unknown) => ({ error }));
+  await bounded('remote merge finalizers start', Promise.all(workers.map(worker => worker.finishStarted.promise)));
+  workers[0].releaseFinish();
+  await bounded('source merge enters asynchronous owner', entered.promise);
+  workers[1].releaseFinish();
+  await bounded('both remote results are sealed', bothSealed.promise);
+  await new Promise<void>(resolve => setTimeout(resolve, 0));
+  assert.equal(applications, 1, 'another result cannot overtake the remote merge');
+  assert.equal(acknowledgements, 0, 'a pending remote merge is not a completed result');
+  if (outcome === 'cancel') pool.cancel();
+  release.resolve();
+  const result = await bounded('remote merge settles', settled);
+  if (outcome === 'complete') {
+    assert.deepEqual(result, { count: 2 });
+    assert.equal(acknowledgements, 2);
+  } else {
+    assert.ok('error' in result && result.error instanceof Error);
+    assert.match(result.error.message, outcome === 'cancel' ? /cancelled/ : /result commit failed/);
+    assert.equal(applications, 1);
+    assert.equal(acknowledgements, 0);
+  }
+  pool.cancel();
+}
+
+for (const outcome of ['complete', 'cancel', 'finish'] as const) {
+  const worker = new ControlledConsumeVerifierWorker();
+  const pool = new ClearraVerifierPool(() => worker as unknown as Worker);
+  await pool.initialize(new ArrayBuffer(0), 1, undefined, `remote-source-${outcome}`);
+  const entered = signal();
+  const release = signal();
+  const issuing = pool.enqueueFromSource(async () => {
+    entered.resolve();
+    await release.promise;
+    return Uint8Array.of(6).buffer;
+  }, () => undefined, async () => new ArrayBuffer(56));
+  const issued = issuing.then(value => ({ value }), (error: unknown) => ({ error }));
+  await bounded('remote source call is admitted', entered.promise);
+  let idle = false;
+  const draining = pool.waitForIdle().then(() => { idle = true; }, error => error);
+  await Promise.resolve();
+  assert.equal(idle, false, 'pending source admission belongs to the drain');
+  let finishing: Promise<unknown> | undefined;
+  if (outcome === 'cancel') pool.cancel();
+  if (outcome === 'finish') finishing = pool.finish(() => undefined).catch(error => error);
+  release.resolve();
+  const result = await bounded('remote source claim settles', issued);
+  if (outcome === 'complete') {
+    assert.deepEqual(result, { value: true });
+    await bounded('remote source reaches its reserved executor', worker.consumeStarted.promise);
+    assert.equal(idle, false, 'the drain also owns the task dispatched by the source');
+    worker.releaseConsume();
+    await bounded('source and executor drain together', draining);
+    const values: number[] = [];
+    assert.equal(await pool.finish(partial => { values.push(new Uint8Array(partial)[0]); }), 1);
+    assert.deepEqual(values, [6]);
+  } else {
+    assert.ok('error' in result && result.error instanceof Error);
+    assert.match(result.error.message, outcome === 'cancel' ? /cancelled/ : /issuance is closed/);
+    await bounded('closed source drain settles', draining);
+    if (finishing) {
+      const error = await bounded('terminal drain rejects an unissued remote claim', finishing);
+      assert.ok(error instanceof Error);
+    }
+  }
+  pool.cancel();
+}
+
+// A reply from the retired relation owner must neither reach a replacement
+// verifier session nor terminate it when the old source rejects the lookup.
+for (const rejects of [false, true]) {
+  const worker = new ConditionedVerifierWorker();
+  const pool = new ClearraVerifierPool(() => worker as unknown as Worker);
+  const release = signal();
+  const answered = signal();
+  await pool.initialize(new ArrayBuffer(0), 1, undefined, 'remote-relation-owner', 'atomic-task',
+    undefined, 'geometry-verifier', null,
+    { profile: 1, seed: Uint8Array.of(1).buffer, identity: 'remote-relation',
+      reservedBytes: 1024, maximumPeers: 1, answerQueries: async wire => {
+        await release.promise;
+        answered.resolve();
+        if (rejects) throw new Error('retired relation source failed');
+        return wire.slice(0);
+      } });
+  worker.query();
+  await pool.finish(() => undefined);
+  await bounded('replacement relation session starts',
+    pool.initialize(new ArrayBuffer(0), 1, undefined, 'remote-relation-owner'));
+  release.resolve();
+  await bounded('old relation owner answers', answered.promise);
+  await new Promise<void>(resolve => setTimeout(resolve, 0));
+  assert.equal(worker.replies.length, 0);
+  assert.equal(worker.terminated, false);
+  await pool.enqueue(Uint8Array.of(2).buffer, () => undefined);
+  await pool.finish(() => undefined);
+  pool.cancel();
+}

@@ -708,12 +708,22 @@ class VerifierClient {
           if (!(response.wire instanceof ArrayBuffer) || response.wire.byteLength > 256 * 1024) {
             throw new Error('bounded relation query rejected');
           }
-          // Synchronous immutable lookup runs between root WASM quanta.
-          // There is no network, waiting, or separate compute delegation.
-          const wire = broker.relation.answerQueries(response.wire);
-          if (wire.byteLength > 256 * 1024) throw new Error('bounded relation reply rejected');
-          worker.postMessage({ type: 'conditioned-reply', profile: response.profile,
-            session: response.session, wire }, [wire]);
+          const reply = broker.relation.answerQueries(response.wire);
+          const postReply = (wire: ArrayBuffer) => {
+            if (this.worker !== worker || this.relationBroker !== broker) return;
+            if (!(wire instanceof ArrayBuffer) || wire.byteLength > 256 * 1024) {
+              throw new Error('bounded relation reply rejected');
+            }
+            worker.postMessage({ type: 'conditioned-reply', profile: response.profile,
+              session: response.session, wire }, [wire]);
+          };
+          if (isPromise(reply)) {
+            void reply.then(postReply).catch((error) => {
+              if (this.worker === worker && this.relationBroker === broker) {
+                this.onFatalWorkerError(asError(error));
+              }
+            });
+          } else postReply(reply);
         } catch (error) {
           this.onFatalWorkerError(asError(error)); // invalidate even idle, already sealed partials
         }
@@ -1092,6 +1102,9 @@ class VerifierClient {
   }
 }
 
+type PartialConsumer = ((partial: ArrayBuffer) => void) |
+  ((partial: ArrayBuffer) => Promise<void>);
+
 export class ClearraVerifierPool {
   private readonly transportProfile = new VerifierTransportProfile();
   beginTransportProfile() { this.transportProfile.begin(); }
@@ -1099,6 +1112,7 @@ export class ClearraVerifierPool {
   private clients: VerifierClient[] = [];
   private waiters: PoolWaiter[] = [];
   private inFlight = new Set<Promise<void>>();
+  private sourceAdmissions = new Set<Promise<void>>();
   private resultCommitTail: Promise<void> = Promise.resolve();
   private leasedClients = new Set<VerifierClient>();
   private exactTaskKeys = new Map<VerifierClient, { key: ArrayBuffer; cancelled: boolean }>();
@@ -1191,6 +1205,7 @@ export class ClearraVerifierPool {
     this.issuanceClosed = false;
     this.failure = null;
     this.resultCommitTail = Promise.resolve();
+    this.sourceAdmissions.clear();
     // All durable v0.8 modes seal an immutable task result before merger
     // application. The legacy `streaming` label is accepted as an input
     // compatibility spelling but does not re-enable streaming application.
@@ -1250,16 +1265,16 @@ export class ClearraVerifierPool {
     }
   }
 
-  async enqueue(batch: ArrayBuffer, consumePartial: (partial: ArrayBuffer) => void) {
+  async enqueue(batch: ArrayBuffer, consumePartial: PartialConsumer) {
     await this.enqueueFromSource(() => batch, consumePartial);
   }
 
   /** Reserve a ready executor before issuing an exact task from its owner.
    * No task is held in a host queue while every remote executor is busy. */
   async enqueueFromSource(
-    takeTask: () => ArrayBuffer | null,
-    consumePartial: (partial: ArrayBuffer) => void,
-    taskKey?: () => ArrayBuffer
+    takeTask: () => ArrayBuffer | null | Promise<ArrayBuffer | null>,
+    consumePartial: PartialConsumer,
+    taskKey?: () => ArrayBuffer | Promise<ArrayBuffer>
   ): Promise<boolean> {
     const generation = this.generation;
     this.assertActive(generation);
@@ -1276,16 +1291,26 @@ export class ClearraVerifierPool {
     }
     readyWait();
     this.leasedClients.add(client);
+    let admission: Promise<void> | undefined;
+    let closeAdmission: (() => void) | undefined;
+    const retainAdmission = () => {
+      if (admission) return;
+      admission = new Promise<void>((resolve) => { closeAdmission = resolve; });
+      this.sourceAdmissions.add(admission);
+    };
     let batch: ArrayBuffer | null;
     try {
-      // There is no await between reserving this client, issuing the task and
-      // handing it to the fenced durable operation. A reentrant cancellation
-      // or new generation cannot publish the old task in its replacement.
-      batch = takeTask();
+      // A remote source retains its compute state. Reserve this executor while
+      // the source answers and fence ownership again after every async boundary.
+      const taken = takeTask();
+      if (isPromise(taken)) retainAdmission();
+      batch = isPromise(taken) ? await taken : taken;
       this.assertActive(generation);
       this.assertIssuanceOpen();
       if (batch !== null && taskKey) {
-        const key = taskKey();
+        const takenKey = taskKey();
+        if (isPromise(takenKey)) retainAdmission();
+        const key = isPromise(takenKey) ? await takenKey : takenKey;
         if (key.byteLength !== 56) throw new Error('exact task routing key must contain its full core identity');
         this.assertActive(generation);
         this.assertIssuanceOpen();
@@ -1296,8 +1321,14 @@ export class ClearraVerifierPool {
         this.leasedClients.delete(client);
         this.exactTaskKeys.delete(client);
         this.wakeNextWaiter();
+        // A terminal drain cannot succeed while a reserved source call may
+        // already have claimed work that is now forbidden from dispatching.
+        if (this.active && this.issuanceClosed) this.fail(error);
       }
       throw error;
+    } finally {
+      if (admission) this.sourceAdmissions.delete(admission);
+      closeAdmission?.();
     }
     if (batch === null) {
       this.leasedClients.delete(client);
@@ -1320,7 +1351,7 @@ export class ClearraVerifierPool {
   }
 
   async finish(
-    consumePartial: (partial: ArrayBuffer) => void,
+    consumePartial: PartialConsumer,
     options: ClearraVerifierPoolFinishOptions = {}
   ): Promise<number> {
     const generation = this.generation;
@@ -1351,8 +1382,10 @@ export class ClearraVerifierPool {
 
   async waitForIdle(): Promise<void> {
     const generation = this.generation;
-    await Promise.allSettled([...this.inFlight]);
-    this.assertActive(generation);
+    do {
+      await Promise.allSettled([...this.sourceAdmissions, ...this.inFlight]);
+      this.assertActive(generation);
+    } while (this.sourceAdmissions.size > 0 || this.inFlight.size > 0);
   }
 
   /** Backpressure is not more producer work. Suspend until one exact result
@@ -1386,12 +1419,17 @@ export class ClearraVerifierPool {
     for (const client of this.clients) client.cancelExactTasks();
   }
 
-  cancelRedundantExactTasks(redundant: (key: ArrayBuffer) => boolean): void {
+  async cancelRedundantExactTasks(
+    redundant: (key: ArrayBuffer) => boolean | Promise<boolean>
+  ): Promise<void> {
     const generation = this.generation;
     this.assertActive(generation);
     for (const [client, task] of this.exactTaskKeys) {
-      if (!task.cancelled && redundant(task.key)) {
-        this.assertActive(generation);
+      if (task.cancelled) continue;
+      const decision = redundant(task.key);
+      const isRedundant = isPromise(decision) ? await decision : decision;
+      this.assertActive(generation);
+      if (isRedundant && this.exactTaskKeys.get(client) === task && !task.cancelled) {
         task.cancelled = true;
         client.cancelCurrentExactTask();
       }
@@ -1469,6 +1507,7 @@ export class ClearraVerifierPool {
     for (const client of this.clients) client.terminate();
     this.clients = [];
     this.inFlight.clear();
+    this.sourceAdmissions.clear();
     this.leasedClients.clear();
     this.exactTaskKeys.clear();
     this.targetWorkerCount = 0;
@@ -1525,7 +1564,7 @@ export class ClearraVerifierPool {
   private async consumeLease(
     initialClient: VerifierClient,
     batch: ArrayBuffer,
-    consumePartial: (partial: ArrayBuffer) => void,
+    consumePartial: PartialConsumer,
     generation: number
   ): Promise<void> {
     let client = initialClient;
@@ -1542,7 +1581,7 @@ export class ClearraVerifierPool {
 
   private commitResult(
     result: DelegatedVerifierResponse,
-    consumePartial: (partial: ArrayBuffer) => void,
+    consumePartial: PartialConsumer,
     generation: number
   ): Promise<void> {
     // Once the worker hands a sealed result to the pool, release() can no
@@ -1597,6 +1636,7 @@ export class ClearraVerifierPool {
     for (const client of this.clients) client.terminate();
     this.clients = [];
     this.inFlight.clear();
+    this.sourceAdmissions.clear();
     this.leasedClients.clear();
     this.exactTaskKeys.clear();
     this.targetWorkerCount = 0;
@@ -1764,11 +1804,12 @@ function withTimeout<T>(operation: Promise<T>, timeoutMs: number, label: string)
 }
 
 function commitPartial(
-  consumePartial: (partial: ArrayBuffer) => void,
+  consumePartial: PartialConsumer,
   partial: ArrayBuffer
 ) {
   try {
-    consumePartial(partial);
+    const result = consumePartial(partial);
+    if (isPromise(result)) return result.catch((error) => { throw new VerifierCommitError(error); });
   } catch (error) {
     throw new VerifierCommitError(error);
   }
@@ -1844,7 +1885,7 @@ function canonicalVerifierReply(response: VerifierResponse): unknown {
 
 async function applySealedVerifierResult(
   sealed: DelegatedVerifierResponse,
-  consumePartial: (partial: ArrayBuffer) => void,
+  consumePartial: PartialConsumer,
   requireCurrentOwner: () => void
 ): Promise<void> {
   const { authority, token } = sealed.delegation;
@@ -1854,7 +1895,8 @@ async function applySealedVerifierResult(
   let quantumStarted = performance.now();
   for (let index = 0; index < sealed.partials.length; index += 1) {
     requireCurrentOwner();
-    commitPartial(consumePartial, sealed.partials[index]);
+    const committed = commitPartial(consumePartial, sealed.partials[index]);
+    if (isPromise(committed)) await committed;
     if (index + 1 < sealed.partials.length && performance.now() - quantumStarted >= MERGE_HOST_QUANTUM_MS) {
       // Durable result application remains exactly once. Only host message
       // handling may interleave between bounded wire chunks, and the same
@@ -1884,4 +1926,9 @@ async function rejectSealedVerifierResult(
     // cleanup the journal itself could not persist.
   }
   throw error;
+}
+
+function isPromise<T>(value: T | Promise<T>): value is Promise<T> {
+  return value !== null && typeof value === 'object' &&
+    typeof (value as Promise<T>).then === 'function';
 }

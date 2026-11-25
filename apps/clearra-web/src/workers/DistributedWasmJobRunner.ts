@@ -18,10 +18,10 @@ import type {
   AcceleratorWorkerSynopsis,
   ClearraDistributedCoreProgress,
   ClearraDistributedPlan,
-  ClearraWasmHostCapabilities,
-  ClearraWasmModule
+  ClearraWasmHostCapabilities
 } from './clearraWasmRuntime';
 import { createWorkerHostYield } from './workerHostYield';
+import type { DistributedSourceRuntime } from './DistributedSourceRuntime';
 import {
   authorityForVerifierPool,
   browserExecutionResourceCapacity,
@@ -120,11 +120,12 @@ export class DistributedWasmJobRunner {
   private acquireGeneration = 0;
   private acquireController: AbortController | null = null;
   private resourceLease: SharedExecutionResourceLease | null = null;
+  private cleanupTask: Promise<void> | null = null;
   private readonly pool: ClearraVerifierPool;
   private readonly resourceAuthority: SharedExecutionResourceAuthority;
 
   constructor(
-    private readonly wasm: ClearraWasmModule,
+    private readonly wasm: DistributedSourceRuntime,
     private readonly jobId: number,
     private readonly lifecycleOwnerId: string,
     private readonly hostCapabilities: ClearraWasmHostCapabilities,
@@ -205,19 +206,32 @@ export class DistributedWasmJobRunner {
     this.acquireController = null;
   }
 
-  prepare(commandText: string): ClearraDistributedPlan {
+  async prepare(commandText: string): Promise<ClearraDistributedPlan> {
     if (!this.resourceLease || this.resourceLease.isReleased()) {
       throw new Error('distributed coordinator preparation requires an execution lease');
     }
     // distributed_prepare may mutate coordinator state before throwing. Mark
     // ownership first because the shared lease has already been acquired.
     this.coordinatorOwned = true;
-    return this.wasm.distributed_prepare(commandText);
+    const plan = await this.wasm.distributed_prepare(commandText);
+    this.requireActive();
+    return plan;
   }
 
-  finishPreparedResult(
+  /** Move source control, not its WASM state, under a dedicated manager.
+   * This owner retains the whole-job lease until that manager has drained. */
+  handoffPreparedSource() {
+    this.requireActive();
+    if (!this.resourceLease || this.resourceLease.isReleased() || !this.coordinatorOwned) {
+      throw new Error('source handoff requires an owned prepared coordinator');
+    }
+    this.coordinatorOwned = false;
+    return this.resourceLease.token.grant;
+  }
+
+  async finishPreparedResult(
     onEvent: (event: ClearraWasmWorkerEvent) => void
-  ): ClearraWasmWorkerEvent {
+  ): Promise<ClearraWasmWorkerEvent> {
     if (!this.resourceLease || this.resourceLease.isReleased() || !this.coordinatorOwned) {
       throw new Error('prepared terminal result requires an owned execution lease');
     }
@@ -230,7 +244,7 @@ export class DistributedWasmJobRunner {
         job_id: this.jobId
       });
       this.requireActive();
-      const decoded = JSON.parse(this.wasm.distributed_finish(this.jobId, 0)) as unknown;
+      const decoded = JSON.parse(await this.wasm.distributed_finish(this.jobId, 0)) as unknown;
       if (!Array.isArray(decoded)) {
         throw new Error('prepared terminal result returned a non-array event payload');
       }
@@ -250,9 +264,11 @@ export class DistributedWasmJobRunner {
         throw new Error('prepared App response completed without a terminal event');
       }
       this.releaseCompletedRun();
+      await this.cleanupTask;
       return terminal;
     } catch (error) {
       this.releaseFailedRun();
+      await this.cleanupTask;
       throw error;
     }
   }
@@ -261,11 +277,11 @@ export class DistributedWasmJobRunner {
    * Clears preparation-only coordinator state while retaining the shared
    * execution lease for a serial fallback owned by the same product run.
    */
-  resetPreparedCoordinatorForSerial(): void {
+  async resetPreparedCoordinatorForSerial(): Promise<void> {
     if (!this.resourceLease || this.resourceLease.isReleased()) {
       throw new Error('serial handoff requires an execution lease');
     }
-    this.resetOwnedCoordinator();
+    await this.resetOwnedCoordinator();
   }
 
   async run(
@@ -279,14 +295,20 @@ export class DistributedWasmJobRunner {
     // the same coordinator immediately before run(). The lease makes taking
     // ownership safe; no coordinator state is touched before acquisition.
     this.coordinatorOwned = true;
+    if (plan.verificationRequired && plan.rootTaskParallel !== true && plan.workerCount < 2) {
+      this.releaseFailedRun();
+      await this.cleanupTask;
+      throw new Error('a one-worker source must use the serial execution plan');
+    }
     let profilingActive = false;
     let searchProfile: unknown = null;
     if (this.wasm.profile_start) {
       try {
-        this.wasm.profile_start();
+        await this.wasm.profile_start();
         profilingActive = true;
       } catch (error) {
         this.releaseFailedRun();
+        await this.cleanupTask;
         throw error;
       }
     }
@@ -299,10 +321,10 @@ export class DistributedWasmJobRunner {
       source_merge_ms: 0, source_merge_calls: 0
     };
     let stageStarted = hostStarted;
-    const mergePartial = (partial: ArrayBuffer) => {
+    const mergePartial = async (partial: ArrayBuffer) => {
       if (!captureSchedulingProfile) return this.wasm.distributed_merge_partial(partial);
       const started = performance.now();
-      try { return this.wasm.distributed_merge_partial(partial); }
+      try { return await this.wasm.distributed_merge_partial(partial); }
       finally {
         hostTiming.source_merge_calls += 1;
         hostTiming.source_merge_ms += performance.now() - started;
@@ -344,9 +366,14 @@ export class DistributedWasmJobRunner {
       workerCount: 0,
       oldestBatchMs: 0
     };
+    let latestProducer: ClearraDistributedCoreProgress | null = null;
     const emitProgress = () => {
       if (this.cancelled) return;
-      const producer = finalizingProducer ?? this.wasm.distributed_progress();
+      // A remote source can be busy inside a WASM quantum. Keep the manager's
+      // progress timer independent and combine its last sealed snapshot with
+      // live verifier activity instead of queuing unbounded progress RPCs.
+      const producer = finalizingProducer ?? latestProducer;
+      if (!producer) return;
       let verifier = lastVerifierProgress;
       if (progressPhase !== 'initializing' && progressPhase !== 'merging') {
         const snapshot = this.pool.progressSnapshot();
@@ -427,6 +454,8 @@ export class DistributedWasmJobRunner {
     };
     const progressTimer = setInterval(emitProgress, PROGRESS_REFRESH_MS);
     try {
+      latestProducer = await this.wasm.distributed_progress();
+      this.requireActive();
       onEvent({
         schema_version: 1,
         runtime: 'clearra-wasm',
@@ -457,7 +486,8 @@ export class DistributedWasmJobRunner {
       emitProgress();
 
       while (!this.cancelled) {
-        const batchProgress = this.wasm.distributed_progress();
+        const batchProgress = latestProducer = await this.wasm.distributed_progress();
+        this.requireActive();
         // Compact PC roots report issued roots in geometryNodes and completed
         // roots in coverageChecks. Tiling roots use coverageChecks for issued
         // roots instead; do not apply either convention to streaming producers.
@@ -472,7 +502,7 @@ export class DistributedWasmJobRunner {
           plan.rootTaskParallel === true
         );
         const produceStarted = captureSchedulingProfile ? performance.now() : 0;
-        const produced = this.wasm.distributed_produce(
+        const produced = await this.wasm.distributed_produce(
           PRODUCER_WORK_BUDGET,
           candidateBatchSize
         );
@@ -593,7 +623,7 @@ export class DistributedWasmJobRunner {
       progressPhase = 'merging';
       // Starting the product continuation moves the coordinator out of the
       // producer ABI slot. Preserve its exact final counters for this phase.
-      finalizingProducer = this.wasm.distributed_progress();
+      finalizingProducer = await this.wasm.distributed_progress();
       emitProgress();
       const workersUsed = plan.verificationRequired
         ? finishedVerifierCount + Number(sourceCoordinatorComputes)
@@ -605,7 +635,7 @@ export class DistributedWasmJobRunner {
           this.wasm.distributed_finish_parallel_local_advance);
         const idleAssistAvailable = Boolean(this.wasm.distributed_finish_parallel_assist &&
           this.wasm.distributed_finish_parallel_last_task_key && this.wasm.distributed_finish_parallel_redundant);
-        finalEvents = this.wasm.distributed_finish_start(this.jobId, workersUsed);
+        finalEvents = await this.wasm.distributed_finish_start(this.jobId, workersUsed);
         const guardedExact = Boolean(this.wasm.distributed_finish_parallel_configure &&
           this.wasm.distributed_finish_parallel_admit && this.wasm.distributed_finish_parallel_guarded_query);
         const completionWorkerCount = plan.completionWorkerCount ?? plan.workerCount;
@@ -614,7 +644,7 @@ export class DistributedWasmJobRunner {
         let minimumAdmitted = false;
         const minimumGrant = this.resourceLease!.token.grant;
         if (guardedExact && completionWorkerCount > 0 && finalEvents === null) {
-          this.wasm.distributed_finish_parallel_configure!(this.jobId,
+          await this.wasm.distributed_finish_parallel_configure!(this.jobId,
             minimumGrant.computeUnits, minimumGrant.memoryBytes);
         }
         while (finalEvents === null) {
@@ -623,19 +653,19 @@ export class DistributedWasmJobRunner {
             this.wasm.distributed_finish_parallel_task &&
             this.wasm.distributed_finish_parallel_merge) {
             const preparationStarted = captureSchedulingProfile ? performance.now() : 0;
-            let query = this.wasm.distributed_finish_parallel_prepare(
+            let query = await this.wasm.distributed_finish_parallel_prepare(
               this.jobId, minimumTopology.partitions
             );
             if (query !== null) {
               if (guardedExact) {
                 if (!minimumAdmitted) {
-                  minimumAdmitted = this.wasm.distributed_finish_parallel_admit!(this.jobId,
+                  minimumAdmitted = await this.wasm.distributed_finish_parallel_admit!(this.jobId,
                     minimumTopology.remoteWorkers, minimumTopology.controlOnly, minimumGrant.computeUnits, minimumGrant.memoryBytes);
                   if (!minimumAdmitted) throw new Error('minimum parallel whole-job memory admission unavailable');
                 }
                 // A late remote initialization failure is fail-closed. Never
                 // replace a query after ready-first dispatch has issued tasks.
-                query = this.wasm.distributed_finish_parallel_guarded_query!(this.jobId);
+                query = await this.wasm.distributed_finish_parallel_guarded_query!(this.jobId);
               }
               const waveStarted = captureSchedulingProfile ? performance.now() : 0;
               minimumWaveCount += 1;
@@ -670,15 +700,15 @@ export class DistributedWasmJobRunner {
               let proofCancellationRequested = false;
               let releaseLocalDrain!: () => void;
               const localDrained = new Promise<void>((resolve) => { releaseLocalDrain = resolve; });
-              const cancelSatisfiedSiblings = () => {
-                if (this.wasm.distributed_finish_parallel_found?.(this.jobId)) {
+              const cancelSatisfiedSiblings = async () => {
+                if (await this.wasm.distributed_finish_parallel_found?.(this.jobId)) {
                   if (!proofCancellationRequested) {
                     proofCancellationRequested = true;
                     this.pool.cancelExactTasks();
                   }
                   return;
                 }
-                if (idleAssistAvailable) this.pool.cancelRedundantExactTasks((key) =>
+                if (idleAssistAvailable) await this.pool.cancelRedundantExactTasks((key) =>
                   this.wasm.distributed_finish_parallel_redundant!(this.jobId, key));
               };
               const dispatchRemoteTasks = async () => {
@@ -687,16 +717,34 @@ export class DistributedWasmJobRunner {
                   this.requireActive();
                   const admissionStarted = wave ? performance.now() : 0;
                   let taskIssued = admissionStarted;
-                  const dispatched = await this.pool.enqueueFromSource(() => {
+                  let issuedTaskKey: ArrayBuffer | null = null;
+                  const takeExactTask = async () => {
+                    if (this.wasm.takeExactTask) {
+                      const issued = await this.wasm.takeExactTask(this.jobId);
+                      issuedTaskKey = issued.key;
+                      return issued.task;
+                    }
+                    // Local WASM exposes one mutable last-key slot. Keep its
+                    // task/key reads in the same turn; only remote sources
+                    // yield, and those supply the composite issuer above.
+                    const pendingTask = this.wasm.distributed_finish_parallel_task!(this.jobId);
+                    const task = pendingTask && 'then' in pendingTask ? await pendingTask : pendingTask;
+                    const pendingKey = task && idleAssistAvailable
+                      ? this.wasm.distributed_finish_parallel_last_task_key!(this.jobId) : null;
+                    issuedTaskKey = pendingKey && 'then' in pendingKey ? await pendingKey : pendingKey;
+                    return task;
+                  };
+                  const dispatched = await this.pool.enqueueFromSource(async () => {
                     this.requireActive();
                     // The advisory cursor may validate a witness before the
                     // first remote becomes ready. Do not ask an already
                     // satisfied, unissued query to allocate another task.
-                    if (this.wasm.distributed_finish_parallel_found?.(this.jobId)) return null;
-                    let task = this.wasm.distributed_finish_parallel_task!(this.jobId);
+                    if (await this.wasm.distributed_finish_parallel_found?.(this.jobId)) return null;
+                    this.requireActive();
+                    let task = await takeExactTask();
                     if (task === null && idleAssistAvailable &&
-                      this.wasm.distributed_finish_parallel_assist!(this.jobId, 64)) {
-                      task = this.wasm.distributed_finish_parallel_task!(this.jobId);
+                      await this.wasm.distributed_finish_parallel_assist!(this.jobId, 64)) {
+                      task = await takeExactTask();
                       if (task === null) throw new Error('core committed assistance without an issued child');
                     }
                     if (wave && task !== null) {
@@ -705,16 +753,19 @@ export class DistributedWasmJobRunner {
                       wave.first_task_issued_ms ??= taskIssued - waveStarted;
                     }
                     return task;
-                  }, (receipt) => {
+                  }, async (receipt) => {
                     if (wave) {
                       const now = performance.now();
                       wave.first_receipt_ms ??= now - waveStarted;
                       wave.last_receipt_ms = now - waveStarted;
                       wave.task_round_trip_max_ms = Math.max(wave.task_round_trip_max_ms, now - taskIssued);
                     }
-                    this.wasm.distributed_finish_parallel_merge!(this.jobId, receipt);
-                    cancelSatisfiedSiblings();
-                  }, idleAssistAvailable ? () => this.wasm.distributed_finish_parallel_last_task_key!(this.jobId) : undefined);
+                    await this.wasm.distributed_finish_parallel_merge!(this.jobId, receipt);
+                    await cancelSatisfiedSiblings();
+                  }, idleAssistAvailable ? () => {
+                    if (!issuedTaskKey) throw new Error('issued exact task omitted its routing key');
+                    return issuedTaskKey;
+                  } : undefined);
                   if (wave) wave.remote_admission_wait_ms += performance.now() - admissionStarted;
                   if (dispatched) {
                     retriedAfterDrain = false;
@@ -747,10 +798,10 @@ export class DistributedWasmJobRunner {
                     this.requireActive();
                     if (!parallelCoordinatorActive) {
                       const started = wave ? performance.now() : 0;
-                      parallelCoordinatorActive = this.wasm.distributed_finish_parallel_local_start!(this.jobId);
+                      parallelCoordinatorActive = await this.wasm.distributed_finish_parallel_local_start!(this.jobId);
                       if (!parallelCoordinatorActive && idleAssistAvailable &&
-                        this.wasm.distributed_finish_parallel_assist!(this.jobId, 64)) {
-                        parallelCoordinatorActive = this.wasm.distributed_finish_parallel_local_start!(this.jobId);
+                        await this.wasm.distributed_finish_parallel_assist!(this.jobId, 64)) {
+                        parallelCoordinatorActive = await this.wasm.distributed_finish_parallel_local_start!(this.jobId);
                       }
                       if (wave) {
                         wave.coordinator_compute_ms += performance.now() - started;
@@ -759,14 +810,14 @@ export class DistributedWasmJobRunner {
                       if (!parallelCoordinatorActive) break;
                     }
                     const sliceStarted = wave ? performance.now() : 0;
-                    const drained = this.wasm.distributed_finish_parallel_local_advance!(this.jobId, 128);
+                    const drained = await this.wasm.distributed_finish_parallel_local_advance!(this.jobId, 128);
                     if (wave) {
                       wave.coordinator_compute_ms += performance.now() - sliceStarted;
                       wave.coordinator_slices += 1;
                     }
                     if (drained) {
                       parallelCoordinatorActive = false;
-                      cancelSatisfiedSiblings();
+                      await cancelSatisfiedSiblings();
                     }
                     // The coordinator computes while remote workers initialize,
                     // consume, or seal receipts, but yields a host quantum so
@@ -809,11 +860,11 @@ export class DistributedWasmJobRunner {
             lastCompletionYield = performance.now();
           }
           this.requireActive();
-          finalEvents = this.wasm.distributed_finish_advance(this.jobId, 128);
+          finalEvents = await this.wasm.distributed_finish_advance(this.jobId, 128);
         }
       } else {
         // Compatibility for pre-continuation adapters and explicit fixtures.
-        finalEvents = this.wasm.distributed_finish(this.jobId, workersUsed);
+        finalEvents = await this.wasm.distributed_finish(this.jobId, workersUsed);
       }
       this.requireActive();
       const parseStarted = captureSchedulingProfile ? performance.now() : 0;
@@ -821,7 +872,7 @@ export class DistributedWasmJobRunner {
       const events = JSON.parse(finalEvents) as ClearraWasmWorkerEvent[];
       if (captureSchedulingProfile) hostTiming.parse_ms = performance.now() - parseStarted;
       if (profilingActive && this.wasm.profile_finish) {
-        searchProfile = this.wasm.profile_finish();
+        searchProfile = await this.wasm.profile_finish();
         profilingActive = false;
       }
       if (minimumWaves.length > 0) {
@@ -866,13 +917,14 @@ export class DistributedWasmJobRunner {
       if (transportProfiling) this.pool.finishTransportProfile();
       if (profilingActive && this.wasm.profile_finish) {
         try {
-          this.wasm.profile_finish();
+          await this.wasm.profile_finish();
         } catch {
           // Coordinator reset remains the final ownership boundary after failure.
         }
       }
       clearInterval(progressTimer);
       this.releaseCompletedRun();
+      await this.cleanupTask;
     }
   }
 
@@ -898,23 +950,33 @@ export class DistributedWasmJobRunner {
   private releaseFailedRun() {
     if (this.released) return;
     this.released = true;
+    const cleanup: Array<void | Promise<void>> = [];
     if (this.poolOwned) {
       try {
-        this.wasm.distributed_cancel();
+        cleanup.push(this.wasm.distributed_cancel());
       } catch {
         // Reset and worker termination below are the fail-closed fallback.
       }
       this.pool.cancel();
     }
-    this.resetOwnedCoordinator();
-    this.releaseExecutionLease();
+    cleanup.push(this.resetOwnedCoordinator());
+    this.releaseAfterSourceCleanup(cleanup);
   }
 
   private releaseCompletedRun() {
     if (this.released) return;
     this.released = true;
-    this.resetOwnedCoordinator();
-    this.releaseExecutionLease();
+    this.releaseAfterSourceCleanup([this.resetOwnedCoordinator()]);
+  }
+
+  private releaseAfterSourceCleanup(operations: Array<void | Promise<void>>) {
+    const pending = operations.filter((operation): operation is Promise<void> =>
+      operation !== undefined && typeof operation.then === 'function');
+    if (pending.length === 0) {
+      this.releaseExecutionLease();
+      return;
+    }
+    this.cleanupTask = Promise.allSettled(pending).then(() => this.releaseExecutionLease());
   }
 
   private releaseExecutionLease() {
@@ -930,7 +992,7 @@ export class DistributedWasmJobRunner {
     if (!this.coordinatorOwned) return;
     this.coordinatorOwned = false;
     try {
-      this.wasm.distributed_reset();
+      return this.wasm.distributed_reset();
     } catch {
       // The main worker is terminated after failure or cancellation.
     }

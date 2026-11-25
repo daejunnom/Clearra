@@ -16,6 +16,7 @@ import { withHostExecutionTiming } from './HostExecutionProfile';
 import { relationPeerReservation, RELATION_PEER_WIRE_CAP } from './ConditionedRelationPeerBudget';
 
 import { ClearraProductJobRunner } from './ClearraProductJobRunner';
+import { DedicatedDistributedManager, type DedicatedManagerOptions } from './DedicatedDistributedManager';
 import {
   disposeDistributedWorkers,
   prewarmDistributedWorkers
@@ -101,6 +102,8 @@ let requestedPrewarmWorkerCount = 1;
 let completedPrewarmWorkerCount = 0;
 let completedRootOnlyPrewarm = false;
 let loadedWasm: ClearraWasmModule | null = null;
+let dedicatedManagerWorker: Worker | null = null;
+let lastExecutionUsedDedicatedManager = false;
 let gpuWarmup: Promise<void> | null = null;
 let gpuWarmupGeneration = 0;
 let gpuWarmupCompleted = false;
@@ -289,7 +292,8 @@ async function runCommandText(
       undefined,
       undefined,
       accelerators.legalBoardSynopsis,
-      accelerators.conditionedPack
+      accelerators.conditionedPack,
+      { create: createSourceManager, release: releaseSourceManager }
     );
     const modulePrepareMs = profileStarted === null ? 0 : performance.now() - profileStarted;
     const terminal = await job.runner.run(commandText, (event) => {
@@ -318,13 +322,52 @@ async function runCommandText(
     closeFailClosedWorker();
   } finally {
     if (active === job) active = null;
-    if (!failClosed) {
+    if (!failClosed && !lastExecutionUsedDedicatedManager) {
       startRuntimePrewarm(
         requestedPrewarmWorkerCount,
         deferredTablebaseRequested,
         warmupPolicy
       );
     }
+  }
+}
+
+function createSourceManager(options: DedicatedManagerOptions) {
+  // The source keeps its live WASM and becomes one requested compute lane.
+  // Retire its speculative verifier cache before the manager owns that pool.
+  disposeDistributedWorkers();
+  completedPrewarmWorkerCount = 0;
+  lastExecutionUsedDedicatedManager = true;
+  return new DedicatedDistributedManager(options, () => {
+    dedicatedManagerWorker ??= new Worker(new URL('./clearraManagerWorker.ts', import.meta.url), { type: 'module' });
+    return dedicatedManagerWorker;
+  }, (worker, reusable) => {
+    if (reusable && !failClosed && dedicatedManagerWorker === worker) {
+      // A retained idle realm can fail between jobs. Clear its cache entry so
+      // the next run cannot wait forever on a dead Worker's silent postMessage.
+      const retireIdleWorker = (event: Event) => {
+        event.preventDefault();
+        if (dedicatedManagerWorker === worker) dedicatedManagerWorker = null;
+        worker.terminate();
+      };
+      worker.onerror = retireIdleWorker;
+      worker.onmessageerror = retireIdleWorker;
+      return;
+    }
+    if (dedicatedManagerWorker === worker) dedicatedManagerWorker = null;
+    worker.terminate();
+  });
+}
+
+function releaseSourceManager() {
+  const worker = dedicatedManagerWorker;
+  dedicatedManagerWorker = null;
+  lastExecutionUsedDedicatedManager = false;
+  // Explicitly close descendants in the manager before closing its realm.
+  // Hard owner termination is additionally fenced by the lifecycle broadcast.
+  if (worker) {
+    try { worker.postMessage({ type: 'dispose' }); }
+    catch { worker.terminate(); }
   }
 }
 
@@ -497,7 +540,12 @@ function startRuntimePrewarm(
   requestedTablebase = tablebaseRequested,
   requestedWarmupPolicy: RuntimeWarmupPolicy = warmupPolicy
 ) {
-  const normalizedWarmupPolicy = normalizeRuntimeWarmupPolicy(requestedWarmupPolicy);
+  // The retained manager already owns the reusable verifier pool. UI prewarm
+  // requests may still prepare root/GPU/TB state, but must not create a second
+  // speculative compute pool in this source realm.
+  const normalizedWarmupPolicy = normalizeRuntimeWarmupPolicy(dedicatedManagerWorker
+    ? { ...requestedWarmupPolicy, verifierWarmup: false }
+    : requestedWarmupPolicy);
   const boundedWorkerCount = resolveWorkerAuthority(
     hostCapabilitySnapshot,
     workerCount
@@ -790,6 +838,7 @@ function cancelActiveJob(jobId: number | undefined) {
 }
 
 function disposeRuntime() {
+  releaseSourceManager();
   runtimePrewarmGeneration++;
   runtimePrewarm = null;
   pendingRuntimePrewarm = null;
@@ -871,6 +920,7 @@ function failCloseUnhandled(error: unknown) {
 function closeFailClosedWorker() {
   if (failClosed) return;
   failClosed = true;
+  releaseSourceManager();
   runtimePrewarmGeneration++;
   runtimePrewarm = null;
   pendingRuntimePrewarm = null;
