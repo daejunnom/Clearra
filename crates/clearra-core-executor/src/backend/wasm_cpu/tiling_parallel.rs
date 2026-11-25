@@ -1867,19 +1867,32 @@ mod tests {
 
     #[test]
     fn pc_root_windows_preserve_filtered_ordinal_and_physical_results() {
-        let occupied = (0..4).fold(0_u64, |mask, row| mask | (0x3f0_u64 << (row * 10)));
         for filtered_empty in [false, true] {
-            let mut query = o_query(4, occupied, 4);
-            if filtered_empty {
-                query = query.with_allowed_colored_solution_identities(std::iter::empty());
-            }
-            let problem = ProblemCompiler::compile_scenario_pc(&query).unwrap();
+            // The PC root path requires Standard7Bag coverage. This existing
+            // one-lock fixture has seven natural roots and only the O cavity
+            // is buildable; N=8 splits each root into two ordinal windows.
+            let problem = pc_root_problem(
+                PcExecutionPolicy::mvp_default()
+                    .with_workers(1)
+                    .with_worker_hardware_limit(1),
+                filtered_empty,
+            );
+            assert!(WasmPcRootProducer::supports(&problem));
             let control = ExecutionControl::default();
             let reference = WasmCpuSearchBackend::execute_with_control(&problem, &control).unwrap();
-            for workers in [1, 2, 8] {
+            let expected_count = if filtered_empty { "0" } else { "1" };
+            assert_eq!(
+                reference.field("packing_candidate_count"),
+                Some(expected_count)
+            );
+            assert_eq!(
+                reference.field("unique_solution_count"),
+                Some(expected_count)
+            );
+            for (workers, expected_tasks) in [(1, 7), (2, 7), (8, 14)] {
                 let mut producer = WasmPcRootProducer::new_with_workers(&problem, workers).unwrap();
-                assert_eq!(producer.root_count(), 1);
-                assert_eq!(producer.task_count(), workers);
+                assert_eq!(producer.root_count(), 7);
+                assert_eq!(producer.task_count(), expected_tasks);
                 let mut packets = Vec::new();
                 let summary = loop {
                     match producer.advance(&control).unwrap() {
@@ -1888,6 +1901,7 @@ mod tests {
                         _ => panic!("root production is control-only"),
                     }
                 };
+                assert_eq!(packets.len(), expected_tasks);
                 let mut results = Vec::new();
                 for packet in packets.into_iter().rev() {
                     let mut worker = WasmTilingRootWorker::new_for_pc_unique(&problem).unwrap();
