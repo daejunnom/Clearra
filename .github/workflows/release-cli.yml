@@ -195,7 +195,7 @@ jobs:
           export CLEARRA_PARITY_EXECUTABLE="$CLEARRA_REAL_PC24_CLI"
           export CLEARRA_PARITY_EXECUTABLE_SHA256="$(sha256sum "$CLEARRA_PARITY_EXECUTABLE" | cut -d ' ' -f 1)"
           export CLEARRA_PARITY_SOURCE_COMMIT="$CLEARRA_REAL_PC24_SOURCE_COMMIT"
-          node --test apps/clearra-discord-bot/test/pc-solutions.test.mjs
+          node --test apps/clearra-discord-bot/test/pc-solutions.test.mjs apps/clearra-discord-bot/test/pc-chance-option-matrix.test.mjs
           node --test apps/clearra-discord-bot/test/realCliFullHeightProducts.test.mjs
       - name: Upload Linux CLI artifact
         uses: actions/upload-artifact@v4

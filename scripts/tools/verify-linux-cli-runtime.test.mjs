@@ -74,7 +74,7 @@ test('parallel release CLI uses the Cloud compiler baseline and then the slim ru
   assert.match(job, /export CLEARRA_PARITY_EXECUTABLE="\$CLEARRA_REAL_PC24_CLI"/u);
   assert.match(job, /export CLEARRA_PARITY_EXECUTABLE_SHA256="\$\(sha256sum "\$CLEARRA_PARITY_EXECUTABLE"/u);
   assert.match(job, /export CLEARRA_PARITY_SOURCE_COMMIT="\$CLEARRA_REAL_PC24_SOURCE_COMMIT"/u);
-  assert.match(job, /node --test apps\/clearra-discord-bot\/test\/pc-solutions\.test\.mjs/u);
+  assert.match(job, /node --test apps\/clearra-discord-bot\/test\/pc-solutions\.test\.mjs apps\/clearra-discord-bot\/test\/pc-chance-option-matrix\.test\.mjs/u);
   const script = await readFile(new URL('./verify-linux-cli-runtime.mjs', import.meta.url), 'utf8');
   assert.doesNotMatch(script, /spawn.*cargo|execFile.*cargo|cargo build/u);
 });
