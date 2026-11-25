@@ -667,6 +667,7 @@ test("SIGKILL is classified as OOM only when the container counter advances", as
     });
     assert.equal(result.terminationReason, fixture.expected);
     assert.equal(result.signal, "SIGKILL");
+    assert.equal(result.failureStage, "execute");
   }
 });
 

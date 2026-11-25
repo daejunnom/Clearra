@@ -40,6 +40,7 @@ test("nonzero and signal exits retain the engine cause instead of parsing a miss
     const result = await runner.execute({ arguments: ["pc"],
       deadlineUnixMs: Date.now() + 5000, maxOutputBytes: 4096, maxArtifactBytes: 4096 });
     assert.equal(result.failureCode, expected);
+    assert.equal(result.failureStage, "execute");
     assert.equal(result.exitCode, code ?? -1);
     assert.equal(result.signal, signal);
     assert.equal(result.stderr, "private diagnostic input");
@@ -54,7 +55,9 @@ test("nonzero and signal exits retain the engine cause instead of parsing a miss
     });
     assert.equal(terminal.state, "failed");
     assert.equal(terminal.failureCode, expected);
+    assert.equal(terminal.failureStage, "execute");
     assert.equal(JSON.parse(logs[0]).failureCode, expected);
+    assert.equal(JSON.parse(logs[0]).failureStage, "execute");
     assert.equal(logs[0].includes("private diagnostic"), false);
   }
 });

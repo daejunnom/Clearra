@@ -265,6 +265,7 @@ export class ClearraCommandRunner {
               : signal ? "forced-signal" : "exit",
             failureCode: confirmedOom ? "engine-oom"
               : signal ? "engine-signal" : code !== 0 ? "engine-exit" : null,
+            ...(signal || code !== 0 ? { failureStage: "execute" } : {}),
             oomKillCountBefore,
             oomKillCountAfter,
             stdout: renderDocument ? encodeRenderStdout(renderDocument)

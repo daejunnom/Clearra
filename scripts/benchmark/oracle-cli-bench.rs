@@ -1094,6 +1094,7 @@ fn prepare_discord() -> Result<(), String> {
         &directory.join("plan.json"),
         &json!({"diagnostic":context,"diagnostic_only":true,
         "cpu":capacity,"workers":workers,"input":input,"deadline_ms":14 * 60_000,
+        "request_mode":"path","capability_id":"pc.path","count_policy":"CountAll","target_lines":4,
         "stdout_stderr_limit_bytes":4 * 1024 * 1024,"artifact_limit_bytes":24 * 1024 * 1024,
         "scope":"actual product adapter at observed CI width; no Discord service/deployment/Cloud Run performance assertion"}),
     )?;
@@ -1114,7 +1115,13 @@ fn validate_discord() -> Result<(), String> {
     let root = diagnostic_root()?;
     let directory = root.join("discord-p7p4");
     let plan = read_json(&directory.join("plan.json"), 1024 * 1024)?;
-    if plan["diagnostic"] != context || plan["diagnostic_only"] != true {
+    if plan["diagnostic"] != context
+        || plan["diagnostic_only"] != true
+        || plan["request_mode"] != "path"
+        || plan["capability_id"] != "pc.path"
+        || plan["count_policy"] != "CountAll"
+        || plan["target_lines"] != 4
+    {
         return Err("Discord diagnostic plan does not bind this run".into());
     }
     let workers = plan["workers"]
@@ -1133,7 +1140,10 @@ fn validate_discord() -> Result<(), String> {
         workers,
     )
     .unwrap_or_else(|error| json!({"valid":false,"errors":[error]}));
-    let accepted = process_success && validation["valid"] == true;
+    let accepted = process_success
+        && validation["valid"] == true
+        && validation["schema"] == "clearra.local-discord-p7p4-validation.v2"
+        && validation["fixture"]["mode"] == plan["request_mode"];
     create_json(
         &directory.join("validation.json"),
         &json!({"diagnostic":context,"diagnostic_only":true,
@@ -1141,7 +1151,7 @@ fn validate_discord() -> Result<(), String> {
     )?;
     if !accepted {
         return Err(
-            "actual Discord adapter result failed its exact golden/policy validation; no retry"
+            "actual Discord adapter result failed its bound input/result-policy validation; no retry"
                 .into(),
         );
     }

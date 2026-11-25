@@ -217,6 +217,9 @@ pub(super) fn validate(path: &str, source: &str, workers: u64) -> Result<Value, 
 fn validate_bytes(bytes: &[u8], source: &str, workers: u64) -> Result<Value, String> {
     let outer: Value =
         serde_json::from_slice(bytes).map_err(|error| format!("outer JSON: {error}"))?;
+    if outer["schema"] == "clearra.local-discord-runner.v2" {
+        return validate_path_report(&outer, bytes, source, workers);
+    }
     let mut errors = Vec::new();
     require_string(
         &mut errors,
@@ -586,6 +589,266 @@ fn validate_bytes(bytes: &[u8], source: &str, workers: u64) -> Result<Value, Str
     }))
 }
 
+// Public pc.path has CountAll replay semantics and a bounded canonical Discord
+// projection. The old Unique/CTK3 golden is deliberately not a Path oracle.
+fn validate_path_report(
+    outer: &Value,
+    bytes: &[u8],
+    source: &str,
+    workers: u64,
+) -> Result<Value, String> {
+    let mut errors = Vec::new();
+    require_string(
+        &mut errors,
+        &outer["adapterSourceCommit"],
+        source,
+        "adapterSourceCommit",
+    );
+    require_flag(
+        &mut errors,
+        &outer["diagnosticOnly"],
+        true,
+        "diagnosticOnly",
+    );
+    require_integer(&mut errors, &outer["exitCode"], 0, "exitCode");
+    require_string(
+        &mut errors,
+        &outer["terminationReason"],
+        "exit",
+        "terminationReason",
+    );
+    for field in ["signal", "failureCode", "artifact"] {
+        check(
+            &mut errors,
+            outer.get(field).is_some_and(Value::is_null),
+            format!("{field} must be present and null"),
+        );
+    }
+    check(
+        &mut errors,
+        outer["error"].is_null(),
+        "runner error must be absent",
+    );
+    let fixture = &outer["fixture"];
+    let lines = match fixture["mode"].as_str() {
+        Some("path") => 4,
+        Some("path-2l") => 2,
+        _ => {
+            errors.push("Path report requires an explicit Path fixture".into());
+            4
+        }
+    };
+    for (name, value) in [
+        ("capabilityId", "pc.path"),
+        ("objective", "all"),
+        ("countPolicy", "CountAll"),
+        ("sourcePattern", "P7P4"),
+        ("hold", "empty"),
+        ("queueKnowledge", "oracle"),
+        ("rule", "srs-plus"),
+    ] {
+        require_string(
+            &mut errors,
+            &fixture[name],
+            value,
+            &format!("fixture.{name}"),
+        );
+    }
+    for (name, value) in [
+        ("originalPatternCount", PATTERNS),
+        ("originalSequenceLength", 11),
+        ("lines", lines),
+    ] {
+        require_integer(
+            &mut errors,
+            &fixture[name],
+            value,
+            &format!("fixture.{name}"),
+        );
+    }
+    let expected_args = json!([
+        "pc",
+        "path",
+        "--lines",
+        lines.to_string(),
+        "--board-mask",
+        "0x0",
+        "--height",
+        lines.to_string(),
+        "--pieces",
+        (lines * 10 / 4).to_string(),
+        "--patterns",
+        "P7P4",
+        "--hold",
+        "empty",
+        "--rule",
+        "srs-plus"
+    ]);
+    check(
+        &mut errors,
+        outer["arguments"] == expected_args && fixture["arguments"] == expected_args,
+        "arguments must match the unchanged original P7P4 public Path request",
+    );
+    let mut prepared = expected_args.as_array().expect("literal array").clone();
+    prepared.extend([
+        json!("--auto-workers"),
+        json!(workers.to_string()),
+        json!("--use-all-cpu-threads"),
+        json!("--format"),
+        json!("json"),
+        json!("--include-solution-data"),
+    ]);
+    check(
+        &mut errors,
+        outer["observation"]["preparedArguments"] == Value::Array(prepared),
+        "spawned argv must preserve public Path input and the requested worker authority",
+    );
+    require_string(
+        &mut errors,
+        &outer["observation"]["expectedVcpus"],
+        &workers.to_string(),
+        "spawned expectedVcpus",
+    );
+    let policy = &outer["policy"];
+    for (name, expected) in [
+        ("workers", workers),
+        ("expectedVcpus", workers),
+        ("maxOutputBytes", OUTPUT_CAP),
+        ("maxArtifactBytes", ARTIFACT_CAP),
+        ("deadlineMs", 14 * 60_000),
+    ] {
+        require_integer(
+            &mut errors,
+            &policy[name],
+            expected,
+            &format!("policy.{name}"),
+        );
+    }
+    require_flag(
+        &mut errors,
+        &policy["useAllLogicalProcessors"],
+        true,
+        "policy.useAllLogicalProcessors",
+    );
+    let stdout = outer["stdout"].as_str().unwrap_or("");
+    let stderr = outer["stderr"].as_str().unwrap_or("");
+    check(
+        &mut errors,
+        outer["stdout"].is_string() && outer["stderr"].is_string(),
+        "stdout and stderr must be strings",
+    );
+    let inner: Value = serde_json::from_str(stdout).unwrap_or(Value::Null);
+    require_integer(
+        &mut errors,
+        &inner["schema_version"],
+        2,
+        "stdout.schema_version",
+    );
+    require_string(
+        &mut errors,
+        &inner["kind"],
+        "pc-path-family.v2",
+        "stdout.kind",
+    );
+    for name in ["source_commit", "engine_build_id"] {
+        require_string(
+            &mut errors,
+            &inner["runtime_identity"][name],
+            source,
+            &format!("runtime_identity.{name}"),
+        );
+    }
+    require_string(
+        &mut errors,
+        &inner["summary"]["capability_id"],
+        "pc.path",
+        "capability_id",
+    );
+    require_flag(&mut errors, &inner["summary"]["complete"], true, "complete");
+    require_string(
+        &mut errors,
+        &inner["summary"]["canonical_selection"],
+        "smallest-canonical-candidate-id",
+        "canonical_selection",
+    );
+    let receipt = &outer["nativeReceipt"];
+    for (name, value) in [
+        ("kind", "pc-path-family.v2"),
+        ("sourceCommit", source),
+        ("engineBuildId", source),
+        ("capabilityId", "pc.path"),
+        ("pageContract", "pc-replay-member-page.v2"),
+    ] {
+        require_string(
+            &mut errors,
+            &receipt[name],
+            value,
+            &format!("nativeReceipt.{name}"),
+        );
+    }
+    require_integer(
+        &mut errors,
+        &receipt["materializedPatternCount"],
+        PATTERNS,
+        "nativeReceipt.materializedPatternCount",
+    );
+    require_flag(
+        &mut errors,
+        &receipt["complete"],
+        true,
+        "nativeReceipt.complete",
+    );
+    require_flag(
+        &mut errors,
+        &receipt["pageSourceAvailable"],
+        true,
+        "nativeReceipt.pageSourceAvailable",
+    );
+    for name in ["witnessCount", "geometryCount"] {
+        check(
+            &mut errors,
+            integer(&receipt[name]).is_some_and(|n| n > 0),
+            format!("nativeReceipt.{name} must be a positive complete count"),
+        );
+    }
+    check(
+        &mut errors,
+        receipt["problemId"].is_string() && receipt["problemId"] == inner["summary"]["problem_id"],
+        "native and projected problem identities must agree",
+    );
+    check(
+        &mut errors,
+        receipt["pageSourceIdentitySha256"]
+            .as_str()
+            .is_some_and(|s| hex(s, 64)),
+        "native complete Path source identity must be a SHA-256 digest",
+    );
+    let stages = &outer["stageDurationsMs"];
+    for stage in ["prepare", "execute", "artifact", "projection"] {
+        check(
+            &mut errors,
+            stages[stage].as_u64().is_some(),
+            format!("stageDurationsMs.{stage} must be a nonnegative integer"),
+        );
+    }
+    check(
+        &mut errors,
+        stdout.len() + stderr.len() <= OUTPUT_CAP as usize,
+        "returned stdout+stderr exceed 4 MiB",
+    );
+    let observation_evidence = inspect_observation(&mut errors, outer, stderr.len());
+    Ok(json!({
+        "schema":"clearra.local-discord-p7p4-validation.v2", "valid":errors.is_empty(),
+        "errors":errors,"expectedSource":source,"inputReportSha256":format!("{:x}",Sha256::digest(bytes)),
+        "fixture":fixture,"arguments":outer["arguments"],"policy":policy,
+        "nativeReceipt":receipt,"stageDurationsMs":stages,
+        "observation":outer["observation"],"observationValidation":observation_evidence,
+        "workerEvidence":"exact spawned adaptive worker cap and declared CPU authority; typed payload does not expose actual worker participation",
+        "identityEvidence":"complete source-owned Path receipt; no independent golden replay-count or hash comparison",
+        "scope":"recorded local/CI CPU width; not Cloud Run performance or deployment evidence; never compared with the legacy CountUnique golden"
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -630,6 +893,95 @@ mod tests {
 
     fn validate_report(report: &Value) -> Value {
         validate_bytes(&serde_json::to_vec(report).unwrap(), TEST_SOURCE, 2).unwrap()
+    }
+
+    fn path_report() -> Value {
+        let mut report = successful_report();
+        let arguments = json!([
+            "pc",
+            "path",
+            "--lines",
+            "4",
+            "--board-mask",
+            "0x0",
+            "--height",
+            "4",
+            "--pieces",
+            "10",
+            "--patterns",
+            "P7P4",
+            "--hold",
+            "empty",
+            "--rule",
+            "srs-plus"
+        ]);
+        report["schema"] = json!("clearra.local-discord-runner.v2");
+        report["arguments"] = arguments.clone();
+        report["fixture"] = json!({"mode":"path","capabilityId":"pc.path","objective":"all",
+            "countPolicy":"CountAll","sourcePattern":"P7P4","originalPatternCount":PATTERNS,
+            "originalSequenceLength":11,"lines":4,"hold":"empty","queueKnowledge":"oracle",
+            "rule":"srs-plus","arguments":arguments});
+        report["policy"]["useAllLogicalProcessors"] = json!(true);
+        let mut prepared = arguments.as_array().unwrap().clone();
+        prepared.extend([
+            json!("--auto-workers"),
+            json!("2"),
+            json!("--use-all-cpu-threads"),
+            json!("--format"),
+            json!("json"),
+            json!("--include-solution-data"),
+        ]);
+        report["observation"]["preparedArguments"] = json!(prepared);
+        report["observation"]["expectedVcpus"] = json!("2");
+        let stdout = json!({"schema_version":2,"kind":"pc-path-family.v2",
+            "runtime_identity":{"source_commit":TEST_SOURCE,"engine_build_id":TEST_SOURCE},
+            "summary":{"capability_id":"pc.path","complete":true,"problem_id":"original-path",
+                "canonical_selection":"smallest-canonical-candidate-id"}})
+        .to_string();
+        report["observation"]["stdoutBytes"] = json!(stdout.len());
+        report["stdout"] = json!(stdout);
+        report["artifact"] = Value::Null;
+        report["nativeReceipt"] = json!({"kind":"pc-path-family.v2","sourceCommit":TEST_SOURCE,
+            "engineBuildId":TEST_SOURCE,"capabilityId":"pc.path","problemId":"original-path",
+            "materializedPatternCount":PATTERNS,"witnessCount":"123","geometryCount":"2",
+            "complete":true,"pageContract":"pc-replay-member-page.v2","pageSourceAvailable":true,
+            "pageSourceIdentitySha256":"a".repeat(64)});
+        report
+    }
+
+    #[test]
+    fn public_path_report_uses_original_universe_and_its_own_semantics() {
+        let report = path_report();
+        let validation = validate_report(&report);
+        assert_eq!(validation["valid"], true, "{}", validation["errors"]);
+        assert_eq!(
+            validation["schema"],
+            "clearra.local-discord-p7p4-validation.v2"
+        );
+        assert!(validation["golden"].is_null());
+        let mut legacy_disguised_as_path = successful_report();
+        legacy_disguised_as_path["schema"] = json!("clearra.local-discord-runner.v2");
+        assert_eq!(validate_report(&legacy_disguised_as_path)["valid"], false);
+    }
+
+    #[test]
+    fn public_path_report_rejects_changed_workers_queue_identity_or_incomplete_source() {
+        for (name, value) in [
+            ("materializedPatternCount", json!(840)),
+            ("complete", json!(false)),
+            ("sourceCommit", json!("0".repeat(40))),
+            ("pageSourceIdentitySha256", json!("not-a-digest")),
+        ] {
+            let mut report = path_report();
+            report["nativeReceipt"][name] = value;
+            assert_eq!(validate_report(&report)["valid"], false, "{name}");
+        }
+        let mut report = path_report();
+        report["observation"]["expectedVcpus"] = json!("1");
+        assert_eq!(validate_report(&report)["valid"], false);
+        let mut report = path_report();
+        report["arguments"][11] = json!("P7");
+        assert_eq!(validate_report(&report)["valid"], false);
     }
 
     #[test]

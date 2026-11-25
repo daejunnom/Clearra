@@ -208,6 +208,7 @@ export class ClearraJobService {
       });
       entry.state = result.exitCode === 0 && !result.signal ? "completed" : "failed";
       entry.failureCode = result.failureCode ?? (entry.state === "failed" ? "engine-exit" : null);
+      entry.failureStage = result.failureStage;
       entry.exitCode = result.exitCode;
       entry.signal = result.signal;
       entry.stageDurationsMs = result.stageDurationsMs;
@@ -216,6 +217,7 @@ export class ClearraJobService {
         ...(entry.state === "failed" ? {
           error: "Clearra process did not complete successfully.",
           failureCode: entry.failureCode,
+          failureStage: entry.failureStage,
         } : {}),
       });
     } catch (error) {
