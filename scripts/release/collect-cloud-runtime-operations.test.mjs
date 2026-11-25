@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
+import { basename } from "node:path";
 import test from "node:test";
 
 import {
@@ -82,7 +83,7 @@ test("collector accepts structured text and rejects unrelated or malformed metad
 });
 
 test("diagnostic workflow retains the protected main-only boundary without Oracle credentials or mutation", () => {
-  const source = readFileSync(new URL("../../.github/workflows/discord-runtime-diagnostics.yml", import.meta.url), "utf8");
+  const source = readFileSync(new URL("../../.github/workflows/cloud-cli-diagnostic.yml", import.meta.url), "utf8");
   assert.match(source, /if: github\.ref == 'refs\/heads\/main'/);
   assert.match(source, /timeout-minutes: 5/);
   assert.match(source, /environment: discord-path-confirmation/);
@@ -91,6 +92,15 @@ test("diagnostic workflow retains the protected main-only boundary without Oracl
   assert.match(source, /collect-cloud-runtime-operations\.mjs --validate-only/);
   assert.doesNotMatch(source, /secrets\.|ORACLE|ssh|update-traffic|run deploy|run jobs execute|write-all/);
   assert.ok(source.indexOf("--validate-only") < source.indexOf("google-github-actions/auth"));
+});
+
+test("read-only workflow uses the existing intended WIF diagnostic entrypoint", () => {
+  const workflowUrl = new URL("../../.github/workflows/cloud-cli-diagnostic.yml", import.meta.url);
+  const policy = readFileSync(new URL("./github/github-wif-bootstrap.mjs", import.meta.url), "utf8");
+  const trusted = /const GITHUB_DIAGNOSTIC_WORKFLOW_REF =\s*"([^"]+)"/u.exec(policy)?.[1];
+  const expected = `daejunnom/Clearra/.github/workflows/${basename(workflowUrl.pathname)}@refs/heads/main`;
+  assert.equal(trusted, expected);
+  assert.ok(policy.includes(`assertion.workflow_ref == '${expected}'`));
 });
 
 test("collector imports in a fresh Node process with all package dependencies forbidden", () => {

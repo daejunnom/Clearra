@@ -1,5 +1,8 @@
 name: Read Discord Runtime Operations
 
+# This is the diagnostic workflow already named by the protected WIF policy.
+# Do not move it to another entrypoint or broaden provider trust for a log read.
+
 on:
   workflow_dispatch:
     inputs:
