@@ -296,3 +296,136 @@ fn compact_pc_keeps_finite_request_caps_and_visible_policy_at_all_widths() {
         }
     }
 }
+
+#[test]
+fn compact_typed_tiling_keeps_the_same_family_under_its_native_parallel_authority() {
+    use clearra_core_domain::piece::piece_kind::PieceKind;
+    use clearra_core_executor::{
+        WasmCpuSearchAdvance, WasmCpuSearchSession, WasmCpuTerminalResourceAuthority,
+    };
+    use clearra_pc_graph::request::WorkerPolicy;
+    use clearra_supply::queue::fixed_sequence::FixedSequence;
+    use std::sync::Arc;
+
+    let _request = REQUESTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let hardware = WorkerPolicy::hardware_worker_limit().min(2);
+    for height in [2, 4] {
+        // The 4L field has exactly nine inverse-row O tilings. The 2L field
+        // has five pieces, keeping this an ordinary bounded product fixture.
+        let (initial, queue) = if height == 2 {
+            (
+                0,
+                vec![
+                    PieceKind::I,
+                    PieceKind::I,
+                    PieceKind::O,
+                    PieceKind::O,
+                    PieceKind::O,
+                ],
+            )
+        } else {
+            (
+                (0..4).fold(0_u64, |mask, row| mask | (0x3f0_u64 << (row * 10))),
+                vec![PieceKind::O; 4],
+            )
+        };
+        let mut baseline = None;
+        for worker_policy in [
+            WorkerPolicy::Fixed(1),
+            WorkerPolicy::Fixed(hardware),
+            WorkerPolicy::Auto,
+        ] {
+            let execution = policy(1)
+                .with_worker_hardware_limit(hardware)
+                .with_worker_policy(worker_policy);
+            let workers = execution.workers();
+            // This is the same pre-compilation parent/child authority that
+            // App uses. Merely deleting the fixed-worker rejection would not
+            // admit the child's N compute slots beneath its parent.
+            let authority =
+                WasmCpuTerminalResourceAuthority::try_acquire_full_capacity_with_compute_units(
+                    workers,
+                )
+                .unwrap();
+            let query = PcScenarioQuery::new(
+                PcScenarioBoard::standard_10(height, initial),
+                PcQueueInput::fixed_sequence(FixedSequence::new(queue.clone())),
+                PieceWindow::new(queue.len()),
+            )
+            .with_exact_pieces(Some(queue.len()))
+            .with_min_remaining_queue(0)
+            .with_allow_hold(false)
+            .with_count_policy(PcCountPolicy::CountUnique)
+            .with_objective(ObjectivePolicy::tiling())
+            .with_execution_policy(execution);
+            let problem = Arc::new(ProblemCompiler::compile_scenario_pc_tiling(&query).unwrap());
+            let result =
+                WasmCpuSearchBackend::execute_shared_under_authority_with_control_and_terminal(
+                    Arc::clone(&problem),
+                    0,
+                    &authority,
+                    &ExecutionControl::default().with_parallelism(workers),
+                    |result, terminal| {
+                        let result = result.unwrap();
+                        terminal
+                            .unwrap()
+                            .validate_public_result_memory(&result)
+                            .unwrap();
+                        result
+                    },
+                );
+            assert!(result.pc_tiling_family_publication_contract_is_valid());
+            assert_eq!(result.bool_field("count_complete"), Some(true));
+            assert_eq!(result.bool_field("buildup_executed"), Some(false));
+            assert_eq!(result.usize_field("workers_used"), Some(workers));
+            let store = result.tiling_solution_page_store().unwrap();
+            assert!(store.len() > 1);
+            if height == 4 {
+                assert_eq!(store.len(), 9);
+            }
+            let snapshot = (
+                store.normalized_hash().to_owned(),
+                store.page_keys(0, 100).unwrap(),
+            );
+            if let Some(expected) = &baseline {
+                assert_eq!(
+                    &snapshot, expected,
+                    "height={height}, policy={worker_policy:?}"
+                );
+            } else {
+                baseline = Some(snapshot.clone());
+            }
+            drop(result);
+
+            let control = ExecutionControl::default().with_parallelism(workers);
+            let mut session =
+                WasmCpuSearchSession::new_shared_under_authority(problem, 0, &authority).unwrap();
+            if workers > 1 {
+                assert!(matches!(
+                    session.advance(0, &control).unwrap(),
+                    WasmCpuSearchAdvance::Pending
+                ));
+            }
+            let result = (0..4096)
+                .find_map(|_| match session.advance(256, &control).unwrap() {
+                    WasmCpuSearchAdvance::Pending => None,
+                    WasmCpuSearchAdvance::Completed(result) => Some(result),
+                    WasmCpuSearchAdvance::Cancelled => panic!("Tiling cancelled"),
+                })
+                .expect("small cooperative Tiling finishes");
+            session.validate_public_result_memory(&result).unwrap();
+            assert!(result.pc_tiling_family_publication_contract_is_valid());
+            assert_eq!(result.usize_field("workers_used"), Some(workers));
+            let store = result.tiling_solution_page_store().unwrap();
+            assert_eq!(
+                (
+                    store.normalized_hash().to_owned(),
+                    store.page_keys(0, 100).unwrap()
+                ),
+                snapshot
+            );
+        }
+    }
+}

@@ -1028,6 +1028,8 @@ pub(crate) struct WasmExactSearchSession {
     parallel_minimum_worker_candidates: usize,
     parallel_maximum_worker_candidates: usize,
     parallel_decision_reason: &'static str,
+    #[cfg(all(feature = "parallel", not(target_family = "wasm")))]
+    native_tiling_parallel_pending: bool,
     distributed_execution_constraint_materialized: bool,
     cpu_warmup_requested: bool,
     cpu_warmup_performed: bool,
@@ -1231,10 +1233,12 @@ impl WasmExactSearchSession {
             problem.as_ref(),
             checked_external_retained_upper_bound_bytes,
             authority,
-            if cfg!(target_family = "wasm") || !problem.objective().score().requested() {
-                1
-            } else {
+            if cfg!(not(target_family = "wasm"))
+                && (cfg!(feature = "parallel") || problem.objective().score().requested())
+            {
                 problem.backend_policy().workers()
+            } else {
+                1
             },
         )
         .map_err(WasmExactSearchError::resource_admission)?;
@@ -1967,6 +1971,11 @@ impl WasmExactSearchSession {
             } else {
                 "parallel-feature-disabled"
             },
+            #[cfg(all(feature = "parallel", not(target_family = "wasm")))]
+            native_tiling_parallel_pending: parent_authorized
+                && !external_geometry
+                && problem.output_policy() == SearchOutputPolicy::TilingOnly
+                && problem.backend_policy().workers() > 1,
             distributed_execution_constraint_materialized: false,
             cpu_warmup_requested: problem.backend_policy().cpu_warmup(),
             cpu_warmup_performed: false,
@@ -2148,6 +2157,10 @@ impl WasmExactSearchSession {
         terminal_identity_move: bool,
     ) -> Result<Option<CoreExecutionResult>, WasmExactSearchError> {
         self.execution_control = control.clone();
+        #[cfg(not(target_family = "wasm"))]
+        {
+            self.native_tiling_parallel_pending = false;
+        }
         if worker_count <= 1 {
             return Ok(None);
         }
@@ -2479,6 +2492,21 @@ impl WasmExactSearchSession {
             return Err(WasmExactSearchError::InvalidProblem(
                 "wasm_search_session_already_finished",
             ));
+        }
+        #[cfg(all(feature = "parallel", not(target_family = "wasm")))]
+        if self.native_tiling_parallel_pending {
+            if work_budget == 0 {
+                return Ok(ExactSearchAdvance::Pending);
+            }
+            // Cooperative native hosts enter through advance instead of the
+            // synchronous backend driver. Consume the same one-shot parallel
+            // transition so their admitted N-slot request cannot become a
+            // silent serial compact Tiling session.
+            if let Some(result) = self
+                .execute_parallel_if_worthwhile(self.problem.backend_policy().workers(), control)?
+            {
+                return Ok(ExactSearchAdvance::Completed(result));
+            }
         }
         let work_budget = work_budget.max(1);
         let mut processed_candidates = 0usize;

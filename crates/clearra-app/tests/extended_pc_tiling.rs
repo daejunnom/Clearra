@@ -1347,6 +1347,159 @@ fn extended_direct_tiling_never_reduces_an_explicit_multiworker_request() {
 
 #[test]
 #[cfg(all(feature = "parallel", not(target_family = "wasm")))]
+fn native_product_parallel_compact_tiling_preserves_fixed_and_all_workers_with_occupied_hold() {
+    use clearra_core_domain::execution_cancellation::{ExecutionProgress, ProgressSink};
+    use clearra_pc_graph::request::{SupplyWindowSize, WorkerPolicy};
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Default)]
+    struct Threads(Mutex<Vec<std::thread::ThreadId>>);
+    impl ProgressSink for Threads {
+        fn report(&self, _: ExecutionProgress) {
+            self.0.lock().unwrap().push(std::thread::current().id());
+        }
+    }
+
+    let hardware = WorkerPolicy::hardware_worker_limit().min(2);
+    let context = AppContext::new(
+        AppServices::default().with_core_executor(AppCoreExecutorService::wasm_cpu()),
+    );
+    for height in [2, 4] {
+        let (initial, pieces) = if height == 2 {
+            (
+                0,
+                vec![
+                    PieceKind::I,
+                    PieceKind::I,
+                    PieceKind::O,
+                    PieceKind::O,
+                    PieceKind::O,
+                ],
+            )
+        } else {
+            (
+                (0..4).fold(0_u64, |mask, row| mask | (0x3f0_u64 << (row * 10))),
+                vec![PieceKind::O; 4],
+            )
+        };
+        for occupied_hold in [false, true] {
+            let held = occupied_hold.then_some(pieces[0]);
+            let queue = pieces[usize::from(occupied_hold)..].to_vec();
+            let mut baseline = None;
+            for worker_policy in [
+                WorkerPolicy::Fixed(1),
+                WorkerPolicy::Fixed(hardware),
+                WorkerPolicy::Auto,
+            ] {
+                let execution = PcExecutionPolicy::mvp_default()
+                    .with_requested_backend(RequestedSearchBackend::Cpu)
+                    .with_use_all_logical_processors(true)
+                    .with_worker_hardware_limit(hardware)
+                    .with_worker_policy(worker_policy);
+                let workers = execution.workers();
+                let query = PcScenarioQuery::new(
+                    PcScenarioBoard::standard_10(height, initial),
+                    PcQueueInput::fixed_sequence(FixedSequence::new(queue.clone())),
+                    PieceWindow::new(pieces.len()),
+                )
+                .with_exact_pieces(Some(pieces.len()))
+                .with_supply_window_size(SupplyWindowSize::new(queue.len()))
+                .with_allow_hold(occupied_hold)
+                .with_hold_piece(held)
+                .with_min_remaining_queue(0)
+                .with_count_policy(PcCountPolicy::CountUnique)
+                .with_objective(ObjectivePolicy::tiling())
+                .with_retained_trace_limit(1)
+                .with_execution_policy(execution);
+                let request = AppRequest::new(AppCommand::Scenario(
+                    ScenarioAppCommand::new(query).with_result_projection(
+                        PcResultProjection::TilingFamilyV1(
+                            PcTilingIngressOrigin::CanonicalPcTiling,
+                        ),
+                    ),
+                ))
+                .with_product_capability_contract(ProductCapabilityContract::PcTiling)
+                .unwrap();
+                let caller = std::thread::current().id();
+                let events = Arc::new(Threads::default());
+                let response = context.run_with_execution_control(
+                    request.clone(),
+                    &ExecutionControl::default()
+                        .with_parallelism(workers)
+                        .with_progress_sink(events.clone()),
+                );
+                assert_eq!(
+                    response.status(),
+                    AppStatus::Success,
+                    "height={height}, hold={held:?}, policy={worker_policy:?}: {response:?}"
+                );
+                let core = response.render_model().unwrap().core_result().unwrap();
+                assert_eq!(core.usize_field("workers_used"), Some(workers));
+                assert!(core.pc_tiling_family_publication_contract_is_valid());
+                assert_eq!(core.bool_field("buildup_executed"), Some(false));
+                let family = response
+                    .product_capability_result()
+                    .unwrap()
+                    .pc_tiling_family_v1()
+                    .unwrap();
+                assert!(family.normalized_solution_count() > 1);
+                let snapshot = (
+                    family.normalized_solution_set_hash().to_owned(),
+                    family.page_keys(0, 100).unwrap(),
+                );
+                if let Some(expected) = &baseline {
+                    assert_eq!(&snapshot, expected);
+                } else {
+                    baseline = Some(snapshot.clone());
+                }
+                let observed = events.0.lock().unwrap();
+                assert!(!observed.is_empty());
+                assert!(observed.iter().all(|thread| *thread != caller));
+                drop(observed);
+
+                let mut cooperative = context.start_cooperative_execution(request);
+                let completed = (0..4096)
+                    .find_map(|_| {
+                        match cooperative
+                            .advance(256, &ExecutionControl::default().with_parallelism(workers))
+                        {
+                            CooperativeAppAdvance::Pending | CooperativeAppAdvance::Progress => {
+                                None
+                            }
+                            CooperativeAppAdvance::Completed(response) => Some(response),
+                            other => panic!("unexpected compact Tiling advance: {other:?}"),
+                        }
+                    })
+                    .expect("small compact Tiling finishes");
+                assert_eq!(completed.status(), AppStatus::Success, "{completed:?}");
+                assert_eq!(
+                    completed
+                        .render_model()
+                        .unwrap()
+                        .core_result()
+                        .unwrap()
+                        .usize_field("workers_used"),
+                    Some(workers)
+                );
+                let family = completed
+                    .product_capability_result()
+                    .unwrap()
+                    .pc_tiling_family_v1()
+                    .unwrap();
+                assert_eq!(
+                    (
+                        family.normalized_solution_set_hash().to_owned(),
+                        family.page_keys(0, 100).unwrap()
+                    ),
+                    snapshot
+                );
+            }
+        }
+    }
+}
+
+#[test]
+#[cfg(all(feature = "parallel", not(target_family = "wasm")))]
 fn extended_native_parallel_tiling_keeps_the_real_complete_family_and_terminal_authority() {
     use clearra_core_domain::board::standard_pc_board::Board256Mask;
     let context = AppContext::new(
