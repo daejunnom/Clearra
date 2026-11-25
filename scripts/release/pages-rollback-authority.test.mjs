@@ -11,6 +11,7 @@ import {
   LEGACY_BOOTSTRAP_RELEASE_TAG,
   captureArtifactAuthoritySha256,
   canonicalAcceptanceQuery,
+  downloadRollbackCaptureArtifact,
   expectedCaptureArtifactName,
   expectedCaptureReportArtifactName,
   preparePagesRollbackManifests,
@@ -574,7 +575,7 @@ test("Pages rollback workflow keeps bootstrap capture read-only and reuses the s
     "node authority-source/scripts/release/pages-legacy-contract.mjs",
     "legacy_initial_evidence_base64",
     "LEGACY_PREARTIFACT_EVIDENCE_BASE64",
-    "Download uploaded rollback artifact by exact run-bound name",
+    "Download uploaded rollback artifact by exact receipt ID",
     "Seal exact rollback capture authority",
     "Verify downloaded rollback package against sealed capture report",
   ]) {
@@ -610,6 +611,18 @@ test("Pages rollback workflow keeps bootstrap capture read-only and reuses the s
   assert.match(acceptedDownload, /run-id: \$\{\{ needs\.capture-authority\.outputs\.accepted_run_id \}\}/u);
   assert.match(acceptedDownload, /path: canonical-pages-build/u);
   assert.doesNotMatch(acceptedDownload, /\n\s+pattern:|\n\s+name:/u);
+  const captureDownload = captureJobs.slice(
+    captureJobs.indexOf("- name: Download uploaded rollback artifact by exact receipt ID"),
+    captureJobs.indexOf("- name: Seal exact rollback capture authority"),
+  );
+  assert.match(captureDownload, /PAGES_AUTHORITY_MODE: capture-download/u);
+  assert.match(captureDownload, /CAPTURE_ARTIFACT_ID: \$\{\{ steps\.snapshot\.outputs\.artifact_id \}\}/u);
+  assert.match(captureDownload, /CAPTURE_ARTIFACT_NAME: \$\{\{ steps\.artifact-authority\.outputs\.artifact_name \}\}/u);
+  assert.match(captureDownload, /AUTHORITY_SHA: \$\{\{ inputs\.expected_current_main \}\}/u);
+  assert.match(captureDownload, /SNAPSHOT_SHA: \$\{\{ inputs\.snapshot_sha \}\}/u);
+  assert.match(captureDownload, /CAPTURE_DOWNLOAD_PATH: captured-pages-artifact/u);
+  assert.match(captureDownload, /node authority-source\/scripts\/release\/pages-rollback-authority\.mjs/u);
+  assert.doesNotMatch(captureDownload, /actions\/download-artifact|artifact-ids:|\n\s+with:/u);
   const legacyStamp = captureJobs.slice(
     captureJobs.indexOf("- name: Stamp separate reconstructed v0.7.4 identity"),
     captureJobs.indexOf("- name: Validate portable rollback tree"),
@@ -957,6 +970,203 @@ test("bounded response reader rejects Content-Length, chunked, and exact-size dr
     }),
     /exact byte length/u,
   );
+});
+
+function captureDownloadFixture(outputDirectory) {
+  const archive = Buffer.from("exact-uploaded-archive");
+  const input = {
+    repository: "daejunnom/Clearra",
+    apiUrl: "https://api.github.com",
+    token: "test-only-artifact-read",
+    snapshotSha: SNAPSHOT,
+    authoritySha: AUTHORITY,
+    captureRunId: "12345",
+    captureRunAttempt: "2",
+    artifactId: "67890",
+    outputDirectory,
+  };
+  input.artifactName = expectedCaptureArtifactName(input);
+  const run = {
+    id: 12345, run_attempt: 2, head_sha: AUTHORITY, head_branch: "main",
+    event: "workflow_dispatch", status: "in_progress", conclusion: null,
+    path: ".github/workflows/pages-rollback.yml",
+    repository: { full_name: input.repository }, head_repository: { full_name: input.repository },
+  };
+  const artifact = {
+    id: 67890, name: input.artifactName, expired: false,
+    digest: `sha256:${createHash("sha256").update(archive).digest("hex")}`,
+    size_in_bytes: archive.byteLength,
+    created_at: "2026-08-28T00:00:00Z", expires_at: "2026-11-26T00:00:00Z",
+    workflow_run: { id: 12345, head_branch: "main", head_sha: AUTHORITY },
+    archive_download_url: "https://api.github.com/repos/daejunnom/Clearra/actions/artifacts/67890/zip",
+  };
+  const requests = [];
+  const fetchImpl = async (url, options) => {
+    requests.push({ url, options });
+    const path = new URL(url).pathname;
+    if (path === "/repos/daejunnom/Clearra/actions/runs/12345") return Response.json(run);
+    if (path === "/repos/daejunnom/Clearra/actions/artifacts/67890") return Response.json(artifact);
+    if (url === artifact.archive_download_url) return new Response(archive);
+    throw new Error("artifact list/name lookup must not be used");
+  };
+  return { input, run, artifact, archive, requests, fetchImpl };
+}
+
+test("capture download uses the upload receipt ID without a visible name/list index", async () => {
+  const root = await mkdtemp(join(tmpdir(), "clearra-pages-download-"));
+  const fixture = captureDownloadFixture(join(root, "captured"));
+  try {
+    const result = await downloadRollbackCaptureArtifact(fixture.input, {
+      fetchImpl: fixture.fetchImpl,
+      extractArtifactTar: async (path) => {
+        assert.deepEqual(await readFile(path), fixture.archive);
+        return Buffer.from("verified-tar");
+      },
+    });
+    assert.equal(result.id, "67890");
+    assert.equal(await readFile(join(root, "captured", "artifact.tar"), "utf8"), "verified-tar");
+    assert.deepEqual(fixture.requests.map(({ url }) => new URL(url).pathname), [
+      "/repos/daejunnom/Clearra/actions/runs/12345",
+      "/repos/daejunnom/Clearra/actions/artifacts/67890",
+      "/repos/daejunnom/Clearra/actions/artifacts/67890/zip",
+    ]);
+    assert.equal(fixture.requests[2].options.redirect, "manual");
+    await assert.rejects(downloadRollbackCaptureArtifact(fixture.input, {
+      fetchImpl: fixture.fetchImpl,
+      extractArtifactTar: () => assert.fail("existing output must not be replaced"),
+    }), /EEXIST/u);
+    assert.equal(await readFile(join(root, "captured", "artifact.tar"), "utf8"), "verified-tar");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("capture download retries transient receipt and archive reads within a fixed bound", async () => {
+  const root = await mkdtemp(join(tmpdir(), "clearra-pages-download-retry-"));
+  const fixture = captureDownloadFixture(join(root, "captured"));
+  let metadataReads = 0;
+  let archiveReads = 0;
+  const waits = [];
+  try {
+    await downloadRollbackCaptureArtifact(fixture.input, {
+      fetchImpl: async (url, options) => {
+        if (url.endsWith("/artifacts/67890") && ++metadataReads < 3) {
+          return new Response(null, { status: metadataReads === 1 ? 404 : 503 });
+        }
+        if (url.endsWith("/zip") && ++archiveReads === 1) return new Response(null, { status: 502 });
+        return fixture.fetchImpl(url, options);
+      },
+      sleep: async (milliseconds) => { waits.push(milliseconds); },
+      attempts: 3,
+      extractArtifactTar: () => Buffer.from("verified-tar"),
+    });
+    assert.equal(metadataReads, 3);
+    assert.equal(archiveReads, 2);
+    assert.deepEqual(waits, [2_000, 2_000, 2_000]);
+    let attempts = 0;
+    await assert.rejects(downloadRollbackCaptureArtifact(fixture.input, {
+      fetchImpl: async (url, options) => {
+        if (url.endsWith("/artifacts/67890")) {
+          attempts += 1;
+          return new Response(null, { status: 404 });
+        }
+        return fixture.fetchImpl(url, options);
+      },
+      sleep: async () => {}, attempts: 3,
+      extractArtifactTar: () => assert.fail("unavailable artifact must not extract"),
+    }), /HTTP 404/u);
+    assert.equal(attempts, 3);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("capture download immediately rejects auth, identity, size, and digest failures", async () => {
+  const root = await mkdtemp(join(tmpdir(), "clearra-pages-download-reject-"));
+  const cases = [
+    (fixture) => { fixture.input.apiUrl = "https://untrusted.invalid"; },
+    (fixture) => { fixture.input.artifactName += "-wrong"; },
+    (fixture) => { fixture.run.repository.full_name = "other/Clearra"; },
+    (fixture) => { fixture.run.head_repository.full_name = "other/Clearra"; },
+    (fixture) => { fixture.run.id += 1; },
+    (fixture) => { fixture.run.run_attempt += 1; },
+    (fixture) => { fixture.run.head_sha = SNAPSHOT; },
+    (fixture) => { fixture.artifact.id += 1; },
+    (fixture) => { fixture.artifact.name += "-wrong"; },
+    (fixture) => { fixture.artifact.workflow_run.id += 1; },
+    (fixture) => { fixture.artifact.workflow_run.head_sha = SNAPSHOT; },
+    (fixture) => { fixture.artifact.expired = true; },
+    (fixture) => { fixture.artifact.expires_at = "2026-08-29T00:00:00Z"; },
+    (fixture) => { fixture.artifact.archive_download_url = "https://untrusted.invalid/zip"; },
+    (fixture) => { fixture.artifact.size_in_bytes -= 1; },
+    (fixture) => { fixture.artifact.size_in_bytes += 1; },
+    (fixture) => { fixture.artifact.digest = `sha256:${"0".repeat(64)}`; },
+  ];
+  try {
+    for (const mutate of cases) {
+      const fixture = captureDownloadFixture(join(root, "must-not-exist"));
+      mutate(fixture);
+      await assert.rejects(downloadRollbackCaptureArtifact(fixture.input, {
+        fetchImpl: fixture.fetchImpl,
+        sleep: () => assert.fail("identity and byte failures must not retry"),
+        extractArtifactTar: () => assert.fail("unverified bytes must not extract"),
+      }));
+    }
+    for (const status of [400, 401, 403, 410, 422]) {
+      for (const endpoint of ["/artifacts/67890", "/zip"]) {
+        const fixture = captureDownloadFixture(join(root, "must-not-exist"));
+        await assert.rejects(downloadRollbackCaptureArtifact(fixture.input, {
+          fetchImpl: (url, options) => url.endsWith(endpoint)
+            ? new Response(null, { status }) : fixture.fetchImpl(url, options),
+          sleep: () => assert.fail("permanent HTTP failure must not retry"),
+          extractArtifactTar: () => assert.fail("failed reads must not extract"),
+        }), new RegExp(`HTTP ${status}`, "u"));
+      }
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("capture archive redirects never forward GitHub credentials and reject unsafe destinations", async () => {
+  const root = await mkdtemp(join(tmpdir(), "clearra-pages-download-redirect-"));
+  const fixture = captureDownloadFixture(join(root, "captured"));
+  const signedUrl = "https://artifact-storage.invalid/archive?signature=test-only";
+  try {
+    await downloadRollbackCaptureArtifact(fixture.input, {
+      fetchImpl: (url, options) => {
+        if (url === fixture.artifact.archive_download_url) {
+          assert.equal(options.headers.Authorization, `Bearer ${fixture.input.token}`);
+          assert.equal(options.redirect, "manual");
+          return new Response(null, { status: 302, headers: { location: signedUrl } });
+        }
+        if (url === signedUrl) {
+          assert.equal(options.headers.Authorization, undefined);
+          assert.equal(options.headers.authorization, undefined);
+          assert.equal(options.redirect, "manual");
+          return new Response(fixture.archive);
+        }
+        return fixture.fetchImpl(url, options);
+      },
+      extractArtifactTar: () => Buffer.from("verified-tar"),
+    });
+    for (const location of [
+      "http://artifact-storage.invalid/archive",
+      "https://user:password@artifact-storage.invalid/archive",
+      "file:///artifact.tar",
+      "https://artifact-storage.invalid/archive#fragment",
+    ]) {
+      await assert.rejects(downloadRollbackCaptureArtifact(fixture.input, {
+        fetchImpl: (url, options) => url.endsWith("/zip")
+          ? new Response(null, { status: 302, headers: { location } })
+          : fixture.fetchImpl(url, options),
+        sleep: () => assert.fail("unsafe redirect must not retry"),
+        extractArtifactTar: () => assert.fail("unsafe redirect must not extract"),
+      }), /HTTPS URL without credentials or a fragment/u);
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("capture names are unique per authority, run, and rerun attempt", () => {

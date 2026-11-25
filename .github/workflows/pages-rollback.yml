@@ -233,11 +233,16 @@ jobs:
           name: ${{ steps.artifact-authority.outputs.artifact_name }}
           path: ${{ inputs.mode == 'capture' && 'canonical-pages-build' || 'snapshot-source/apps/clearra-web/build' }}
           retention-days: 90
-      - name: Download uploaded rollback artifact by exact run-bound name
-        uses: actions/download-artifact@v4
-        with:
-          name: ${{ steps.artifact-authority.outputs.artifact_name }}
-          path: captured-pages-artifact
+      - name: Download uploaded rollback artifact by exact receipt ID
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PAGES_AUTHORITY_MODE: capture-download
+          AUTHORITY_SHA: ${{ inputs.expected_current_main }}
+          SNAPSHOT_SHA: ${{ inputs.snapshot_sha }}
+          CAPTURE_ARTIFACT_NAME: ${{ steps.artifact-authority.outputs.artifact_name }}
+          CAPTURE_ARTIFACT_ID: ${{ steps.snapshot.outputs.artifact_id }}
+          CAPTURE_DOWNLOAD_PATH: captured-pages-artifact
+        run: node authority-source/scripts/release/pages-rollback-authority.mjs
       - name: Seal exact rollback capture authority
         id: capture-report
         env:

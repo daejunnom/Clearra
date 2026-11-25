@@ -1,8 +1,10 @@
 // SRP rationale: rollback authority stays cohesive here because the behavior-level change reason is to capture, resolve, validate, and consume one exact Pages snapshot through a closed provenance chain.
 import { createHash } from "node:crypto";
-import { appendFile, lstat, open, readFile, readdir } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { appendFile, lstat, mkdir, open, readFile, readdir } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 
 import {
   canonicalJson,
@@ -53,6 +55,8 @@ export const LEGACY_BOOTSTRAP_RELEASE_TAG = LEGACY_PAGES_RELEASE_TAG;
 const MINIMUM_RETENTION_MS = 89 * 24 * 60 * 60 * 1000;
 const HTTP_READ_TIMEOUT_MS = 30_000;
 const MAX_JSON_RESPONSE_BYTES = 8 * 1024 * 1024;
+const execFileAsync = promisify(execFile);
+const TRANSIENT_ARTIFACT_HTTP_STATUSES = new Set([404, 408, 429, 500, 502, 503, 504]);
 export const MAX_PAGES_ROLLBACK_ARCHIVE_BYTES = 512 * 1024 * 1024;
 export const MAX_PAGES_ROLLBACK_TAR_BYTES = 512 * 1024 * 1024;
 const MAX_CAPTURE_REPORT_BYTES = 2 * 1024 * 1024;
@@ -1375,7 +1379,10 @@ export async function readBoundedResponseBytes(response, label, {
     fail(`${label} response byte limit is invalid`);
   }
   if (!response.ok) {
-    fail(`${label} request failed with HTTP ${response.status}`);
+    await response.body?.cancel().catch(() => {});
+    const error = new Error(`${label} request failed with HTTP ${response.status}`);
+    error.httpStatus = response.status;
+    throw error;
   }
   const contentLengthValue = response.headers?.get?.("content-length");
   if (contentLengthValue != null) {
@@ -1425,7 +1432,7 @@ async function parseJsonResponse(response, label) {
   }
 }
 
-function apiClient({ repository, token, apiUrl }) {
+function apiClient({ repository, token, apiUrl, fetchImpl = fetch }) {
   const base = `${apiUrl.replace(/\/$/u, "")}/repos/${repository}`;
   const headers = {
     Accept: "application/vnd.github+json",
@@ -1434,7 +1441,7 @@ function apiClient({ repository, token, apiUrl }) {
   };
   return {
     async get(path, label) {
-      return parseJsonResponse(await fetch(`${base}${path}`, {
+      return parseJsonResponse(await fetchImpl(`${base}${path}`, {
         headers,
         cache: "no-store",
         redirect: "error",
@@ -1442,6 +1449,160 @@ function apiClient({ repository, token, apiUrl }) {
       }), label);
     },
   };
+}
+
+async function readCaptureArtifactWithRetry(read, { attempts, sleep }) {
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      return await read();
+    } catch (error) {
+      if (attempt >= attempts || !TRANSIENT_ARTIFACT_HTTP_STATUSES.has(error.httpStatus)) {
+        throw error;
+      }
+      await sleep(2_000);
+    }
+  }
+}
+
+async function fetchCaptureArtifactArchive({ url, token, size }, fetchImpl) {
+  let current = new URL(url);
+  for (let redirect = 0; redirect <= 5; redirect += 1) {
+    if (current.protocol !== "https:" || current.username || current.password || current.hash) {
+      fail("capture artifact archive redirect must be an HTTPS URL without credentials or a fragment");
+    }
+    const response = await fetchImpl(current.href, {
+      headers: redirect === 0
+        ? {
+          Accept: "application/vnd.github+json",
+          Authorization: `Bearer ${token}`,
+          "X-GitHub-Api-Version": "2022-11-28",
+        }
+        : { Accept: "application/octet-stream" },
+      cache: "no-store",
+      redirect: "manual",
+      signal: AbortSignal.timeout(HTTP_READ_TIMEOUT_MS),
+    });
+    if (![301, 302, 303, 307, 308].includes(response.status)) {
+      return readBoundedResponseBytes(response, "capture artifact archive", {
+        maximumBytes: size,
+        exactBytes: size,
+      });
+    }
+    await response.body?.cancel().catch(() => {});
+    const location = response.headers.get("location");
+    if (!location || redirect === 5) fail("capture artifact archive redirect is missing or exceeds the limit");
+    try {
+      current = new URL(location, current);
+    } catch {
+      fail("capture artifact archive redirect URL is invalid");
+    }
+  }
+}
+
+async function extractCaptureArtifactTar(archivePath) {
+  // The capture job runs on Linux. Read the one named member without extracting
+  // archive paths; unzip also checks its CRC and rejects malformed ZIP data.
+  let listing;
+  try {
+    ({ stdout: listing } = await execFileAsync("unzip", ["-Z", "-1", archivePath], {
+      encoding: "utf8", timeout: HTTP_READ_TIMEOUT_MS, maxBuffer: 4_096,
+    }));
+  } catch {
+    fail("capture artifact archive member listing failed");
+  }
+  if (listing !== "artifact.tar\n") {
+    fail("capture artifact archive must contain exactly one artifact.tar");
+  }
+  try {
+    const { stdout } = await execFileAsync("unzip", ["-p", archivePath, "artifact.tar"], {
+      encoding: "buffer", timeout: HTTP_READ_TIMEOUT_MS, maxBuffer: MAX_PAGES_ROLLBACK_TAR_BYTES,
+    });
+    return stdout;
+  } catch {
+    fail("capture artifact archive extraction failed");
+  }
+}
+
+export async function downloadRollbackCaptureArtifact(input, {
+  fetchImpl = fetch,
+  sleep = (milliseconds) => new Promise((resolvePromise) => setTimeout(resolvePromise, milliseconds)),
+  attempts = 6,
+  extractArtifactTar = extractCaptureArtifactTar,
+} = {}) {
+  if (!Number.isSafeInteger(attempts) || attempts < 1 || attempts > 10) {
+    fail("capture artifact readback attempts must be 1 through 10");
+  }
+  const repository = requirePattern(input.repository, /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u, "repository");
+  const apiUrl = requireString(input.apiUrl, "GitHub API URL").replace(/\/$/u, "");
+  assertExact(apiUrl, "https://api.github.com", "capture artifact API origin");
+  const token = requireString(input.token, "GitHub token");
+  const authoritySha = requireSha(input.authoritySha, "authority SHA");
+  const snapshotSha = requireSha(input.snapshotSha, "snapshot SHA");
+  const captureRunId = requireDecimalId(String(input.captureRunId), "capture run ID");
+  const captureRunAttempt = requireDecimalId(String(input.captureRunAttempt), "capture run attempt");
+  const artifactId = requireDecimalId(String(input.artifactId), "capture artifact ID");
+  const artifactName = expectedCaptureArtifactName({ snapshotSha, authoritySha, captureRunId, captureRunAttempt });
+  assertExact(input.artifactName, artifactName, "capture artifact run-bound name");
+  const api = apiClient({ repository, token, apiUrl, fetchImpl });
+  const run = await api.get(`/actions/runs/${captureRunId}`, "capture workflow run");
+  if (
+    String(run.id) !== captureRunId || String(run.run_attempt) !== captureRunAttempt ||
+    run.event !== "workflow_dispatch" || run.status !== "in_progress" || run.conclusion !== null ||
+    run.head_branch !== "main" || run.head_sha !== authoritySha ||
+    run.path !== ".github/workflows/pages-rollback.yml" ||
+    run.repository?.full_name !== repository || run.head_repository?.full_name !== repository
+  ) {
+    fail("capture workflow run does not match the active exact-main repository and attempt");
+  }
+  // A just-finalized upload can precede artifact name/list visibility. Its
+  // receipt ID is already exact; never resolve it through either index.
+  const artifactValue = await readCaptureArtifactWithRetry(
+    () => api.get(`/actions/artifacts/${artifactId}`, "capture artifact"),
+    { attempts, sleep },
+  );
+  const artifact = captureArtifactAuthorityProjection(artifactValue);
+  const archiveUrl = `${apiUrl}/repos/${repository}/actions/artifacts/${artifactId}/zip`;
+  if (
+    artifact.id !== artifactId || artifact.name !== artifactName ||
+    artifact.workflow_run.id !== captureRunId || artifact.workflow_run.head_branch !== "main" ||
+    artifact.workflow_run.head_sha !== authoritySha || artifactValue.archive_download_url !== archiveUrl
+  ) {
+    fail("capture artifact metadata does not match its exact upload receipt authority");
+  }
+  if (Date.parse(artifact.expires_at) - Date.parse(artifact.created_at) < MINIMUM_RETENTION_MS) {
+    fail("capture artifact retention is shorter than the durable authority policy");
+  }
+  const archiveBytes = await readCaptureArtifactWithRetry(
+    () => fetchCaptureArtifactArchive({ url: archiveUrl, token, size: artifact.size_in_bytes }, fetchImpl),
+    { attempts, sleep },
+  );
+  if (`sha256:${createHash("sha256").update(archiveBytes).digest("hex")}` !== artifact.digest) {
+    fail("capture artifact archive digest differs from its exact API receipt");
+  }
+  const directory = resolve(requireString(input.outputDirectory, "capture artifact download directory"));
+  await assertSafeDirectoryChain(dirname(directory));
+  await mkdir(directory);
+  // Retain the verified ZIP beside the extraction root. The existing seal
+  // requires that root to contain artifact.tar alone, and neither is replaced.
+  const archivePath = `${directory}.zip`;
+  const archiveHandle = await open(archivePath, "wx", 0o600);
+  try {
+    await archiveHandle.writeFile(archiveBytes);
+    await archiveHandle.sync();
+  } finally {
+    await archiveHandle.close();
+  }
+  const extractedTar = await extractArtifactTar(archivePath);
+  const tarBytes = Buffer.isBuffer(extractedTar) ? extractedTar : Buffer.from(extractedTar);
+  requireBoundedByteSize(tarBytes.byteLength, MAX_PAGES_ROLLBACK_TAR_BYTES, "capture artifact tar size");
+  const tarHandle = await open(resolve(directory, "artifact.tar"), "wx", 0o600);
+  try {
+    await tarHandle.writeFile(tarBytes);
+    await tarHandle.sync();
+  } finally {
+    await tarHandle.close();
+  }
+  return artifact;
 }
 
 async function fetchPublicJson(url, label) {
@@ -1791,6 +1952,25 @@ export async function verifyCurrentPagesAgainstCapture({
   return verifyCanonicalPagesPublicAuthority({ pageUrl, cacheBuster, canonicalSnapshot: report.canonical_snapshot }, dependencies);
 }
 
+async function captureDownloadMain() {
+  const authoritySha = requireSha(env("AUTHORITY_SHA"), "authority SHA");
+  assertExact(env("GITHUB_REF"), "refs/heads/main", "workflow ref");
+  assertExact(requireSha(env("GITHUB_SHA"), "workflow SHA"), authoritySha, "workflow SHA");
+  const artifact = await downloadRollbackCaptureArtifact({
+    repository: env("GITHUB_REPOSITORY"),
+    apiUrl: env("GITHUB_API_URL"),
+    token: env("GH_TOKEN"),
+    authoritySha,
+    snapshotSha: env("SNAPSHOT_SHA"),
+    captureRunId: env("GITHUB_RUN_ID"),
+    captureRunAttempt: env("GITHUB_RUN_ATTEMPT"),
+    artifactId: env("CAPTURE_ARTIFACT_ID"),
+    artifactName: env("CAPTURE_ARTIFACT_NAME"),
+    outputDirectory: env("CAPTURE_DOWNLOAD_PATH"),
+  });
+  console.log(`pages_rollback_capture_download=verified artifact=${artifact.id} bytes=${artifact.size_in_bytes}`);
+}
+
 async function captureReportMain() {
   const repository = requireString(env("GITHUB_REPOSITORY"), "GitHub repository");
   const token = requireString(env("GH_TOKEN"), "GitHub token");
@@ -2004,12 +2184,16 @@ async function main() {
     await captureReportMain();
     return;
   }
+  if (mode === "capture-download") {
+    await captureDownloadMain();
+    return;
+  }
   if (mode === "resolve-forward" || mode === "resolve-restore") {
     await resolveCaptureReportMain(mode);
     return;
   }
   if (!new Set(["capture", "bootstrap-capture", "forward", "restore"]).has(mode)) {
-    fail("PAGES_AUTHORITY_MODE must be prepare-manifests, capture, bootstrap-capture, capture-report, resolve-forward, resolve-restore, forward, or restore");
+    fail("PAGES_AUTHORITY_MODE must be prepare-manifests, capture, bootstrap-capture, capture-download, capture-report, resolve-forward, resolve-restore, forward, or restore");
   }
   const phase = validatePagesAuthorityPhase(mode, env("PAGES_AUTHORITY_PHASE"));
   const authoritySha = requireSha(env("AUTHORITY_SHA"), "authority SHA");
