@@ -550,8 +550,9 @@ impl WasmTilingRootProducer {
         if control.is_cancelled() {
             return Ok(WasmCandidateProducerAdvance::Cancelled);
         }
-        for offset in 0..self.passes.len() {
-            let pass_index = (self.next_pass + offset) % self.passes.len();
+        let pass_count = self.passes.len();
+        for offset in 0..pass_count {
+            let pass_index = (self.next_pass + offset) % pass_count;
             let pass = &mut self.passes[pass_index];
             if pass.next_root >= pass.root_order.len() * pass.partition_count as usize {
                 continue;
@@ -559,7 +560,7 @@ impl WasmTilingRootProducer {
             let root_ordinal = pass.next_root;
             let family_index = pass.root_order[root_ordinal / pass.partition_count as usize];
             pass.next_root += 1;
-            self.next_pass = (pass_index + 1) % self.passes.len();
+            self.next_pass = (pass_index + 1) % pass_count;
             return Ok(WasmCandidateProducerAdvance::Candidate(root_packet(
                 root_ordinal,
                 u8::try_from(pass_index).map_err(|_| "wasm_tiling_pass_index_overflow")?,
