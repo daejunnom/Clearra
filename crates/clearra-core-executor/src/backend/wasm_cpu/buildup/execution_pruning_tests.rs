@@ -59,6 +59,45 @@ const RULES: [KickTableProfileId; 5] = [
     KickTableProfileId::NoKick,
 ];
 
+#[test]
+fn typed_chance_constraint_survives_disabled_optional_semantic_pruning() {
+    use clearra_problem::SearchOutputPolicy;
+    use clearra_supply::queue::queue_pattern_expression::QueuePatternExpression;
+
+    for spin in SPIN_PROFILES {
+        let query = PcScenarioQuery::new(
+            PcScenarioBoard::standard_10(2, 0xfc3f0),
+            PcQueueInput::pattern_expression(QueuePatternExpression::parse("II;OO", 2).unwrap()),
+            PieceWindow::new(2),
+        )
+        .with_allow_hold(false)
+        .with_exact_pieces(Some(2))
+        .with_supply_window_size(SupplyWindowSize::new(2))
+        .with_count_policy(PcCountPolicy::CountUnique)
+        .with_objective(ObjectivePolicy::unique().with_back_to_back_preservation(spin))
+        .with_execution_policy(execution_policy());
+        let problem = ProblemCompiler::compile_scenario_pc(&query)
+            .unwrap()
+            .with_pc_chance_probability_v2_evidence()
+            .with_output_policy(SearchOutputPolicy::CoverageSummary);
+        let result = with_semantic_pruning(false, || {
+            WasmCpuSearchBackend::execute_with_control(&problem, &ExecutionControl::default())
+                .unwrap()
+        });
+        assert_eq!(result.coverage_pattern_words(), &[2], "{spin:?}");
+        assert_eq!(
+            result.field("coverage_probability"),
+            Some("0.5"),
+            "{spin:?}"
+        );
+        assert_eq!(
+            result.field("execution_constraint_materialized"),
+            Some("true")
+        );
+        assert!(result.pc_chance_coverage_evidence().unwrap().complete());
+    }
+}
+
 fn rule(id: KickTableProfileId) -> RuleProfile {
     match id {
         KickTableProfileId::Srs90 => builtin_rules::srs(),

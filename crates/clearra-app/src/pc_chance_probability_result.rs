@@ -25,6 +25,16 @@ use clearra_supply::QueueObservationPolicy;
 
 const CHANCE_RESULT_CONTRACT: &str = "pc-probability.v2";
 
+pub(crate) fn supports_pc_chance_objective(objective: ObjectivePolicy) -> bool {
+    let constraint = objective.execution_constraints();
+    let expected = if constraint.preserves_back_to_back() {
+        ObjectivePolicy::unique().with_back_to_back_preservation(constraint.spin_profile())
+    } else {
+        ObjectivePolicy::unique()
+    };
+    objective == expected
+}
+
 /// Closed identity for the Web ingress spelling that requested `pc.chance`.
 ///
 /// This value is part of the request proof. Compatibility aliases are not
@@ -64,6 +74,13 @@ impl PcChanceQuerySnapshot {
         match self {
             Self::Opening(query) => query.queue_observation_policy(),
             Self::Scenario(query) => query.queue_observation_policy(),
+        }
+    }
+
+    fn objective(&self) -> ObjectivePolicy {
+        match self {
+            Self::Opening(query) => query.objective(),
+            Self::Scenario(query) => query.objective(),
         }
     }
 }
@@ -385,7 +402,8 @@ impl PcChanceCompiledAuthority {
             ));
         }
         if problem.goal().as_str() != "clear-to-empty"
-            || problem.objective() != ObjectivePolicy::unique()
+            || problem.objective() != query.objective()
+            || !supports_pc_chance_objective(problem.objective())
             || problem.solution_probability_policy() != PcSolutionProbabilityPolicy::Omit
             || problem.count_policy() != PcCountPolicy::CountUnique
             || problem.allowed_colored_solution_identities().is_some()
@@ -451,7 +469,13 @@ impl PcChanceCompiledAuthority {
         expected_problem: &SearchProblem,
         result: &CoreExecutionResult,
     ) -> Result<ValidatedPcChanceExecutionEvidence, PcChanceExecutionError> {
+        if expected_problem.objective() != self.query.objective() {
+            return Err(rejected(
+                "executed pc chance objective does not match the query authority",
+            ));
+        }
         let critical_fields = critical_field_snapshot(result)?;
+        validate_pc_chance_constraint_materialization(expected_problem, result)?;
         require_field(result, "search_output_policy", "coverage-summary")?;
         require_usize(
             result,
@@ -584,6 +608,16 @@ impl PcChanceCompiledAuthority {
                 .push(row.clone())
                 .map_err(|_| rejected("coverage-row evidence identity or dimensions mismatch"))?;
         }
+        if self
+            .query
+            .objective()
+            .execution_constraints()
+            .preserves_back_to_back()
+            && result.unique_field("b2b_preserving_candidate_pattern_count")
+                != Some("not-calculated")
+        {
+            return Err(rejected("pc chance B2B witness count must remain private"));
+        }
         let union = matrix.union_all();
 
         let aggregate = strict_coverage_pattern_bitset_from_words(
@@ -668,6 +702,138 @@ enum PcChanceResultProducer {
     CooperativeWasm,
 }
 
+pub(crate) fn validate_pc_chance_before_public_surface(
+    problem: &SearchProblem,
+    result: &CoreExecutionResult,
+) -> Result<(), PcChanceExecutionError> {
+    // Public summary projection canonicalizes some fields. Detect conflicting
+    // producer occurrences before that operation can erase their ambiguity.
+    for key in CRITICAL_FIELDS {
+        if result.field_occurrence_count(key) > 1 {
+            return Err(rejected(
+                "chance result contains a duplicate authoritative field",
+            ));
+        }
+    }
+    validate_pc_chance_constraint_materialization(problem, result)?;
+    if problem
+        .objective()
+        .execution_constraints()
+        .preserves_back_to_back()
+    {
+        let evidence = result
+            .pc_chance_coverage_evidence()
+            .expect("constraint validation requires the private coverage rows");
+        let witnessed = evidence
+            .rows()
+            .iter()
+            .try_fold(0_u128, |count, row| {
+                count.checked_add(u128::from(row.coverage_bits().count_ones()))
+            })
+            .ok_or_else(|| rejected("pc chance B2B witness count overflow"))?;
+        if optional_strict_u128_field(result, "b2b_preserving_candidate_pattern_count")?
+            != Some(witnessed)
+        {
+            return Err(rejected(
+                "pc chance B2B witness count does not match its rows",
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// The probability product owns coverage of the constrained physical language.
+/// Validate that producer binding before the generic public-surface pass can
+/// detach its rows or trust the already-materialized execution constraint.
+pub(crate) fn validate_pc_chance_constraint_materialization(
+    problem: &SearchProblem,
+    result: &CoreExecutionResult,
+) -> Result<(), PcChanceExecutionError> {
+    let evidence = result
+        .pc_chance_coverage_evidence()
+        .ok_or_else(|| rejected("pc chance coverage-row evidence is missing"))?;
+    if !evidence.problem().matches_search_problem(problem) {
+        return Err(rejected(
+            "executed pc chance problem does not match the expected compiled problem",
+        ));
+    }
+    let constraint = problem.objective().execution_constraints();
+    if !constraint.preserves_back_to_back() {
+        require_optional_field(result, "execution_constraint_preserve_b2b", "false")?;
+        require_optional_field(result, "execution_constraint_materialized", "false")?;
+        if result.field_occurrence_count("b2b_preservation_evaluation_basis") != 0 {
+            return Err(rejected(
+                "unconstrained pc chance carries a B2B filter authority",
+            ));
+        }
+        return Ok(());
+    }
+    if !problem
+        .pc_chance_evidence_policy()
+        .retains_pc_probability_v2_evidence()
+        || problem.output_policy() != SearchOutputPolicy::CoverageSummary
+        || !supports_pc_chance_objective(problem.objective())
+        || problem.solution_probability_policy() != PcSolutionProbabilityPolicy::Omit
+        || problem.count_policy() != PcCountPolicy::CountUnique
+        || problem.queue_observation_policy() != QueueObservationPolicy::FullQueueOracle
+    {
+        return Err(rejected(
+            "pc chance B2B authority has an incompatible problem",
+        ));
+    }
+    for (name, expected) in [
+        ("execution_constraint_preserve_b2b", "true"),
+        ("execution_constraint_materialized", "true"),
+        (
+            "execution_constraint_spin_profile",
+            constraint.spin_profile().as_str(),
+        ),
+        (
+            "b2b_preservation_evaluation_basis",
+            "filtered-pc-chance-order-language",
+        ),
+        ("b2b_preservation_selection", "existential"),
+        (
+            "b2b_preservation_denominator_semantics",
+            "original-materialized-queue",
+        ),
+        ("b2b_preservation_path_multiplicity_counted", "false"),
+        ("objective", "unique"),
+        ("postprocess_scoring_requested", "false"),
+        ("postprocess_pc_save_requested", "false"),
+        ("postprocess_pc_path_requested", "false"),
+    ] {
+        if result.unique_field(name) != Some(expected) {
+            return Err(rejected(
+                "pc chance B2B filter authority does not match the request",
+            ));
+        }
+    }
+    for (filtered, aggregate) in [
+        ("b2b_preserving_pattern_count", "covered_pattern_count"),
+        (
+            "b2b_preservation_pattern_universe_count",
+            "coverage_pattern_count",
+        ),
+        ("b2b_preservation_probability", "coverage_probability"),
+        ("b2b_preservation_count_complete", "count_complete"),
+        (
+            "b2b_preservation_probability_complete",
+            "probability_complete",
+        ),
+    ] {
+        let expected = result
+            .unique_field(aggregate)
+            .ok_or_else(|| rejected("pc chance B2B filter is missing its aggregate authority"))?;
+        if result.unique_field(filtered) != Some(expected) {
+            return Err(rejected(
+                "pc chance B2B filter and coverage aggregate disagree",
+            ));
+        }
+    }
+    Ok(())
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ValidatedPcChanceExecutionEvidence {
     report: PcProbabilityV2Result,
@@ -706,7 +872,7 @@ pub(crate) struct PcChanceExecutionError {
 }
 
 impl PcChanceExecutionError {
-    #[cfg(all(test, feature = "native-c-core"))]
+    #[cfg(test)]
     pub(crate) const fn reason(self) -> &'static str {
         self.reason
     }
@@ -763,6 +929,23 @@ const CRITICAL_FIELDS: &[&str] = &[
     "resource_truncation_reason",
     "objective_search_complete",
     "objective_complete",
+    "objective",
+    "postprocess_scoring_requested",
+    "postprocess_pc_save_requested",
+    "postprocess_pc_path_requested",
+    "execution_constraint_preserve_b2b",
+    "execution_constraint_materialized",
+    "execution_constraint_spin_profile",
+    "b2b_preservation_evaluation_basis",
+    "b2b_preservation_selection",
+    "b2b_preservation_denominator_semantics",
+    "b2b_preserving_pattern_count",
+    "b2b_preservation_pattern_universe_count",
+    "b2b_preservation_probability",
+    "b2b_preservation_count_complete",
+    "b2b_preservation_probability_complete",
+    "b2b_preserving_candidate_pattern_count",
+    "b2b_preservation_path_multiplicity_counted",
 ];
 
 fn critical_field_snapshot(
@@ -1035,6 +1218,257 @@ mod probability_alias_tests {
         assert_eq!(
             direct_legacy_probability(&full_coverage, &terminal).expect("legacy alias"),
             legacy_probability(producer_alias.get())
+        );
+    }
+}
+
+#[cfg(test)]
+mod constraint_tests {
+    use clearra_core_domain::piece::piece_kind::PieceKind;
+    use clearra_objectives::policy::{
+        objective_policy::ObjectivePolicy, score_objective_policy::SpinProfileSelection,
+    };
+    use clearra_pc_graph::request::{
+        PcCountPolicy, PcQueueInput, PcScenarioBoard, PcScenarioQuery, PieceWindow,
+    };
+    use clearra_problem::ProblemCompiler;
+    use clearra_supply::queue::fixed_sequence::FixedSequence;
+
+    use super::{PcChanceCompiledAuthority, PcChanceIngressOrigin};
+    use crate::{AppCoreExecutorService, ExecutionControl};
+
+    fn query(height: u16, profile: SpinProfileSelection) -> PcScenarioQuery {
+        let mask = if height == 1 {
+            0x3f0
+        } else {
+            (0..4).fold(0_u64, |mask, row| mask | (0x3fe_u64 << (row * 10)))
+        };
+        PcScenarioQuery::new(
+            PcScenarioBoard::standard_10(height, mask),
+            PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::I])),
+            PieceWindow::new(1),
+        )
+        .with_exact_pieces(Some(1))
+        .with_allow_hold(false)
+        .with_count_policy(PcCountPolicy::CountUnique)
+        .with_objective(ObjectivePolicy::unique().with_back_to_back_preservation(profile))
+    }
+
+    #[test]
+    fn compiled_chance_authority_binds_the_complete_constraint_objective() {
+        let constrained = query(4, SpinProfileSelection::AllSpinPlus);
+        let problem = ProblemCompiler::compile_scenario_percent(&constrained)
+            .expect("tiny constrained chance problem")
+            .with_pc_chance_probability_v2_evidence();
+        PcChanceCompiledAuthority::scenario(
+            &constrained,
+            PcChanceIngressOrigin::CanonicalPcChance,
+            &problem,
+        )
+        .expect("matching B2B objective");
+        for objective in [
+            ObjectivePolicy::unique(),
+            ObjectivePolicy::unique().with_back_to_back_preservation(SpinProfileSelection::TSpins),
+        ] {
+            let altered = constrained.clone().with_objective(objective);
+            let error = PcChanceCompiledAuthority::scenario(
+                &altered,
+                PcChanceIngressOrigin::CanonicalPcChance,
+                &problem,
+            )
+            .expect_err("compiled objective must exactly match the originating query");
+            assert_eq!(
+                error.reason(),
+                "compiled chance problem does not preserve the validated objective contract"
+            );
+        }
+        let noncanonical = constrained.with_objective(
+            ObjectivePolicy::new(
+                clearra_core_domain::objective::objective_kind::ObjectiveKind::Unique,
+                clearra_core_domain::objective::tie_policy::TiePolicy::StableInputOrder,
+                clearra_core_domain::objective::trace_policy::TracePolicy::Discard,
+            )
+            .with_back_to_back_preservation(SpinProfileSelection::AllSpinPlus),
+        );
+        let noncanonical_problem = ProblemCompiler::compile_scenario_percent(&noncanonical)
+            .expect("syntactically valid noncanonical objective")
+            .with_pc_chance_probability_v2_evidence();
+        assert!(
+            PcChanceCompiledAuthority::scenario(
+                &noncanonical,
+                PcChanceIngressOrigin::CanonicalPcChance,
+                &noncanonical_problem,
+            )
+            .is_err(),
+            "allowing B2B must not loosen tie or trace semantics"
+        );
+    }
+
+    #[test]
+    fn filtered_chance_rows_survive_app_postprocessing_without_replay_materialization() {
+        let _resource_guard =
+            crate::execution_resource_test_support::execution_resource_test_guard();
+        let service = AppCoreExecutorService::wasm_cpu();
+        let control = ExecutionControl::default();
+        for profile in [
+            SpinProfileSelection::TSpins,
+            SpinProfileSelection::TSpinsPlus,
+            SpinProfileSelection::AllSpin,
+            SpinProfileSelection::AllSpinPlus,
+            SpinProfileSelection::AllMini,
+            SpinProfileSelection::AllMiniPlus,
+        ] {
+            for height in [1, 4] {
+                let query = query(height, profile);
+                let problem = ProblemCompiler::compile_scenario_percent(&query)
+                    .expect("tiny constrained chance problem")
+                    .with_pc_chance_probability_v2_evidence();
+                let authority = PcChanceCompiledAuthority::scenario(
+                    &query,
+                    PcChanceIngressOrigin::CanonicalPcChance,
+                    &problem,
+                )
+                .expect("matching chance authority");
+                let result = service
+                    .execute_pc_chance_with_control(&problem, &control)
+                    .expect("bounded constrained chance finishes through the App seam");
+                let validated = authority
+                    .validate_execution_result(&problem, &result)
+                    .expect("filtered rows remain the exact probability authority");
+                if height == 4 {
+                    assert_eq!(validated.report().covered_pattern_count(), 1);
+                    assert_eq!(validated.report().weighted_probability(), "1");
+                } else if profile == SpinProfileSelection::TSpins {
+                    assert_eq!(validated.report().covered_pattern_count(), 0);
+                    assert_eq!(validated.report().weighted_probability(), "0");
+                }
+                assert!(result.exact_scoring_execution_batches().is_empty());
+                assert!(result.postprocess_pattern_weights().is_empty());
+                assert_eq!(
+                    result.field("unique_solution_count"),
+                    Some("not-calculated")
+                );
+                assert!(validated.report().completeness().complete());
+            }
+        }
+    }
+
+    #[test]
+    fn chance_filter_authority_is_checked_before_detaching_rows_and_after_postprocessing() {
+        let _resource_guard =
+            crate::execution_resource_test_support::execution_resource_test_guard();
+        let query = query(4, SpinProfileSelection::TSpins);
+        let problem = ProblemCompiler::compile_scenario_percent(&query)
+            .expect("tiny constrained chance problem")
+            .with_pc_chance_probability_v2_evidence();
+        let service = AppCoreExecutorService::wasm_cpu();
+        let control = ExecutionControl::default();
+        let raw_result =
+            clearra_core_executor::CoreExecutor::execute_with_control(&problem, &control)
+                .expect("bounded constrained chance producer");
+        let result = service
+            .postprocess_pc_chance_result_before_public_surface(
+                &problem,
+                raw_result.clone(),
+                &control,
+            )
+            .expect("untampered producer passes the public-surface seam");
+        let authority = PcChanceCompiledAuthority::scenario(
+            &query,
+            PcChanceIngressOrigin::CanonicalPcChance,
+            &problem,
+        )
+        .expect("matching chance authority");
+        let foreign_query = query.clone().with_objective(
+            ObjectivePolicy::unique()
+                .with_back_to_back_preservation(SpinProfileSelection::AllSpinPlus),
+        );
+        let foreign_problem = ProblemCompiler::compile_scenario_percent(&foreign_query)
+            .expect("other valid chance constraint")
+            .with_pc_chance_probability_v2_evidence();
+        let foreign_result = service
+            .execute_pc_chance_with_control(&foreign_problem, &control)
+            .expect("other bounded chance result");
+        assert_eq!(
+            authority
+                .validate_execution_result(&foreign_problem, &foreign_result)
+                .expect_err("a matching foreign problem/result cannot replace this query")
+                .reason(),
+            "executed pc chance objective does not match the query authority"
+        );
+        for (name, value) in [
+            ("execution_constraint_preserve_b2b", "false"),
+            ("execution_constraint_materialized", "false"),
+            ("execution_constraint_spin_profile", "all-spin-plus"),
+            (
+                "b2b_preservation_evaluation_basis",
+                "filtered-build-order-language",
+            ),
+            ("b2b_preservation_selection", "all"),
+            ("b2b_preservation_denominator_semantics", "filtered-queues"),
+            ("b2b_preservation_path_multiplicity_counted", "true"),
+            ("b2b_preserving_pattern_count", "0"),
+            ("b2b_preservation_pattern_universe_count", "2"),
+            ("b2b_preservation_probability", "0"),
+            ("b2b_preservation_count_complete", "false"),
+            ("b2b_preservation_probability_complete", "false"),
+        ] {
+            let changed_raw = raw_result
+                .clone()
+                .with_replaced_fields(vec![(name.to_owned(), value.to_owned())]);
+            assert!(
+                service
+                    .postprocess_pc_chance_result_before_public_surface(
+                        &problem,
+                        changed_raw,
+                        &control
+                    )
+                    .is_err(),
+                "{name}"
+            );
+            let changed = result
+                .clone()
+                .with_replaced_fields(vec![(name.to_owned(), value.to_owned())]);
+            assert!(
+                authority
+                    .validate_execution_result(&problem, &changed)
+                    .is_err(),
+                "{name}"
+            );
+        }
+        let changed_raw = raw_result.clone().with_replaced_fields(vec![(
+            "b2b_preserving_candidate_pattern_count".to_owned(),
+            "0".to_owned(),
+        )]);
+        assert!(service
+            .postprocess_pc_chance_result_before_public_surface(&problem, changed_raw, &control)
+            .is_err());
+        for (key, value) in [
+            ("search_output_policy", "trace"),
+            ("b2b_preserving_candidate_pattern_count", "0"),
+        ] {
+            let duplicated = raw_result
+                .clone()
+                .with_additional_fields(vec![(key.to_owned(), value.to_owned())]);
+            let error = service
+                .postprocess_pc_chance_result_before_public_surface(&problem, duplicated, &control)
+                .expect_err("summary canonicalization must not hide conflicting producer fields");
+            assert!(
+                matches!(&error, clearra_core_executor::CoreExecutionError::Pc(message)
+                    if message.contains("duplicate authoritative field")),
+                "{error:?}"
+            );
+        }
+        let changed = result.with_replaced_fields(vec![(
+            "b2b_preserving_candidate_pattern_count".to_owned(),
+            "0".to_owned(),
+        )]);
+        assert_eq!(
+            authority
+                .validate_execution_result(&problem, &changed)
+                .expect_err("private witness count must not leak through public summary")
+                .reason(),
+            "pc chance B2B witness count must remain private"
         );
     }
 }

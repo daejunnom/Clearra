@@ -3052,6 +3052,67 @@ fn pc_chance_rejects_conflicting_objective_but_accepts_its_matching_fixed_value(
 }
 
 #[test]
+fn pc_chance_accepts_b2b_profiles_without_changing_source_or_result_semantics() {
+    for (source, source_len) in [("P7P4", 11), ("P7P7", 14)] {
+        for profile in [
+            SpinProfileSelection::TSpins,
+            SpinProfileSelection::TSpinsPlus,
+            SpinProfileSelection::AllSpin,
+            SpinProfileSelection::AllMini,
+            SpinProfileSelection::AllSpinPlus,
+            SpinProfileSelection::AllMiniPlus,
+        ] {
+            for scenario in [false, true] {
+                let field = if scenario {
+                    " --board-mask 0x3f0 --height 1 --pieces 1"
+                } else {
+                    ""
+                };
+                let lines = if scenario { 1 } else { 2 };
+                let command = format!(
+                    "clearra pc chance --lines {lines} --patterns {source}{field} \
+                     --hold T --rule srs-plus --preserve-b2b --spin-profile {} \
+                     --auto-workers 8 --use-all-cpu-threads",
+                    profile.as_str()
+                );
+                let request = CliCommandParser::parse(&command)
+                    .expect(&command)
+                    .to_app_request()
+                    .expect(&command);
+                assert_eq!(
+                    request.product_capability_contract(),
+                    Some(ProductCapabilityContract::PcChance)
+                );
+                let (objective, queue_len, projection) = match request.command() {
+                    AppCommand::Pc(command) => (
+                        command.query().objective(),
+                        command.query().queue().len(),
+                        command.result_projection(),
+                    ),
+                    AppCommand::Scenario(command) => (
+                        command.query().objective(),
+                        command.query().remaining_queue().len(),
+                        command.result_projection(),
+                    ),
+                    other => panic!("wrong Chance command: {other:?}"),
+                };
+                assert_eq!(
+                    objective,
+                    ObjectivePolicy::unique().with_back_to_back_preservation(profile)
+                );
+                assert_eq!(queue_len, source_len);
+                assert_eq!(
+                    projection,
+                    PcResultProjection::ChanceProbabilityV2(
+                        PcChanceIngressOrigin::CanonicalPcChance
+                    )
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn public_score_compatibility_spellings_keep_fixed_jstris_semantics_without_a_product_claim() {
     for source in [
         "clearra score v115@vhAAgH P7P3 4",

@@ -649,10 +649,16 @@ impl PreparedDistributedSearch {
         let result = match &self.response_kind {
             CooperativeSearchResponseKind::PcTiling { .. }
             | CooperativeSearchResponseKind::ScenarioTiling { .. } => Ok(result),
-            CooperativeSearchResponseKind::PcChance { .. }
-            | CooperativeSearchResponseKind::ScenarioChance { .. } => {
-                core_executor.postprocess_pc_chance_result_before_public_surface(result, control)
+            CooperativeSearchResponseKind::PcChance {
+                expected_problem, ..
             }
+            | CooperativeSearchResponseKind::ScenarioChance {
+                expected_problem, ..
+            } => core_executor.postprocess_pc_chance_result_before_public_surface(
+                expected_problem,
+                result,
+                control,
+            ),
             CooperativeSearchResponseKind::BuildProbability {
                 solution_probability_policy,
                 result_command,

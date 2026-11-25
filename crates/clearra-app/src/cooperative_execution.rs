@@ -3679,9 +3679,9 @@ impl CooperativeAppExecution {
                                 }),
                             }
                         }
-                        CooperativeSearchResponseKind::PcChance { .. }
-                        | CooperativeSearchResponseKind::ScenarioChance { .. } => core_executor
-                            .postprocess_pc_chance_result_before_public_surface(result, control),
+                        CooperativeSearchResponseKind::PcChance { expected_problem, .. }
+                        | CooperativeSearchResponseKind::ScenarioChance { expected_problem, .. } => core_executor
+                            .postprocess_pc_chance_result_before_public_surface(expected_problem, result, control),
                         CooperativeSearchResponseKind::PcScore {
                             authority,
                             expected_problem,

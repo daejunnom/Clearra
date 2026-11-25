@@ -5308,6 +5308,183 @@ fn typed_pc_chance_distributed_completion_preserves_probability_evidence() {
 }
 
 #[test]
+fn typed_pc_chance_b2b_options_preserve_filtered_probability_through_workers() {
+    let _resource_guard = typed_pc_distributed_test_guard();
+    let runtime = WasmCommandRuntime::default()
+        .with_host_capabilities(WasmHostCapabilities::new(4, false, false));
+    for rule in ["srs", "srs-plus", "srs-x", "jstris-180", "no-kick"] {
+        for profile in [
+            "t-spins",
+            "t-spins-plus",
+            "all-spin",
+            "all-spin-plus",
+            "all-mini",
+            "all-mini-plus",
+        ] {
+            for hold in ["--no-hold", "--hold empty"] {
+                // Only two locks and two queues. The I family breaks B2B on
+                // its first single; the O family finishes with a PC.
+                let command = format!(
+                    "clearra pc chance --lines 2 --board-mask 0xfc3f0 --height 2 \
+                     --pieces 2 --patterns II;OO --source-pieces 2 {hold} --rule {rule} \
+                     --queue-knowledge oracle --preserve-b2b --spin-profile {profile} --backend cpu"
+                );
+                let serial = runtime
+                    .run_command_text(&format!("{command} --workers 1"))
+                    .expect("serial typed Chance B2B execution");
+                let distributed = run_distributed_cpu(&runtime, &format!("{command} --workers 2"));
+                for result in [&serial, &distributed] {
+                    assert_eq!(
+                        result.app_response().status(),
+                        AppStatus::Success,
+                        "{command}: {:?}",
+                        result.app_response()
+                    );
+                    assert_eq!(
+                        result
+                            .app_response()
+                            .result()
+                            .map(clearra_host_contract::AppResult::kind),
+                        Some("pc-probability.v2")
+                    );
+                    let report = result
+                        .search_report()
+                        .expect("validated typed Chance report");
+                    assert_eq!(report.covered_pattern_count, 1, "{command}");
+                    assert_eq!(report.coverage_probability, "0.5", "{command}");
+                    for (name, expected) in [
+                        ("execution_constraint_materialized", "true"),
+                        ("execution_constraint_spin_profile", profile),
+                        (
+                            "b2b_preservation_evaluation_basis",
+                            "filtered-pc-chance-order-language",
+                        ),
+                    ] {
+                        assert!(
+                            report
+                                .summary_fields
+                                .iter()
+                                .any(|(key, value)| key == name && value == expected),
+                            "{command}: missing {name}={expected}"
+                        );
+                    }
+                    assert!(
+                        report.probability_complete && report.count_complete,
+                        "{command}"
+                    );
+                }
+                assert_build_probability_semantics_match(
+                    serial.search_report().unwrap(),
+                    distributed.search_report().unwrap(),
+                );
+                assert_eq!(distributed.search_report().unwrap().workers_used, 2);
+            }
+        }
+    }
+}
+
+#[test]
+fn typed_pc_chance_full_height_b2b_uses_the_same_filtered_authority() {
+    let _resource_guard = typed_pc_distributed_test_guard();
+    let runtime = WasmCommandRuntime::default()
+        .with_host_capabilities(WasmHostCapabilities::new(4, false, false));
+    // Eight rows with two forced vertical I slots. There are only two locks;
+    // each can clear four rows, so this is a bounded positive B2B PC fixture.
+    for profile in [
+        "t-spins",
+        "t-spins-plus",
+        "all-spin",
+        "all-spin-plus",
+        "all-mini",
+        "all-mini-plus",
+    ] {
+        let command = format!(
+            "clearra pc chance --lines 8 --board-mask 0xff7fdff7fdffbfeffbfe --height 8 \
+             --pieces 2 --queue II --source-pieces 2 --no-hold --rule srs-plus \
+             --preserve-b2b --spin-profile {profile} --backend cpu"
+        );
+        let serial = runtime
+            .run_command_text(&format!("{command} --workers 1"))
+            .expect("serial full-height typed Chance");
+        let distributed = run_distributed_cpu(&runtime, &format!("{command} --workers 2"));
+        for result in [&serial, &distributed] {
+            assert_eq!(
+                result.app_response().status(),
+                AppStatus::Success,
+                "{command}: {:?}",
+                result.app_response()
+            );
+            let report = result.search_report().expect("full-height Chance report");
+            assert_eq!(report.covered_pattern_count, 1, "{command}");
+            assert_eq!(report.coverage_probability, "1", "{command}");
+            for (name, expected) in [
+                ("board_storage", "board256-canonical"),
+                ("execution_constraint_materialized", "true"),
+                (
+                    "b2b_preservation_evaluation_basis",
+                    "filtered-pc-chance-order-language",
+                ),
+            ] {
+                assert!(
+                    report
+                        .summary_fields
+                        .iter()
+                        .any(|(key, value)| key == name && value == expected),
+                    "{command}: missing {name}={expected}"
+                );
+            }
+            assert!(
+                report.probability_complete && report.count_complete,
+                "{command}"
+            );
+        }
+        assert_build_probability_semantics_match(
+            serial.search_report().unwrap(),
+            distributed.search_report().unwrap(),
+        );
+    }
+}
+
+#[test]
+fn typed_pc_chance_full_height_b2b_zero_coverage_is_complete() {
+    let _resource_guard = typed_pc_distributed_test_guard();
+    let runtime = WasmCommandRuntime::default()
+        .with_host_capabilities(WasmHostCapabilities::new(4, false, false));
+    // Two vertical I slots overlap one row. Either first lock clears a
+    // non-PC triple, so the T-spin-only B2B policy rejects the whole family.
+    let command = "clearra pc chance --lines 7 --board-mask 0x3fdff7fdff3feffbfe --height 7 \
+                   --pieces 2 --queue II --no-hold --rule srs-plus --preserve-b2b \
+                   --spin-profile t-spins --backend cpu";
+    let serial = runtime
+        .run_command_text(&format!("{command} --workers 1"))
+        .unwrap();
+    let distributed = run_distributed_cpu(&runtime, &format!("{command} --workers 2"));
+    for result in [&serial, &distributed] {
+        assert_eq!(
+            result.app_response().status(),
+            AppStatus::Success,
+            "{:?}",
+            result.app_response()
+        );
+        assert_eq!(
+            result
+                .app_response()
+                .result()
+                .map(clearra_host_contract::AppResult::kind),
+            Some("pc-probability.v2")
+        );
+        let report = result.search_report().unwrap();
+        assert_eq!(report.covered_pattern_count, 0);
+        assert_eq!(report.coverage_probability, "0");
+        assert!(report.count_complete && report.probability_complete);
+        assert!(report
+            .summary_fields
+            .iter()
+            .any(|(name, value)| name == "execution_constraint_materialized" && value == "true"));
+    }
+}
+
+#[test]
 fn finesse_score_remains_serial_when_multiple_workers_are_requested() {
     let runtime = WasmCommandRuntime::default()
         .with_host_capabilities(WasmHostCapabilities::new(4, false, false));

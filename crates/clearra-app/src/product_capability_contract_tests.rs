@@ -2677,6 +2677,76 @@ fn cooperative_pc_chance_finalizes_once_and_strips_all_transient_authority() {
 }
 
 #[test]
+fn pc_chance_b2b_profiles_and_occupied_hold_keep_one_exact_public_probability() {
+    let _resource_guard = crate::execution_resource_test_support::execution_resource_test_guard();
+    let context = AppContext::new(
+        AppServices::default().with_core_executor(AppCoreExecutorService::wasm_cpu()),
+    );
+    let control = ExecutionControl::default();
+    let origin = PcChanceIngressOrigin::CanonicalPcChance;
+    let board_mask = (0..4).fold(0_u64, |mask, row| mask | (0x3fe_u64 << (row * 10)));
+    for profile in [
+        SpinProfileSelection::TSpins,
+        SpinProfileSelection::TSpinsPlus,
+        SpinProfileSelection::AllSpin,
+        SpinProfileSelection::AllSpinPlus,
+        SpinProfileSelection::AllMini,
+        SpinProfileSelection::AllMiniPlus,
+    ] {
+        for (allow_hold, held, queued) in [
+            (false, None, PieceKind::I),
+            (true, None, PieceKind::I),
+            (true, Some(PieceKind::I), PieceKind::O),
+        ] {
+            let query = PcScenarioQuery::new(
+                PcScenarioBoard::standard_10(4, board_mask),
+                PcQueueInput::fixed_sequence(FixedSequence::new(vec![queued])),
+                PieceWindow::new(1),
+            )
+            .with_exact_pieces(Some(1))
+            .with_count_policy(PcCountPolicy::CountUnique)
+            .with_hold_piece(held)
+            .with_allow_hold(allow_hold)
+            .with_objective(ObjectivePolicy::unique().with_back_to_back_preservation(profile));
+            let expected_query = PcChanceQuerySnapshot::Scenario(query.clone());
+            let request = || {
+                AppRequest::new(AppCommand::Scenario(
+                    ScenarioAppCommand::new(query.clone())
+                        .with_result_projection(PcResultProjection::ChanceProbabilityV2(origin)),
+                ))
+                .with_product_capability_contract(ProductCapabilityContract::PcChance)
+                .expect("valid B2B chance product")
+            };
+            let direct = context.run(request());
+            assert_pc_probability_success(&direct, origin, &expected_query);
+            let mut execution = context.start_cooperative_execution(request());
+            let mut cooperative = None;
+            for _ in 0..256 {
+                match execution.advance(4_096, &control) {
+                    CooperativeAppAdvance::Pending | CooperativeAppAdvance::Progress => {}
+                    CooperativeAppAdvance::Completed(response) => {
+                        cooperative = Some(response);
+                        break;
+                    }
+                    other => panic!("bounded B2B chance did not complete normally: {other:?}"),
+                }
+            }
+            let cooperative = cooperative.expect("one-lock chance completes within the bound");
+            assert_pc_probability_success(&cooperative, origin, &expected_query);
+            for response in [&direct, &cooperative] {
+                let probability = response
+                    .product_capability_result()
+                    .unwrap()
+                    .pc_probability_v2()
+                    .unwrap();
+                assert_eq!(probability.covered_pattern_count(), 1);
+                assert_eq!(probability.weighted_probability(), "1");
+            }
+        }
+    }
+}
+
+#[test]
 fn pc_score_raw_authority_rejects_foreign_problem_and_replay_profile_swaps() {
     let _resource_guard = crate::execution_resource_test_support::execution_resource_test_guard();
     let RawScoreExecution {

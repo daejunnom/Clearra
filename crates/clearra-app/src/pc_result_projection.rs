@@ -13,7 +13,7 @@ use clearra_pc_graph::request::{
 use clearra_supply::{hold::hold_slot::HoldSlot, QueueObservationPolicy};
 
 use crate::{
-    pc_chance_probability_result::PcChanceIngressOrigin,
+    pc_chance_probability_result::{supports_pc_chance_objective, PcChanceIngressOrigin},
     pc_minimum_cover_result::{
         validate_pc_minimals_common_request_contract, validate_pc_minimals_scenario_shape,
         PcMinimalsIngressOrigin, PC_MINIMUM_COVER_RESULT_CONTRACT,
@@ -625,8 +625,8 @@ fn validate_pc_chance_common_request_contract(
     probability_policy: PcSolutionProbabilityPolicy,
     observation_policy: QueueObservationPolicy,
 ) -> Result<(), &'static str> {
-    if objective != ObjectivePolicy::unique() {
-        return Err("pc chance requires the unique non-scoring objective without constraints");
+    if !supports_pc_chance_objective(objective) {
+        return Err("pc chance requires the unique non-scoring objective");
     }
     if probability_policy != PcSolutionProbabilityPolicy::Omit {
         return Err("pc chance does not accept per-solution probability calculation");

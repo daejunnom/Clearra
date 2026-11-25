@@ -80,6 +80,10 @@ use super::{
     },
     kick_profiles::replay_profile_ids,
     mix_digest, mix_order_independent_candidate_digest,
+    pc_chance_constraints::{
+        filters_pc_chance_constraints, mark_filtered_pc_chance_constraints,
+        validate_filtered_pc_chance_metadata,
+    },
     reachability::{static_influence::StaticInfluenceMetrics, ReachabilityMetrics},
     standard_bag_coverage::StandardBagCoverage,
     WasmExactSearchError, MAX_BOARD64_PIECES,
@@ -788,7 +792,8 @@ fn canonical_multiset_order(left: [u8; 7], right: [u8; 7]) -> Ordering {
 
 fn exact_execution_evidence_requested(problem: &SearchProblem) -> bool {
     problem.objective().score().requested()
-        || problem.objective().execution_constraints().requested()
+        || (problem.objective().execution_constraints().requested()
+            && !filters_pc_chance_constraints(problem))
         || problem
             .pc_chance_evidence_policy()
             .retains_pc_save_groups_v2_evidence()
@@ -798,11 +803,17 @@ fn exact_execution_evidence_requested(problem: &SearchProblem) -> bool {
 }
 
 fn native_candidate_window_accounting(problem: &SearchProblem) -> bool {
+    // Typed probability owns every candidate's original-source row. Use the
+    // same bounded owner for admission, worker windows and row reduction even
+    // when the caller supplied no explicit cap.
     cfg!(all(feature = "parallel", not(target_family = "wasm")))
         && problem.objective().kind() != ObjectiveKind::Tiling
         && (problem
-            .queue_observation_policy()
-            .requires_observation_policy()
+            .pc_chance_evidence_policy()
+            .retains_pc_probability_v2_evidence()
+            || problem
+                .queue_observation_policy()
+                .requires_observation_policy()
             || problem.budget().max_nodes() != 0
             || problem.backend_request().max_candidates() != 0
             || problem.backend_request().max_frontier_states() != 0
@@ -1916,7 +1927,8 @@ impl WasmExactSearchSession {
             tiling_supply_projection_complete,
             solution_coverage: (problem.solution_probability_policy().requested()
                 || problem.objective().kind() == ObjectiveKind::MinimumCover
-                || problem.objective().execution_constraints().requested())
+                || (problem.objective().execution_constraints().requested()
+                    && !filters_pc_chance_constraints(&problem)))
             .then(ExactHashMap::default),
             solution_coverage_bytes: 0,
             packing_candidate_count: 0,
@@ -2254,7 +2266,11 @@ impl WasmExactSearchSession {
                 .problem
                 .pc_chance_evidence_policy()
                 .pc_failed_queue_example_limit()
-                .is_some();
+                .is_some()
+                || self
+                    .problem
+                    .pc_chance_evidence_policy()
+                    .retains_pc_probability_v2_evidence();
             if failed_queue_rows {
                 self.coverage_rows = std::mem::take(&mut outcome.failed_queue_rows);
             }
@@ -2691,6 +2707,7 @@ impl WasmExactSearchSession {
         self.parallel_maximum_worker_candidates = 0;
         self.parallel_decision_reason = "browser-worker-candidate-pipeline";
         if self.problem.objective().execution_constraints().requested()
+            && !filters_pc_chance_constraints(&self.problem)
             && self.solution_coverage.is_none()
         {
             self.solution_coverage = Some(ExactHashMap::default());
@@ -3545,7 +3562,8 @@ impl WasmExactSearchSession {
             self.problem.solution_probability_policy().requested();
         let solution_coverage_required = solution_probabilities_requested
             || self.problem.objective().kind() == ObjectiveKind::MinimumCover
-            || self.problem.objective().execution_constraints().requested();
+            || (self.problem.objective().execution_constraints().requested()
+                && !filters_pc_chance_constraints(&self.problem));
         // The compact failed-queue producer seals raw candidate coverage rows,
         // not just the running union. Even a witness that is redundant for
         // the union must not stand in for a candidate's original ordinals.
@@ -3633,7 +3651,8 @@ impl WasmExactSearchSession {
     ) -> Result<Option<ExactSearchAdvance>, WasmExactSearchError> {
         let solution_coverage_required = self.problem.solution_probability_policy().requested()
             || self.problem.objective().kind() == ObjectiveKind::MinimumCover
-            || self.problem.objective().execution_constraints().requested();
+            || (self.problem.objective().execution_constraints().requested()
+                && !filters_pc_chance_constraints(&self.problem));
         let failed_queue_rows = self
             .problem
             .pc_chance_evidence_policy()
@@ -4310,6 +4329,9 @@ impl WasmExactSearchSession {
         pattern_count: usize,
         aggregate_coverage: &PatternBitSet,
     ) -> Result<(), WasmExactSearchError> {
+        if filters_pc_chance_constraints(&self.problem) {
+            validate_filtered_pc_chance_metadata(result, &self.problem)?;
+        }
         let Some(transport) = result.distributed_pc_chance_coverage_rows() else {
             if self
                 .problem
@@ -4680,7 +4702,7 @@ impl WasmExactSearchSession {
             .pc_chance_evidence_policy()
             .retains_pc_path_v2_evidence();
         let execution_evidence_requested = scoring_requested
-            || execution_constraints.requested()
+            || (execution_constraints.requested() && !filters_pc_chance_constraints(&self.problem))
             || save_execution_requested
             || path_execution_requested;
         let scoring_batch = if execution_evidence_requested {
@@ -5382,6 +5404,8 @@ impl WasmExactSearchSession {
         let score_policy = self.problem.objective().score();
         let execution_constraints = self.problem.objective().execution_constraints();
         let execution_constraint_requested = execution_constraints.requested();
+        let execution_constraint_materialized = self.distributed_execution_constraint_materialized
+            || filters_pc_chance_constraints(&self.problem);
         let save_execution_requested = self
             .problem
             .pc_chance_evidence_policy()
@@ -6091,16 +6115,13 @@ impl WasmExactSearchSession {
                 "objective_complete",
                 non_score_objective_complete
                     && !score_objective_requested
-                    && (!execution_constraint_requested
-                        || self.distributed_execution_constraint_materialized),
+                    && (!execution_constraint_requested || execution_constraint_materialized),
             ),
             field(
                 "objective_incomplete_reason",
                 if score_objective_requested {
                     "score_matrix_not_materialized"
-                } else if execution_constraint_requested
-                    && !self.distributed_execution_constraint_materialized
-                {
+                } else if execution_constraint_requested && !execution_constraint_materialized {
                     "b2b_preservation_not_materialized"
                 } else if minimum_cover_requested {
                     minimum_cover_reason
@@ -6127,7 +6148,7 @@ impl WasmExactSearchSession {
             ),
             field(
                 "execution_constraint_materialized",
-                self.distributed_execution_constraint_materialized,
+                execution_constraint_materialized,
             ),
             field("score_initial_b2b", score_policy.initial_b2b()),
             field("postprocess_execution_complete", scoring_execution_complete),
@@ -6419,7 +6440,7 @@ impl WasmExactSearchSession {
             fields.extend(replacements);
         }
         let pattern_weights = if score_policy.requested()
-            || execution_constraint_requested
+            || (execution_constraint_requested && !filters_pc_chance_constraints(&self.problem))
             || save_execution_requested
         {
             let mut weights = Vec::new();
@@ -6604,6 +6625,9 @@ impl WasmExactSearchSession {
         if let Some(evidence) = pc_chance_coverage_evidence {
             result = result.with_pc_chance_coverage_evidence(evidence);
         }
+        if filters_pc_chance_constraints(&self.problem) {
+            result = mark_filtered_pc_chance_constraints(result, &self.problem)?;
+        }
         if let Some(evidence) = path_supply_evidence {
             result = result.with_pc_path_supply_evidence(evidence);
         }
@@ -6632,7 +6656,8 @@ pub(super) fn retains_buildable_identity_evidence(problem: &SearchProblem) -> bo
     // CoverageSummary still hides identities in `build_result`; requested execution constraints
     // retain them only long enough to build the authoritative post-processing graph.
     problem.output_policy().retains_solution_set()
-        || problem.objective().execution_constraints().requested()
+        || (problem.objective().execution_constraints().requested()
+            && !filters_pc_chance_constraints(problem))
 }
 
 fn add_reachability_metrics(total: &mut ReachabilityMetrics, next: ReachabilityMetrics) {
@@ -7423,6 +7448,125 @@ mod tests {
     }
 
     #[test]
+    fn pc_chance_full_source_compact_preparation_reaches_geometry() {
+        use clearra_pc_graph::request::SupplyWindowSize;
+        use clearra_problem::SearchOutputPolicy;
+        use clearra_rules::profile::builtin_rules::{jstris_180, no_kick, srs, srs_plus, srs_x};
+
+        // Keep the entire original queue universe while visiting only the
+        // first geometry node of a one-lock field. No source enumeration or
+        // terminal scoring/replay materialization belongs to this probe.
+        for (draws, expected_patterns) in [(11, 4_233_600), (14, 25_401_600)] {
+            for rule in [srs(), srs_plus(), srs_x(), jstris_180(), no_kick()] {
+                for hold in [false, true] {
+                    for typed in [false, true] {
+                        let query = PcScenarioQuery::new(
+                            PcScenarioBoard::standard_10(1, 0x3f0),
+                            PcQueueInput::standard_7_bag(),
+                            PieceWindow::new(1),
+                        )
+                        .with_rule(rule.clone())
+                        .with_allow_hold(hold)
+                        .with_exact_pieces(Some(1))
+                        .with_supply_window_size(SupplyWindowSize::new(draws))
+                        .with_count_policy(PcCountPolicy::CountUnique)
+                        .with_execution_policy(
+                            PcExecutionPolicy::default()
+                                .with_workers(1)
+                                .with_max_memory_mib(Some(64)),
+                        );
+                        let problem = ProblemCompiler::compile_scenario_pc(&query)
+                            .expect("full-source one-lock PC query");
+                        let problem = if typed {
+                            problem
+                                .with_pc_chance_probability_v2_evidence()
+                                .with_output_policy(SearchOutputPolicy::CoverageSummary)
+                        } else {
+                            problem
+                        };
+                        let universe = problem.piece_source().materialized_universe().unwrap();
+                        assert_eq!(universe.pattern_count(), expected_patterns);
+                        assert_eq!(problem.supply().source_sequence_length(), draws);
+                        let mut session = WasmExactSearchSession::new(&problem)
+                            .expect("compact chance preparation retains the full source");
+                        assert!(matches!(
+                            session.advance(1, &ExecutionControl::default()).unwrap(),
+                            ExactSearchAdvance::Pending
+                        ));
+                        assert!(session.distributed_progress().geometry_nodes > 0);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn pc_chance_full_source_extended_preparation_omits_concrete_indexes() {
+        use clearra_core_domain::board::standard_pc_board::Board256Mask;
+        use clearra_pc_graph::request::SupplyWindowSize;
+        use clearra_problem::SearchOutputPolicy;
+
+        let target = (0..8_u16).fold(Board256Mask::EMPTY, |mask, row| {
+            mask.union(Board256Mask::singleton(row * 10 + u16::from(row >= 4)).unwrap())
+        });
+        let initial = Board256Mask::all_cells(80).unwrap().without(target);
+        // Two forced I placements, never a full 8L enumeration. The complete
+        // P7P4/P7P7 source is unchanged and only preparation is requested.
+        for (draws, expected_patterns) in [(11, 4_233_600), (14, 25_401_600)] {
+            for hold in [false, true] {
+                for typed in [false, true] {
+                    for preserve in [false, true] {
+                        let query = PcScenarioQuery::new(
+                            PcScenarioBoard::standard_10_from_words(8, initial.words()).unwrap(),
+                            PcQueueInput::standard_7_bag(),
+                            PieceWindow::new(2),
+                        )
+                        .with_allow_hold(hold)
+                        .with_rule(clearra_rules::profile::builtin_rules::srs_plus())
+                        .with_exact_pieces(Some(2))
+                        .with_supply_window_size(SupplyWindowSize::new(draws))
+                        .with_count_policy(PcCountPolicy::CountUnique)
+                        .with_objective(if preserve {
+                            ObjectivePolicy::unique()
+                                .with_back_to_back_preservation(SpinProfileSelection::AllSpinPlus)
+                        } else {
+                            ObjectivePolicy::unique()
+                        })
+                        .with_execution_policy(
+                            PcExecutionPolicy::default()
+                                .with_workers(1)
+                                .with_max_memory_mib(Some(64)),
+                        );
+                        let problem = ProblemCompiler::compile_scenario_pc(&query)
+                            .expect("full-source extended PC query");
+                        let problem = if typed {
+                            problem
+                                .with_pc_chance_probability_v2_evidence()
+                                .with_output_policy(SearchOutputPolicy::CoverageSummary)
+                        } else {
+                            problem
+                        };
+                        assert_eq!(
+                            problem
+                                .piece_source()
+                                .materialized_universe()
+                                .unwrap()
+                                .pattern_count(),
+                            expected_patterns
+                        );
+                        assert_eq!(problem.supply().source_sequence_length(), draws);
+                        let session = super::super::extended_pc_search::ExtendedPcSearchSession::new(&problem)
+                .unwrap_or_else(|error| panic!(
+                    "indexless PC preparation draws={draws}, hold={hold}, typed={typed}, B2B={preserve}: {error:?}"
+                ));
+                        drop(session);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn distributed_target_preparation_yields_with_monotonic_progress_and_cancel() {
         let query = OpeningPcSearchQuery::new(PcTarget::four_lines())
             .with_count_policy(PcCountPolicy::CountAll)
@@ -7480,7 +7624,7 @@ mod tests {
     }
 
     #[test]
-    fn coverage_summary_b2b_retains_internal_graph_and_coverage_evidence() {
+    fn typed_chance_b2b_keeps_filtered_rows_without_replay_owners() {
         let query = PcScenarioQuery::new(
             PcScenarioBoard::standard_10(2, 0xf3fcf),
             PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::O])),
@@ -7518,25 +7662,300 @@ mod tests {
         );
         assert!(chance_evidence.rows().iter().all(|row| row.row_kind()
             == &clearra_coverage::row::coverage_row_kind::CoverageRowKind::Build));
-        assert_eq!(result.solution_coverages().len(), 1);
-        assert_eq!(result.normalized_solution_coverages().len(), 1);
-        let batch = result
-            .exact_scoring_execution_batch()
-            .expect("B2B execution evidence batch");
-        assert!(batch.complete());
-        assert_eq!(batch.graphs().len(), 1);
+        assert!(result.solution_coverages().is_empty());
+        assert!(result.normalized_solution_coverages().is_empty());
+        assert!(result.exact_scoring_execution_batches().is_empty());
+        assert!(result.postprocess_pattern_weights().is_empty());
         assert_eq!(
-            batch.graphs()[0].identity(),
-            result.solution_coverages()[0].identity()
+            result.field("execution_constraint_materialized"),
+            Some("true")
         );
         assert_eq!(
-            result.solution_coverages()[0]
-                .covered_patterns()
-                .count_ones(),
-            1
+            result.field("b2b_preservation_evaluation_basis"),
+            Some(super::super::pc_chance_constraints::FILTERED_PC_CHANCE_BASIS)
         );
+        assert_eq!(result.field("b2b_preserving_solution_count"), None);
         assert!(result.normalized_solution_identities().is_empty());
         assert!(result.path_steps().is_empty());
+    }
+
+    fn tiny_chance_problem(
+        hold: bool,
+        rule: clearra_rules::profile::rule_profile::RuleProfile,
+        spin: Option<SpinProfileSelection>,
+        workers: usize,
+    ) -> clearra_problem::SearchProblem {
+        use clearra_pc_graph::request::SupplyWindowSize;
+        use clearra_supply::queue::queue_pattern_expression::QueuePatternExpression;
+
+        // A 4x2 gap has the two-I and two-O families. The first I clears a
+        // non-PC single; the first O clears nothing and the second makes PC.
+        let objective = spin.map_or_else(ObjectivePolicy::unique, |spin| {
+            ObjectivePolicy::unique().with_back_to_back_preservation(spin)
+        });
+        let query = PcScenarioQuery::new(
+            PcScenarioBoard::standard_10(2, ((1_u64 << 20) - 1) & !(0xf | (0xf << 10))),
+            PcQueueInput::pattern_expression(QueuePatternExpression::parse("II;OO", 2).unwrap()),
+            PieceWindow::new(2),
+        )
+        .with_rule(rule)
+        .with_allow_hold(hold)
+        .with_exact_pieces(Some(2))
+        .with_supply_window_size(SupplyWindowSize::new(2))
+        .with_count_policy(PcCountPolicy::CountUnique)
+        .with_objective(objective)
+        .with_retained_trace_limit(0)
+        .with_execution_policy(PcExecutionPolicy::default().with_workers(workers));
+        ProblemCompiler::compile_scenario_pc(&query).expect("bounded two-family Chance fixture")
+    }
+
+    #[test]
+    fn typed_chance_b2b_rows_match_exact_late_filter_for_all_rules_profiles_and_hold() {
+        use clearra_postprocess::{BackToBackExecutionFilter, TSpinCoverageOnlyMaterializer};
+        use clearra_problem::SearchOutputPolicy;
+        use clearra_rules::profile::builtin_rules::{jstris_180, no_kick, srs, srs_plus, srs_x};
+        use clearra_scoring::profile::SpinProfileId;
+
+        let control = ExecutionControl::default();
+        for rule in [srs(), srs_plus(), srs_x(), jstris_180(), no_kick()] {
+            for spin in [
+                SpinProfileSelection::TSpins,
+                SpinProfileSelection::TSpinsPlus,
+                SpinProfileSelection::AllSpin,
+                SpinProfileSelection::AllSpinPlus,
+                SpinProfileSelection::AllMini,
+                SpinProfileSelection::AllMiniPlus,
+            ] {
+                for hold in [false, true] {
+                    let ordinary = tiny_chance_problem(hold, rule.clone(), Some(spin), 1);
+                    let reference = WasmCpuSearchBackend::execute_with_control(&ordinary, &control)
+                        .expect("ordinary late-filter producer");
+                    let batch = BackToBackExecutionFilter::scoring_batch(
+                        reference.exact_scoring_execution_batch().unwrap(),
+                        SpinProfileId::parse(spin.as_str()).unwrap(),
+                    );
+                    let late = TSpinCoverageOnlyMaterializer::materialize_all_paths(
+                        &batch,
+                        0..batch.patterns().len(),
+                        &control,
+                    )
+                    .expect("exact late B2B reference");
+                    assert!(late.complete());
+                    let typed = ordinary
+                        .clone()
+                        .with_pc_chance_probability_v2_evidence()
+                        .with_output_policy(SearchOutputPolicy::CoverageSummary);
+                    let result = WasmCpuSearchBackend::execute_with_control(&typed, &control)
+                        .expect("typed filtered Chance execution");
+                    let evidence = result.pc_chance_coverage_evidence().unwrap();
+                    assert!(evidence.complete(), "{rule:?}/{spin:?}/hold={hold}");
+                    assert!(evidence.problem().matches_search_problem(&typed));
+                    assert!(!evidence.problem().matches_search_problem(&ordinary));
+                    assert_eq!(
+                        evidence.coverage_union(),
+                        *late.covered_patterns(),
+                        "{rule:?}/{spin:?}/hold={hold}"
+                    );
+                    assert_eq!(
+                        result.coverage_pattern_words(),
+                        late.covered_patterns().words()
+                    );
+                    let mut actual_rows = evidence
+                        .rows()
+                        .iter()
+                        .map(|row| row.coverage_bits().to_owned_words())
+                        .collect::<Vec<_>>();
+                    let mut expected_rows = late
+                        .candidate_coverages()
+                        .iter()
+                        .filter(|row| !row.covered_patterns().is_empty())
+                        .map(|row| row.covered_patterns().to_owned_words())
+                        .collect::<Vec<_>>();
+                    actual_rows.sort();
+                    expected_rows.sort();
+                    assert_eq!(actual_rows, expected_rows, "{rule:?}/{spin:?}/hold={hold}");
+                    assert_eq!(result.field("covered_pattern_count"), Some("1"));
+                    assert_eq!(result.field("coverage_probability"), Some("0.5"));
+                    assert!(result.exact_scoring_execution_batches().is_empty());
+                    assert!(result.postprocess_pattern_weights().is_empty());
+                    assert_eq!(
+                        result.field("execution_constraint_materialized"),
+                        Some("true")
+                    );
+                    assert_eq!(result.field("objective_complete"), Some("true"));
+                }
+            }
+        }
+    }
+
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn typed_chance_native_parallel_preserves_exact_rows_and_probability() {
+        use clearra_problem::SearchOutputPolicy;
+        use clearra_rules::profile::builtin_rules::srs_plus;
+
+        let control = ExecutionControl::default();
+        for spin in [None, Some(SpinProfileSelection::AllSpinPlus)] {
+            for hold in [false, true] {
+                let ordinary = tiny_chance_problem(hold, srs_plus(), spin, 2);
+                assert_eq!(ordinary.backend_request().max_memory_mib(), None);
+                assert_eq!(ordinary.backend_policy().workers(), 2);
+                assert!(!super::native_candidate_window_accounting(&ordinary));
+                let problem = ordinary
+                    .with_pc_chance_probability_v2_evidence()
+                    .with_output_policy(SearchOutputPolicy::CoverageSummary);
+                assert_eq!(problem.backend_request().max_memory_mib(), None);
+                assert_eq!(problem.backend_policy().workers(), 2);
+                #[cfg(not(target_family = "wasm"))]
+                assert!(super::native_candidate_window_accounting(&problem));
+                let mut serial = WasmExactSearchSession::new(&problem).unwrap();
+                let reference = loop {
+                    match serial.advance(32, &control).unwrap() {
+                        ExactSearchAdvance::Pending => {}
+                        ExactSearchAdvance::Completed(result) => break result,
+                        ExactSearchAdvance::Cancelled => panic!("uncancelled fixture"),
+                    }
+                };
+                // The session's admitted host-cap lease ends before starting
+                // the independent parallel comparison of this tiny fixture.
+                drop(serial);
+                let parallel = WasmExactSearchSession::new(&problem)
+                    .unwrap()
+                    .execute_parallel_if_worthwhile(2, &control)
+                    .unwrap()
+                    .expect("two-candidate geometry uses the requested native workers");
+                assert_eq!(parallel.usize_field("workers_requested"), Some(2));
+                assert_eq!(parallel.usize_field("workers_used"), Some(2));
+                assert_eq!(parallel.bool_field("cpu_parallel_execution"), Some(true));
+                #[cfg(not(target_family = "wasm"))]
+                assert_eq!(
+                    parallel.field("cpu_parallel_decision_reason"),
+                    Some("parallel-original-candidate-windows")
+                );
+                let actual = parallel.pc_chance_coverage_evidence().unwrap();
+                let expected = reference.pc_chance_coverage_evidence().unwrap();
+                assert!(actual.complete(), "spin={spin:?}/hold={hold}");
+                assert!(actual.problem().matches_search_problem(&problem));
+                assert_eq!(actual.coverage_union(), expected.coverage_union());
+                let rows = |evidence: &crate::PcChanceCoverageEvidence| {
+                    let mut rows = evidence
+                        .rows()
+                        .iter()
+                        .map(|row| row.coverage_bits().to_owned_words())
+                        .collect::<Vec<_>>();
+                    rows.sort();
+                    rows
+                };
+                assert_eq!(rows(actual), rows(expected));
+                assert_eq!(
+                    parallel.field("coverage_probability"),
+                    reference.field("coverage_probability")
+                );
+                assert_eq!(
+                    parallel.field("covered_pattern_count"),
+                    reference.field("covered_pattern_count")
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn typed_chance_full_height_b2b_retains_filtered_probability_authority() {
+        use clearra_core_domain::board::standard_pc_board::Board256Mask;
+        use clearra_pc_graph::request::SupplyWindowSize;
+        use clearra_problem::SearchOutputPolicy;
+
+        let target = (0..8_u16).fold(Board256Mask::EMPTY, |mask, row| {
+            mask.union(Board256Mask::singleton(row * 10 + u16::from(row >= 4)).unwrap())
+        });
+        let initial = Board256Mask::all_cells(80).unwrap().without(target);
+        for spin in [
+            SpinProfileSelection::TSpins,
+            SpinProfileSelection::TSpinsPlus,
+            SpinProfileSelection::AllSpin,
+            SpinProfileSelection::AllSpinPlus,
+            SpinProfileSelection::AllMini,
+            SpinProfileSelection::AllMiniPlus,
+        ] {
+            let query = PcScenarioQuery::new(
+                PcScenarioBoard::standard_10_from_words(8, initial.words()).unwrap(),
+                PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::I; 2])),
+                PieceWindow::new(2),
+            )
+            .with_rule(clearra_rules::profile::builtin_rules::srs_plus())
+            .with_allow_hold(false)
+            .with_exact_pieces(Some(2))
+            .with_supply_window_size(SupplyWindowSize::new(2))
+            .with_count_policy(PcCountPolicy::CountUnique)
+            .with_objective(ObjectivePolicy::unique().with_back_to_back_preservation(spin));
+            let problem = ProblemCompiler::compile_scenario_pc(&query)
+                .unwrap()
+                .with_pc_chance_probability_v2_evidence()
+                .with_output_policy(SearchOutputPolicy::CoverageSummary);
+            let result =
+                WasmCpuSearchBackend::execute_with_control(&problem, &ExecutionControl::default())
+                    .expect("two-lock full-height Chance fixture");
+            assert_eq!(result.field("board_storage"), Some("board256-canonical"));
+            assert_eq!(result.field("covered_pattern_count"), Some("1"), "{spin:?}");
+            assert_eq!(result.field("coverage_probability"), Some("1"), "{spin:?}");
+            assert_eq!(
+                result.field("execution_constraint_materialized"),
+                Some("true")
+            );
+            let evidence = result.pc_chance_coverage_evidence().unwrap();
+            assert!(evidence.problem().matches_search_problem(&problem));
+            assert!(evidence.complete());
+            assert_eq!(
+                evidence.coverage_union().words(),
+                result.coverage_pattern_words()
+            );
+            super::super::pc_chance_constraints::validate_filtered_pc_chance_metadata(
+                &result, &problem,
+            )
+            .expect("identical compact and extended filtered authority");
+        }
+    }
+
+    #[test]
+    fn typed_chance_full_height_b2b_rejection_has_complete_empty_rows() {
+        use clearra_core_domain::board::standard_pc_board::Board256Mask;
+        use clearra_problem::SearchOutputPolicy;
+
+        let initial = Board256Mask::from_words([0xdff7fdff3feffbfe, 0x3f, 0, 0]);
+        let query = PcScenarioQuery::new(
+            PcScenarioBoard::standard_10_from_words(7, initial.words()).unwrap(),
+            PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::I; 2])),
+            PieceWindow::new(2),
+        )
+        .with_rule(clearra_rules::profile::builtin_rules::srs_plus())
+        .with_allow_hold(false)
+        .with_exact_pieces(Some(2))
+        .with_count_policy(PcCountPolicy::CountUnique)
+        .with_objective(
+            ObjectivePolicy::unique().with_back_to_back_preservation(SpinProfileSelection::TSpins),
+        );
+        let problem = ProblemCompiler::compile_scenario_pc(&query)
+            .unwrap()
+            .with_pc_chance_probability_v2_evidence()
+            .with_output_policy(SearchOutputPolicy::CoverageSummary);
+        let result =
+            WasmCpuSearchBackend::execute_with_control(&problem, &ExecutionControl::default())
+                .expect("two I pieces clear three then four lines; first clear breaks B2B");
+        assert_eq!(result.field("board_storage"), Some("board256-canonical"));
+        assert_eq!(result.field("covered_pattern_count"), Some("0"));
+        assert_eq!(result.field("coverage_probability"), Some("0"));
+        assert_eq!(
+            result.field("execution_constraint_materialized"),
+            Some("true")
+        );
+        let evidence = result.pc_chance_coverage_evidence().unwrap();
+        assert!(evidence.complete());
+        assert!(evidence.rows().is_empty());
+        assert!(evidence.coverage_union().is_empty());
+        super::super::pc_chance_constraints::validate_filtered_pc_chance_metadata(
+            &result, &problem,
+        )
+        .unwrap();
     }
 
     #[test]

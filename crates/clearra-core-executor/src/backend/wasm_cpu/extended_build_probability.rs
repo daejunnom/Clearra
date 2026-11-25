@@ -11,8 +11,8 @@ mod pc_parallel;
 pub(super) use pc_parallel::cooperative::{DryRunOwner, ParallelTerminalRetention, SerialHandoff};
 
 use clearra_core_domain::{
-    execution_cancellation::ExecutionControl, piece::piece_kind::PieceKind,
-    solution::ExtendedTilingSolutionKey,
+    execution_cancellation::ExecutionControl, objective::objective_kind::ObjectiveKind,
+    piece::piece_kind::PieceKind, solution::ExtendedTilingSolutionKey,
 };
 use clearra_coverage::{
     pattern::pattern_bitset::PatternBitSet,
@@ -26,7 +26,8 @@ use clearra_finesse::{
 };
 use clearra_pc_graph::request::PcCountPolicy;
 use clearra_problem::{
-    BuildProbabilityAggregation, BuildProbabilityField, PcChanceEvidencePolicy, SearchProblem,
+    BuildProbabilityAggregation, BuildProbabilityField, PcChanceEvidencePolicy, SearchOutputPolicy,
+    SearchProblem,
 };
 use clearra_replay::{
     FullHeightExecutionBatch, FullHeightReplayProjector, SpinCoverageExecutionBatch,
@@ -209,7 +210,7 @@ struct SealedPcFamily {
 // session surface so compact and extended execution stay contract-compatible.
 #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 impl ExtendedBuildProbabilitySession {
-    /// The physical graph remains the Build authority. Only its Boolean
+    /// The physical graph remains the execution authority. Only its Boolean
     /// kind-word language is composed with the standard-bag source here.
     /// Keep this gate shared with admission so an omitted index is never
     /// charged as if it existed, or selected for a different evaluator.
@@ -245,10 +246,15 @@ impl ExtendedBuildProbabilitySession {
         });
         let held = usize::from(!problem.initial_hold().hold_empty());
         let projected = problem.supply().projects_unplaced_lookahead();
+        let supported_evidence = problem.pc_chance_evidence_policy()
+            == PcChanceEvidencePolicy::Disabled
+            || (problem.pc_chance_evidence_policy() == PcChanceEvidencePolicy::PcProbabilityV2
+                && problem.output_policy() == SearchOutputPolicy::CoverageSummary
+                && problem.objective().kind() == ObjectiveKind::Unique);
         Ok(aggregation == BuildProbabilityAggregation::Buildability
             && !finesse_requested
             && !problem.solution_probability_policy().requested()
-            && problem.pc_chance_evidence_policy() == PcChanceEvidencePolicy::Disabled
+            && supported_evidence
             && !problem.objective().score().requested()
             && problem.count_policy() == PcCountPolicy::CountUnique
             && problem.queue_observation_policy() == QueueObservationPolicy::FullQueueOracle
@@ -277,7 +283,8 @@ impl ExtendedBuildProbabilitySession {
         memory_bound: ExecutionMemoryBound,
         coexisting_retained_bytes: u128,
     ) -> Result<Option<StandardBagCoverage>, WasmExactSearchError> {
-        if purpose != ExtendedFamilyPurpose::Build
+        if (purpose == ExtendedFamilyPurpose::Build
+            && problem.pc_chance_evidence_policy() != PcChanceEvidencePolicy::Disabled)
             || !Self::uses_standard_bag_coverage(problem, aggregation, finesse_requested)?
         {
             return Ok(None);
@@ -1267,7 +1274,9 @@ impl ExtendedBuildProbabilitySession {
         let execution_evidence_requested = self.aggregation.requests_spin_coverage()
             || self.problem.objective().score().requested()
             || (self.problem.objective().execution_constraints().requested()
-                && (!self.build_constraints_materialized() || self.finesse_requested))
+                && ((self.purpose == ExtendedFamilyPurpose::Build
+                    && !self.build_constraints_materialized())
+                    || self.finesse_requested))
             || (self.purpose == ExtendedFamilyPurpose::Pc
                 && self
                     .problem
@@ -1389,8 +1398,8 @@ impl ExtendedBuildProbabilitySession {
                     if finesse_language.is_some()
                         || spin_graph.is_some()
                         || self.pc_observation.is_some()
-                        || self.solution_coverage.is_some()
-                        || self.purpose != ExtendedFamilyPurpose::Build
+                        || (self.purpose == ExtendedFamilyPurpose::Build
+                            && self.solution_coverage.is_some())
                     {
                         return Err(WasmExactSearchError::InvalidProblem(
                             "wasm_extended_symbolic_boolean_scope_mismatch",
@@ -1399,6 +1408,7 @@ impl ExtendedBuildProbabilitySession {
                     return self.apply_symbolic_build_order(
                         candidate,
                         tiling,
+                        candidate_key.as_deref(),
                         external_ordinal,
                         &graph,
                         control,
@@ -1586,6 +1596,7 @@ impl ExtendedBuildProbabilitySession {
         &mut self,
         candidate: &super::extended_geometry::ExtendedGeometryCandidate,
         tiling: ExtendedTilingKey,
+        candidate_key: Option<&str>,
         external_ordinal: Option<u64>,
         graph: &BuildOrderGraph,
         control: &ExecutionControl,
@@ -1621,6 +1632,22 @@ impl ExtendedBuildProbabilitySession {
                 .ok_or(WasmExactSearchError::InvalidProblem(
                     "wasm_extended_symbolic_witness_missing",
                 ))?;
+            // Typed Chance and constrained PC retain exact original-source
+            // rows. Materialize this candidate root while it is live, before
+            // global union is allowed to recycle the symbolic arena.
+            if self.solution_coverage.is_some() {
+                let key = candidate_key.ok_or(WasmExactSearchError::InvalidProblem(
+                    "wasm_extended_solution_coverage_key_missing",
+                ))?;
+                self.ensure_symbolic_materialization_bound()?;
+                self.prepare_standard_bag_resources()?;
+                let row = self
+                    .standard_bag_coverage
+                    .as_ref()
+                    .expect("symbolic owner")
+                    .materialize_root(product.root)?;
+                self.merge_solution_coverage(key, &row)?;
+            }
             self.witnessed_pattern_count = self
                 .witnessed_pattern_count
                 .saturating_add(product.covered_pattern_count as u128);
@@ -4447,6 +4474,12 @@ impl ExtendedBuildProbabilitySession {
         if let Some(evidence) = evidence {
             result = result.with_pc_chance_coverage_evidence(evidence);
         }
+        if super::pc_chance_constraints::filters_pc_chance_constraints(&self.problem) {
+            result = super::pc_chance_constraints::mark_filtered_pc_chance_constraints(
+                result,
+                &self.problem,
+            )?;
+        }
         result = result.with_pc_score_problem_evidence(score_evidence);
         if score_source {
             if let Some(batch) = physical_batch {
@@ -4867,7 +4900,8 @@ impl ExtendedBuildProbabilitySession {
                     .constructor_peak_bytes,
             )?;
         }
-        if self.problem.objective().execution_constraints().requested()
+        if self.purpose == ExtendedFamilyPurpose::Build
+            && self.problem.objective().execution_constraints().requested()
             && (!self.build_constraints_materialized()
                 || self.problem.solution_probability_policy().requested())
         {
@@ -4883,6 +4917,7 @@ impl ExtendedBuildProbabilitySession {
         let execution_evidence_requested = self.aggregation.requests_spin_coverage()
             || self.problem.objective().score().requested()
             || (self.problem.objective().execution_constraints().requested()
+                && self.purpose == ExtendedFamilyPurpose::Build
                 && !self.build_constraints_materialized())
             || (self.purpose == ExtendedFamilyPurpose::Pc
                 && self

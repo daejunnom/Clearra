@@ -892,7 +892,10 @@ fn run_branch(
     let retain_failed_queue_rows = problem
         .pc_chance_evidence_policy()
         .pc_failed_queue_example_limit()
-        .is_some();
+        .is_some()
+        || problem
+            .pc_chance_evidence_policy()
+            .retains_pc_probability_v2_evidence();
     let mut failed_queue_rows = Vec::new();
     let solution_coverage_required = retains_solution_coverage_evidence(problem);
     let exact_candidate_coverage = solution_coverage_required || retain_failed_queue_rows;
@@ -1154,7 +1157,8 @@ fn record_failed_queue_branch_row(
 fn retains_solution_coverage_evidence(problem: &SearchProblem) -> bool {
     problem.solution_probability_policy().requested()
         || problem.objective().kind() == ObjectiveKind::MinimumCover
-        || problem.objective().execution_constraints().requested()
+        || (problem.objective().execution_constraints().requested()
+            && !super::pc_chance_constraints::filters_pc_chance_constraints(problem))
 }
 
 fn add_reachability_metrics(total: &mut ReachabilityMetrics, next: ReachabilityMetrics) {

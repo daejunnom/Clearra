@@ -810,6 +810,9 @@ fn collect_failed_queue_rows(
         .pc_chance_evidence_policy()
         .pc_failed_queue_example_limit()
         .is_none()
+        && !problem
+            .pc_chance_evidence_policy()
+            .retains_pc_probability_v2_evidence()
     {
         return Ok(Vec::new());
     }

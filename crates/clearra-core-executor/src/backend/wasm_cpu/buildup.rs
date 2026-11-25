@@ -3725,14 +3725,19 @@ fn verify_candidate_with_projection(
     // Finesse uses the original graph edge ordinal to break ties after
     // candidate languages are unioned. Keep that ordinal space intact here;
     // its policy/dead-suffix pruning happens before movement annotation below.
-    // Ordinary coverage also retains the unconstrained producer denominator.
-    let mut graph = BuildOrderGraph::build(
+    // Ordinary coverage retains its unconstrained producer checkpoint. Typed
+    // Chance owns only filtered probability rows, so use the same physical B2B
+    // edge predicate before composing its language with the original queues.
+    let chance_b2b_policy = super::pc_chance_constraints::filters_pc_chance_constraints(problem)
+        .then(|| finesse_b2b_policy(problem))
+        .flatten();
+    let mut graph = BuildOrderGraph::build_with_edge_policy(
         problem,
         catalog,
         candidate,
         projection,
         workspace,
-        problem.count_policy() == PcCountPolicy::CountUnique,
+        problem.count_policy() == PcCountPolicy::CountUnique && chance_b2b_policy.is_none(),
         completion,
         Some(feasibility),
         if finesse_requested {
@@ -3741,6 +3746,7 @@ fn verify_candidate_with_projection(
             BuildReachabilityMode::Existing
         },
         movement_proofs,
+        chance_b2b_policy,
     )?;
     graph_span.finish(graph.nodes.len() as u64);
     if let Some(span) = finesse_geometry_span {
@@ -5429,7 +5435,16 @@ impl BuildOrderGraph {
         let operation_count = projection.operation_count();
         let state_count = projection.state_count();
         let all_placed = projection.all_placed;
-        let b2b_policy = b2b_policy.filter(|_| semantic_pruning_enabled());
+        let chance_b2b_policy = b2b_policy
+            .filter(|_| super::pc_chance_constraints::filters_pc_chance_constraints(problem));
+        // Early Chance filtering is the product's constraint authority, not
+        // an optional graph simplification controlled by the test oracle.
+        let b2b_policy = b2b_policy
+            .filter(|_| semantic_pruning_enabled())
+            .or(chance_b2b_policy);
+        // A Boolean operation edge can choose its first reachable pose only
+        // when no execution predicate depends on that pose's rotation proof.
+        debug_assert!(chance_b2b_policy.is_none() || !piece_language_projection_only);
         let share_piece_edges =
             piece_language_projection_only && matches!(completion, BuildCompletion::ClearToEmpty);
         let materialize_graph = matches!(representation, BuildPassRepresentation::Graph);
@@ -5913,6 +5928,20 @@ impl BuildOrderGraph {
                             realization,
                             LocalRelationRowFrame::new(catalog.height(), deleted_rows),
                         ) {
+                            if let Some(policy) = chance_b2b_policy {
+                                let perfect_clear =
+                                    edge.cleared_lines > 0 && projection.state(child).0 == 0;
+                                if !b2b_build_edge_allows(
+                                    catalog,
+                                    &mut workspace.reachability,
+                                    board,
+                                    edge,
+                                    perfect_clear,
+                                    policy,
+                                ) {
+                                    continue;
+                                }
+                            }
                             try_push_build_edge(&mut edge_scratch, edge)?;
                         }
                     }
@@ -6572,6 +6601,57 @@ pub(super) fn finesse_b2b_policy(problem: &SearchProblem) -> Option<BackToBackEd
     constraints
         .preserves_back_to_back()
         .then(|| BackToBackEdgePolicy::new(constraints.spin_profile()))
+}
+
+fn b2b_build_edge_allows(
+    catalog: &GeometryCatalog,
+    reachability: &mut ReachabilityWorkspace,
+    board: u64,
+    edge: BuildEdge,
+    perfect_clear: bool,
+    policy: BackToBackEdgePolicy,
+) -> bool {
+    match policy.before_spin_evidence(edge.piece, edge.cleared_lines, perfect_clear) {
+        BeforeSpinEvidenceDecision::Preserves => true,
+        BeforeSpinEvidenceDecision::Rejects => false,
+        BeforeSpinEvidenceDecision::RequiresSpinEvidence => {
+            let lock_evidence = reachability.scoring_lock_evidence(
+                catalog,
+                board,
+                edge.piece,
+                edge.rotation,
+                edge.x,
+                edge.y,
+            );
+            let (blocked_t_corners, blocked_t_front_corners) = if edge.piece == PieceKind::T {
+                t_corner_evidence(
+                    catalog.width(),
+                    catalog.height(),
+                    board,
+                    edge.rotation,
+                    edge.x,
+                    edge.y,
+                )
+            } else {
+                (0, 0)
+            };
+            policy.allows(
+                ScoringExecutionEdge::new(
+                    edge.to,
+                    edge.operation_index,
+                    edge.piece,
+                    edge.rotation,
+                    edge.x,
+                    edge.y,
+                    edge.cleared_lines,
+                    blocked_t_corners,
+                    blocked_t_front_corners,
+                    lock_evidence,
+                )
+                .with_perfect_clear(perfect_clear),
+            )
+        }
+    }
 }
 
 pub(super) fn finesse_terminal_label(

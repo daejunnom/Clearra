@@ -375,6 +375,14 @@ fn extended_standard_bag_gate_rejects_truncated_and_factorized_original_axes() {
         )
         .unwrap()
     );
+    let typed_probability = probability_evidence
+        .with_output_policy(clearra_problem::SearchOutputPolicy::CoverageSummary);
+    assert!(ExtendedBuildProbabilitySession::uses_standard_bag_coverage(
+        &typed_probability,
+        BuildProbabilityAggregation::Buildability,
+        false,
+    )
+    .unwrap());
     let truncated = source_problem(2, 2, None, PcQueueInput::standard_7_bag(), 1);
     let universe = truncated.piece_source().materialized_universe().unwrap();
     assert!(!universe.complete());
@@ -518,6 +526,125 @@ fn extended_standard_bag_complete_full_height_build_matches_dense_result() {
     assert_eq!(symbolic.bool_field("solution_found"), Some(true));
     assert_eq!(symbolic.bool_field("count_complete"), Some(true));
     assert_eq!(symbolic.bool_field("probability_complete"), Some(true));
+}
+
+#[test]
+fn typed_chance_extended_standard_bag_rows_match_dense_pc_source_product() {
+    use clearra_core_domain::board::standard_pc_board::Board256Mask;
+    use clearra_objectives::policy::{
+        objective_policy::ObjectivePolicy, score_objective_policy::SpinProfileSelection,
+    };
+    use clearra_problem::SearchOutputPolicy;
+
+    let target = (0..8_u16).fold(Board256Mask::EMPTY, |mask, row| {
+        mask.union(Board256Mask::singleton(row * 10 + u16::from(row >= 4)).unwrap())
+    });
+    let initial = Board256Mask::all_cells(80).unwrap().without(target);
+    let field =
+        BuildProbabilityField::from_words_preserving_height(8, initial.words(), target.words())
+            .unwrap();
+    for spin in [
+        None,
+        Some(SpinProfileSelection::TSpins),
+        Some(SpinProfileSelection::TSpinsPlus),
+        Some(SpinProfileSelection::AllSpin),
+        Some(SpinProfileSelection::AllSpinPlus),
+        Some(SpinProfileSelection::AllMini),
+        Some(SpinProfileSelection::AllMiniPlus),
+    ] {
+        for (hold, held) in [(false, None), (true, None), (true, Some(PieceKind::I))] {
+            let query = PcScenarioQuery::new(
+                PcScenarioBoard::standard_10_from_words(8, initial.words()).unwrap(),
+                PcQueueInput::standard_7_bag(),
+                PieceWindow::new(2),
+            )
+            .with_exact_pieces(Some(2))
+            .with_supply_window_size(SupplyWindowSize::new(2))
+            .with_allow_hold(hold)
+            .with_hold_piece(held)
+            .with_rule(clearra_rules::profile::builtin_rules::srs_plus())
+            .with_count_policy(PcCountPolicy::CountUnique)
+            .with_objective(spin.map_or_else(ObjectivePolicy::unique, |profile| {
+                ObjectivePolicy::unique().with_back_to_back_preservation(profile)
+            }));
+            let problem = ProblemCompiler::compile_scenario_pc(&query)
+                .unwrap()
+                .with_pc_chance_probability_v2_evidence()
+                .with_output_policy(SearchOutputPolicy::CoverageSummary);
+            let run = |symbolic: bool| {
+                let bound =
+                    crate::resource::ExecutionMemoryBound::unbounded_for_problem(&problem).unwrap();
+                let mut session =
+                    ExtendedBuildProbabilitySession::new_pc_family(&problem, field, bound, 0)
+                        .unwrap();
+                assert!(session.standard_bag_coverage.is_some());
+                if !symbolic {
+                    // Exercise the previous position-index product against
+                    // the same full source IDs, weights and physical graph.
+                    session.standard_bag_coverage = None;
+                    let universe = problem.piece_source().materialized_universe().unwrap();
+                    let family = universe.packing_multiset_family_for_execution(
+                        2,
+                        problem.initial_hold(),
+                        problem.supply().hold_enabled(),
+                        crate::backend::wasm_cpu::packing_hold_projection(&problem),
+                    );
+                    session.geometry =
+                        ExtendedGeometrySearch::new(universe, &family, &session.catalog).unwrap();
+                }
+                for _ in 0..64 {
+                    match session.advance(16, &ExecutionControl::default()).unwrap() {
+                        BuildProbabilityAdvance::Pending => {}
+                        BuildProbabilityAdvance::Completed(result) => return result,
+                        BuildProbabilityAdvance::Cancelled => {
+                            panic!("uncancelled two-lock fixture")
+                        }
+                    }
+                }
+                panic!("two-lock PC fixture did not complete")
+            };
+            let dense = run(false);
+            let symbolic = run(true);
+            for name in [
+                "covered_pattern_count",
+                "coverage_probability",
+                "coverage_pattern_count",
+                "count_complete",
+                "probability_complete",
+                "execution_constraint_materialized",
+                "b2b_preservation_evaluation_basis",
+            ] {
+                assert_eq!(
+                    symbolic.field(name),
+                    dense.field(name),
+                    "{name}, spin={spin:?}, hold={hold}, held={held:?}"
+                );
+            }
+            assert_eq!(
+                symbolic.coverage_pattern_words(),
+                dense.coverage_pattern_words()
+            );
+            let rows = |result: &CoreExecutionResult| {
+                let evidence = result.pc_chance_coverage_evidence().unwrap();
+                assert!(evidence.complete());
+                assert!(evidence.problem().matches_search_problem(&problem));
+                let mut rows = evidence
+                    .rows()
+                    .iter()
+                    .map(|row| (row.candidate_id(), row.coverage_bits().to_owned_words()))
+                    .collect::<Vec<_>>();
+                rows.sort();
+                rows
+            };
+            assert_eq!(rows(&symbolic), rows(&dense));
+            assert_eq!(
+                symbolic.field("solution_found"),
+                Some(if held.is_some() { "true" } else { "false" })
+            );
+            assert!(symbolic.spin_coverage_execution_batches().is_empty());
+            assert!(symbolic.postprocess_pattern_weights().is_empty());
+        }
+    }
 }
 
 fn full_draw_component_fixture(duplicate_s: bool) -> (SearchProblem, BuildProbabilityField) {

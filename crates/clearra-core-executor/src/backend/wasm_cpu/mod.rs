@@ -62,6 +62,7 @@ mod parallel_search;
 #[cfg(feature = "parallel")]
 mod parallel_worker;
 mod pc4_graph_materializer;
+mod pc_chance_constraints;
 mod piece_order_language;
 #[cfg(feature = "local-search-ab")]
 pub use piece_order_language::{count_distinct_no_hold_one_bag_poset, DistinctNoHoldOneBagCount};

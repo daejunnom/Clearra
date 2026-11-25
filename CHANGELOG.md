@@ -13,6 +13,13 @@
   workers, and show the corresponding localized cause in Web and desktop.
 - Keep Discord job responses alive during computation without extending the
   execution deadline, and distinguish transport timeouts from search deadlines.
+- Add Discord-only `/pc solutions` over the existing exact Unique producer,
+  retaining the ordinary CLI/GUI defaults and explicit Path replay semantics.
+- Carry complete PC chance coverage evidence through native parallel reduction,
+  apply requested B2B/spin constraints before probability coverage, and bind
+  filtered rows to the complete request before public result projection.
+- Reuse the exact standard-bag language product for eligible full-height PC
+  searches and retain typed chance rows under the existing worker-window budget.
 - Bind P7P4 diagnostics to the public Path command, original queue universe,
   requested CPU policy, native result identity, and actual spawned arguments.
 - Reuse exact replay counts for source-verified queues that differ only after

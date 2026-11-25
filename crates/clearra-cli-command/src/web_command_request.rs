@@ -1054,9 +1054,16 @@ impl WebCommandRequest {
                         "pc chance does not support an explicit memory cap until transient proof memory is accounted",
                     ));
                 }
-                if self.objective != ObjectivePolicy::unique() {
+                let constraints = self.objective.execution_constraints();
+                let expected_objective = if constraints.preserves_back_to_back() {
+                    ObjectivePolicy::unique()
+                        .with_back_to_back_preservation(constraints.spin_profile())
+                } else {
+                    ObjectivePolicy::unique()
+                };
+                if self.objective != expected_objective {
                     return Err(invalid(
-                        "pc chance requires the unique non-scoring objective without constraints",
+                        "pc chance requires the unique non-scoring objective",
                     ));
                 }
                 if self.solution_probabilities {
