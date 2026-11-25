@@ -100,7 +100,7 @@ pub(crate) fn run_native_recovery_build(
             .ok_or(Error::InvalidState("recovery result missing"));
     }
     let coordinator = Coordinator::new_with_control(query, workers, control)?;
-    let init = std::sync::Arc::new(coordinator.worker_initialization());
+    let init = coordinator.shared_worker_initialization();
     if control.is_cancelled() {
         return Err(RecoveryBuildError::Cancelled.into());
     }
@@ -129,7 +129,7 @@ pub(crate) fn run_native_recovery_build(
                 .spawn(move || {
                     let panic = catch_unwind(AssertUnwindSafe(|| {
                         with_compute_worker(permit, || {
-                            let mut worker = match Worker::new(&init) {
+                            let mut worker = match Worker::from_shared(init) {
                                 Ok(worker) => worker,
                                 Err(error) => {
                                     let _ = completion

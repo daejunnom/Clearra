@@ -41,6 +41,45 @@ fn complete(
     }
     output.unwrap()
 }
+
+#[test]
+fn recovery_build_shared_input_preserves_wire_results_and_request_binding() {
+    for all_solutions in [false, true] {
+        let mut q = query();
+        q.all_solutions = all_solutions;
+        let control = ExecutionControl::default();
+        let expected = q.search(&control).unwrap();
+        let mut coordinator = RecoveryBuildParallelCoordinator::new(q.clone(), 2).unwrap();
+        let mut shared =
+            RecoveryBuildParallelWorker::from_shared(coordinator.shared_worker_initialization())
+                .unwrap();
+        let mut transported =
+            RecoveryBuildParallelWorker::new(&coordinator.worker_initialization()).unwrap();
+        q.hold_enabled = !q.hold_enabled;
+        let foreign = RecoveryBuildParallelCoordinator::new(q, 2).unwrap();
+        let mut foreign =
+            RecoveryBuildParallelWorker::from_shared(foreign.shared_worker_initialization())
+                .unwrap();
+        loop {
+            let (status, task) = coordinator.produce(32, &control).unwrap();
+            match status {
+                RecoveryBuildParallelProduce::Batch => {
+                    assert!(foreign.consume(&task, &control).is_err());
+                    let result = complete(&mut shared, &task, &control);
+                    assert_eq!(result, complete(&mut transported, &task, &control));
+                    coordinator.absorb(&result, &control).unwrap();
+                }
+                RecoveryBuildParallelProduce::Completed => break,
+                RecoveryBuildParallelProduce::Pending => {
+                    assert!(coordinator.has_pending_preparation());
+                }
+                RecoveryBuildParallelProduce::Cancelled => panic!("unexpected cancellation"),
+            }
+        }
+        assert_eq!(coordinator.finish(&control).unwrap(), expected);
+    }
+}
+
 #[test]
 fn recovery_build_parallel_reordered_pairs_preserve_exact_report() {
     for hold in [false, true] {

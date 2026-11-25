@@ -136,6 +136,98 @@ fn recovery_build_catalog_first_and_second_p7_are_compact_and_distinct() {
     bad.nodes[0].1[0] = 999_999;
     assert!(Diagram::default().import(&bad, 14).is_err());
 }
+
+#[test]
+fn recovery_catalog_reuses_weighted_measures_without_crossing_source_lifetimes() {
+    use clearra_core_domain::{
+        piece::piece_kind::PieceKind, probability::probability_value::ProbabilityValue,
+    };
+    use clearra_coverage::universe::{
+        pattern_universe_id::PatternUniverseId, pattern_weight_model_id::PatternWeightModelId,
+    };
+    use clearra_supply::pattern_universe::MaterializedPatternUniverse;
+
+    let explicit = |id, weights: [f64; 2]| {
+        MaterializedPatternUniverse::from_sequences(
+            PatternUniverseId::new(id),
+            PatternWeightModelId::new(id),
+            vec![vec![PieceKind::I], vec![PieceKind::O]],
+            weights
+                .into_iter()
+                .map(|weight| ProbabilityValue::new(weight).unwrap())
+                .collect(),
+            2,
+            true,
+            None,
+        )
+        .unwrap()
+    };
+    let mut prepared = PreparedPopulation::new(query()).unwrap();
+    prepared.first = explicit(1, [0.25, 0.75]);
+    prepared.second = explicit(2, [0.6, 0.4]);
+    let control = ExecutionControl::default();
+    let mut diagram = Diagram::default();
+    let source = Source::for_population(&mut diagram, &prepared, &control).unwrap();
+    assert!(!source.compact_second);
+    let second_i = diagram
+        .prepend(1, 0, super::super::staged::diagram::ALL)
+        .unwrap();
+    let first_i = diagram.prepend(0, 0, second_i).unwrap();
+    let mut cache = MeasurementCache::default();
+    let measured_i = measure(
+        &prepared,
+        &source,
+        &mut diagram,
+        first_i,
+        &mut cache,
+        &control,
+    )
+    .unwrap();
+    assert_eq!(measured_i, (1, 0.25 * 0.6));
+
+    // Later imports/unions append nodes but cannot change an existing Id's
+    // weighted continuation. Both distinct languages share that continuation.
+    let first_o = diagram.prepend(0, 3, second_i).unwrap();
+    let combined = diagram.union(first_i, first_o).unwrap();
+    for (language, expected) in [(first_o, (1, 0.75 * 0.6)), (combined, (2, 0.6))] {
+        let reused = measure(
+            &prepared,
+            &source,
+            &mut diagram,
+            language,
+            &mut cache,
+            &control,
+        )
+        .unwrap();
+        let isolated = measure(
+            &prepared,
+            &source,
+            &mut diagram,
+            language,
+            &mut MeasurementCache::default(),
+            &control,
+        )
+        .unwrap();
+        assert_eq!(reused, isolated);
+        assert_eq!(reused.0, expected.0);
+        assert!((reused.1 - expected.1).abs() < 1e-15);
+    }
+    assert_eq!(cache.second.len(), 2, "one empty and one weighted suffix");
+    control.cancellation.handle().cancel();
+    assert_eq!(
+        measure(
+            &prepared,
+            &source,
+            &mut diagram,
+            first_i,
+            &mut cache,
+            &control
+        ),
+        Err(Error::Cancelled),
+        "a cached language cannot bypass request cancellation"
+    );
+}
+
 #[test]
 fn recovery_build_catalog_parallel_reversed_results_keep_all_solutions() {
     let mut q = query();

@@ -59,7 +59,7 @@ impl Sum {
 
 pub(super) struct Coordinator {
     prepared: Arc<PreparedPopulation>,
-    init: Vec<u8>,
+    init: Arc<[u8]>,
     source: Source,
     diagram: Diagram,
     producer: plan::Producer,
@@ -75,7 +75,7 @@ pub(super) struct Coordinator {
 impl Coordinator {
     pub fn new(
         prepared: Arc<PreparedPopulation>,
-        init: Vec<u8>,
+        init: Arc<[u8]>,
         workers: usize,
         control: &ExecutionControl,
     ) -> Result<Self, ParallelError> {
@@ -394,9 +394,20 @@ impl Coordinator {
         let recovery = self.diagram.difference(self.recovery, self.normal)?;
         let total = self.diagram.union(self.normal, recovery)?;
         let missing = self.diagram.difference(self.source.universe, total)?;
+        // Every language belongs to this same immutable source and append-only
+        // diagram. Reuse exact weighted suffix measures across all solutions;
+        // rebuilding them for every record repeats the final serial reduction.
+        let mut measurement = MeasurementCache::default();
         let mut measures = [(0_u128, 0.0); 3];
         for (out, id) in measures.iter_mut().zip([self.normal, recovery, missing]) {
-            *out = measure(&self.prepared, &self.source, &mut self.diagram, id, control)?;
+            *out = measure(
+                &self.prepared,
+                &self.source,
+                &mut self.diagram,
+                id,
+                &mut measurement,
+                control,
+            )?;
         }
         if measures.iter().map(|m| m.0).sum::<u128>() != self.prepared.possible {
             return Err(Error::PatternDomainUnavailable.into());
@@ -438,6 +449,7 @@ impl Coordinator {
                 &self.source,
                 &mut self.diagram,
                 covered,
+                &mut measurement,
                 control,
             )?;
             let example = record
@@ -457,6 +469,7 @@ impl Coordinator {
                 example,
             });
         }
+        drop(measurement);
         // A per-plan repair example can be normal under another tiling. Only
         // the global set difference is an additional recovery probability.
         if recovery != NONE && recovery_example.is_none() {
@@ -567,29 +580,47 @@ fn first_pair(
         second,
     ))
 }
+#[derive(Default)]
+struct MeasurementCache {
+    languages: HashMap<Id, (u128, f64)>,
+    second: HashMap<Id, (u128, f64)>,
+    first_queue: Vec<clearra_core_domain::piece::piece_kind::PieceKind>,
+    second_queue: Vec<clearra_core_domain::piece::piece_kind::PieceKind>,
+}
+
 fn measure(
     prepared: &PreparedPopulation,
     source: &Source,
     diagram: &mut Diagram,
     language: Id,
+    cache: &mut MeasurementCache,
     control: &ExecutionControl,
 ) -> Result<(u128, f64), Error> {
+    cancelled(control)?;
     if language == NONE {
         return Ok((0, 0.0));
     }
+    if let Some(value) = cache.languages.get(&language) {
+        return Ok(*value);
+    }
     if !prepared.stages.is_empty() {
-        cancelled(control)?;
         let valid = diagram.intersect(language, source.universe)?;
         let count = diagram.count(valid, 0, source.end)?;
-        return Ok((count, count as f64 / prepared.possible as f64));
+        let value = (count, count as f64 / prepared.possible as f64);
+        cache
+            .languages
+            .try_reserve(1)
+            .map_err(|_| Error::MemoryUnavailable)?;
+        cache.languages.insert(language, value);
+        return Ok(value);
     }
-    let mut cache = HashMap::<Id, (u128, f64)>::new();
     let mut count = 0_u128;
     let mut sum = Sum::default();
     for i in 0..prepared.first.pattern_count() {
         cancelled(control)?;
-        let rest = source.follow_first(diagram, language, &prepared.first.sequence_at(i));
-        let value = if let Some(value) = cache.get(&rest) {
+        prepared.first.write_sequence_at(i, &mut cache.first_queue);
+        let rest = source.follow_first(diagram, language, &cache.first_queue);
+        let value = if let Some(value) = cache.second.get(&rest) {
             *value
         } else {
             let value = if rest == NONE {
@@ -603,21 +634,33 @@ fn measure(
                 let mut weight = Sum::default();
                 for j in 0..prepared.second.pattern_count() {
                     cancelled(control)?;
-                    if source.accepts_second(diagram, rest, &prepared.second.sequence_at(j)) {
+                    prepared
+                        .second
+                        .write_sequence_at(j, &mut cache.second_queue);
+                    if source.accepts_second(diagram, rest, &cache.second_queue) {
                         n += 1;
                         weight.add(prepared.second.weight_at(j).get());
                     }
                 }
                 (n, weight.sum)
             };
-            cache.try_reserve(1).map_err(|_| Error::MemoryUnavailable)?;
-            cache.insert(rest, value);
+            cache
+                .second
+                .try_reserve(1)
+                .map_err(|_| Error::MemoryUnavailable)?;
+            cache.second.insert(rest, value);
             value
         };
         count = count.checked_add(value.0).ok_or(Error::CounterOverflow)?;
         sum.add(prepared.first.weight_at(i).get() * value.1);
     }
-    Ok((count, sum.sum.clamp(0.0, 1.0)))
+    let value = (count, sum.sum.clamp(0.0, 1.0));
+    cache
+        .languages
+        .try_reserve(1)
+        .map_err(|_| Error::MemoryUnavailable)?;
+    cache.languages.insert(language, value);
+    Ok(value)
 }
 struct Work {
     task: Task,
@@ -625,14 +668,14 @@ struct Work {
 }
 pub(super) struct Worker {
     prepared: Arc<PreparedPopulation>,
-    init: Vec<u8>,
+    init: Arc<[u8]>,
     blueprint: Option<(Source, Diagram)>,
     geometry: Option<Geometry>,
     pending: Option<Work>,
     progress: Progress,
 }
 impl Worker {
-    pub fn new(prepared: Arc<PreparedPopulation>, init: Vec<u8>) -> Result<Self, Error> {
+    pub fn new(prepared: Arc<PreparedPopulation>, init: Arc<[u8]>) -> Result<Self, Error> {
         Ok(Self {
             prepared,
             init,

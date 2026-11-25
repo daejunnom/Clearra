@@ -7,30 +7,17 @@ use super::{
     RecoveryBuildQuery, RecoveryBuildStatus,
 };
 use clearra_core_domain::execution_cancellation::ExecutionControl;
-use std::{collections::BTreeMap, ops::Deref, sync::Arc};
+use std::{collections::BTreeMap, sync::Arc};
 pub(super) mod wire;
 const MAX_BATCH: usize = 32;
 
-// Catalog and its enclosing coordinator/worker need the same immutable input.
-// Keep non-catalog requests inline; share only within this one owner instance.
-#[allow(
-    clippy::large_enum_variant,
-    reason = "one owner per coordinator or worker; boxing Direct adds an allocation to every non-catalog request"
-)]
-enum PreparedOwner {
-    Direct(PreparedPopulation),
-    Catalog(Arc<PreparedPopulation>),
-}
-
-impl Deref for PreparedOwner {
-    type Target = PreparedPopulation;
-
-    fn deref(&self) -> &Self::Target {
-        match self {
-            Self::Direct(prepared) => prepared,
-            Self::Catalog(prepared) => prepared,
-        }
-    }
+/// Validated, immutable request input shared by workers in one native process.
+/// Mutable diagrams, geometry caches and in-flight batches remain worker-owned.
+/// The byte initializer remains the authority at a process/WASM boundary.
+#[derive(Clone)]
+pub struct RecoveryBuildParallelWorkerInitialization {
+    source: Arc<PreparedPopulation>,
+    initialization: Arc<[u8]>,
 }
 
 #[cfg(test)]
@@ -38,30 +25,30 @@ mod prepared_owner_tests {
     use super::*;
 
     #[test]
-    fn catalog_shares_one_prepared_population_per_owner() {
-        let mut query = super::super::parallel_tests::query();
-        query.all_solutions = true;
-        let coordinator = RecoveryBuildParallelCoordinator::new(query, 2).unwrap();
-        let PreparedOwner::Catalog(prepared) = &coordinator.source else {
-            panic!("catalog coordinator must share its prepared population");
-        };
-        assert!(coordinator.catalog.is_some());
-        assert_eq!(Arc::strong_count(prepared), 2);
-
-        let worker =
-            RecoveryBuildParallelWorker::new(&coordinator.worker_initialization()).unwrap();
-        let PreparedOwner::Catalog(prepared) = &worker.source else {
-            panic!("catalog worker must share its prepared population");
-        };
-        assert!(worker.catalog.is_some());
-        assert_eq!(Arc::strong_count(prepared), 2);
-
-        let ordinary =
-            RecoveryBuildParallelCoordinator::new(super::super::parallel_tests::query(), 2)
-                .unwrap();
-        assert!(matches!(&ordinary.source, PreparedOwner::Direct(_)));
-        let worker = RecoveryBuildParallelWorker::new(&ordinary.worker_initialization()).unwrap();
-        assert!(matches!(&worker.source, PreparedOwner::Direct(_)));
+    fn native_workers_share_prepared_population_and_wire_identity() {
+        for all_solutions in [false, true] {
+            let mut query = super::super::parallel_tests::query();
+            query.all_solutions = all_solutions;
+            let coordinator = RecoveryBuildParallelCoordinator::new(query, 2).unwrap();
+            let initialization = coordinator.shared_worker_initialization();
+            for _ in 0..2 {
+                let worker =
+                    RecoveryBuildParallelWorker::from_shared(initialization.clone()).unwrap();
+                assert!(Arc::ptr_eq(&coordinator.source, &worker.source));
+                assert!(Arc::ptr_eq(
+                    &coordinator.initialization,
+                    &worker.initialization
+                ));
+                assert_eq!(worker.catalog.is_some(), all_solutions);
+                assert_eq!(worker.progress().possible, coordinator.progress().possible);
+            }
+            // A transport boundary still validates its own input and cannot
+            // silently borrow another request's prepared population.
+            let remote =
+                RecoveryBuildParallelWorker::new(&coordinator.worker_initialization()).unwrap();
+            assert!(!Arc::ptr_eq(&coordinator.source, &remote.source));
+            assert_eq!(coordinator.initialization, remote.initialization);
+        }
     }
 
     #[test]
@@ -80,7 +67,7 @@ mod prepared_owner_tests {
         let prepared = Arc::new(PreparedPopulation::new(query).unwrap());
         let initialization = wire::encode_initialization(&prepared.query);
         assert!(matches!(
-            super::super::catalog::Coordinator::new(prepared, initialization, 2, &control),
+            super::super::catalog::Coordinator::new(prepared, initialization.into(), 2, &control),
             Err(RecoveryBuildParallelError::Search(
                 RecoveryBuildError::Cancelled
             ))
@@ -135,8 +122,8 @@ struct ResultBatch {
 
 pub struct RecoveryBuildParallelCoordinator {
     pub(super) catalog: Option<super::catalog::Coordinator>,
-    source: PreparedOwner,
-    initialization: Vec<u8>,
+    source: Arc<PreparedPopulation>,
+    initialization: Arc<[u8]>,
     accumulator: PopulationAccumulator,
     issued: BTreeMap<u128, Task>,
     completed: BTreeMap<u128, ResultBatch>,
@@ -171,11 +158,11 @@ impl RecoveryBuildParallelCoordinator {
         if control.is_cancelled() {
             return Err(RecoveryBuildError::Cancelled.into());
         }
-        let source = PreparedPopulation::new(query)?;
+        let source = Arc::new(PreparedPopulation::new(query)?);
         if control.is_cancelled() {
             return Err(RecoveryBuildError::Cancelled.into());
         }
-        let initialization = wire::encode_initialization(&source.query);
+        let initialization: Arc<[u8]> = wire::encode_initialization(&source.query).into();
         // Fixed partitioning makes all worker counts use identical arithmetic
         // and search quotients. Parallelism does not change a probability space.
         let batch_size = if source.query.allow_piece_exchange || source.first.pattern_count() <= 64
@@ -185,17 +172,15 @@ impl RecoveryBuildParallelCoordinator {
             MAX_BATCH
         };
         let accumulator = PopulationAccumulator::new(source.possible);
-        let (source, catalog) = if source.query.all_solutions {
-            let source = Arc::new(source);
-            let catalog = super::catalog::Coordinator::new(
+        let catalog = if source.query.all_solutions {
+            Some(super::catalog::Coordinator::new(
                 Arc::clone(&source),
-                initialization.clone(),
+                Arc::clone(&initialization),
                 workers,
                 control,
-            )?;
-            (PreparedOwner::Catalog(source), Some(catalog))
+            )?)
         } else {
-            (PreparedOwner::Direct(source), None)
+            None
         };
         Ok(Self {
             catalog,
@@ -226,7 +211,13 @@ impl RecoveryBuildParallelCoordinator {
                 || self.issued.len() >= self.capacity)
     }
     pub fn worker_initialization(&self) -> Vec<u8> {
-        self.initialization.clone()
+        self.initialization.to_vec()
+    }
+    pub fn shared_worker_initialization(&self) -> RecoveryBuildParallelWorkerInitialization {
+        RecoveryBuildParallelWorkerInitialization {
+            source: Arc::clone(&self.source),
+            initialization: Arc::clone(&self.initialization),
+        }
     }
     pub fn progress(&self) -> RecoveryBuildParallelProgress {
         if let Some(catalog) = &self.catalog {
@@ -448,8 +439,8 @@ struct PendingBatch {
 }
 pub struct RecoveryBuildParallelWorker {
     catalog: Option<super::catalog::Worker>,
-    source: PreparedOwner,
-    initialization: Vec<u8>,
+    source: Arc<PreparedPopulation>,
+    initialization: Arc<[u8]>,
     geometry: Option<Geometry>,
     pending: Option<PendingBatch>,
     progress: RecoveryBuildParallelProgress,
@@ -459,19 +450,33 @@ impl RecoveryBuildParallelWorker {
         bytes.starts_with(wire::INIT)
     }
     pub fn new(bytes: &[u8]) -> Result<Self, RecoveryBuildParallelError> {
-        let source = PreparedPopulation::new(wire::decode_initialization(bytes)?)?;
+        Self::from_shared(RecoveryBuildParallelWorkerInitialization {
+            source: Arc::new(PreparedPopulation::new(wire::decode_initialization(
+                bytes,
+            )?)?),
+            initialization: bytes.into(),
+        })
+    }
+    pub fn from_shared(
+        input: RecoveryBuildParallelWorkerInitialization,
+    ) -> Result<Self, RecoveryBuildParallelError> {
+        let RecoveryBuildParallelWorkerInitialization {
+            source,
+            initialization,
+        } = input;
         let possible = source.possible;
-        let (source, catalog) = if source.query.all_solutions {
-            let source = Arc::new(source);
-            let catalog = super::catalog::Worker::new(Arc::clone(&source), bytes.to_vec())?;
-            (PreparedOwner::Catalog(source), Some(catalog))
+        let catalog = if source.query.all_solutions {
+            Some(super::catalog::Worker::new(
+                Arc::clone(&source),
+                Arc::clone(&initialization),
+            )?)
         } else {
-            (PreparedOwner::Direct(source), None)
+            None
         };
         Ok(Self {
             catalog,
             source,
-            initialization: bytes.to_vec(),
+            initialization,
             geometry: None,
             pending: None,
             progress: RecoveryBuildParallelProgress {
@@ -587,7 +592,7 @@ pub(super) fn search_serial(
     if control.is_cancelled() {
         return Err(RecoveryBuildError::Cancelled.into());
     }
-    let mut w = RecoveryBuildParallelWorker::new(&c.worker_initialization())?;
+    let mut w = RecoveryBuildParallelWorker::from_shared(c.shared_worker_initialization())?;
     loop {
         let (status, bytes) = c.produce(MAX_BATCH, control)?;
         match status {

@@ -52,6 +52,6 @@ pub use recovery_build::{
     RecoveryBuildError, RecoveryBuildExample, RecoveryBuildFields, RecoveryBuildFixedQuery,
     RecoveryBuildFixedReport, RecoveryBuildParallelCoordinator, RecoveryBuildParallelError,
     RecoveryBuildParallelProduce, RecoveryBuildParallelProgress, RecoveryBuildParallelWorker,
-    RecoveryBuildPopulation, RecoveryBuildQuery, RecoveryBuildSolution, RecoveryBuildStatus,
-    RecoveryBuildStep, RecoveryChainStage,
+    RecoveryBuildParallelWorkerInitialization, RecoveryBuildPopulation, RecoveryBuildQuery,
+    RecoveryBuildSolution, RecoveryBuildStatus, RecoveryBuildStep, RecoveryChainStage,
 };

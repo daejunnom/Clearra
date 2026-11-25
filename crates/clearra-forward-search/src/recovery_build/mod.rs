@@ -10,6 +10,7 @@ mod staged;
 pub use parallel::{
     RecoveryBuildParallelCoordinator, RecoveryBuildParallelError, RecoveryBuildParallelProduce,
     RecoveryBuildParallelProgress, RecoveryBuildParallelWorker,
+    RecoveryBuildParallelWorkerInitialization,
 };
 #[cfg(test)]
 mod parallel_tests;
