@@ -6,7 +6,7 @@ use clearra_core_domain::{
     board::standard_pc_board::Board256Mask,
     piece::piece_kind::PieceKind,
     solution::normalized_tiling_solution::{
-        NormalizedTilingSolutionKey, StandardBoard64ColoredTilingIdentity,
+        StandardBoard64ColoredTilingIdentity, StandardBoard64TilingIdentity,
     },
     solution::ExtendedTilingSolutionKey,
 };
@@ -242,9 +242,7 @@ fn fumen_page_error(error: ColoredSolutionFumenError) -> SolutionDocumentError {
 fn canonical_colored_identity(
     entry: &SolutionArtifactEntry,
 ) -> Result<StandardBoard64ColoredTilingIdentity, SolutionDocumentError> {
-    if let Ok(identity) = NormalizedTilingSolutionKey::parse_canonical(entry.key())
-        .and_then(|key| key.standard_board64_identity())
-    {
+    if let Ok(identity) = StandardBoard64TilingIdentity::parse_canonical(entry.key()) {
         return Ok(StandardBoard64ColoredTilingIdentity::from_standard_board64_identity(identity));
     }
     parse_colored_field_key(entry.key())
@@ -401,8 +399,8 @@ impl<E> From<SolutionDocumentError> for SolutionDocumentStreamError<E> {
 #[cfg(test)]
 mod tests {
     use clearra_core_domain::solution::normalized_tiling_solution::{
-        NormalizedTilingSolutionSetHasher, NORMALIZED_TILING_SOLUTION_KEY_ALGORITHM,
-        NORMALIZED_TILING_SOLUTION_SET_HASH_ALGORITHM,
+        NormalizedTilingSolutionKey, NormalizedTilingSolutionSetHasher, PiecePlacementMask,
+        NORMALIZED_TILING_SOLUTION_KEY_ALGORITHM, NORMALIZED_TILING_SOLUTION_SET_HASH_ALGORITHM,
     };
     use clearra_fumen::{ActualFumenRenderColor, ActualFumenRenderDocument, SourceFumenDiagramSet};
 
@@ -631,6 +629,76 @@ mod tests {
     }
 
     #[test]
+    fn board64_ctk3_stream_matches_exact_pages_across_segment_boundary() {
+        let count = CTK3_MAX_SEGMENT_PAGES + 1;
+        let mut entries = Vec::with_capacity(count);
+        let mut expected_pages = Vec::with_capacity(count);
+        for index in 0..count {
+            let initial = (index as u64) << 4;
+            let key = NormalizedTilingSolutionKey::from_placements(
+                initial,
+                [PiecePlacementMask::new(PieceKind::I, 0xf)],
+            )
+            .expect("disjoint initial field and I placement");
+            let annotated = index % 2 == 0;
+            let annotation = if annotated {
+                SolutionArtifactAnnotation::new()
+                    .with_pc_probability("0.5")
+                    .unwrap()
+            } else {
+                SolutionArtifactAnnotation::new()
+            };
+            entries.push(SolutionArtifactEntry::try_new(key.into_string(), annotation).unwrap());
+
+            // Build the expected field directly from the fixture, independently
+            // of canonical-key parsing and the solution-document page projector.
+            let height = (u64::BITS - (initial | 0xf).leading_zeros()) as usize;
+            let height = height.div_ceil(STANDARD_WIDTH);
+            let cells = (0..height * STANDARD_WIDTH)
+                .map(|bit| {
+                    if bit < 4 {
+                        Ctk3Color::Piece(Ctk3Piece::I)
+                    } else if initial & (1_u64 << bit) != 0 {
+                        Ctk3Color::Gray
+                    } else {
+                        Ctk3Color::Empty
+                    }
+                })
+                .collect();
+            let mut page = Ctk3Page::new(height, cells);
+            if annotated {
+                page = page.with_comment(concat!(
+                    "clearra.solution-annotation.v1\n",
+                    "authority=annotation-only\n",
+                    "pc_probability=0.5"
+                ));
+            }
+            expected_pages.push(page);
+        }
+        let artifact = SolutionSetArtifact::try_new(
+            "test-native-document-set",
+            "test-native-key-v1",
+            "test-native-hash-v1",
+            "test-page-order",
+            count,
+            entries,
+        )
+        .unwrap();
+        let expected_segments = expected_pages
+            .chunks(CTK3_MAX_SEGMENT_PAGES)
+            .map(|pages| {
+                encode_ctk3_compact(&Ctk3Document::new(STANDARD_WIDTH, pages.to_vec())).unwrap()
+            })
+            .collect::<Vec<_>>();
+        let expected = clearra_ctk3::encode_ctk3_bundle(&expected_segments).unwrap();
+        let actual = encode_ctk3_solution_set(&artifact).unwrap();
+        assert_eq!(actual.as_bytes(), expected.as_bytes());
+        let decoded = clearra_ctk3::decode_ctk3_exact(&actual).unwrap();
+        assert_eq!(decoded.width, STANDARD_WIDTH);
+        assert_eq!(decoded.pages, expected_pages);
+    }
+
+    #[test]
     fn native_fumen_roundtrips_the_exact_colored_field() {
         let encoded = encode_fumen_solution_set(&artifact()).expect("fumen");
         let decoded = SourceFumenDiagramSet::decode(&encoded).expect("decoded fumen");
@@ -697,6 +765,30 @@ mod tests {
             );
             assert_eq!(
                 encode_fumen_solution_set(&artifact),
+                Err(SolutionDocumentError::InvalidCanonicalKey),
+                "{key}"
+            );
+        }
+    }
+
+    #[test]
+    fn noncanonical_board64_keys_fail_closed_in_documents() {
+        for key in [
+            "ctk1|initial=000000000000000A|placements=",
+            "ctk1|initial=0000000000000000|placements=I:000000000000000F",
+            "ctk1|initial=0000000000000000|placements=O:00000000000000f0,I:000000000000000f",
+            "ctk1|initial=0000000000000001|placements=I:000000000000000f",
+            "ctk1|initial=0000000000000000|placements=I:0000000000000007",
+        ] {
+            let entry = SolutionArtifactEntry::try_new(key, SolutionArtifactAnnotation::new())
+                .expect("envelope accepts opaque key");
+            assert_eq!(
+                ctk3_page(&entry),
+                Err(SolutionDocumentError::InvalidCanonicalKey),
+                "{key}"
+            );
+            assert_eq!(
+                fumen_page(&entry),
                 Err(SolutionDocumentError::InvalidCanonicalKey),
                 "{key}"
             );

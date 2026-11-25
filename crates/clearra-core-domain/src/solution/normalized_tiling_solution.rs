@@ -124,12 +124,7 @@ impl NormalizedTilingSolutionKey {
             super::ExtendedTilingSolutionKey::parse_canonical(value)?;
             return Ok(Self(value.to_owned()));
         }
-        let identity = parse_standard_board64_identity(value)?;
-        let key = Self::from_standard_board64_identity(identity);
-        if key.as_str() != value {
-            return Err(NormalizedTilingSolutionError::InvalidCanonicalKey);
-        }
-        Ok(key)
+        parse_canonical_standard_board64_identity(value).map(|(_, canonical)| Self(canonical))
     }
 
     /// Recovers the allocation-free semantic identity carried by this
@@ -148,6 +143,17 @@ impl NormalizedTilingSolutionKey {
     ) -> Result<super::ExtendedTilingSolutionKey<'_>, NormalizedTilingSolutionError> {
         super::ExtendedTilingSolutionKey::parse_canonical(self.as_str())
     }
+}
+
+fn parse_canonical_standard_board64_identity(
+    value: &str,
+) -> Result<(StandardBoard64TilingIdentity, String), NormalizedTilingSolutionError> {
+    let identity = parse_standard_board64_identity(value)?;
+    let canonical = identity.canonical_string();
+    if canonical != value {
+        return Err(NormalizedTilingSolutionError::InvalidCanonicalKey);
+    }
+    Ok((identity, canonical))
 }
 
 fn parse_standard_board64_identity(
@@ -205,6 +211,14 @@ pub struct StandardBoard64TilingIdentity {
 }
 
 impl StandardBoard64TilingIdentity {
+    /// Validates a canonical Board64 key and returns the identity from that
+    /// same parse. Callers that need its geometry do not have to construct a
+    /// string key and then parse it again. CTK2 and noncanonical spellings are
+    /// rejected instead of being normalized or narrowed to Board64.
+    pub fn parse_canonical(value: &str) -> Result<Self, NormalizedTilingSolutionError> {
+        parse_canonical_standard_board64_identity(value).map(|(identity, _)| identity)
+    }
+
     pub fn from_placements(
         initial_board_mask: u64,
         placements: impl IntoIterator<Item = PiecePlacementMask>,
@@ -678,7 +692,43 @@ mod incremental_hasher_tests {
                     .expect("canonical key round trip"),
                 identity,
             );
+            assert_eq!(
+                StandardBoard64TilingIdentity::parse_canonical(&encoded)
+                    .expect("direct canonical identity round trip"),
+                identity,
+            );
         }
+    }
+
+    #[test]
+    fn direct_board64_parse_rejects_noncanonical_and_invalid_geometry() {
+        for value in [
+            "ctk1|initial=000000000000000A|placements=",
+            "ctk1|initial=+000000000000000|placements=",
+            "ctk1|initial=000000000000000|placements=",
+            "ctk1|initial=0000000000000000|placements=I:000000000000000F",
+            "ctk1|initial=0000000000000000|placements=i:000000000000000f",
+            "ctk1|initial=0000000000000000|placements=O:00000000000000f0,I:000000000000000f",
+            "ctk1|initial=0000000000000000|placements=I:00000000000000f0,I:000000000000000f",
+            "ctk1|initial=0000000000000001|placements=I:000000000000000f",
+            "ctk1|initial=0000000000000000|placements=I:000000000000000f,O:000000000000000f",
+            "ctk1|initial=0000000000000000|placements=I:0000000000000000",
+            "ctk1|initial=0000000000000000|placements=I:0000000000000007",
+            "ctk1|initial=0000000000000000|placements=I:000000000000000f,",
+        ] {
+            assert!(
+                NormalizedTilingSolutionKey::parse_canonical(value).is_err(),
+                "string key accepted {value}"
+            );
+            assert!(
+                StandardBoard64TilingIdentity::parse_canonical(value).is_err(),
+                "direct identity accepted {value}"
+            );
+        }
+
+        let extended = "ctk2|height=24|initial=0000800000000000000000000000000000000000000000000000000000000000|placements=";
+        assert!(NormalizedTilingSolutionKey::parse_canonical(extended).is_ok());
+        assert!(StandardBoard64TilingIdentity::parse_canonical(extended).is_err());
     }
 
     #[test]
