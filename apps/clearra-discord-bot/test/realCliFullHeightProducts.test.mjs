@@ -7,11 +7,12 @@ import { createHash } from 'node:crypto';
 import { readFile, realpath } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
-import { decodeCtk3 } from 'ctk3';
+import { decodeCtk3, decodeCtk3Exact } from 'ctk3';
 import { readCurrentProductRelease } from '../../../scripts/release/current-product-release.mjs';
 import { assertDiscordCanonicalOnlyResult, prepareClearraArguments } from '../src/clearra/command.mjs';
 import { buildCtk3Result } from '../src/clearra/ctk3-result.mjs';
 import { ClearraDirectExecutor } from '../src/clearra/direct-executor.mjs';
+import { validateSolutionTransportArtifact } from '../src/clearra/solution-artifact.mjs';
 import { renderDocumentGif } from '../src/viewer/gif.mjs';
 import { buildCanonicalPcPathReplayDocument, PC_PATH_REPLAY_FRAME_DELAY_MS }
   from '../src/viewer/pc-path-replay.mjs';
@@ -145,6 +146,41 @@ function verifyProduct(raw, projected, input) {
   }
 }
 
+function assertProductTransport(actual, projected, input, message) {
+  const payload = JSON.parse(actual.stdout);
+  if (input.product !== '') {
+    assert.equal(actual.artifact, undefined);
+    assert.deepEqual(payload, projected, message);
+    return;
+  }
+
+  // Ordinary PC now transports its complete solution set through the native
+  // file. Prove every decoded page agrees with the direct CLI's complete keys
+  // before comparing the otherwise unchanged search/result contract.
+  assert.deepEqual(projected.contract.solution_data,
+    { requested: true, status: 'complete', reason: null });
+  assert.deepEqual(Object.keys(projected.contract.artifacts).sort(),
+    ['schema_version', 'solution_keys']);
+  assert.equal(projected.summary.solution_keys_complete, true);
+  const expected = buildCtk3Result(projected);
+  assert.ok(expected);
+  assert.equal(expected.complete, true);
+  assert.deepEqual(expected.warnings, []);
+  const artifact = validateSolutionTransportArtifact(actual.artifact, 1024 * 1024);
+  assert.equal(artifact.solutionCount, projected.contract.artifacts.solution_keys.length);
+  assert.equal(artifact.solutionCount, Number(projected.summary.normalized_unique_solution_count));
+  assert.equal(artifact.solutionCount, expected.pageCount);
+  assert.deepEqual(decodeCtk3Exact(artifact.source), decodeCtk3Exact(expected.source),
+    `${message}: native artifact must retain every complete solution page`);
+  assert.equal(Object.hasOwn(payload, 'solution_artifact'), false);
+  assert.equal(Object.hasOwn(payload.contract, 'artifacts'), false);
+  assert.deepEqual(payload.contract.solution_data,
+    { requested: false, status: 'not-requested', reason: null });
+  const { artifacts, solution_data, ...contract } = projected.contract;
+  assert.deepEqual(payload, { ...projected,
+    contract: { ...contract, solution_data: payload.contract.solution_data } }, message);
+}
+
 test('real full-height CLI families survive Discord runner and render all physical rows', {
   skip: !executable && !sourceCommit && packagedVersion === undefined, timeout: 1_200_000,
 }, async t => {
@@ -174,7 +210,7 @@ test('real full-height CLI families survive Discord runner and render all physic
       assert.equal(actual.exitCode, 0, actual.stderr);
       assert.equal(actual.signal, null);
       assert.equal(actual.terminationReason, 'exit');
-      assert.deepEqual(JSON.parse(actual.stdout), projected,
+      assertProductTransport(actual, projected, input,
         `${profile}/${input.name}/${input.product}/b2b=${input.preserveB2b}: actual CLI/Discord product drift`);
       assert.equal(assertDiscordCanonicalOnlyResult(actual).stdout, actual.stdout);
       completed.push([profile, input.name, input.product, input.kind, input.preserveB2b]);
