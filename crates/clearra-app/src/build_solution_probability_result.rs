@@ -75,6 +75,7 @@ pub(crate) enum BuildSolutionProbabilityResultError {
     InvalidCountField(&'static str),
     UnexpectedWorkerPartialField(&'static str),
     WorkerPartialAlreadyMaterialized,
+    FilteredWorkerConstraintMismatch(&'static str),
     WorkerPartialReportsPresent,
     RequestPolicyMismatch,
     OmittedContractMismatch,
@@ -135,7 +136,11 @@ impl fmt::Display for BuildSolutionProbabilityResultError {
                 "final-only field `{field}` is present in a raw Build worker partial"
             ),
             Self::WorkerPartialAlreadyMaterialized => formatter.write_str(
-                "raw Build worker partial claims that execution constraints are already materialized",
+                "Build worker partial claims materialized constraints without filtered build-order evidence",
+            ),
+            Self::FilteredWorkerConstraintMismatch(field) => write!(
+                formatter,
+                "filtered Build worker constraint field `{field}` disagrees with its result authority"
             ),
             Self::WorkerPartialReportsPresent => formatter.write_str(
                 "raw Build worker partial unexpectedly contains final probability reports",
@@ -1232,7 +1237,11 @@ pub(crate) fn validate_build_solution_probability_worker_partial(
     if !result.solution_probabilities().is_empty() {
         return Err(BuildSolutionProbabilityResultError::WorkerPartialReportsPresent);
     }
-    if required_bool(result, "execution_constraint_materialized")? {
+    let constraint_materialized = required_bool(result, "execution_constraint_materialized")?;
+    if constraint_materialized
+        && result.unique_field("b2b_preservation_evaluation_basis")
+            != Some("filtered-build-order-language")
+    {
         return Err(BuildSolutionProbabilityResultError::WorkerPartialAlreadyMaterialized);
     }
 
@@ -1251,12 +1260,26 @@ pub(crate) fn validate_build_solution_probability_worker_partial(
     if worker_solution_count != keys.len() {
         return Err(BuildSolutionProbabilityResultError::SolutionKeyCountMismatch);
     }
+    if constraint_materialized {
+        validate_filtered_build_worker_constraint(
+            result,
+            pattern_count,
+            worker_solution_count,
+            count_complete,
+            probability_complete,
+        )?;
+    }
     let coverage = result.normalized_solution_coverages();
-    if coverage.len() != keys.len()
-        || keys
-            .iter()
-            .zip(coverage)
-            .any(|(key, row)| key != row.solution_key())
+    // A producer that filters the physical build-order language before supply
+    // coverage needs only the global union when per-solution probabilities were
+    // omitted. Late filtering still requires every private per-solution row.
+    let omitted_filtered_rows = constraint_materialized && !requested && coverage.is_empty();
+    if !omitted_filtered_rows
+        && (coverage.len() != keys.len()
+            || keys
+                .iter()
+                .zip(coverage)
+                .any(|(key, row)| key != row.solution_key()))
     {
         return Err(BuildSolutionProbabilityResultError::CoverageKeysMismatch);
     }
@@ -1283,6 +1306,90 @@ pub(crate) fn validate_build_solution_probability_worker_partial(
         solution_keys_complete: false,
         resource_truncated,
     })
+}
+
+fn validate_filtered_build_worker_constraint(
+    result: &CoreExecutionResult,
+    pattern_count: usize,
+    solution_count: usize,
+    count_complete: bool,
+    probability_complete: bool,
+) -> Result<(), BuildSolutionProbabilityResultError> {
+    use BuildSolutionProbabilityResultError::FilteredWorkerConstraintMismatch as Mismatch;
+
+    for (name, expected) in [
+        ("search_kind", BUILD_PROBABILITY_SEARCH_KIND),
+        ("build_probability_aggregation", "buildability"),
+        ("b2b_preservation_selection", "existential"),
+        (
+            "b2b_preservation_denominator_semantics",
+            "original-materialized-queue",
+        ),
+    ] {
+        if required_field(result, name)? != expected {
+            return Err(Mismatch(name));
+        }
+    }
+    if !required_bool(result, "execution_constraint_preserve_b2b")? {
+        return Err(Mismatch("execution_constraint_preserve_b2b"));
+    }
+    if clearra_objectives::policy::score_objective_policy::SpinProfileSelection::parse(
+        required_field(result, "execution_constraint_spin_profile")?,
+    )
+    .is_none()
+    {
+        return Err(Mismatch("execution_constraint_spin_profile"));
+    }
+    if required_bool(result, "b2b_preservation_path_multiplicity_counted")? {
+        return Err(Mismatch("b2b_preservation_path_multiplicity_counted"));
+    }
+    for (name, expected) in [
+        ("b2b_preserving_solution_count", solution_count),
+        ("b2b_preservation_pattern_universe_count", pattern_count),
+    ] {
+        if required_usize(result, name)? != expected {
+            return Err(Mismatch(name));
+        }
+    }
+    let covered_count = required_usize(result, "covered_pattern_count")?;
+    if covered_count > pattern_count
+        || required_usize(result, "b2b_preserving_pattern_count")? != covered_count
+    {
+        return Err(Mismatch("b2b_preserving_pattern_count"));
+    }
+    let words = result.coverage_pattern_words();
+    let tail_bits = pattern_count % u64::BITS as usize;
+    if words.len() != pattern_count.div_ceil(u64::BITS as usize)
+        || (tail_bits != 0
+            && words
+                .last()
+                .is_some_and(|word| *word & !((1_u64 << tail_bits) - 1) != 0))
+        || words
+            .iter()
+            .map(|word| word.count_ones() as usize)
+            .sum::<usize>()
+            != covered_count
+    {
+        return Err(BuildSolutionProbabilityResultError::CoverageUnionMismatch);
+    }
+    let probability = required_field(result, "coverage_probability")?;
+    parse_canonical_probability(probability)
+        .map_err(|_| BuildSolutionProbabilityResultError::ReportProbabilityInvalid)?;
+    if required_field(result, "b2b_preservation_probability")? != probability {
+        return Err(Mismatch("b2b_preservation_probability"));
+    }
+    for (name, expected) in [
+        ("b2b_preservation_count_complete", count_complete),
+        (
+            "b2b_preservation_probability_complete",
+            probability_complete,
+        ),
+    ] {
+        if required_bool(result, name)? != expected {
+            return Err(Mismatch(name));
+        }
+    }
+    Ok(())
 }
 
 fn validate_normalized_coverage_union(
@@ -1974,6 +2081,131 @@ mod tests {
             true,
             vec!["0.5".to_owned(), "0.5".to_owned()],
         )
+    }
+
+    fn filtered_worker_partial(requested: bool) -> CoreExecutionResult {
+        let result = requested_worker_partial().with_replaced_fields(vec![
+            field(REQUESTED_FIELD, requested),
+            field("execution_constraint_materialized", true),
+            field("execution_constraint_preserve_b2b", true),
+            field("execution_constraint_spin_profile", "all-spin-plus"),
+            field("search_kind", "build-probability"),
+            field("build_probability_aggregation", "buildability"),
+            field(
+                "b2b_preservation_evaluation_basis",
+                "filtered-build-order-language",
+            ),
+            field("b2b_preservation_selection", "existential"),
+            field(
+                "b2b_preservation_denominator_semantics",
+                "original-materialized-queue",
+            ),
+            field("b2b_preservation_path_multiplicity_counted", false),
+            field("b2b_preserving_solution_count", 1),
+            field("b2b_preservation_pattern_universe_count", 2),
+            field("b2b_preserving_pattern_count", 1),
+            field("covered_pattern_count", 1),
+            field("coverage_probability", "0.5"),
+            field("b2b_preservation_probability", "0.5"),
+            field("b2b_preservation_count_complete", true),
+            field("b2b_preservation_probability_complete", true),
+        ]);
+        if requested {
+            result
+        } else {
+            result
+                .with_normalized_solution_coverages(Vec::new())
+                .with_postprocess_execution_batch(Vec::new(), true, Vec::new())
+        }
+    }
+
+    #[test]
+    fn filtered_build_worker_omits_unrequested_rows_without_losing_constraint_authority() {
+        for policy in [
+            BuildSolutionProbabilityPolicy::Omit,
+            BuildSolutionProbabilityPolicy::Include,
+        ] {
+            let result = filtered_worker_partial(policy.requested());
+            assert!(validate_build_solution_probability_worker_partial(policy, &result).is_ok());
+            assert_eq!(
+                result.normalized_solution_coverages().len(),
+                usize::from(policy.requested())
+            );
+        }
+        let unproven = requested_worker_partial()
+            .with_replaced_fields(vec![field("execution_constraint_materialized", true)]);
+        assert_eq!(
+            validate_build_solution_probability_worker_partial(
+                BuildSolutionProbabilityPolicy::Include,
+                &unproven
+            ),
+            Err(BuildSolutionProbabilityResultError::WorkerPartialAlreadyMaterialized),
+        );
+    }
+
+    #[test]
+    fn filtered_build_worker_rejects_conflicting_constraint_and_global_coverage_evidence() {
+        let valid = filtered_worker_partial(false);
+        for (name, value) in [
+            ("search_kind", "pc"),
+            ("build_probability_aggregation", "tiling"),
+            ("execution_constraint_preserve_b2b", "false"),
+            ("execution_constraint_spin_profile", "unknown"),
+            (
+                "b2b_preservation_evaluation_basis",
+                "candidate-pattern-existence",
+            ),
+            ("b2b_preservation_selection", "universal"),
+            ("b2b_preservation_denominator_semantics", "covered-only"),
+            ("b2b_preservation_path_multiplicity_counted", "true"),
+            ("b2b_preserving_solution_count", "2"),
+            ("b2b_preservation_pattern_universe_count", "3"),
+            ("b2b_preserving_pattern_count", "2"),
+            ("covered_pattern_count", "2"),
+            ("b2b_preservation_probability", "1"),
+            ("b2b_preservation_count_complete", "false"),
+            ("b2b_preservation_probability_complete", "false"),
+        ] {
+            let conflicting = valid.clone().with_replaced_fields(vec![field(name, value)]);
+            assert!(
+                validate_build_solution_probability_worker_partial(
+                    BuildSolutionProbabilityPolicy::Omit,
+                    &conflicting
+                )
+                .is_err(),
+                "accepted conflicting filtered worker field {name}",
+            );
+            let duplicate = valid
+                .clone()
+                .with_additional_fields(vec![field(name, value)]);
+            assert!(
+                validate_build_solution_probability_worker_partial(
+                    BuildSolutionProbabilityPolicy::Omit,
+                    &duplicate
+                )
+                .is_err(),
+                "accepted duplicate filtered worker field {name}",
+            );
+        }
+        for words in [Vec::new(), vec![0], vec![0b101], vec![1, 0]] {
+            let conflicting = valid.clone().with_coverage_pattern_words(words);
+            assert_eq!(
+                validate_build_solution_probability_worker_partial(
+                    BuildSolutionProbabilityPolicy::Omit,
+                    &conflicting
+                ),
+                Err(BuildSolutionProbabilityResultError::CoverageUnionMismatch),
+            );
+        }
+        let included_without_rows =
+            filtered_worker_partial(true).with_normalized_solution_coverages(Vec::new());
+        assert_eq!(
+            validate_build_solution_probability_worker_partial(
+                BuildSolutionProbabilityPolicy::Include,
+                &included_without_rows
+            ),
+            Err(BuildSolutionProbabilityResultError::CoverageKeysMismatch),
+        );
     }
 
     #[test]

@@ -89,6 +89,14 @@ impl ExecutionAdmissionPlan {
         )
     }
 
+    /// Compact standard-bag membership can omit the position indexes while
+    /// retaining requested per-solution bitsets and the same worker identity.
+    /// Its backend must use the same predicate when allocating those indexes.
+    pub(crate) fn without_pattern_position_indexes(mut self) -> Self {
+        self.per_pattern_bytes = 0;
+        self
+    }
+
     /// The admitted Boolean standard-bag path retains the original-ID bitmap
     /// but owns no per-pattern position index or explicit sequence array.
     /// Selection of that exact execution mode belongs to the Build backend.
@@ -959,6 +967,11 @@ mod tests {
         let two = ExecutionAdmissionPlan::build_probability(&problem, 2);
         assert_eq!(one.dense_bitset_copies, retained_coverage + 1);
         assert_eq!(two.dense_bitset_copies, (retained_coverage + 1) * 2);
+        let indexless = two.without_pattern_position_indexes();
+        assert_eq!(indexless.per_pattern_bytes, 0);
+        assert_eq!(indexless.dense_bitset_copies, two.dense_bitset_copies);
+        assert_eq!(indexless.fixed_bytes, two.fixed_bytes);
+        assert_eq!(indexless.compute_units, two.compute_units);
     }
 
     #[test]

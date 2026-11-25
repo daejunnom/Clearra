@@ -2523,7 +2523,8 @@ fn distributed_build_admission_remains_typed_below_inactive_raw_wasm_boundaries(
         .with_host_capabilities(WasmHostCapabilities::new(4, false, false));
     let command = "clearra build-probability --base-mask 0x0 \
         --target-mask 0xffffffffff --height 4 \
-        --no-hold --no-mirror --workers 2 --max-memory-mib 1";
+        --no-hold --no-mirror --finesse inputs --pattern-knowledge both \
+        --workers 2 --max-memory-mib 1";
     // Test-only lower-layer admission oracle; this preparation is not public
     // finite-ingress evidence.
     let prepared_command = runtime
@@ -2600,7 +2601,8 @@ fn distributed_build_aggregate_admission_remains_typed_below_the_raw_boundary() 
         .with_host_capabilities(WasmHostCapabilities::new(4, false, false));
     let command = "clearra build-probability --base-mask 0x0 \
         --target-mask 0xffffffffff --height 4 \
-        --no-hold --no-mirror --workers 2 --max-memory-mib 20";
+        --no-hold --no-mirror --finesse inputs --pattern-knowledge both \
+        --workers 2 --max-memory-mib 20";
     // Test-only lower-layer admission oracle; the production raw boundary is
     // checked after the producer-plus-verifier accounting assertions.
     let prepared_command = runtime
@@ -2958,8 +2960,9 @@ fn distributed_extended_build_tiling_keeps_high_rows_without_claiming_coverage()
 
 #[test]
 fn original_p7p7_extended_build_prepares_distributed_without_running_search() {
+    let _resource_guard = typed_pc_distributed_test_guard();
     let runtime = WasmCommandRuntime::default()
-        .with_host_capabilities(WasmHostCapabilities::new(4, false, false));
+        .with_host_capabilities(WasmHostCapabilities::new(12, false, false));
     // Same base/target, 14 locks/draws, empty hold and FullQueueOracle source as
     // oracle_ctk3_bench. This regression stops at preparation: no source batch
     // or worker search is advanced over the 25,401,600 original queues.
@@ -2978,18 +2981,125 @@ fn original_p7p7_extended_build_prepares_distributed_without_running_search() {
     assert_eq!(build.query().field().height(), 10);
     assert_eq!(build.query().target_piece_count(), 14);
     assert!(!build.query().field().is_compact());
-    let WasmDistributedPreparation::Coordinator(source) =
-        WasmDistributedCoordinator::prepare(&runtime, command)
-            .expect("P7P7 distributed preparation")
-    else {
-        panic!("the original extended Build must expose the browser worker plan");
+    for options in [
+        "",
+        "--preserve-b2b --spin-profile t-spins",
+        "--preserve-b2b --spin-profile t-spins-plus",
+        "--preserve-b2b --spin-profile all-spin",
+        "--preserve-b2b --spin-profile all-spin-plus",
+        "--preserve-b2b --spin-profile all-mini",
+        "--preserve-b2b --spin-profile all-mini-plus",
+    ] {
+        let WasmDistributedPreparation::Coordinator(source) =
+            WasmDistributedCoordinator::prepare(&runtime, &format!("{command} {options}"))
+                .unwrap_or_else(|error| panic!("P7P7 preparation {options}: {error:?}"))
+        else {
+            panic!("the original extended Build must expose the browser worker plan");
+        };
+        assert_eq!(source.mode(), WasmDistributedMode::CpuMulti);
+        assert_eq!(source.worker_count(), 2);
+        assert_eq!(source.requested_compute_workers(), 2);
+        assert!(source.verification_required());
+        assert!(!source.root_task_parallel());
+        assert_eq!(source.progress().candidates, 0);
+    }
+    let all = command.replace("--workers 2", "--workers 12");
+    let WasmDistributedPreparation::Coordinator(source) = WasmDistributedCoordinator::prepare(
+        &runtime,
+        &format!("{all} --preserve-b2b --spin-profile all-spin-plus"),
+    )
+    .expect("original P7P7 B2B admits the full logical processor count") else {
+        panic!("the full-worker request must expose the browser worker plan");
     };
-    assert_eq!(source.mode(), WasmDistributedMode::CpuMulti);
-    assert_eq!(source.worker_count(), 2);
-    assert_eq!(source.requested_compute_workers(), 2);
-    assert!(source.verification_required());
-    assert!(!source.root_task_parallel());
+    assert_eq!(source.requested_compute_workers(), 12);
     assert_eq!(source.progress().candidates, 0);
+}
+
+#[test]
+fn extended_build_b2b_option_combinations_match_bounded_compact_reference() {
+    let _resource_guard = typed_pc_distributed_test_guard();
+    let runtime = WasmCommandRuntime::default()
+        .with_host_capabilities(WasmHostCapabilities::new(4, false, false));
+    for (base, target, queue) in [
+        (0_u64, 0xf_u64, "I"),
+        (0x803f0, 0xf, "I"),
+        (0x3f0, 0xf, "I"),
+        // Exercise a real mini-spin lock under all six recognition profiles;
+        // the I fixtures separately cover no clear, a plain clear, and PC.
+        (0x27f8, 0x807, "T"),
+    ] {
+        for spin in [
+            "t-spins",
+            "t-spins-plus",
+            "all-spin",
+            "all-spin-plus",
+            "all-mini",
+            "all-mini-plus",
+        ] {
+            for (hold, extra) in [
+                ("--no-hold", "--no-mirror"),
+                ("--hold empty", "--include-mirror"),
+                ("--no-hold", "--no-mirror --solution-probabilities"),
+                (
+                    "--hold empty",
+                    "--include-mirror --finesse inputs --pattern-knowledge both",
+                ),
+            ] {
+                let command = format!(
+                    "clearra build-probability --base-mask 0x{base:x} --target-mask 0x{target:x} \
+                     --queue {queue} --source-pieces 1 {hold} {extra} --queue-knowledge oracle \
+                     --aggregate buildability --result-mode all-solutions --rule srs-plus \
+                     --preserve-b2b --spin-profile {spin} --backend cpu --no-backend-fallback"
+                );
+                let compact = runtime
+                    .run_command_text(&format!("{command} --height 4 --workers 1"))
+                    .unwrap_or_else(|error| panic!("compact {command}: {error:?}"));
+                let extended = runtime
+                    .run_command_text(&format!("{command} --height 8 --workers 1"))
+                    .unwrap_or_else(|error| panic!("extended {command}: {error:?}"));
+                let distributed =
+                    run_distributed_cpu(&runtime, &format!("{command} --height 8 --workers 2"));
+                let reference = compact.search_report().expect("bounded compact B2B report");
+                for result in [&extended, &distributed] {
+                    assert_eq!(
+                        result.app_response().status(),
+                        AppStatus::Success,
+                        "{command}: {:?}",
+                        result.app_response()
+                    );
+                    let report = result.search_report().expect("bounded extended B2B report");
+                    assert_eq!(
+                        report.unique_solution_count, reference.unique_solution_count,
+                        "{command}"
+                    );
+                    assert_eq!(
+                        report.covered_pattern_count, reference.covered_pattern_count,
+                        "{command}"
+                    );
+                    assert_eq!(
+                        report.coverage_probability, reference.coverage_probability,
+                        "{command}"
+                    );
+                    assert!(
+                        report.count_complete && report.probability_complete,
+                        "{command}"
+                    );
+                    assert_build_coverage_aggregation_is_coherent(report);
+                }
+                assert_eq!(
+                    extended
+                        .search_report()
+                        .unwrap()
+                        .normalized_solution_set_hash,
+                    distributed
+                        .search_report()
+                        .unwrap()
+                        .normalized_solution_set_hash,
+                    "{command}",
+                );
+            }
+        }
+    }
 }
 
 #[test]

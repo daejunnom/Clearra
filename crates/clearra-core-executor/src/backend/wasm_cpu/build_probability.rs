@@ -56,7 +56,7 @@ use crate::{
     solution_probability::normalized_solution_probability_reports,
     CoreExecutionResult, CorePathStep, FinessePolicyResult, FinesseReport, FinesseReportInput,
     FinesseRepresentativeWitness, FinesseSolutionAverage, NormalizedSolutionCoverage,
-    SolutionCoverage, TilingSolutionPageStore,
+    SolutionAuditCheckpoint, SolutionCoverage, TilingSolutionPageStore,
 };
 
 use super::{
@@ -341,7 +341,17 @@ impl WasmBuildProbabilitySession {
                 "wasm_build_probability_symbolic_admission_projection_overflow",
             ))?
         } else {
-            ExecutionAdmissionPlan::build_probability(problem, pass_count)
+            let plan = ExecutionAdmissionPlan::build_probability(problem, pass_count);
+            if original.is_compact()
+                && CompactBuildProbabilitySession::uses_symbolic_pattern_membership(
+                    problem,
+                    finesse_metric.requested(),
+                )
+            {
+                plan.without_pattern_position_indexes()
+            } else {
+                plan
+            }
         };
         execution_admission
             .ensure_plan(
@@ -1032,6 +1042,42 @@ pub(super) fn merge_symmetry_results_with_memory_guard(
             "wasm_build_probability_symmetry_pass_mismatch",
         ));
     }
+    let constraints_filtered = results.iter().all(|result| {
+        result.unique_field("execution_constraint_materialized") == Some("true")
+            && result.unique_field("b2b_preservation_evaluation_basis")
+                == Some("filtered-build-order-language")
+    });
+    if !constraints_filtered
+        && results.iter().any(|result| {
+            result.unique_field("b2b_preservation_evaluation_basis")
+                == Some("filtered-build-order-language")
+        })
+    {
+        return Err(WasmExactSearchError::InvalidProblem(
+            "wasm_build_probability_symmetry_constraint_authority_mismatch",
+        ));
+    }
+    let filtered_candidate_pattern_count = constraints_filtered
+        .then(|| {
+            results.iter().try_fold(0_u128, |total, result| {
+                let count = exact_u128_field(
+                    result,
+                    "witnessed_pattern_count",
+                    "wasm_build_probability_symmetry_candidate_pattern_count_invalid",
+                )?;
+                total
+                    .checked_add(count)
+                    .ok_or(WasmExactSearchError::InvalidProblem(
+                        "wasm_build_probability_symmetry_candidate_pattern_count_overflow",
+                    ))
+            })
+        })
+        .transpose()?;
+    let materialize_postprocess_pattern_weights = materialize_postprocess_pattern_weights
+        && (!constraints_filtered
+            || results.iter().any(|result| {
+                result.unique_field("postprocess_build_spin_requested") == Some("true")
+            }));
     let primary_source = &results[0];
     let tiling_only = primary_source.field("build_probability_aggregation") == Some("tiling");
     let solution_probabilities_requested = exact_solution_probabilities_requested(primary_source)?;
@@ -1661,6 +1707,9 @@ pub(super) fn merge_symmetry_results_with_memory_guard(
             sum_usize_field(&all_results, "resource_peak_cpu_bytes"),
         ),
     ];
+    if let Some(count) = filtered_candidate_pattern_count {
+        replacements.push(field("witnessed_pattern_count", count));
+    }
     if normalized_solutions_complete {
         let merged_solution_count = merged_page_store
             .as_ref()
@@ -1730,7 +1779,92 @@ pub(super) fn merge_symmetry_results_with_memory_guard(
     if let Some(store) = merged_page_store {
         merged = merged.with_tiling_solution_page_store(store);
     }
-    Ok(merged)
+    if constraints_filtered {
+        mark_build_constraints_filtered(merged)
+    } else {
+        Ok(merged)
+    }
+}
+
+/// The producer has applied the exact B2B lock-edge policy before composing
+/// its physical language with the original supply. Publish that same coverage
+/// authority without rebuilding execution graphs or materializing every queue.
+/// Only the filtered family is evaluated; pre-filter audit counts stay unknown.
+pub(super) fn mark_build_constraints_filtered(
+    result: CoreExecutionResult,
+) -> Result<CoreExecutionResult, WasmExactSearchError> {
+    let count_complete = exact_bool_field(
+        &result,
+        "count_complete",
+        "wasm_build_filtered_constraint_count_complete_invalid",
+    )?;
+    let probability_complete = exact_bool_field(
+        &result,
+        "probability_complete",
+        "wasm_build_filtered_constraint_probability_complete_invalid",
+    )?;
+    let text = |key| {
+        result
+            .unique_field(key)
+            .ok_or(WasmExactSearchError::InvalidProblem(
+                "wasm_build_filtered_constraint_evidence_missing",
+            ))
+    };
+    let fields = vec![
+        field("execution_constraint_materialized", true),
+        field("b2b_preservation_selection", "existential"),
+        field(
+            "b2b_preservation_denominator_semantics",
+            "original-materialized-queue",
+        ),
+        field(
+            "b2b_preserving_solution_count",
+            text("unique_solution_count")?,
+        ),
+        field(
+            "b2b_preserving_pattern_count",
+            text("covered_pattern_count")?,
+        ),
+        field(
+            "b2b_preservation_pattern_universe_count",
+            text("coverage_pattern_count")?,
+        ),
+        field(
+            "b2b_preservation_probability",
+            text("coverage_probability")?,
+        ),
+        field("b2b_preservation_count_complete", count_complete),
+        field(
+            "b2b_preservation_probability_complete",
+            probability_complete,
+        ),
+        field(
+            "b2b_preserving_candidate_pattern_count",
+            text("witnessed_pattern_count")?,
+        ),
+        field(
+            "b2b_preservation_evaluation_basis",
+            "filtered-build-order-language",
+        ),
+        field("b2b_preservation_path_multiplicity_counted", false),
+        field("objective_complete", count_complete && probability_complete),
+        field(
+            "objective_incomplete_reason",
+            if count_complete && probability_complete {
+                "none"
+            } else {
+                "search-incomplete"
+            },
+        ),
+    ];
+    Ok(result
+        .with_replaced_fields(fields)
+        .with_pre_b2b_produced_solution_audit_checkpoint(SolutionAuditCheckpoint::unknown(
+            "b2b-filtered-during-build-order-construction",
+        ))
+        .with_pre_b2b_solution_audit_checkpoint(SolutionAuditCheckpoint::unknown(
+            "b2b-filtered-during-build-order-construction",
+        )))
 }
 
 pub(super) fn normalized_string_solution_set_hash(keys: &[String]) -> String {
@@ -2212,6 +2346,23 @@ pub(super) struct CompactBuildProbabilitySharedCatalog {
 // session surface so both targets share one implementation.
 #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 impl CompactBuildProbabilitySession {
+    /// Keep admission and source catalog construction tied to the actual
+    /// index owner. B2B and Include still retain their exact coverage rows;
+    /// they do not require a position index for Boolean bag membership.
+    pub(super) fn uses_symbolic_pattern_membership(
+        problem: &SearchProblem,
+        finesse_requested: bool,
+    ) -> bool {
+        !finesse_requested
+            && problem.count_policy() != clearra_pc_graph::request::PcCountPolicy::CountAll
+            && problem
+                .piece_source()
+                .materialized_universe()
+                .is_some_and(|universe| {
+                    StandardBagCoverage::supports(universe, problem.initial_hold())
+                })
+    }
+
     // Browser product execution always supplies an explicit finite-memory
     // boundary through the constructors below; keep this unbounded adapter for
     // native embeddings and parity tests only.
@@ -2465,11 +2616,9 @@ impl CompactBuildProbabilitySession {
         let universe = problem.piece_source().materialized_universe().ok_or(
             WasmExactSearchError::InvalidProblem("wasm_piece_source_not_materialized"),
         )?;
-        let symbolic = StandardBagCoverage::supports(universe, problem.initial_hold());
-        let compile_pattern_indexes = !symbolic
-            || problem.count_policy() == clearra_pc_graph::request::PcCountPolicy::CountAll
-            || finesse_requested
-            || shared_supply_catalog.is_some_and(|shared| shared.key.compile_pattern_indexes);
+        let compile_pattern_indexes =
+            !Self::uses_symbolic_pattern_membership(problem, finesse_requested)
+                || shared_supply_catalog.is_some_and(|shared| shared.key.compile_pattern_indexes);
         let shared_key = CompactBuildProbabilitySharedCatalogKey {
             piece_source_id: problem.piece_source().id().get(),
             pattern_universe_id: universe.pattern_universe_id().get(),
@@ -6954,6 +7103,67 @@ mod finesse_integration_tests {
         }
     }
 
+    #[test]
+    fn symmetry_merge_rejects_mixed_filtered_constraint_authority() {
+        let filtered = mark_build_constraints_filtered(
+            symmetry_input(Some("false"), false).with_additional_fields(vec![
+                field("covered_pattern_count", 1),
+                field("coverage_probability", "1"),
+                field("witnessed_pattern_count", 1),
+            ]),
+        )
+        .expect("filtered constraint authority");
+        let error = merge_symmetry_results(
+            vec![filtered, symmetry_input(Some("false"), false)],
+            true,
+            true,
+            &WeightedPatternSet::uniform(1).expect("uniform weights"),
+            true,
+        )
+        .expect_err("raw and prefiltered coverage cannot share one materialized marker");
+        assert_eq!(
+            invalid_problem_reason(error),
+            "wasm_build_probability_symmetry_constraint_authority_mismatch"
+        );
+    }
+
+    #[test]
+    fn symmetry_merge_rebuilds_filtered_constraint_authority_from_union() {
+        let filtered = |key: &str| {
+            mark_build_constraints_filtered(
+                symmetry_input(Some("false"), false)
+                    .with_additional_fields(vec![
+                        field("covered_pattern_count", 1),
+                        field("coverage_probability", "1"),
+                        field("witnessed_pattern_count", 1),
+                    ])
+                    .with_normalized_solution_keys(vec![key.to_owned()])
+                    .with_normalized_solution_coverages(Vec::new()),
+            )
+            .expect("filtered constraint authority")
+        };
+        let merged = merge_symmetry_results(
+            vec![filtered("original"), filtered("mirror")],
+            true,
+            true,
+            &WeightedPatternSet::uniform(1).expect("uniform weights"),
+            true,
+        )
+        .expect("filtered symmetry union");
+        assert_eq!(merged.field("unique_solution_count"), Some("2"));
+        assert_eq!(merged.field("b2b_preserving_solution_count"), Some("2"));
+        assert_eq!(merged.field("covered_pattern_count"), Some("1"));
+        assert_eq!(merged.field("b2b_preserving_pattern_count"), Some("1"));
+        assert_eq!(merged.field("b2b_preservation_probability"), Some("1"));
+        assert_eq!(merged.field("witnessed_pattern_count"), Some("2"));
+        assert_eq!(
+            merged.field("b2b_preserving_candidate_pattern_count"),
+            Some("2")
+        );
+        assert!(merged.normalized_solution_coverages().is_empty());
+        assert!(merged.postprocess_pattern_weights().is_empty());
+    }
+
     fn symmetry_input(
         solution_probabilities_requested: Option<&str>,
         resource_truncated: bool,
@@ -7634,6 +7844,128 @@ mod finesse_integration_tests {
         session
             .ensure_symbolic_coverage_finalization_bound()
             .expect("exact projection fits");
+    }
+
+    #[test]
+    fn compact_symbolic_membership_admission_matches_the_actual_index_owner() {
+        use clearra_pc_graph::request::PcCountPolicy;
+
+        let field = BuildProbabilityField::from_words_preserving_height(4, [0; 4], [0xf, 0, 0, 0])
+            .expect("one-piece compact field");
+        for count in [
+            PcCountPolicy::CountUnique,
+            PcCountPolicy::CountAll,
+            PcCountPolicy::FirstSolution,
+        ] {
+            for finesse in [false, true] {
+                for include in [false, true] {
+                    for b2b in [false, true] {
+                        let objective = if b2b {
+                            ObjectivePolicy::unique()
+                                .with_back_to_back_preservation(SpinProfileSelection::AllSpinPlus)
+                        } else {
+                            ObjectivePolicy::unique()
+                        };
+                        let query = PcScenarioQuery::new(
+                            PcScenarioBoard::standard_10(4, 0),
+                            PcQueueInput::standard_7_bag(),
+                            PieceWindow::new(1),
+                        )
+                        .with_exact_pieces(Some(1))
+                        .with_count_policy(count)
+                        .with_objective(objective)
+                        .with_solution_probability_policy(if include {
+                            PcSolutionProbabilityPolicy::Include
+                        } else {
+                            PcSolutionProbabilityPolicy::Omit
+                        });
+                        let problem = ProblemCompiler::compile_scenario_pc(&query)
+                            .expect("bounded standard-bag request");
+                        let session = CompactBuildProbabilitySession::new_with_finesse(
+                            &problem,
+                            field,
+                            BuildProbabilityAggregation::Buildability,
+                            finesse,
+                        )
+                        .expect("bounded compact preparation");
+                        let symbolic =
+                            CompactBuildProbabilitySession::uses_symbolic_pattern_membership(
+                                &problem, finesse,
+                            );
+                        assert_eq!(symbolic, count != PcCountPolicy::CountAll && !finesse);
+                        assert_eq!(
+                            session.shared_supply_catalog.key.compile_pattern_indexes,
+                            !symbolic
+                        );
+                        assert_eq!(session.solution_coverage.is_some(), include || b2b);
+                        assert_eq!(session.candidate_count, 0);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn compact_p7p7_prepares_all_entrypoints_without_position_index_charge() {
+        use crate::backend::wasm_cpu::build_probability_distributed::{
+            WasmBuildProbabilityCandidateProducer, WasmBuildProbabilityDistributedVerifier,
+        };
+        use clearra_pc_graph::request::PcCountPolicy;
+
+        // Admission only: the 56-cell target is never enumerated. All 14 draws
+        // remain in the original 25,401,600-queue universe.
+        let query = PcScenarioQuery::new(
+            PcScenarioBoard::standard_10(6, 0),
+            PcQueueInput::standard_7_bag(),
+            PieceWindow::new(14),
+        )
+        .with_exact_pieces(Some(14))
+        .with_supply_window_size(clearra_pc_graph::request::SupplyWindowSize::new(14))
+        .with_count_policy(PcCountPolicy::CountUnique)
+        .with_solution_probability_policy(PcSolutionProbabilityPolicy::Omit)
+        .with_execution_policy(PcExecutionPolicy::default().with_max_memory_mib(Some(64)));
+        let problem = ProblemCompiler::compile_scenario_pc(&query).expect("compact P7P7 source");
+        assert_eq!(
+            problem
+                .piece_source()
+                .materialized_universe()
+                .unwrap()
+                .pattern_count(),
+            25_401_600
+        );
+        let field = BuildProbabilityField::from_words_preserving_height(
+            6,
+            [0; 4],
+            [(1_u64 << 56) - 1, 0, 0, 0],
+        )
+        .expect("compact fourteen-piece target");
+        let serial = WasmBuildProbabilitySession::new(
+            &problem,
+            field,
+            BuildProbabilityAggregation::Buildability,
+            BuildProbabilityFinesseRequest::Off,
+        )
+        .expect("serial preparation excludes the unallocated position indexes");
+        drop(serial);
+        let producer = WasmBuildProbabilityCandidateProducer::new_with_finesse_and_verifiers_typed(
+            &problem,
+            field,
+            BuildProbabilityAggregation::Buildability,
+            FinesseMetric::Off,
+            FinessePatternKnowledge::Both,
+            1,
+            0,
+        )
+        .expect("coordinator preparation excludes only unallocated replica indexes");
+        assert_eq!(producer.progress().candidates, 0);
+        drop(producer);
+        let verifier = WasmBuildProbabilityDistributedVerifier::new_typed(
+            &problem,
+            field,
+            BuildProbabilityAggregation::Buildability,
+        )
+        .expect("delegated verifier preparation uses the same index owner predicate");
+        assert_eq!(verifier.progress().candidates, 0);
     }
 
     #[test]

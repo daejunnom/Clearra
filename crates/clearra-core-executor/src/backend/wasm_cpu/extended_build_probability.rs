@@ -51,7 +51,7 @@ pub(super) mod pc_distributed;
 use super::{
     build_probability::{
         build_pattern_coverage_aggregation, costed_finesse_language, exact_bool_field,
-        exact_solution_probabilities_requested, exact_usize_field,
+        exact_solution_probabilities_requested, exact_usize_field, mark_build_constraints_filtered,
         solution_coverage_union_matches_global, validate_distributed_coverage_aggregation_surface,
         validate_distributed_coverage_authority, validate_worker_partial_probability_surface,
         BuildProbabilityAdvance, FinesseSearchMaterial,
@@ -64,9 +64,9 @@ use super::{
     },
     extended_board::{compact_logical_board, words_hex},
     extended_buildup::{
-        build_extended_order_graph, build_extended_order_graph_with_finesse,
-        build_extended_pc_order_graph, ExtendedBuildOrderResult, ExtendedBuildOrderWorkspace,
-        ExtendedTilingKey,
+        build_extended_order_graph, build_extended_order_graph_with_constraints,
+        build_extended_order_graph_with_finesse, ExtendedBuildOrderResult,
+        ExtendedBuildOrderWorkspace, ExtendedTilingKey,
     },
     extended_geometry::{
         ExtendedGeometryAdvance, ExtendedGeometrySearch, ExtendedGeometrySharedTargets,
@@ -250,7 +250,6 @@ impl ExtendedBuildProbabilitySession {
             && !problem.solution_probability_policy().requested()
             && problem.pc_chance_evidence_policy() == PcChanceEvidencePolicy::Disabled
             && !problem.objective().score().requested()
-            && !problem.objective().execution_constraints().requested()
             && problem.count_policy() == PcCountPolicy::CountUnique
             && problem.queue_observation_policy() == QueueObservationPolicy::FullQueueOracle
             && universe.complete()
@@ -994,7 +993,9 @@ impl ExtendedBuildProbabilitySession {
             buildable_tilings: HashSet::new(),
             solution_coverage: (problem.solution_probability_policy().requested()
                 || problem.objective().score().requested()
-                || problem.objective().execution_constraints().requested()
+                || ((purpose == ExtendedFamilyPurpose::Pc
+                    || aggregation != BuildProbabilityAggregation::Buildability)
+                    && problem.objective().execution_constraints().requested())
                 || matches!(
                     problem.pc_chance_evidence_policy(),
                     PcChanceEvidencePolicy::PcMinimumCoverV2
@@ -1265,7 +1266,8 @@ impl ExtendedBuildProbabilitySession {
         }
         let execution_evidence_requested = self.aggregation.requests_spin_coverage()
             || self.problem.objective().score().requested()
-            || self.problem.objective().execution_constraints().requested()
+            || (self.problem.objective().execution_constraints().requested()
+                && (!self.build_constraints_materialized() || self.finesse_requested))
             || (self.purpose == ExtendedFamilyPurpose::Pc
                 && self
                     .problem
@@ -1305,8 +1307,9 @@ impl ExtendedBuildProbabilitySession {
                 self.aggregation.requests_spin_coverage(),
                 control,
             )
-        } else if self.purpose == ExtendedFamilyPurpose::Pc {
-            build_extended_pc_order_graph(
+        } else if self.purpose == ExtendedFamilyPurpose::Pc || self.build_constraints_materialized()
+        {
+            build_extended_order_graph_with_constraints(
                 &self.problem,
                 &self.catalog,
                 &candidate,
@@ -1549,7 +1552,10 @@ impl ExtendedBuildProbabilitySession {
                     ));
                 }
                 self.retain_buildable_tiling(tiling)?;
-                if let Some(spin_graph) = spin_graph {
+                if let Some(spin_graph) = spin_graph.filter(|_| {
+                    self.aggregation.requests_spin_coverage()
+                        || !self.build_constraints_materialized()
+                }) {
                     // The returned graph and source scratch coexist until
                     // transfer. Charge both before growing its retained owner.
                     self.ensure_memory_bound(
@@ -2374,6 +2380,54 @@ impl ExtendedBuildProbabilitySession {
             "unique_solution_count",
             "wasm_extended_distributed_solution_count_invalid",
         )?;
+        if self.build_constraints_materialized()
+            && (result.unique_field("search_kind") != Some("build-probability")
+                || result.unique_field("execution_constraint_preserve_b2b") != Some("true")
+                || result.unique_field("execution_constraint_materialized") != Some("true")
+                || result.unique_field("b2b_preservation_evaluation_basis")
+                    != Some("filtered-build-order-language")
+                || result.unique_field("b2b_preservation_selection") != Some("existential")
+                || result.unique_field("b2b_preservation_denominator_semantics")
+                    != Some("original-materialized-queue")
+                || result.unique_field("b2b_preservation_path_multiplicity_counted")
+                    != Some("false")
+                || result.unique_field("execution_constraint_spin_profile")
+                    != Some(
+                        self.problem
+                            .objective()
+                            .execution_constraints()
+                            .spin_profile()
+                            .as_str(),
+                    )
+                || exact_usize_field(
+                    result,
+                    "b2b_preserving_solution_count",
+                    "wasm_extended_distributed_filtered_constraint_count_invalid",
+                )? != worker_solution_count
+                || exact_usize_field(
+                    result,
+                    "b2b_preservation_pattern_universe_count",
+                    "wasm_extended_distributed_filtered_constraint_universe_invalid",
+                )? != pattern_count
+                || exact_bool_field(
+                    result,
+                    "b2b_preservation_count_complete",
+                    "wasm_extended_distributed_filtered_constraint_complete_invalid",
+                )? != count_complete
+                || exact_bool_field(
+                    result,
+                    "b2b_preservation_probability_complete",
+                    "wasm_extended_distributed_filtered_constraint_probability_invalid",
+                )? != probability_complete
+                || result.unique_field("b2b_preserving_pattern_count")
+                    != result.unique_field("covered_pattern_count")
+                || result.unique_field("b2b_preservation_probability")
+                    != result.unique_field("coverage_probability"))
+        {
+            return Err(WasmExactSearchError::InvalidProblem(
+                "wasm_extended_distributed_filtered_constraint_mismatch",
+            ));
+        }
         let coverage_source_row_count = validate_distributed_coverage_authority(
             &self.problem,
             self.aggregation,
@@ -2595,7 +2649,23 @@ impl ExtendedBuildProbabilitySession {
         &mut self,
         control: &ExecutionControl,
     ) -> Result<(), WasmExactSearchError> {
+        if self.build_constraints_materialized() {
+            // Every verifier already filtered the physical lock language before
+            // coverage. Rebuilding from keys would repeat that work and restore
+            // the source-sized indexes the symbolic producer deliberately omits.
+            return if control.is_cancelled() {
+                Err(WasmExactSearchError::Cancelled)
+            } else {
+                Ok(())
+            };
+        }
         self.rebuild_distributed_solution_evidence(control, false)
+    }
+
+    fn build_constraints_materialized(&self) -> bool {
+        self.purpose == ExtendedFamilyPurpose::Build
+            && self.aggregation == BuildProbabilityAggregation::Buildability
+            && self.problem.objective().execution_constraints().requested()
     }
 
     // A raw worker's oracle coverage cannot authorize VisibleSeven. Rebuild
@@ -2707,7 +2777,7 @@ impl ExtendedBuildProbabilitySession {
                 // Boolean coverage still uses exactly the original PC/B2B
                 // language, not an unconstrained generic Build graph.
                 self.prepare_build_order_resources()?;
-                let graph = match build_extended_pc_order_graph(
+                let graph = match build_extended_order_graph_with_constraints(
                     &self.problem,
                     &self.catalog,
                     &candidate,
@@ -2867,8 +2937,9 @@ impl ExtendedBuildProbabilitySession {
                     ));
                 }
                 let spin_candidate = (self.aggregation.requests_spin_coverage()
-                    || self.problem.objective().execution_constraints().requested())
-                .then(|| (tiling.digest(), solution_key.clone()));
+                    || (self.problem.objective().execution_constraints().requested()
+                        && (!self.build_constraints_materialized() || collect_finesse)))
+                    .then(|| (tiling.digest(), solution_key.clone()));
                 let local = row_ids.capacity() as u128 * core::mem::size_of::<u32>() as u128
                     + tiling.retained_bytes() as u128
                     + 2 * solution_key.capacity() as u128;
@@ -2891,7 +2962,8 @@ impl ExtendedBuildProbabilitySession {
                         control,
                     )
                 } else {
-                    build_extended_order_graph(
+                    build_extended_order_graph_with_constraints(
+                        &self.problem,
                         &self.catalog,
                         &candidate,
                         &mut self.build_order_workspace,
@@ -3077,12 +3149,11 @@ impl ExtendedBuildProbabilitySession {
             .as_ref()
             .is_some_and(|summary| summary.completeness().is_complete());
         let execution_constraints = self.problem.objective().execution_constraints();
-        let execution_evidence_requested =
-            self.aggregation.requests_spin_coverage() || execution_constraints.requested();
-        let spin_batch = if execution_evidence_requested
-            && !(execution_constraints.requested()
-                && self.distributed_execution_constraint_materialized)
-        {
+        let constraints_materialized = self.build_constraints_materialized()
+            || self.distributed_execution_constraint_materialized;
+        let execution_evidence_requested = self.aggregation.requests_spin_coverage()
+            || (execution_constraints.requested() && !constraints_materialized);
+        let spin_batch = if execution_evidence_requested {
             // Worker completion order is not a source ordinal. Preserve the
             // complete graph family and publish it in canonical physical order.
             self.spin_execution_graphs
@@ -3529,18 +3600,28 @@ impl ExtendedBuildProbabilitySession {
             .with_normalized_solution_coverages(normalized_solution_coverages)
             .with_coverage_pattern_words(self.covered_patterns.to_owned_words())
             .with_spin_coverage_execution_batch(spin_batch);
-        Ok(if execution_constraints.requested() {
-            let pattern_weights = (0..universe.pattern_count())
-                .map(|pattern| universe.weight_at(pattern).get().to_string())
-                .collect();
-            result.with_postprocess_execution_batch(
-                Vec::new(),
-                count_complete && probability_complete,
-                pattern_weights,
-            )
+        let result = if self.build_constraints_materialized() {
+            mark_build_constraints_filtered(result)?
         } else {
             result
-        })
+        };
+        Ok(
+            if execution_constraints.requested()
+                && (!constraints_materialized
+                    || self.problem.solution_probability_policy().requested())
+            {
+                let pattern_weights = (0..universe.pattern_count())
+                    .map(|pattern| universe.weight_at(pattern).get().to_string())
+                    .collect();
+                result.with_postprocess_execution_batch(
+                    Vec::new(),
+                    count_complete && probability_complete,
+                    pattern_weights,
+                )
+            } else {
+                result
+            },
+        )
     }
 
     fn count_pc_build_paths(&self) -> bool {
@@ -4786,7 +4867,10 @@ impl ExtendedBuildProbabilitySession {
                     .constructor_peak_bytes,
             )?;
         }
-        if self.problem.objective().execution_constraints().requested() {
+        if self.problem.objective().execution_constraints().requested()
+            && (!self.build_constraints_materialized()
+                || self.problem.solution_probability_policy().requested())
+        {
             future = future.checked_add(
                 (self.covered_patterns.pattern_count() as u128).checked_mul(
                     (core::mem::size_of::<String>() as u128).checked_add(
@@ -4798,15 +4882,17 @@ impl ExtendedBuildProbabilitySession {
 
         let execution_evidence_requested = self.aggregation.requests_spin_coverage()
             || self.problem.objective().score().requested()
-            || self.problem.objective().execution_constraints().requested()
+            || (self.problem.objective().execution_constraints().requested()
+                && !self.build_constraints_materialized())
             || (self.purpose == ExtendedFamilyPurpose::Pc
                 && self
                     .problem
                     .pc_chance_evidence_policy()
                     .retains_pc_path_v2_evidence());
         if execution_evidence_requested
-            && !(self.problem.objective().execution_constraints().requested()
-                && self.distributed_execution_constraint_materialized)
+            && (self.aggregation.requests_spin_coverage()
+                || !(self.problem.objective().execution_constraints().requested()
+                    && self.distributed_execution_constraint_materialized))
         {
             let universe = self.problem.piece_source().materialized_universe()?;
             future = future.checked_add(
@@ -5043,6 +5129,87 @@ mod tests {
     use clearra_supply::queue::fixed_sequence::FixedSequence;
 
     use super::*;
+
+    #[test]
+    fn extended_filtered_b2b_worker_rejects_conflicting_constraint_authority() {
+        use clearra_objectives::policy::{
+            objective_policy::ObjectivePolicy, score_objective_policy::SpinProfileSelection,
+        };
+
+        let query = PcScenarioQuery::new(
+            PcScenarioBoard::standard_10(8, 0),
+            PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::I])),
+            PieceWindow::new(1),
+        )
+        .with_exact_pieces(Some(1))
+        .with_allow_hold(false)
+        .with_count_policy(PcCountPolicy::CountUnique)
+        .with_objective(
+            ObjectivePolicy::unique()
+                .with_back_to_back_preservation(SpinProfileSelection::AllSpinPlus),
+        );
+        let problem = ProblemCompiler::compile_scenario_pc(&query).expect("one-I B2B source");
+        let target_field =
+            BuildProbabilityField::from_words_preserving_height(8, [0; 4], [0xf, 0, 0, 0])
+                .expect("one-I extended target");
+        let mut producer = ExtendedBuildProbabilitySession::new(
+            &problem,
+            target_field,
+            BuildProbabilityAggregation::Buildability,
+        )
+        .expect("one-I producer");
+        let mut result = None;
+        for _ in 0..64 {
+            match producer.advance(16, &ExecutionControl::default()).unwrap() {
+                BuildProbabilityAdvance::Pending => {}
+                BuildProbabilityAdvance::Completed(completed) => {
+                    result = Some(completed);
+                    break;
+                }
+                BuildProbabilityAdvance::Cancelled => panic!("uncancelled one-I fixture"),
+            }
+        }
+        let result = result.expect("one-I fixture completes within its bounded slices");
+        assert_eq!(
+            result.field("execution_constraint_materialized"),
+            Some("true")
+        );
+        assert!(producer
+            .validate_distributed_solution_surface(&result, 1)
+            .is_ok());
+        for (name, invalid) in [
+            ("search_kind", "pc"),
+            ("execution_constraint_preserve_b2b", "false"),
+            ("execution_constraint_materialized", "false"),
+            ("execution_constraint_spin_profile", "t-spins"),
+            (
+                "b2b_preservation_evaluation_basis",
+                "candidate-pattern-existence",
+            ),
+            ("b2b_preservation_selection", "universal"),
+            ("b2b_preservation_denominator_semantics", "covered-only"),
+            ("b2b_preservation_path_multiplicity_counted", "true"),
+        ] {
+            for changed in [
+                result
+                    .clone()
+                    .with_replaced_fields(vec![field(name, invalid)]),
+                result
+                    .clone()
+                    .with_additional_fields(vec![field(name, invalid)]),
+            ] {
+                assert!(
+                    matches!(
+                        producer.validate_distributed_solution_surface(&changed, 1),
+                        Err(WasmExactSearchError::InvalidProblem(
+                            "wasm_extended_distributed_filtered_constraint_mismatch"
+                        ))
+                    ),
+                    "accepted conflicting or duplicate filtered worker field {name}"
+                );
+            }
+        }
+    }
 
     #[test]
     fn extended_tiling_build_uses_build_memory_projection_under_finite_budget() {

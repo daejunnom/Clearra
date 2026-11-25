@@ -382,11 +382,11 @@ pub(super) fn build_extended_order_graph(
     )
 }
 
-// PC constraints must be applied before supply coverage, minimum-source proof,
-// and replay authority are minted. Passing a finesse problem here would turn
+// Execution constraints must be applied before supply coverage, minimum-source
+// proof, and replay authority are minted. Passing a finesse problem here would turn
 // this into geometry-only enumeration and skip ordinary exact reachability.
 #[allow(clippy::too_many_arguments)]
-pub(super) fn build_extended_pc_order_graph(
+pub(super) fn build_extended_order_graph_with_constraints(
     problem: &SearchProblem,
     catalog: &ExtendedInverseCatalog,
     candidate: &ExtendedGeometryCandidate,

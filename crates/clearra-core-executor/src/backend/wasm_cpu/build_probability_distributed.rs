@@ -633,6 +633,18 @@ impl WasmBuildProbabilityCandidateProducer {
                 pass_count,
                 verifier_count,
             )
+            .map(|plan| {
+                if field.is_compact()
+                    && CompactBuildProbabilitySession::uses_symbolic_pattern_membership(
+                        problem,
+                        finesse_metric.requested(),
+                    )
+                {
+                    plan.without_pattern_position_indexes()
+                } else {
+                    plan
+                }
+            })
         }
         .ok_or_else(|| {
             WasmCpuSearchError::resource_admission(
@@ -1096,7 +1108,14 @@ impl WasmBuildProbabilityDistributedVerifier {
                 )
             })?
         } else {
-            ExecutionAdmissionPlan::build_probability(problem, pass_count)
+            let plan = ExecutionAdmissionPlan::build_probability(problem, pass_count);
+            if field.is_compact()
+                && CompactBuildProbabilitySession::uses_symbolic_pattern_membership(problem, false)
+            {
+                plan.without_pattern_position_indexes()
+            } else {
+                plan
+            }
         };
         execution_admission
             .ensure_plan(plan, 0)

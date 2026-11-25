@@ -88,6 +88,16 @@ function Invoke-WasmProductSourceContracts {
         '--lib', 'setup_preparation_preserves_fixed_and_all_cpu_budgets_before_graph_work',
         '--', '--test-threads=1',
         ':::',
+        # Keep the original long-input preparation failure and the bounded
+        # constrained serial/distributed parity matrix in every product gate.
+        $CargoPath, 'test', '--locked', '-p', 'clearra-wasm',
+        '--lib', 'original_p7p7_extended_build_prepares_distributed_without_running_search',
+        '--', '--test-threads=1',
+        ':::',
+        $CargoPath, 'test', '--locked', '-p', 'clearra-wasm',
+        '--lib', 'extended_build_b2b_option_combinations_match_bounded_compact_reference',
+        '--', '--test-threads=1',
+        ':::',
         $CargoPath, 'test', '--locked', '-p', 'clearra-cli-command',
         '--test', 'extended_pc_surfaces',
         '--', '--test-threads=1',
