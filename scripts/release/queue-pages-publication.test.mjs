@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import { queuePagesPublication, pagesQueueCompletionInput, pagesSnapshotSource, pagesPublicationRequired } from "./queue-pages-publication.mjs";
+import { queuePagesPublication, pagesQueueCompletionInput, pagesSnapshotSource, pagesPublicationRequired, githubApi } from "./queue-pages-publication.mjs";
 import { classifyDeploymentImpact } from "./deployment-impact.mjs";
 
 const repository = "daejunnom/Clearra";
@@ -53,8 +53,149 @@ function fixture({ mutateRun, mutateReceipt, mutateMain, verify, pause, post } =
       return mutateRun?.(run, count) ?? run;
     },
   };
-  return { dependencies, calls, messages, posts: () => calls.filter((call) => call.method === "POST") };
+  return { dependencies, calls, messages, advance: (ms) => { time += ms; },
+    posts: () => calls.filter((call) => call.method === "POST") };
 }
+
+const httpFailure = (status) => Object.assign(new Error("gh command failed"), {
+  status: 1, stderr: `gh: request failed (HTTP ${status})\nprivate-transport-details`,
+});
+
+test("GitHub reads recover from bounded transient failures at the same exact endpoint", async () => {
+  const endpoint = `${base}/actions/runs/20`;
+  const calls = [];
+  const waits = [];
+  const result = await githubApi("GET", endpoint, undefined, {
+    execute: async (command, args, request) => {
+      calls.push({ command, args, request });
+      if (calls.length < 3) throw httpFailure(calls.length === 1 ? 404 : 503);
+      return JSON.stringify({ id: 20, head_sha: sourceCommit });
+    },
+    pause: async (ms) => waits.push(ms),
+  });
+  assert.deepEqual(result, { id: 20, head_sha: sourceCommit });
+  assert.equal(calls.length, 3);
+  assert.deepEqual(waits, [2_000, 2_000]);
+  for (const { command, args, request } of calls) {
+    assert.equal(command, "gh");
+    assert.deepEqual(args, ["api", "--method", "GET", "-H", "X-GitHub-Api-Version: 2026-03-10", endpoint]);
+    assert.equal(request.input, undefined);
+    assert.equal(request.timeout, 30_000);
+    assert.equal(request.maxBuffer, 4 * 1024 * 1024);
+  }
+});
+
+test("read retries stop at three attempts and disclose only the HTTP status", async () => {
+  let calls = 0;
+  const waits = [];
+  await assert.rejects(githubApi("GET", `${base}/actions/runs/20`, undefined, {
+    execute: () => { calls += 1; throw httpFailure(503); },
+    pause: async (ms) => waits.push(ms),
+  }), (error) => {
+    assert.match(error.message, /HTTP 503; 3 attempt\(s\); read retry stopped/u);
+    assert.doesNotMatch(error.message, /private-transport-details/u);
+    return true;
+  });
+  assert.equal(calls, 3);
+  assert.deepEqual(waits, [2_000, 2_000]);
+});
+
+test("explicit read timeouts may recover but permanent, unknown and malformed responses never retry", async () => {
+  let timeouts = 0;
+  assert.deepEqual(await githubApi("GET", `${base}/actions/runs/20`, undefined, {
+    execute: () => {
+      if (++timeouts === 1) throw Object.assign(new Error("timeout"), { code: "ETIMEDOUT" });
+      return '{"id":20}';
+    }, pause: async () => {},
+  }), { id: 20 });
+  assert.equal(timeouts, 2);
+  for (const failure of [httpFailure(400), httpFailure(401), httpFailure(403),
+    httpFailure(410), httpFailure(422), new Error("unknown failure")]) {
+    let calls = 0;
+    await assert.rejects(githubApi("GET", `${base}/actions/runs/20`, undefined, {
+      execute: () => { calls += 1; throw failure; },
+      pause: () => assert.fail("permanent or unknown failure must not retry"),
+    }), /read retry stopped/u);
+    assert.equal(calls, 1);
+  }
+  let malformedReads = 0;
+  await assert.rejects(githubApi("GET", `${base}/actions/runs/20`, undefined, {
+    execute: () => { malformedReads += 1; return "not-json"; },
+    pause: () => assert.fail("response validation must not retry"),
+  }), /invalid JSON.*validation is not retried/u);
+  assert.equal(malformedReads, 1);
+});
+
+test("dispatch transport failures and malformed receipts always stop after one POST", async () => {
+  for (const output of [httpFailure(503), Object.assign(new Error("timeout"), { code: "ETIMEDOUT" }), "not-json"]) {
+    let calls = 0;
+    await assert.rejects(githubApi("POST", `${base}/actions/workflows/pages.yml/dispatches`, {
+      ref: "main", inputs: { accepted_sha: sourceCommit },
+    }, {
+      execute: (command, args, request) => {
+        calls += 1;
+        assert.deepEqual(JSON.parse(request.input), { ref: "main", inputs: { accepted_sha: sourceCommit } });
+        if (output instanceof Error) throw output;
+        return output;
+      },
+      pause: () => assert.fail("a dispatch must never retry"),
+    }), /dispatches are not retried|dispatch receipt uncertain/u);
+    assert.equal(calls, 1);
+  }
+});
+
+test("a transient capture-run read never duplicates capture or Pages dispatch", async () => {
+  const f = fixture();
+  const api = f.dependencies.api;
+  let captureReads = 0;
+  f.dependencies.api = (method, endpoint, body, guard) => githubApi(method, endpoint, body, {
+    ...guard,
+    execute: async () => {
+      if (method === "GET" && endpoint === `${base}/actions/runs/20` && ++captureReads === 1) {
+        throw httpFailure(503);
+      }
+      return JSON.stringify(await api(method, endpoint, body));
+    },
+    pause: async (ms) => f.advance(ms),
+  });
+  const result = await queuePagesPublication(options, f.dependencies);
+  assert.equal(result.pagesRunId, "30");
+  assert.equal(captureReads, 2);
+  assert.deepEqual(f.posts().map((call) => call.endpoint), [
+    `${base}/actions/workflows/pages-rollback.yml/dispatches`, `${base}/actions/workflows/pages.yml/dispatches`,
+  ]);
+});
+
+test("a lease expiring during a main-read retry prevents the next read and every dispatch", async () => {
+  const f = fixture();
+  const api = f.dependencies.api;
+  let mainReads = 0;
+  let pauses = 0;
+  f.dependencies.api = (method, endpoint, body, guard) => githubApi(method, endpoint, body, {
+    ...guard,
+    execute: async () => {
+      if (method === "GET" && endpoint === `${base}/git/ref/heads/main` && ++mainReads === 2) {
+        throw httpFailure(503);
+      }
+      return JSON.stringify(await api(method, endpoint, body));
+    },
+    pause: async () => { pauses += 1; f.advance(120 * 60_000); },
+  });
+  await assert.rejects(queuePagesPublication(options, f.dependencies), /lease expired/u);
+  assert.equal(mainReads, 2);
+  assert.equal(pauses, 1);
+  assert.equal(f.posts().length, 0);
+});
+
+test("a successful main read that finishes after the lease cannot authorize a POST", async () => {
+  let f;
+  f = fixture({ mutateMain: (count) => {
+    if (count === 2) f.advance(120 * 60_000);
+    return sourceCommit;
+  } });
+  await assert.rejects(queuePagesPublication(options, f.dependencies), /lease expired/u);
+  assert.equal(f.posts().length, 0);
+});
 
 test("queues capture and Pages only after exact success and canonical history verification", async () => {
   const f = fixture({ mutateRun: (run, count) => count === 1 ?
@@ -103,6 +244,7 @@ test("failed, cancelled and timed-out acceptance never starts rollback or Pages"
     const f = fixture({ mutateRun: (run) => ({ ...run, conclusion }) });
     await assert.rejects(queuePagesPublication(options, f.dependencies), /stopped after release-cli/u);
     assert.equal(f.posts().length, 0);
+    assert.equal(f.calls.filter((call) => call.endpoint === `${base}/actions/runs/10`).length, 1);
   }
 });
 
@@ -113,6 +255,7 @@ test("verifies every run identity and a positive attempt rather than trusting it
     const f = fixture({ mutateRun: (run) => ({ ...run, ...change }) });
     await assert.rejects(queuePagesPublication(options, f.dependencies), /run identity/u);
     assert.equal(f.posts().length, 0);
+    assert.equal(f.calls.filter((call) => call.endpoint === `${base}/actions/runs/10`).length, 1);
   }
 });
 

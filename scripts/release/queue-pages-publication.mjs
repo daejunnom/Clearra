@@ -11,6 +11,9 @@ const SHA = /^[0-9a-f]{40}$/u;
 const ID = /^[1-9][0-9]*$/u;
 const WAIT_MS = 30_000;
 const LEASE_MS = 120 * 60_000;
+const READ_ATTEMPTS = 3;
+const READ_RETRY_MS = 2_000;
+const TRANSIENT_READ_HTTP_STATUSES = new Set([404, 408, 429, 500, 502, 503, 504]);
 const PENDING = new Set(["queued", "in_progress", "waiting", "pending", "requested"]);
 
 export function pagesQueueCompletionInput(context) {
@@ -72,7 +75,8 @@ export async function queuePagesPublication(options, dependencies) {
   const base = `repos/${repository}`;
   const runUrl = (id) => `https://github.com/${repository}/actions/runs/${id}`;
   const currentMain = async () => {
-    const head = await api("GET", `${base}/git/ref/heads/main`);
+    const head = await api("GET", `${base}/git/ref/heads/main`, undefined, { beforeAttempt: withinLease });
+    withinLease();
     if (head?.object?.sha !== sourceCommit || head?.object?.type !== "commit") {
       throw new Error("Pages queue source is no longer exact current main");
     }
@@ -85,7 +89,8 @@ export async function queuePagesPublication(options, dependencies) {
     while (true) {
       withinLease();
       await currentMain();
-      const run = await api("GET", `${base}/actions/runs/${id}`);
+      const run = await api("GET", `${base}/actions/runs/${id}`, undefined, { beforeAttempt: withinLease });
+      withinLease();
       if (String(run?.id) !== id || !ID.test(String(run?.run_attempt)) ||
           run?.head_sha !== sourceCommit || run?.head_branch !== "main" ||
           run?.event !== "workflow_dispatch" ||
@@ -108,6 +113,7 @@ export async function queuePagesPublication(options, dependencies) {
   const dispatch = async (workflow, inputs) => {
     withinLease();
     await currentMain();
+    withinLease();
     // GitHub API 2026-03-10 returns the created run ID. Never retry a POST or
     // infer ownership from a recent-run list after an uncertain dispatch.
     const receipt = await api("POST", `${base}/actions/workflows/${workflow}/dispatches`, {
@@ -147,21 +153,53 @@ export async function queuePagesPublication(options, dependencies) {
   return { acceptanceRunId, captureRunId, pagesRunId, sourceCommit, publicationStatus: "dispatched" };
 }
 
-export function githubApi(method, endpoint, body) {
+function githubReadFailure(error) {
+  // Keep useful status diagnostics without printing gh stderr, which may
+  // contain request headers or other private transport details.
+  const stderr = String(error?.stderr ?? "").slice(0, 4_096);
+  const status = Number(/\bHTTP(?:\/\d(?:\.\d)?)?\s+([1-5][0-9]{2})\b/u.exec(stderr)?.[1]);
+  if (status) return { retryable: TRANSIENT_READ_HTTP_STATUSES.has(status), detail: `HTTP ${status}` };
+  if (["ETIMEDOUT", "ECONNRESET", "EAI_AGAIN"].includes(error?.code)) {
+    return { retryable: true, detail: `transport ${error.code}` };
+  }
+  if (/\b(?:i\/o timeout|TLS handshake timeout|unexpected EOF|connection reset by peer)\b|: EOF(?:\r?\n|$)/u.test(stderr)) {
+    return { retryable: true, detail: "transient transport failure (HTTP status unavailable)" };
+  }
+  return { retryable: false, detail: "transport or command failure (HTTP status unavailable)" };
+}
+
+export async function githubApi(method, endpoint, body, {
+  execute = execFileSync, pause = sleep, beforeAttempt = () => {},
+} = {}) {
   const args = ["api", "--method", method, "-H", "X-GitHub-Api-Version: 2026-03-10", endpoint];
   if (body !== undefined) args.push("--input", "-");
-  let output;
-  try {
-    output = execFileSync("gh", args, {
-      encoding: "utf8", input: body === undefined ? undefined : JSON.stringify(body),
-      timeout: 30_000, maxBuffer: 4 * 1024 * 1024,
-      windowsHide: true, stdio: ["pipe", "pipe", "pipe"],
-    });
-  } catch {
-    throw new Error(`GitHub ${method} failed at ${endpoint}; dispatches are not retried`);
+  const attempts = method === "GET" ? READ_ATTEMPTS : 1;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    beforeAttempt();
+    let output;
+    try {
+      output = await execute("gh", args, {
+        encoding: "utf8", input: body === undefined ? undefined : JSON.stringify(body),
+        timeout: 30_000, maxBuffer: 4 * 1024 * 1024,
+        windowsHide: true, stdio: ["pipe", "pipe", "pipe"],
+      });
+    } catch (error) {
+      const failure = githubReadFailure(error);
+      if (method !== "GET" || !failure.retryable || attempt === attempts) {
+        throw new Error(`GitHub ${method} failed at ${endpoint}: ${failure.detail}; ${attempt} attempt(s); ` +
+          (method === "GET" ? "read retry stopped" : "dispatches are not retried"));
+      }
+      await pause(READ_RETRY_MS);
+      continue;
+    }
+    // A malformed body or a valid JSON identity/conclusion rejection is not a
+    // transport failure and must never repeat either a read or a dispatch.
+    try { return JSON.parse(output); }
+    catch {
+      throw new Error(`GitHub ${method} returned invalid JSON at ${endpoint}; ` +
+        (method === "GET" ? "response validation is not retried" : "dispatch receipt uncertain; do not retry automatically"));
+    }
   }
-  try { return JSON.parse(output); }
-  catch { throw new Error(`GitHub ${method} returned an invalid receipt at ${endpoint}`); }
 }
 
 if (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.meta.url) {
