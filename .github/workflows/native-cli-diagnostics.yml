@@ -1,0 +1,182 @@
+name: Canonical Linux CLI diagnostics
+
+on:
+  workflow_dispatch:
+    inputs:
+      baseline_source:
+        description: Exact baseline main source SHA
+        type: string
+        required: true
+      baseline_run:
+        description: Canonical release-cli run that produced the baseline Linux CLI
+        type: string
+        required: true
+      baseline_artifact_id:
+        description: Exact baseline Linux artifact ID
+        type: string
+        required: true
+      candidate_source:
+        description: Exact candidate main SHA, equal to this workflow checkout
+        type: string
+        required: true
+      candidate_run:
+        description: Canonical release-cli run that produced the candidate Linux CLI
+        type: string
+        required: true
+      candidate_artifact_id:
+        description: Exact candidate Linux artifact ID
+        type: string
+        required: true
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: canonical-linux-diagnostic-${{ github.run_id }}-${{ github.run_attempt }}
+  cancel-in-progress: false
+
+jobs:
+  same-runner:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      CARGO_INCREMENTAL: '0'
+      BASELINE_SOURCE: ${{ inputs.baseline_source }}
+      BASELINE_RUN: ${{ inputs.baseline_run }}
+      BASELINE_ARTIFACT_ID: ${{ inputs.baseline_artifact_id }}
+      CANDIDATE_SOURCE: ${{ inputs.candidate_source }}
+      CANDIDATE_RUN: ${{ inputs.candidate_run }}
+      CANDIDATE_ARTIFACT_ID: ${{ inputs.candidate_artifact_id }}
+      OUTPUT_ROOT: _local/artifacts/benchmarks/native-cli-diagnostics/${{ github.run_id }}-${{ github.run_attempt }}
+      TOOLS_ROOT: build/native-cli-diagnostic-tools/${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Bind the diagnostic to the exact main candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_EVENT_NAME" == workflow_dispatch && "$GITHUB_REF" == refs/heads/main ]]
+          [[ "$CANDIDATE_SOURCE" =~ ^[0-9a-f]{40}$ && "$BASELINE_SOURCE" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$CANDIDATE_SOURCE" == "$GITHUB_SHA" && "$CANDIDATE_SOURCE" != "$BASELINE_SOURCE" ]]
+          [[ "$(git rev-parse HEAD)" == "$CANDIDATE_SOURCE" ]]
+          for value in "$BASELINE_RUN" "$BASELINE_ARTIFACT_ID" "$CANDIDATE_RUN" "$CANDIDATE_ARTIFACT_ID"; do
+            [[ "$value" =~ ^[1-9][0-9]*$ ]]
+          done
+          test -z "${CLEARRA_EXPECTED_VCPUS:-}"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.23.2
+      - name: Install the pinned Rust toolchain
+        run: rustup toolchain install 1.98.1 --profile minimal
+      - name: Build only the manager and small diagnostic helpers
+        id: tools
+        timeout-minutes: 20
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Bootstrap small management/inspection tools in the finite CI job.
+          # The product CLI is consumed from its canonical artifact, never built here.
+          tooling="$GITHUB_WORKSPACE/$TOOLS_ROOT"
+          cargo +1.98.1 build --locked --release -j 2 --target-dir "$tooling/cargo" \
+            -p clearra-manage -p clearra-core-domain -p clearra-ctk3
+          dependencies="$tooling/cargo/release/deps"
+          shopt -s nullglob
+          externs=()
+          for crate in serde_json sha2 clearra_ctk3 clearra_core_domain; do
+            matches=("$dependencies"/lib"$crate"-*.rlib)
+            (( ${#matches[@]} == 1 ))
+            externs+=(--extern "$crate=${matches[0]}")
+          done
+          rustc +1.98.1 --edition 2021 -C opt-level=1 -L "dependency=$dependencies" \
+            "${externs[@]}" scripts/benchmark/oracle-cli-bench.rs -o "$tooling/oracle-cli-bench"
+          rustc +1.98.1 --edition 2021 -C opt-level=1 --test -L "dependency=$dependencies" \
+            "${externs[@]}" scripts/benchmark/oracle-cli-bench.rs -o "$tooling/oracle-cli-bench-tests"
+          "$tooling/oracle-cli-bench-tests"
+          manager="$tooling/cargo/release/clearra-manage"
+          "$manager" --root "$GITHUB_WORKSPACE" storage verify --path "$GITHUB_WORKSPACE/$OUTPUT_ROOT"
+          "$manager" --root "$GITHUB_WORKSPACE" storage verify --path "$GITHUB_WORKSPACE/$OUTPUT_ROOT-prepare.log"
+          printf 'manager=%s\nhelper=%s\n' "$manager" "$tooling/oracle-cli-bench" >> "$GITHUB_OUTPUT"
+      - name: Verify exact canonical Linux artifacts without name or list lookup
+        id: prepare
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DIAGNOSTIC_MANAGER: ${{ steps.tools.outputs.manager }}
+          DIAGNOSTIC_HELPER: ${{ steps.tools.outputs.helper }}
+        run: |
+          set -euo pipefail
+          export CLEARRA_DIAGNOSTIC_ROOT="$GITHUB_WORKSPACE/$OUTPUT_ROOT"
+          mkdir -p "$(dirname "$CLEARRA_DIAGNOSTIC_ROOT")"
+          "$DIAGNOSTIC_MANAGER" --root "$GITHUB_WORKSPACE" runtime run \
+            --producer canonical-cli-input-diagnostic --profile control --timeout 300 -- \
+            "$DIAGNOSTIC_HELPER" prepare 2>&1 | tee "$CLEARRA_DIAGNOSTIC_ROOT-prepare.log"
+      - name: Plan the exact Discord adapter invocation
+        id: discord-plan
+        if: ${{ !cancelled() && steps.prepare.outcome == 'success' }}
+        shell: bash
+        env:
+          DIAGNOSTIC_HELPER: ${{ steps.tools.outputs.helper }}
+        run: |
+          set -euo pipefail
+          export CLEARRA_DIAGNOSTIC_ROOT="$GITHUB_WORKSPACE/$OUTPUT_ROOT"
+          "$DIAGNOSTIC_HELPER" discord-prepare
+      - name: Execute the actual Discord P7P4 adapter at observed CPU capacity
+        if: ${{ !cancelled() && steps.discord-plan.outcome == 'success' }}
+        shell: bash
+        env:
+          DIAGNOSTIC_MANAGER: ${{ steps.tools.outputs.manager }}
+          DIAGNOSTIC_HELPER: ${{ steps.tools.outputs.helper }}
+          DIAGNOSTIC_CLI: ${{ steps.discord-plan.outputs.binary }}
+          DIAGNOSTIC_WORKERS: ${{ steps.discord-plan.outputs.workers }}
+        run: |
+          set -euo pipefail
+          export CLEARRA_DIAGNOSTIC_ROOT="$GITHUB_WORKSPACE/$OUTPUT_ROOT"
+          export CLEARRA_P7P4_ADAPTER_SOURCE="$CANDIDATE_SOURCE"
+          export CLEARRA_P7P4_TEMP_ROOT="$CLEARRA_DIAGNOSTIC_ROOT/discord-p7p4/native-artifacts"
+          status=0
+          # Keep Node as the manager's direct child, preserving its owned-PID
+          # GC responder and the unchanged product adapter's process lifecycle.
+          "$DIAGNOSTIC_MANAGER" --root "$GITHUB_WORKSPACE" runtime run \
+            --producer discord-p7p4-diagnostic --profile benchmark-search --timeout 900 -- \
+            node scripts/benchmark/discord-p7p4-runner.mjs "$DIAGNOSTIC_CLI" "$DIAGNOSTIC_WORKERS" \
+            > "$CLEARRA_DIAGNOSTIC_ROOT/discord-p7p4/runner.json" \
+            2> "$CLEARRA_DIAGNOSTIC_ROOT/discord-p7p4/runner.stderr.log" || status=$?
+          export CLEARRA_DIAGNOSTIC_ADAPTER_EXIT="$status"
+          "$DIAGNOSTIC_HELPER" discord-validate
+      - name: Measure complete P7P7 baseline candidate candidate baseline at 1 2 N
+        if: ${{ !cancelled() && steps.prepare.outcome == 'success' }}
+        shell: bash
+        env:
+          DIAGNOSTIC_MANAGER: ${{ steps.tools.outputs.manager }}
+          DIAGNOSTIC_HELPER: ${{ steps.tools.outputs.helper }}
+        run: |
+          set -euo pipefail
+          export CLEARRA_DIAGNOSTIC_ROOT="$GITHUB_WORKSPACE/$OUTPUT_ROOT"
+          "$DIAGNOSTIC_MANAGER" --root "$GITHUB_WORKSPACE" runtime run \
+            --producer oracle-cli-p7p7-diagnostic --profile benchmark-search --timeout 7200 -- \
+            "$DIAGNOSTIC_HELPER" abba 2>&1 | tee "$CLEARRA_DIAGNOSTIC_ROOT/p7p7-manager.log"
+      - name: Retain exact supervisor receipts without another execution
+        if: ${{ always() && steps.tools.outcome == 'success' }}
+        shell: bash
+        env:
+          DIAGNOSTIC_HELPER: ${{ steps.tools.outputs.helper }}
+        run: |
+          set -euo pipefail
+          export CLEARRA_DIAGNOSTIC_ROOT="$GITHUB_WORKSPACE/$OUTPUT_ROOT"
+          "$DIAGNOSTIC_HELPER" receipts
+      - name: Preserve diagnostic results and partial output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-cli-diagnostic-${{ github.sha }}-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: |
+            ${{ env.OUTPUT_ROOT }}/**/*.json
+            ${{ env.OUTPUT_ROOT }}/**/*.log
+            ${{ env.OUTPUT_ROOT }}/**/*.txt
+            ${{ env.OUTPUT_ROOT }}-prepare.log
+          if-no-files-found: warn
+          retention-days: 14
