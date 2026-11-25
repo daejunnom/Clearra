@@ -5,6 +5,9 @@ import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 
 import { ClearraJobExecutor } from "../src/clearra/command.mjs";
+import { validateSolutionTransportArtifact } from "../src/clearra/solution-artifact.mjs";
+import { findProductCapability } from "../src/discord/capability-registry.mjs";
+import { validDiscordPcSolutionsResult } from "../src/discord/pc-solutions-result.mjs";
 import {
   currentRuntimeIdentityForCommit,
   productBuildIdentityMatchesRuntime,
@@ -13,8 +16,15 @@ import {
 const COMMIT_PATTERN = /^[0-9a-f]{40}$/u;
 const SMOKE_TIMEOUT_MS = 60_000;
 const SMOKE_OUTPUT_BYTES = 1024 * 1024;
+const SOLUTIONS = findProductCapability("pc.solutions");
+// Keep the existing small empty-2L/IJLOO/no-Hold search. The pure registry owns
+// its Unique semantics; a contract test compares every argument with the real
+// public option lowerer without importing document codecs into this runtime.
 const SMOKE_ARGUMENTS = Object.freeze([
-  "pc", "--lines", "2", "--queue", "IJLOO", "--fixed", "--no-hold",
+  ...SOLUTIONS.engine.argvPrefix,
+  "--lines", "2", "--board-mask", "0x0", "--height", "2", "--pieces", "5",
+  "--queue", "IJLOO", "--no-hold", "--objective", SOLUTIONS.engine.pcObjective,
+  "--rule", "srs-plus",
 ]);
 
 export async function runCloudCandidateSmokeJob(options, dependencies = {}) {
@@ -39,6 +49,7 @@ export async function runCloudCandidateSmokeJob(options, dependencies = {}) {
     reverseSearchTimeoutMs: SMOKE_TIMEOUT_MS,
     forwardSearchTimeoutMs: SMOKE_TIMEOUT_MS,
     maxOutputBytes: SMOKE_OUTPUT_BYTES,
+    maxArtifactBytes: SMOKE_OUTPUT_BYTES,
     pollIntervalMs: 250,
     cancelTimeoutMs: 2_000,
     now,
@@ -62,15 +73,28 @@ function validateSmokeResult(result, expectedRuntimeIdentity) {
   } catch {
     throw new Error("candidate smoke Job returned invalid Clearra JSON");
   }
+  const summary = payload?.summary;
   if (
-    payload?.kind !== "pc" ||
-    payload?.summary?.solution_found !== true ||
-    typeof payload?.summary?.normalized_solution_set_hash !== "string" ||
+    !validDiscordPcSolutionsResult(payload) ||
+    summary.solution_found !== true ||
+    summary.count_complete !== true ||
+    summary.solution_count_calculated !== true ||
+    summary.solution_set_materialized !== true ||
+    !Number.isSafeInteger(summary.normalized_unique_solution_count) ||
+    summary.normalized_unique_solution_count < 1 ||
+    !/^cts1:[0-9a-f]{16}$/u.test(summary.normalized_solution_set_hash ?? "") ||
+    summary.workers_requested !== "auto" ||
+    !Number.isSafeInteger(summary.workers_used) ||
+    summary.workers_used < 1 || summary.workers_used > 8 ||
     !productBuildIdentityMatchesRuntime(payload?.runtime_identity, expectedRuntimeIdentity)
   ) {
     throw new Error("candidate smoke Job returned an invalid PC result contract");
   }
-  return payload.summary.normalized_solution_set_hash;
+  const artifact = validateSolutionTransportArtifact(result.artifact, SMOKE_OUTPUT_BYTES);
+  if (artifact.solutionCount !== summary.normalized_unique_solution_count) {
+    throw new Error("candidate smoke Job solution artifact differs from its exact Unique count");
+  }
+  return summary.normalized_solution_set_hash;
 }
 
 function canonicalSourceCommit(value) {

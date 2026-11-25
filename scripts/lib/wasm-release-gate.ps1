@@ -98,6 +98,12 @@ function Invoke-WasmProductSourceContracts {
         '--lib', 'extended_build_b2b_option_combinations_match_bounded_compact_reference',
         '--', '--test-threads=1',
         ':::',
+        # Probability requests must execute their bounded distributed and
+        # B2B contract regressions, not only compile with the other lib tests.
+        $CargoPath, 'test', '--locked', '-p', 'clearra-wasm',
+        '--lib', 'typed_pc_chance_',
+        '--', '--test-threads=1',
+        ':::',
         $CargoPath, 'test', '--locked', '-p', 'clearra-cli-command',
         '--test', 'extended_pc_surfaces',
         '--', '--test-threads=1',

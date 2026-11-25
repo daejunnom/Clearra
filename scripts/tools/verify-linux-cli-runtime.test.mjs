@@ -71,6 +71,10 @@ test('parallel release CLI uses the Cloud compiler baseline and then the slim ru
   assert.ok(job.includes(`uses: docker://${runtime}`));
   assert.match(job, /needs: \[metadata, ctk3\]/u);
   assert.equal((job.match(/bash scripts\/tools\/package-release-cli.sh/gu) ?? []).length, 1);
+  assert.match(job, /export CLEARRA_PARITY_EXECUTABLE="\$CLEARRA_REAL_PC24_CLI"/u);
+  assert.match(job, /export CLEARRA_PARITY_EXECUTABLE_SHA256="\$\(sha256sum "\$CLEARRA_PARITY_EXECUTABLE"/u);
+  assert.match(job, /export CLEARRA_PARITY_SOURCE_COMMIT="\$CLEARRA_REAL_PC24_SOURCE_COMMIT"/u);
+  assert.match(job, /node --test apps\/clearra-discord-bot\/test\/pc-solutions\.test\.mjs/u);
   const script = await readFile(new URL('./verify-linux-cli-runtime.mjs', import.meta.url), 'utf8');
   assert.doesNotMatch(script, /spawn.*cargo|execFile.*cargo|cargo build/u);
 });

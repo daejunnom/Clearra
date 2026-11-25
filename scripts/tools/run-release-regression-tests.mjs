@@ -22,6 +22,7 @@ export const RELEASE_REGRESSION_TEST_FILES = Object.freeze([
   "scripts/release/cloud/recovery-prestage-preflight.test.mjs",
   "scripts/release/cloud/remove-failed-deploy-candidate-tag.test.mjs",
   "scripts/release/cloud/candidate-release-v080.test.mjs",
+  "scripts/release/collect-cloud-runtime-operations.test.mjs",
   "scripts/release/create-exact-source-archive.test.mjs",
   "scripts/release/current-product-release.test.mjs",
   "scripts/release/ctk3-npm-package.test.mjs",
