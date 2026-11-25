@@ -42,6 +42,58 @@ const canonicalGuiPcFullSolutionArguments = readFileSync(
   'utf8'
 ).trimEnd().split('\t');
 
+test('PC command projection keeps long supplies, locks and workers across Hold and result modes', () => {
+  const fields = [
+    { lines: 2, boardMask: 0n, locks: 5 },
+    { lines: 6, boardMask: 0xc03n, locks: 14 },
+    { lines: 6, boardMask: 0n, locks: 15 },
+    { lines: 8, boardMask: 0x3fcffn, locks: 16 },
+    { lines: 8, boardMask: 0n, locks: 20 },
+    { lines: 24, boardMask: 0n, locks: 60 }
+  ];
+  for (const field of fields) {
+    for (const holdEnabled of [false, true]) {
+      for (const workers of [1, 8]) {
+        for (const rule of ['srs', 'srs-plus']) {
+          for (const scoreMode of ['off', 'tiling']) {
+            const request = { ...createDefaultWorkspaceRequest(), ...field,
+              queue: 'O'.repeat(field.locks + Number(holdEnabled)),
+              holdEnabled, workers, rule, scoreMode };
+            const context = `${field.lines}L/${field.locks}/${holdEnabled}/${workers}/${rule}/${scoreMode}`;
+            assert.equal(scenarioPieceWindow(request), field.locks, context);
+            assert.deepEqual(workspaceValidationCodes(request, 'web'), [], context);
+            assert.deepEqual(workspaceValidationCodes(request, 'desktop'), [], context);
+            const args = buildWorkspaceCommandArguments(request);
+            assert.equal(args[args.indexOf('--queue') + 1], request.queue, context);
+            assert.equal(args[args.indexOf('--lines') + 1], String(field.lines), context);
+            assert.equal(args[args.indexOf('--workers') + 1], String(workers), context);
+            if (!holdEnabled || field.boardMask !== 0n) {
+              assert.equal(args[args.indexOf('--pieces') + 1], String(field.locks), context);
+              assert.equal(args[args.indexOf('--height') + 1], String(field.lines), context);
+            }
+            if (scoreMode === 'tiling') {
+              assert.deepEqual(args.slice(0, 3), ['clearra', 'pc', 'tiling'], context);
+              assert.equal(args.includes('--rule'), false, 'geometry-only mode has no movement rule');
+            } else {
+              assert.equal(args[args.indexOf('--rule') + 1], rule, context);
+            }
+            assert.deepEqual(workspaceRequestForDesktop(request, 'ko').arguments, args, context);
+          }
+        }
+      }
+    }
+  }
+
+  const queue = Array.from({ length: 12 }, (_, index) => index % 2 ? 'IIOOO' : 'OOOOO').join(';');
+  assert.ok(queue.length > 64);
+  for (const scoreMode of ['off', 'tiling']) {
+    const request = { ...createDefaultWorkspaceRequest(), lines: 2, queue, scoreMode };
+    assert.deepEqual(workspaceValidationCodes(request, 'web'), []);
+    const args = buildWorkspaceCommandArguments(request);
+    assert.equal(args[args.indexOf('--patterns') + 1], queue);
+  }
+});
+
 test('GUI and Desktop canonical argv retain the shared bounded 7..24L surface inputs', () => {
   const rows = readFileSync(new URL('../../../tests/fixtures/contracts/extended_pc_surface_input.v1.tsv', import.meta.url), 'utf8')
     .split(/\r?\n/u).filter(line => line && !line.startsWith('#'));

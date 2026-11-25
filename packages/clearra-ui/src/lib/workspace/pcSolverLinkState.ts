@@ -1,6 +1,8 @@
 import {
+  automaticPcTargetLines,
   normalizeQueueInput,
   trimBoardMask,
+  WORKSPACE_PC_MAX_LINES,
   type RuleProfile
 } from './solverWorkspaceModel';
 import { decodeFieldInput, encodeFieldDocument } from './fieldInterchange';
@@ -9,7 +11,6 @@ const PATH_VERSION = 'v1';
 const EMPTY_QUEUE_SEGMENT = '-';
 const MAX_PATH_LENGTH = 512;
 const MAX_QUEUE_LENGTH = 256;
-const MAX_PC_SOLVER_LINES = 4;
 const RULES = new Set<RuleProfile>(['srs-plus', 'srs', 'srs-x', 'jstris-180']);
 
 export type PcSolverLinkState = {
@@ -28,6 +29,21 @@ export const DEFAULT_PC_SOLVER_LINK_STATE: PcSolverLinkState = {
   rule: 'srs-plus'
 };
 
+export function pcSolverDisplayHeight(
+  state: Pick<PcSolverLinkState, 'lines' | 'boardMask'>
+): number {
+  const boardMask = trimBoardMask(state.boardMask, WORKSPACE_PC_MAX_LINES);
+  const occupiedHeight = boardMask === 0n ? 0 : Math.ceil(boardMask.toString(2).length / 10);
+  return Math.max(DEFAULT_PC_SOLVER_LINK_STATE.lines, boundedLines(state.lines), occupiedHeight);
+}
+
+export function pcSolverAutomaticTargetLines(
+  state: Pick<PcSolverLinkState, 'lines' | 'boardMask' | 'queue'>
+): number {
+  return automaticPcTargetLines(state.boardMask, state.queue, WORKSPACE_PC_MAX_LINES)
+    ?? pcSolverDisplayHeight(state);
+}
+
 export function encodePcSolverPath(state: PcSolverLinkState): string {
   const lines = boundedLines(state.lines);
   const queue = normalizeQueueInput(state.queue);
@@ -35,7 +51,7 @@ export function encodePcSolverPath(state: PcSolverLinkState): string {
   return [
     PATH_VERSION,
     String(lines),
-    encodeURIComponent(encodeOccupancyField(state.boardMask, MAX_PC_SOLVER_LINES)),
+    encodeURIComponent(encodeOccupancyField(state.boardMask, WORKSPACE_PC_MAX_LINES)),
     state.holdEnabled ? 'hold' : 'no-hold',
     RULES.has(state.rule) ? state.rule : DEFAULT_PC_SOLVER_LINK_STATE.rule,
     queueSegment
@@ -49,8 +65,8 @@ export function decodePcSolverPath(path: string): PcSolverLinkState | null {
   if (segments.length !== 6 || segments[0] !== PATH_VERSION) return null;
 
   const lines = Number(segments[1]);
-  if (!Number.isInteger(lines) || lines < 1 || lines > MAX_PC_SOLVER_LINES) return null;
-  const boardMask = decodeOccupancyField(segments[2], MAX_PC_SOLVER_LINES);
+  if (!Number.isInteger(lines) || lines < 1 || lines > WORKSPACE_PC_MAX_LINES) return null;
+  const boardMask = decodeOccupancyField(segments[2], WORKSPACE_PC_MAX_LINES);
   if (boardMask === null) return null;
   const holdEnabled = segments[3] === 'hold' ? true : segments[3] === 'no-hold' ? false : null;
   if (holdEnabled === null || !RULES.has(segments[4] as RuleProfile)) return null;
@@ -75,7 +91,7 @@ export function decodePcSolverPath(path: string): PcSolverLinkState | null {
 }
 
 function boundedLines(lines: number): number {
-  return Math.max(1, Math.min(MAX_PC_SOLVER_LINES, Math.trunc(lines || 1)));
+  return Math.max(1, Math.min(WORKSPACE_PC_MAX_LINES, Math.trunc(lines || 1)));
 }
 
 function encodeOccupancyField(boardMask: bigint, lines: number): string {

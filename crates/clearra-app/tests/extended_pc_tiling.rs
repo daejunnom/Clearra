@@ -235,6 +235,113 @@ fn full_height_tiling_opening_keeps_a_distinct_typed_ingress_without_enumeration
 }
 
 #[test]
+fn tiling_option_combinations_preserve_long_windows_and_occupied_hold_without_enumeration() {
+    use clearra_pc_graph::request::SupplyWindowSize;
+    use clearra_problem::ProblemCompiler;
+
+    // These are input/compiler checks, not an empty 24L enumeration. The
+    // fixed source has one pattern at every size; the standard-bag source is
+    // checked at the product boundary without materializing its population.
+    for (height, initial, pieces) in [
+        (6, [3 | (3 << 10), 0, 0, 0], 14),
+        (6, [0; 4], 15),
+        (8, [0; 4], 20),
+        (24, [0; 4], 60),
+    ] {
+        for (hold_enabled, held) in [(false, None), (true, None), (true, Some(PieceKind::O))] {
+            let required_draws = pieces - usize::from(held.is_some());
+            for draws in required_draws..=required_draws + usize::from(hold_enabled) {
+                for standard_bag in [false, true] {
+                    let queue = if standard_bag {
+                        PcQueueInput::standard_7_bag()
+                    } else {
+                        PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::O; draws]))
+                    };
+                    let query = PcScenarioQuery::new(
+                        PcScenarioBoard::standard_10_from_words(height, initial).unwrap(),
+                        queue,
+                        PieceWindow::new(pieces),
+                    )
+                    .with_exact_pieces(Some(pieces))
+                    .with_allow_hold(hold_enabled)
+                    .with_hold_piece(held)
+                    .with_supply_window_size(SupplyWindowSize::new(draws))
+                    .with_objective(ObjectivePolicy::tiling())
+                    .with_count_policy(PcCountPolicy::CountUnique);
+                    let command = ScenarioAppCommand::new(query.clone()).with_result_projection(
+                        PcResultProjection::TilingFamilyV1(
+                            PcTilingIngressOrigin::CanonicalPcTiling,
+                        ),
+                    );
+                    assert_eq!(command.validate_result_projection(), Ok(()));
+                    assert!(AppRequest::new(AppCommand::Scenario(command))
+                        .with_product_capability_contract(ProductCapabilityContract::PcTiling)
+                        .is_ok());
+                    if !standard_bag {
+                        let compiled = ProblemCompiler::compile_scenario_pc_tiling(&query).unwrap();
+                        assert_eq!(compiled.piece_window().max_pieces(), pieces);
+                        assert_eq!(compiled.exact_pieces(), Some(pieces));
+                        assert_eq!(
+                            compiled.core_query().supply_window_size(),
+                            query.supply_window_size()
+                        );
+                        assert_eq!(compiled.core_query().hold_state(), query.hold_state());
+                        assert_eq!(
+                            compiled
+                                .piece_source()
+                                .materialized_universe()
+                                .unwrap()
+                                .pattern_count(),
+                            1
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn tiling_option_combinations_retain_the_shared_compiler_supply_bounds() {
+    use clearra_pc_graph::request::SupplyWindowSize;
+    use clearra_problem::{ProblemCompileError, ProblemCompiler};
+
+    let base = PcScenarioQuery::new(
+        PcScenarioBoard::standard_10(6, 0),
+        PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::O; 15])),
+        PieceWindow::new(15),
+    )
+    .with_exact_pieces(Some(15))
+    .with_allow_hold(false)
+    .with_objective(ObjectivePolicy::tiling())
+    .with_count_policy(PcCountPolicy::CountUnique);
+    for (draws, expected) in [
+        (
+            14,
+            ProblemCompileError::SupplyWindowTooShort {
+                source_pieces: 14,
+                required_source_pieces: 15,
+            },
+        ),
+        (
+            16,
+            ProblemCompileError::SupplyWindowConflictsWithConcreteQueue {
+                source_pieces: 16,
+                queue_pieces: 15,
+            },
+        ),
+    ] {
+        let query = base
+            .clone()
+            .with_supply_window_size(SupplyWindowSize::new(draws));
+        assert_eq!(
+            ProblemCompiler::compile_scenario_pc_tiling(&query),
+            Err(expected)
+        );
+    }
+}
+
+#[test]
 fn empty_extended_app_opening_reports_finite_memory_failure_not_unsupported_or_success() {
     let context = AppContext::new(
         AppServices::default().with_core_executor(AppCoreExecutorService::wasm_cpu()),

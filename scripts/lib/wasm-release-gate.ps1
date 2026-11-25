@@ -65,9 +65,11 @@ function Invoke-WasmProductSourceContracts {
         '-p', 'clearra-wasm',
         '--lib', '--tests'
     ) 'clearra-wasm source contract compilation'
-    # Cargo stops after a failing integration-test executable. Keep the two
-    # independent host contracts observable even when one process aborts; the
-    # shared runner preserves failure and Cargo reuses the same native build.
+    # Cargo stops after a failing integration-test executable. Keep independent
+    # host and cross-surface input contracts observable when one process aborts;
+    # the shared runner preserves failure and Cargo reuses the native build.
+    # These long-supply cases validate lowering and compiler bounds without
+    # enumerating the empty 24-line search space.
     Invoke-WasmReleaseCommand $NodePath @(
         (Join-Path $Root 'scripts/ci/run-independent-checks.mjs'), '--',
         $CargoPath, 'test', '--locked', '-p', 'clearra-wasm',
@@ -76,6 +78,22 @@ function Invoke-WasmProductSourceContracts {
         ':::',
         $CargoPath, 'test', '--locked', '-p', 'clearra-wasm',
         '--test', 'wasm_host_contract',
+        '--', '--test-threads=1',
+        ':::',
+        $CargoPath, 'test', '--locked', '-p', 'clearra-wasm',
+        '--lib', 'typed_pc_tiling_',
+        '--', '--test-threads=1',
+        ':::',
+        $CargoPath, 'test', '--locked', '-p', 'clearra-cli-command',
+        '--test', 'extended_pc_surfaces',
+        '--', '--test-threads=1',
+        ':::',
+        $CargoPath, 'test', '--locked', '-p', 'clearra-validation',
+        '--lib', 'pc_query_validator::tests',
+        '--', '--test-threads=1',
+        ':::',
+        $CargoPath, 'test', '--locked', '-p', 'clearra-app',
+        '--test', 'extended_pc_tiling', 'tiling_option_combinations',
         '--', '--test-threads=1'
     ) 'clearra-wasm source and host contract execution'
 }

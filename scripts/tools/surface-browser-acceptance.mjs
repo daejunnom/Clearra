@@ -1,4 +1,5 @@
-// Real compiled Svelte + real WASM. Only GPU hardware discovery is simulated.
+// Real compiled Svelte + real WASM. GPU discovery and the dedicated tiling
+// cases' advertised logical capacity are fixtures; computation is real.
 // This is an acceptance test: every assertion and timeout is a failing exit.
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
@@ -6,6 +7,7 @@ import { readFile, mkdir, stat, writeFile } from 'node:fs/promises';
 import { resolve, extname, sep } from 'node:path';
 import { createRequire } from 'node:module';
 import { assertRecoveryGallery } from './recovery-gallery-contract.mjs';
+import { expectedWasmProbeIdentity, validateWasmProbeTerminal } from './wasm-product-terminal-contract.mjs';
 const require = createRequire(resolve(process.env.CLEARRA_BROWSER_TOOLS_ROOT, 'package.json'));
 const { chromium } = require('playwright');
 const root = resolve(process.argv[2] || 'apps/clearra-web/build');
@@ -42,13 +44,17 @@ function gpuShim(mode) {
   const body = mode === 'null' ? 'Promise.resolve(null)' : mode === 'reject' ? "Promise.reject(new Error('simulated adapter refusal'))" : 'new Promise(() => {})';
   return `Object.defineProperty(navigator, 'gpu', { configurable: true, value: { requestAdapter: () => ${body} } });`;
 }
-async function context(mode) {
+async function context(mode, logicalProcessors) {
   const ctx = await browser.newContext({ locale: 'en-US', viewport: { width: 1440, height: 1100 } });
-  await ctx.addInitScript(gpuShim(mode));
+  const capacity = logicalProcessors === undefined ? '' :
+    `globalThis.__clearraAcceptanceActualLogical = navigator.hardwareConcurrency;
+     Object.defineProperty(navigator, 'hardwareConcurrency', { configurable: true, get: () => ${logicalProcessors} });`;
+  const shim = gpuShim(mode) + '\n' + capacity;
+  await ctx.addInitScript(shim);
   // Preserve real worker construction, URL/base-path, lifecycle and all messages.
   await ctx.route(/\/_app\/immutable\/workers\/[^/]+\.js(?:\?.*)?$/, async route => {
     const response = await route.fetch();
-    await route.fulfill({ response, body: gpuShim(mode) + '\n' + await response.text() });
+    await route.fulfill({ response, body: shim + '\n' + await response.text() });
   });
   return ctx;
 }
@@ -135,9 +141,231 @@ async function readPaintedMask(page, index, height) {
   }
   return mask;
 }
+
+function emptyOTilingKey(height) {
+  const placements = [];
+  for (let y = 0; y < height; y += 2) for (let x = 0; x < 10; x += 2) {
+    const mask = 0xc03n << BigInt(y * 10 + x);
+    placements.push(`O:${mask.toString(16).padStart(16, '0')}`);
+  }
+  return `ctk1|initial=0000000000000000|placements=${placements.join(',')}`;
+}
+
+function assertTilingFinal(final, height, expectedIdentity) {
+  assert.equal(final?.event, 'final_response');
+  assert.equal(final.response.status, 'success', JSON.stringify(final.response.diagnostics));
+  assert.equal(final.response.result?.kind, 'pc-tiling-family.v1');
+  assert.deepEqual(final.response.runtime_identity, expectedIdentity);
+  const report = final.search_report;
+  assert.ok(report, 'typed tiling must publish its real search report');
+  assert.equal(report.count_complete, true);
+  assert.equal(report.solution_keys_complete, true);
+  assert.equal(report.resource_truncated, false);
+  assert.equal(report.unique_solution_count, 1);
+  assert.deepEqual(report.normalized_solution_keys, [emptyOTilingKey(height)]);
+  if (height === 2) assert.equal(report.normalized_solution_set_hash, 'cts1:21fffe814548e2c1');
+  return report;
+}
+
+async function tilingUiCase({ height, hold, workers }, expectedIdentity) {
+  const label = `tiling-${height}L-hold-${hold ? 'on' : 'off'}-workers-${workers}`;
+  const ctx = await context('null', workers);
+  await ctx.addInitScript(() => {
+    window.__clearraTilingObserved = { commands: [], terminals: [], workerErrors: [] };
+    const Original = window.Worker;
+    window.Worker = class extends Original {
+      constructor(...args) {
+        super(...args);
+        this.acceptanceOwnsRun = false;
+        this.addEventListener('message', event => {
+          if (this.acceptanceOwnsRun &&
+              ['final_response', 'failed', 'cancelled', 'terminated'].includes(event.data?.event)) {
+            window.__clearraTilingObserved.terminals.push(event.data);
+          }
+        });
+        this.addEventListener('error', event => {
+          window.__clearraTilingObserved.workerErrors.push(String(event.message));
+        });
+      }
+      postMessage(...args) {
+        if (args[0]?.type === 'run_command_text') {
+          this.acceptanceOwnsRun = true;
+          window.__clearraTilingObserved.commands.push(args[0].commandText);
+        }
+        return super.postMessage(...args);
+      }
+    };
+  });
+  const page = await ctx.newPage();
+  const errors = [];
+  page.on('pageerror', error => errors.push(String(error)));
+  try {
+    await page.goto(`http://127.0.0.1:4194${base}/?tool=pc`);
+    await page.locator('.product-tabs').waitFor();
+    await page.locator('.dimension-field input').fill(String(height));
+    await page.waitForFunction(expected =>
+      document.querySelector('.board-tool .board')?.querySelectorAll('button').length === expected, height * 10);
+    assert.equal(await readPaintedMask(page, 0, height), 0n);
+    await page.locator('.workspace-queue-input').fill('O'.repeat(height * 5 / 2));
+    await page.locator('[data-pc-control="result-mode"]').selectOption('tiling');
+    await page.getByRole('checkbox', { name: 'Hold', exact: true }).setChecked(hold);
+    await page.locator('[data-pc-control="all-logical-processors"]').check();
+    await page.waitForFunction(expected =>
+      document.querySelector('.worker-authority')?.getAttribute('data-workers-effective') === String(expected), workers);
+    assert.equal(await page.locator('.worker-authority').getAttribute('data-workers-requested'), String(workers));
+    assert.equal(await page.locator('.workspace-validation li').count(), 0);
+    await completeRun(page, () => page.getByRole('button', { name: 'Run search', exact: true }).click(), label);
+    const observed = await page.evaluate(() => window.__clearraTilingObserved);
+    assert.deepEqual(errors, []);
+    assert.deepEqual(observed.workerErrors, []);
+    assert.equal(observed.commands.length, 1, 'one UI action must issue exactly one product command');
+    assert.match(observed.commands[0], /^clearra pc tiling\b/u);
+    assert.match(observed.commands[0], new RegExp(`(?:^| )--workers ${workers}(?: |$)`, 'u'));
+    assert.match(observed.commands[0], /(?:^| )--use-all-cpu-threads(?: |$)/u);
+    assert.equal(observed.terminals.length, 1, 'typed tiling must emit one successful terminal');
+    const report = assertTilingFinal(observed.terminals[0], height, expectedIdentity);
+    assert.equal(report.workers_used, workers, 'typed tiling must retain the requested compute pool width');
+    assert.deepEqual(await completedKeys(page, 1, label), [emptyOTilingKey(height)]);
+    await writeFile(resolve(reportRoot, `${label}.json`), JSON.stringify({
+      command: observed.commands[0], terminal: observed.terminals[0]
+    }, null, 2) + '\n');
+    results.push({ case: label, result: 'passed', height, hold, advertisedLogicalProcessors: workers,
+      actualLogicalProcessors: await page.evaluate(() => window.__clearraAcceptanceActualLogical),
+      requestedWorkers: workers, workersUsed: report.workers_used,
+      solutionCount: 1, normalizedSolutionSetHash: report.normalized_solution_set_hash });
+  } catch (error) {
+    const failure = error instanceof Error ? error : new Error(String(error));
+    const observed = await page.evaluate(() => window.__clearraTilingObserved).catch(() => null);
+    await page.screenshot({ path: resolve(reportRoot, `failed-${label}.png`), fullPage: true }).catch(() => {});
+    await writeFile(resolve(reportRoot, `failed-${label}.json`), JSON.stringify({
+      source: process.env.CLEARRA_SOURCE_COMMIT, failure: failure.stack, errors, observed,
+      body: (await page.locator('body').innerText().catch(() => 'unavailable')).slice(0, 16384)
+    }, null, 2) + '\n');
+    failures.push(failure);
+    results.push({ case: label, result: 'failed', message: failure.message });
+    console.error(`surface_case=${label} status=failed: ${failure.stack}`);
+  } finally { await ctx.close(); }
+}
+
+// The original product WASM runs in a real browser worker. The page only
+// observes it and owns the same 60-second acceptance deadline as UI cases.
+// Long inputs stop after preparation; only the finite all-O tiling is searched.
+function stagedTilingProbeWorker() {
+  self.onmessage = async ({ data }) => {
+    try {
+      const bindings = await import(data.bindingsUrl);
+      const api = await bindings.default({ module_or_path: data.wasmUrl });
+      if (api.clearra_wasm_abi_version() !== 1) throw new Error('unsupported WASM ABI');
+      const output = () => {
+        try {
+          return new TextDecoder().decode(new Uint8Array(api.memory.buffer,
+            api.clearra_wasm_output_ptr(), api.clearra_wasm_output_len()));
+        } finally { api.clearra_wasm_output_release(); }
+      };
+      const requireOk = (status, operation) => {
+        if (status < 0) throw new Error(`${operation}: ${output()}`);
+        return status;
+      };
+      const command = text => {
+        const bytes = new TextEncoder().encode(text);
+        requireOk(api.clearra_wasm_input_resize(bytes.length), 'input resize');
+        new Uint8Array(api.memory.buffer, api.clearra_wasm_input_ptr(), bytes.length).set(bytes);
+      };
+      requireOk(api.clearra_wasm_configure_host(8, 0), 'host configuration');
+      const preparations = [];
+      for (const text of data.prepareCommands) {
+        command(text);
+        const mode = requireOk(api.clearra_wasm_distributed_prepare(), `distributed preparation: ${text}`);
+        preparations.push({ command: text, mode,
+          workers: api.clearra_wasm_distributed_worker_count(),
+          completionWorkers: api.clearra_wasm_distributed_completion_worker_count(),
+          rootTaskParallel: api.clearra_wasm_distributed_root_task_parallel() !== 0 });
+        requireOk(api.clearra_wasm_distributed_reset(), 'preparation reset');
+      }
+      command(data.runCommand);
+      const job = api.clearra_wasm_start_job();
+      if (job === 0) throw new Error(`start job: ${output()}`);
+      const events = [];
+      let status = 0;
+      while (status === 0 || status === 4) {
+        status = requireOk(api.clearra_wasm_advance_job(job, 8192), 'advance job');
+        requireOk(api.clearra_wasm_drain_job_events(job), 'drain events');
+        events.push(...JSON.parse(output()).filter(event =>
+          ['final_response', 'failed', 'cancelled', 'terminated'].includes(event.event)));
+      }
+      self.postMessage({ preparations, terminalStatus: status, events });
+    } catch (error) {
+      self.postMessage({ error: error instanceof Error ? error.stack : String(error) });
+    }
+  };
+}
+
+async function tilingArtifactCase(expectedIdentity, manifest) {
+  const label = 'typed-tiling-artifact-preparation-and-initial-hold';
+  const ctx = await context('null');
+  const page = await ctx.newPage();
+  const held = draws => `clearra pc tiling --board-mask 0 --height 6 --pieces 15 --queue ${'O'.repeat(draws)} --hold O --backend cpu`;
+  const prepareCommands = [
+    'clearra pc tiling --lines 2 --queue OOOOO --backend cpu',
+    'clearra pc tiling --board-mask 0 --height 2 --pieces 5 --queue OOOOO --no-hold --backend cpu',
+    held(14), held(16)
+  ].map(command => `${command} --workers 8 --use-all-cpu-threads`);
+  const runCommand = `${held(14)} --workers 1 --use-all-cpu-threads`;
+  try {
+    await page.goto(`http://127.0.0.1:4194${base}/?tool=pc`);
+    await page.evaluate(({ source, prepareCommands, runCommand, base, bindingsPath, wasmPath }) => {
+      const url = URL.createObjectURL(new Blob([`(${source})()`], { type: 'text/javascript' }));
+      const worker = new Worker(url, { type: 'module' });
+      const state = { worker, url, outcome: null };
+      window.__clearraTilingArtifact = state;
+      worker.onmessage = event => { state.outcome = event.data; };
+      worker.onerror = event => { state.outcome = { error: String(event.message) }; };
+      worker.postMessage({ prepareCommands, runCommand,
+        bindingsUrl: new URL(`${base}/wasm/${bindingsPath}`, location.origin).href,
+        wasmUrl: new URL(`${base}/wasm/${wasmPath}`, location.origin).href });
+    }, { source: stagedTilingProbeWorker.toString(), prepareCommands, runCommand, base,
+      bindingsPath: manifest.bindings.path, wasmPath: manifest.wasm.path });
+    await page.waitForFunction(() => window.__clearraTilingArtifact.outcome !== null, null, { timeout: 60000 });
+    const outcome = await page.evaluate(() => window.__clearraTilingArtifact.outcome);
+    await writeFile(resolve(reportRoot, `${label}.json`), JSON.stringify({
+      source: process.env.CLEARRA_SOURCE_COMMIT, runCommand, ...outcome
+    }, null, 2) + '\n');
+    assert.equal(outcome.error, undefined, outcome.error);
+    assert.equal(outcome.preparations.length, prepareCommands.length);
+    for (const [index, preparation] of outcome.preparations.entries()) {
+      assert.equal(preparation.command, prepareCommands[index]);
+      assert.equal(preparation.mode, 1, 'one natural root must retain the typed distributed coordinator');
+      assert.equal(preparation.rootTaskParallel, true);
+      assert.equal(preparation.workers, 8, 'request width is independent of currently active roots');
+      assert.equal(preparation.completionWorkers, 8);
+    }
+    const final = validateWasmProbeTerminal({ ...outcome, expectedRuntimeIdentity: expectedIdentity });
+    const report = assertTilingFinal(final, 6, expectedIdentity);
+    results.push({ case: label, result: 'passed', preparedCases: prepareCommands.length,
+      geometryLocks: 15, initialHold: 'O', sourceDraws: 14, solutionCount: 1,
+      normalizedSolutionSetHash: report.normalized_solution_set_hash });
+  } catch (error) {
+    const failure = error instanceof Error ? error : new Error(String(error));
+    await writeFile(resolve(reportRoot, `failed-${label}.json`), JSON.stringify({
+      source: process.env.CLEARRA_SOURCE_COMMIT, failure: failure.stack, prepareCommands, runCommand,
+      outcome: await page.evaluate(() => window.__clearraTilingArtifact?.outcome).catch(() => null)
+    }, null, 2) + '\n');
+    failures.push(failure);
+    results.push({ case: label, result: 'failed', message: failure.message });
+    console.error(`surface_case=${label} status=failed: ${failure.stack}`);
+  } finally {
+    await page.evaluate(() => {
+      const state = window.__clearraTilingArtifact;
+      state?.worker.terminate();
+      if (state) URL.revokeObjectURL(state.url);
+    }).catch(() => {});
+    await ctx.close();
+  }
+}
 try {
   const manifest = JSON.parse(await readFile(resolve(root, 'wasm/clearra_wasm.manifest.json'), 'utf8'));
   assert.equal(manifest.build.runtime_identity.source_commit, process.env.CLEARRA_SOURCE_COMMIT);
+  const expectedIdentity = expectedWasmProbeIdentity(manifest, process.env.CLEARRA_SOURCE_COMMIT);
   let reference;
   let completeBagReference;
   for (const mode of ['null', 'reject', 'timeout']) {
@@ -414,6 +642,11 @@ try {
       })}`);
     } finally { await ctx.close(); }
   }
+  for (const workers of [1, 8]) for (const hold of [false, true]) {
+    await tilingUiCase({ height: 2, hold, workers }, expectedIdentity);
+  }
+  await tilingUiCase({ height: 6, hold: true, workers: 8 }, expectedIdentity);
+  await tilingArtifactCase(expectedIdentity, manifest);
   const report = { source: process.env.CLEARRA_SOURCE_COMMIT, results, failedCases: failures.length };
   await writeFile(resolve(reportRoot, 'results.json'), JSON.stringify(report, null, 2) + '\n');
   console.log(JSON.stringify(report));

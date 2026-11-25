@@ -1,14 +1,17 @@
 //! Canonical GUI/Discord lowering, actual App execution and full-height output.
 //! These few-piece fields are not a sixty-piece performance qualification.
 use clearra_app::{
-    AppContext, AppCoreExecutorService, AppResponse, AppServices, AppStatus, CooperativeAppAdvance,
+    AppCommand, AppContext, AppCoreExecutorService, AppResponse, AppServices, AppStatus,
+    CooperativeAppAdvance, ProductCapabilityContract,
 };
 use clearra_cli_command::CliCommandParser;
 use clearra_core_domain::{
     board::standard_pc_board::Board256Mask, execution_cancellation::ExecutionControl,
-    solution::ExtendedTilingSolutionKey,
+    piece::piece_kind::PieceKind, solution::ExtendedTilingSolutionKey,
 };
 use clearra_host_contract::ProductResultPayloadContent;
+use clearra_objectives::policy::objective_policy::ObjectivePolicy;
+use clearra_pc_graph::request::SupplyWindowSize;
 
 const INPUTS: &str =
     include_str!("../../../tests/fixtures/contracts/extended_pc_surface_input.v1.tsv");
@@ -42,6 +45,95 @@ fn selected_i_drawing(input: &[&str]) -> String {
         vec![clearra_app::Ctk3Page::new(height, cells)],
     ))
     .unwrap()
+}
+
+#[test]
+fn canonical_pc_tiling_lowering_preserves_long_fixed_supplies_and_worker_policy() {
+    for (lines, locks) in [(2, 5), (6, 15), (8, 20), (24, 60)] {
+        for hold in [false, true] {
+            for workers in [1, 8] {
+                let queue = "O".repeat(locks + usize::from(hold));
+                let scenario = if hold {
+                    String::new()
+                } else {
+                    format!("--board-mask 0 --height {lines} --pieces {locks} --no-hold")
+                };
+                let source = format!(
+                    "clearra pc tiling --lines {lines} --queue {queue} \
+                     {scenario} --backend cpu --workers {workers}"
+                );
+                let request = CliCommandParser::parse_with_worker_limit(&source, 12)
+                    .expect("typed tiling command")
+                    .to_app_request()
+                    .expect("typed tiling App request");
+                assert_eq!(
+                    request.product_capability_contract(),
+                    Some(ProductCapabilityContract::PcTiling),
+                    "{source}"
+                );
+                assert_eq!(request.resource_budget().workers(), workers as u16);
+                match request.command() {
+                    AppCommand::Pc(command) => {
+                        assert!(hold);
+                        let query = command.query();
+                        assert!(query.hold_policy().is_enabled());
+                        assert_eq!(usize::from(query.target().lines()), lines);
+                        assert_eq!(query.queue().len(), queue.len());
+                        assert_eq!(query.execution_policy().workers(), workers);
+                        assert_eq!(query.objective(), ObjectivePolicy::tiling());
+                    }
+                    AppCommand::Scenario(command) => {
+                        assert!(!hold);
+                        let query = command.query();
+                        assert!(!query.allow_hold());
+                        assert_eq!(usize::from(query.initial_board().visible_height()), lines);
+                        assert_eq!(query.piece_window().max_pieces(), locks);
+                        assert_eq!(query.exact_pieces(), Some(locks));
+                        assert_eq!(query.remaining_queue().len(), queue.len());
+                        assert_eq!(query.execution_policy().workers(), workers);
+                        assert_eq!(query.objective(), ObjectivePolicy::tiling());
+                    }
+                    other => panic!("typed tiling lowered to an unexpected command: {other:?}"),
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn canonical_scenario_tiling_preserves_multi_bag_supply_windows_and_initial_hold() {
+    for (lines, locks, pattern, hold_option, source_pieces, held) in [
+        (6, 15, "P7P7P1", "--no-hold", 15, None),
+        (6, 15, "P7P7P2", "--hold empty", 16, None),
+        (6, 15, "P7P7", "--hold O", 14, Some(PieceKind::O)),
+        (8, 20, "P7P7P6", "--no-hold", 20, None),
+        (8, 20, "P7P7P7", "--hold empty", 21, None),
+    ] {
+        let source = format!(
+            "clearra pc tiling --lines {lines} --height {lines} --board-mask 0 \
+             --pieces {locks} --patterns {pattern} {hold_option} --backend cpu --workers 8"
+        );
+        let request = CliCommandParser::parse_with_worker_limit(&source, 12)
+            .expect("multi-bag tiling command")
+            .to_app_request()
+            .unwrap_or_else(|error| panic!("{source}: {error:?}"));
+        let AppCommand::Scenario(command) = request.command() else {
+            panic!("multi-bag tiling must retain its scenario");
+        };
+        let query = command.query();
+        assert_eq!(query.remaining_queue().mode(), "standard-7-bag");
+        assert_eq!(
+            query.supply_window_size(),
+            Some(SupplyWindowSize::new(source_pieces)),
+            "{source}"
+        );
+        assert_eq!(query.hold_state().piece(), held);
+        assert_eq!(query.allow_hold(), hold_option != "--no-hold");
+        assert_eq!(query.piece_window().max_pieces(), locks);
+        assert_eq!(query.exact_pieces(), Some(locks));
+        assert_eq!(query.execution_policy().workers(), 8);
+        assert_eq!(query.objective(), ObjectivePolicy::tiling());
+    }
 }
 
 #[test]

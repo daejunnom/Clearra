@@ -1,7 +1,10 @@
 // SRP rationale: this integration test has one behavior-level change reason:
 // preserving the finite terminal-hold solution set across the public CLI/App/WASM boundary.
 
-use clearra_app::{AppCommand, AppContext, AppCoreExecutorService, AppServices, AppStatus};
+use clearra_app::{
+    AppCommand, AppContext, AppCoreExecutorService, AppServices, AppStatus,
+    DistributedSearchPreparation,
+};
 use clearra_core_domain::{
     objective::objective_kind::ObjectiveKind,
     piece::piece_kind::PieceKind,
@@ -10,10 +13,10 @@ use clearra_core_domain::{
     },
 };
 use clearra_host_contract::ProductBuildIdentity;
-use clearra_pc_graph::request::{PcCountPolicy, RequestedSearchBackend};
+use clearra_pc_graph::request::{PcCountPolicy, RequestedSearchBackend, WorkerPolicy};
 use clearra_wasm::{
-    serialize_search_report_from_app_response, WasmCommandRuntime, WasmWorkerAdvanceStatus,
-    WasmWorkerJobRuntime,
+    serialize_search_report_from_app_response, WasmCommandRuntime, WasmHostCapabilities,
+    WasmWorkerAdvanceStatus, WasmWorkerJobRuntime,
 };
 use serde_json::Value;
 
@@ -24,6 +27,80 @@ const TERMINAL_SUPPLY_P0_COMMAND: &str = "clearra pc \
 const TERMINAL_SUPPLY_P0_INITIAL_MASK: u64 = 0x1c0701c07;
 const TERMINAL_SUPPLY_P0_EXPECTED_UNIQUE_COUNT: usize = 18;
 const TERMINAL_SUPPLY_P0_EXPECTED_NORMALIZED_SET_HASH: &str = "cts1:8a7fc484d9b49994";
+
+#[test]
+fn typed_tiling_fifteen_locks_with_initial_hold_and_long_source_prepare_exactly() {
+    let runtime = WasmCommandRuntime::default()
+        .with_host_capabilities(WasmHostCapabilities::new(8, false, false));
+    let app = AppContext::new(
+        AppServices::default().with_core_executor(AppCoreExecutorService::wasm_cpu()),
+    );
+    for workers in [1, 8] {
+        for source_draws in [14, 16] {
+            let command = format!(
+                "clearra pc tiling --board-mask 0 --height 6 --pieces 15 \
+                 --queue {} --hold O --backend cpu --workers {workers} --use-all-cpu-threads",
+                "O".repeat(source_draws)
+            );
+            let request = runtime
+                .compile_command_text(&command)
+                .unwrap_or_else(|error| panic!("typed tiling ingress: {command}: {error:?}"));
+            assert!(request.product_capability_contract().is_some());
+            let AppCommand::Scenario(scenario) = request.command() else {
+                panic!("explicit geometry must remain a scenario: {command}");
+            };
+            let query = scenario.query();
+            assert_eq!(query.exact_pieces(), Some(15));
+            assert_eq!(query.hold_state().piece(), Some(PieceKind::O));
+            assert!(query.allow_hold());
+            assert_eq!(query.execution_policy().workers(), workers);
+            assert_eq!(
+                query
+                    .remaining_queue()
+                    .as_fixed_sequence()
+                    .expect("fixed complete source")
+                    .len(),
+                source_draws
+            );
+
+            // This is the shared product preparation boundary, before any
+            // geometry enumeration. The initial held piece and extra source
+            // draws must not replace the explicit fifteen-lock geometry.
+            let prepared = match app.prepare_distributed_search(request) {
+                DistributedSearchPreparation::Search(prepared) => prepared,
+                DistributedSearchPreparation::Ready(response) => {
+                    panic!("typed tiling preparation rejected {command}: {response:?}")
+                }
+            };
+            let problem = prepared.problem();
+            assert_eq!(problem.exact_pieces(), Some(15));
+            assert_eq!(problem.visible_height(), 6);
+            assert_eq!(problem.objective().kind(), ObjectiveKind::Tiling);
+            assert_eq!(problem.initial_hold().hold_piece(), Some(PieceKind::O));
+            let hardware_limit = if cfg!(target_family = "wasm") {
+                8
+            } else {
+                8.min(WorkerPolicy::hardware_worker_limit())
+            };
+            assert_eq!(
+                problem.backend_policy().workers(),
+                WorkerPolicy::Fixed(workers).effective_for_hardware_limit(true, hardware_limit)
+            );
+            assert_eq!(
+                problem
+                    .piece_source()
+                    .materialized_universe()
+                    .expect("compiled fixed source")
+                    .pattern_count(),
+                1
+            );
+            assert!(prepared
+                .pc_tiling_terminal_resource_authority()
+                .expect("checked typed tiling producer envelope")
+                .is_some());
+        }
+    }
+}
 
 fn assert_terminal_supply_solution_set(keys: &[String]) {
     assert_eq!(keys.len(), TERMINAL_SUPPLY_P0_EXPECTED_UNIQUE_COUNT);

@@ -2818,32 +2818,26 @@ impl SetupCoverageSession {
             .min(shape_indexes.len());
         self.observation_workers_used = self.observation_workers_used.max(worker_count);
         let failed = Arc::new(AtomicBool::new(false));
-        let mut workers = Vec::new();
-        workers.try_reserve_exact(worker_count).map_err(|_| {
-            WasmExactSearchError::InvalidProblem(
-                "setup_observation_parallel_worker_storage_unavailable",
-            )
-        })?;
         let evaluator =
             self.observation_evaluator
                 .as_ref()
                 .ok_or(WasmExactSearchError::InvalidProblem(
                     "setup_observation_evaluator_missing",
                 ))?;
-        for _ in 0..worker_count {
-            let mut worker = evaluator.fork_empty()?;
-            worker.set_terminal_supply_target(None);
-            worker.set_peer_abort(Arc::clone(&failed));
-            workers.push(worker);
-        }
         let graph = self.coverage_graph.as_ref();
         let completed = run_setup_observation_worker_jobs(
-            workers,
+            worker_count,
             shape_indexes.len(),
-            failed,
+            Arc::clone(&failed),
             control,
             #[cfg(test)]
             None,
+            |_| {
+                let mut worker = evaluator.fork_empty()?;
+                worker.set_terminal_supply_target(None);
+                worker.set_peer_abort(Arc::clone(&failed));
+                Ok(worker)
+            },
             |_, evaluator, ordinal| {
                 let shape_index = shape_indexes[ordinal];
                 let target = u32::try_from(shape_index).map_err(|_| {
@@ -2900,37 +2894,29 @@ impl SetupCoverageSession {
             .min(shape_indexes.len());
         self.observation_workers_used = self.observation_workers_used.max(worker_count);
         let failed = Arc::new(AtomicBool::new(false));
-        let mut workers = Vec::new();
-        workers.try_reserve_exact(worker_count).map_err(|_| {
-            WasmExactSearchError::InvalidProblem(
-                "setup_observation_parallel_worker_storage_unavailable",
-            )
-        })?;
-        {
-            let evaluator =
-                self.observation_evaluator
-                    .as_mut()
-                    .ok_or(WasmExactSearchError::InvalidProblem(
-                        "setup_observation_evaluator_missing",
-                    ))?;
-            evaluator.set_terminal_supply_target(self.terminal_supply_target);
-            for _ in 0..worker_count {
-                let mut worker = evaluator.fork_empty()?;
-                worker.set_peer_abort(Arc::clone(&failed));
-                let domain = worker.begin_reusable_memo_domain();
-                workers.push((worker, domain));
-            }
-        }
+        let evaluator =
+            self.observation_evaluator
+                .as_mut()
+                .ok_or(WasmExactSearchError::InvalidProblem(
+                    "setup_observation_evaluator_missing",
+                ))?;
+        evaluator.set_terminal_supply_target(self.terminal_supply_target);
 
         let target_count = shape_indexes.len();
         let graph = self.coverage_graph.as_ref();
         let completed = run_setup_observation_worker_jobs(
-            workers,
+            worker_count,
             target_count,
-            failed,
+            Arc::clone(&failed),
             control,
             #[cfg(test)]
             None,
+            |_| {
+                let mut worker = evaluator.fork_empty()?;
+                worker.set_peer_abort(Arc::clone(&failed));
+                let domain = worker.begin_reusable_memo_domain();
+                Ok((worker, domain))
+            },
             |_, (evaluator, memo_domain), ordinal| {
                 let shape_index = shape_indexes[ordinal];
                 let target_shape = u32::try_from(shape_index).map_err(|_| {
@@ -3142,20 +3128,21 @@ impl SetupCoverageSession {
 }
 
 #[cfg(not(target_family = "wasm"))]
-fn run_setup_observation_worker_jobs<State, Output, RunJob>(
-    workers: Vec<State>,
+fn run_setup_observation_worker_jobs<State, Output, Initialize, RunJob>(
+    worker_count: usize,
     target_count: usize,
     failed: Arc<AtomicBool>,
     control: &ExecutionControl,
     #[cfg(test)] test_hook: Option<Arc<ObservationParallelTestHook>>,
+    initialize: Initialize,
     run_job: RunJob,
 ) -> Result<Vec<(usize, Output)>, WasmExactSearchError>
 where
     State: Send,
     Output: Send,
+    Initialize: Fn(usize) -> Result<State, WasmExactSearchError> + Sync,
     RunJob: Fn(usize, &mut State, usize) -> Result<Output, WasmExactSearchError> + Sync,
 {
-    let worker_count = workers.len();
     if worker_count == 0 || target_count == 0 {
         return Err(WasmExactSearchError::InvalidProblem(
             "setup_observation_parallel_worker_count_invalid",
@@ -3172,10 +3159,6 @@ where
     use clearra_core_domain::parallel_work::{try_for_each_chunk, ParallelWorkError};
     use std::sync::Mutex;
     let control = control.clone().with_parallelism_if_unbound(worker_count);
-    let workers = workers
-        .into_iter()
-        .map(|worker| Mutex::new(Some(worker)))
-        .collect::<Vec<_>>();
     let next = AtomicUsize::new(0);
     let outcomes = Mutex::new(Vec::new());
     struct AbortPeersOnUnwind<'a>(&'a AtomicBool);
@@ -3194,11 +3177,13 @@ where
         |_, range| {
             for worker_index in range {
                 let _abort = AbortPeersOnUnwind(&failed);
-                let mut worker = workers[worker_index]
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .take()
-                    .expect("each setup workspace has one owner");
+                // Initialization belongs to this admitted compute owner. A
+                // ready evaluator starts taking targets immediately without
+                // waiting for every other private workspace to be prepared.
+                let mut worker = initialize(worker_index).map_err(|error| {
+                    failed.store(true, AtomicOrdering::Release);
+                    error
+                })?;
                 #[cfg(test)]
                 let _active_worker = test_hook.as_ref().map(ObservationParallelTestHook::enter);
                 #[cfg(test)]

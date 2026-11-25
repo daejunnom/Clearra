@@ -11,6 +11,7 @@ use clearra_rules::{
 use clearra_supply::queue::{
     bag_aligned_pattern::BagAlignedPattern, fixed_sequence::FixedSequence,
     queue_observation_policy::QueueObservationPolicy,
+    queue_pattern_expression::QueuePatternExpression,
 };
 
 use crate::diagnostic::diagnostic_code::DiagnosticCode;
@@ -266,6 +267,69 @@ fn pc_scenario_fixed_sequence_allows_duplicates_without_bag_offset_zero_contract
     assert!(!report.has_errors());
     assert!(report.contains_code(DiagnosticCode::ISupplyFixedSequenceAccepted));
     assert!(!report.contains_code(DiagnosticCode::ESupplyInvalidDuplicate));
+}
+
+#[test]
+fn pc_scenario_finite_supply_counts_an_enabled_initial_hold_once() {
+    let pieces = [
+        PieceKind::I,
+        PieceKind::O,
+        PieceKind::T,
+        PieceKind::S,
+        PieceKind::Z,
+        PieceKind::J,
+        PieceKind::L,
+    ]
+    .repeat(2);
+    let queues = [
+        PcQueueInput::fixed_sequence(FixedSequence::new(pieces.clone())),
+        PcQueueInput::bag_aligned_pattern(BagAlignedPattern::new(pieces)),
+        PcQueueInput::pattern_expression(
+            QueuePatternExpression::parse("IOTSZJLIOTSZJL", 1).expect("one finite pattern"),
+        ),
+    ];
+    for queue in queues {
+        let base = PcScenarioQuery::new(
+            PcScenarioBoard::standard_10(6, 0),
+            queue,
+            PieceWindow::new(15),
+        )
+        .with_exact_pieces(Some(15));
+        for (allow_hold, held, expected_valid) in [
+            (true, Some(PieceKind::O), true),
+            (true, None, false),
+            (false, None, false),
+            (false, Some(PieceKind::O), false),
+        ] {
+            let query = base
+                .clone()
+                .with_allow_hold(allow_hold)
+                .with_hold_piece(held);
+            let report = validate_pc_scenario_query(&query);
+            assert_eq!(
+                !report.has_errors(),
+                expected_valid,
+                "queue={}, hold={allow_hold}/{held:?}: {report:?}",
+                query.remaining_queue().mode(),
+            );
+        }
+
+        let insufficient = PcScenarioQuery::new(
+            base.initial_board().clone(),
+            base.remaining_queue().clone(),
+            PieceWindow::new(16),
+        )
+        .with_exact_pieces(Some(16))
+        .with_allow_hold(true)
+        .with_hold_piece(Some(PieceKind::O));
+        let report = validate_pc_scenario_query(&insufficient);
+        assert!(report.has_errors());
+        assert!(report.diagnostics().iter().any(|diagnostic| diagnostic
+            .evidence()
+            .iter()
+            .any(|evidence| evidence.key() == "reason"
+                && evidence.value() == "scenario_piece_window_exceeds_queue")));
+    }
 }
 
 #[test]

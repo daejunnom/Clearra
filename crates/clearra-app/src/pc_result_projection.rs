@@ -827,12 +827,11 @@ pub(crate) fn validate_pc_tiling_scenario_request_contract(
     {
         return Err("pc tiling scenario piece window must exactly cover its empty cells");
     }
-    validate_supply_window(
-        query.remaining_queue(),
-        query.supply_window_size(),
-        required_pieces,
-        query.allow_hold(),
-    )
+    // A tiling scenario keeps the caller's finite supply window, including
+    // multiple bags and an occupied Hold slot. The shared problem compiler
+    // checks its required draw count and concrete-queue bounds. The legacy
+    // All-Spin projection's one-bag window is not a tiling-family contract.
+    Ok(())
 }
 
 fn validate_pc_tiling_origin(origin: PcTilingIngressOrigin) -> Result<(), &'static str> {

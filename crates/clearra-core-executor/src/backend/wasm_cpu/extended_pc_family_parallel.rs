@@ -456,43 +456,36 @@ impl ExtendedBuildProbabilitySession {
         queued_memory
             .ensure(queued_branch_private)
             .map_err(WasmExactSearchError::resource_admission)?;
+        // Reserve every initializer before any ready worker can grow its
+        // search state. Activation replaces this owner's reservation with its
+        // actual retained bytes; it never adds a second memory claim.
+        let (_, verifier_creation_bytes) = self.shared_family_verifier_creation_bytes()?;
+        for index in 0..workers {
+            private_memory
+                .owner(index)
+                .ensure(verifier_creation_bytes)
+                .map_err(WasmExactSearchError::resource_admission)?;
+        }
 
         plan.branches
             .sort_unstable_by_key(|branch| (branch.candidate_count, branch.first_ordinal));
-        let mut tasks = Vec::new();
-        tasks
+        let mut task_slots = Vec::new();
+        task_slots
             .try_reserve_exact(workers)
             .map_err(|_| storage_error())?;
         // Preserve the admitted request width even for a one-branch family.
         // Slots without initial work may steal a queued branch or remain idle;
         // `parallel_active_workers` separately reports useful participation.
-        for index in 0..workers {
-            let engine = self.new_shared_family_verifier_with_resources(
-                self.memory_bound,
-                Some(private_memory.owner(index)),
-            )?;
-            engine.ensure_memory_bound(0)?;
-            let first = plan.branches.pop();
-            if let Some(branch) = first.as_ref() {
-                queued_memory
-                    .transfer_retained_to(
-                        engine
-                            .private_memory_owner
-                            .as_ref()
-                            .ok_or_else(contract_error)?,
-                        branch.private_retained_bytes() as u128,
-                    )
-                    .map_err(WasmExactSearchError::resource_admission)?;
-            }
-            tasks.push((engine, first));
+        // Only assign roots here. Each admitted compute worker constructs its
+        // own private bitmap/supply workspace and may begin its first branch
+        // while the remaining workers are still initializing. Assigned roots
+        // stay charged to queued_memory until the worker receives them.
+        for _ in 0..workers {
+            task_slots.push(Mutex::new(Some(plan.branches.pop())));
         }
         let queue = Arc::new(Mutex::new(core::mem::take(&mut plan.branches)));
         let abort = Arc::new(AtomicBool::new(false));
         let progress_nodes = Arc::new(AtomicUsize::new(0));
-        let task_slots: Vec<_> = tasks
-            .into_iter()
-            .map(|task| Mutex::new(Some(task)))
-            .collect();
         let mut completed = Vec::new();
         completed
             .try_reserve_exact(workers)
@@ -506,14 +499,15 @@ impl ExtendedBuildProbabilitySession {
             || Ok::<_, WasmExactSearchError>(()),
             |_, range| {
                 for index in range {
-                    let (engine, first) = task_slots[index]
+                    let first = task_slots[index]
                         .lock()
                         .map_err(|_| contract_error())?
                         .take()
                         .ok_or_else(contract_error)?;
                     let result = WorkerSearchProfile::capture().measure(|| {
                         caught_worker(
-                            engine,
+                            self,
+                            private_memory.owner(index),
                             first,
                             &queue,
                             &queued_memory,
@@ -854,7 +848,8 @@ impl ExtendedBuildProbabilitySession {
 }
 
 fn caught_worker(
-    engine: ExtendedBuildProbabilitySession,
+    source: &ExtendedBuildProbabilitySession,
+    private_memory: ExecutionMemoryOwner,
     first: Option<ExtendedParallelGeometryBranch>,
     queue: &Mutex<Vec<ExtendedParallelGeometryBranch>>,
     queued_memory: &ExecutionMemoryOwner,
@@ -863,6 +858,23 @@ fn caught_worker(
     control: &ExecutionControl,
 ) -> Result<WorkerResult, WasmExactSearchError> {
     catch_unwind(AssertUnwindSafe(|| {
+        if control.is_cancelled() || abort.load(Ordering::Acquire) {
+            return Err(WasmExactSearchError::Cancelled);
+        }
+        let engine = source
+            .new_shared_family_verifier_with_resources(source.memory_bound, Some(private_memory))?;
+        engine.ensure_memory_bound(0)?;
+        if let Some(branch) = first.as_ref() {
+            queued_memory
+                .transfer_retained_to(
+                    engine
+                        .private_memory_owner
+                        .as_ref()
+                        .ok_or_else(contract_error)?,
+                    branch.private_retained_bytes() as u128,
+                )
+                .map_err(WasmExactSearchError::resource_admission)?;
+        }
         run_worker(
             engine,
             first,

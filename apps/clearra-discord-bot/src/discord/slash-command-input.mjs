@@ -316,9 +316,13 @@ export function buildSlashCommandArgumentPlan(command, rawOptions = []) {
       const maxRows = discordPcMaxRows(command.input);
       const field = normalizeSearchField(values.get("field"), { maxRows, maxBits: maxRows * 10 });
       const next = requiredText(values, "next", NEXT_MAX_LENGTH);
+      // A concrete initial Hold piece supplies one lock independently of next.
+      // Keep the queue unchanged: the canonical compiler owns its draw window.
+      const initialHold = normalizedChoice(optionalText(values, "hold", 16));
+      const initialHoldPieces = /^[iotszjl]$/u.test(initialHold) ? 1 : 0;
       const lines = automaticPcLines({
         occupied: field.occupied,
-        pieceCount: queuePatternPieceCount(next),
+        pieceCount: queuePatternPieceCount(next) + initialHoldPieces,
         maxLines: maxRows,
       });
       return Object.freeze({

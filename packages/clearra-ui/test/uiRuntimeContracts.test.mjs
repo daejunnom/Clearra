@@ -202,6 +202,37 @@ test('generic runtime wrappers expose stable failure categories without private 
   }
 });
 
+test('concrete supply and observation diagnostics take precedence over generic failure wrappers', () => {
+  for (const [code, message, expected] of [
+    ['E_PROBLEM_COMPILE_FAILED', 'SupplyWindowTooShort { source_pieces: 14, required_source_pieces: 15 }', 'supply-too-short'],
+    ['E_PC_QUERY_INVALID', 'PC scenario piece window cannot exceed the remaining queue plus an enabled initial held piece', 'supply-too-short'],
+    ['scenario_piece_window_exceeds_queue', 'invalid scenario', 'supply-too-short'],
+    ['E_PROBLEM_COMPILE_FAILED', 'SupplyWindowConflictsWithConcreteQueue { source_pieces: 16, queue_pieces: 15 }', 'supply-window-conflict'],
+    ['visible-seven-minimum-cover-unsupported', 'minimum-cover is unavailable with visible-7 queue knowledge', 'queue-knowledge-incompatible'],
+    ['E_PROBLEM_COMPILE_FAILED', 'PcSearchContract(VisibleSevenMinimumCoverUnsupported)', 'queue-knowledge-incompatible'],
+    ['E_INVALID_INPUT', 'pc minimals requires full-queue oracle knowledge', 'queue-knowledge-incompatible'],
+    ['E_INVALID_INPUT', 'visible-7 queue knowledge is unavailable with tiling-only Build semantics', 'queue-knowledge-incompatible']
+  ]) {
+    const privateSuffix = ' candidate_id=private problem_id=private';
+    const diagnostics = [
+      { code: 'E_PRODUCT_RUNTIME_UNSUPPORTED', severity: 'error', message: 'requested execution runtime is unsupported' },
+      { code, severity: 'error', message: message + privateSuffix }
+    ];
+    const error = message + privateSuffix;
+    const projection = production.projectWorkspacePublicFailure({
+      status: 'failed', responseStatus: 'unsupported', diagnostics, error
+    });
+    assert.deepEqual(projection.publicFailures, [{ code: expected, severity: 'error' }]);
+    assert.deepEqual(projection.developerEvidence, { diagnostics, error });
+    for (const language of ['en', 'ko', 'ja']) {
+      const text = production.workspacePublicFailureMessage(language, projection.publicFailures[0]);
+      assert.ok(text.length > 20, language);
+      assert.doesNotMatch(text, /candidate_id|problem_id|source_pieces|queue_pieces|SupplyWindow|VisibleSevenMinimumCoverUnsupported|E_PRODUCT_RUNTIME/u);
+      assert.notEqual(text, production.workspaceMessage(language, 'workspaceFailureUnsupported'));
+    }
+  }
+});
+
 test('tablebase transport failures remain distinct and never imply automatic offline fallback', () => {
   for (const [reason, expected] of [
     ['pc4_online_field_miss', 'tablebase-miss'],

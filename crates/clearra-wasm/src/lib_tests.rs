@@ -4163,6 +4163,8 @@ fn typed_pc_tiling_preserves_cli_workers_and_uses_product_neutral_distribution()
 
 #[test]
 fn typed_pc_tiling_one_root_keeps_the_product_neutral_coordinator() {
+    use clearra_pc_graph::request::WorkerPolicy;
+
     let _resource_guard = typed_pc_distributed_test_guard();
     let runtime = WasmCommandRuntime::default()
         .with_host_capabilities(WasmHostCapabilities::new(12, false, false));
@@ -4170,8 +4172,19 @@ fn typed_pc_tiling_one_root_keeps_the_product_neutral_coordinator() {
                    --backend auto --allow-backend-fallback --workers 11 \
                    --cpu-warmup --gpu-warmup";
 
+    #[cfg(target_family = "wasm")]
+    let hardware_limit = 12;
+    #[cfg(not(target_family = "wasm"))]
+    let hardware_limit = 12.min(WorkerPolicy::hardware_worker_limit());
+    let expected_workers =
+        WorkerPolicy::Fixed(11).effective_for_hardware_limit(false, hardware_limit);
+
     let preparation = WasmDistributedCoordinator::prepare(&runtime, command)
         .expect("one-root typed PC tiling preparation");
+    if expected_workers < 2 {
+        assert!(matches!(preparation, WasmDistributedPreparation::Serial));
+        return;
+    }
     let coordinator = match preparation {
         WasmDistributedPreparation::Coordinator(coordinator) => coordinator,
         WasmDistributedPreparation::Serial => {
@@ -4182,7 +4195,8 @@ fn typed_pc_tiling_one_root_keeps_the_product_neutral_coordinator() {
             result.app_response()
         ),
     };
-    assert_eq!(coordinator.worker_count(), 2);
+    assert_eq!(coordinator.worker_count(), expected_workers);
+    assert!(coordinator.root_task_parallel());
     assert!(coordinator.verification_required());
     assert_eq!(coordinator.progress().candidate_family_count, Some(1));
     drop(coordinator);
@@ -4199,6 +4213,8 @@ fn typed_pc_tiling_one_root_keeps_the_product_neutral_coordinator() {
     let report = distributed
         .search_report()
         .expect("one-root typed PC tiling WASM report");
+    // The in-process helper supplies finish(2) protocol metadata. This does
+    // not claim that it ran the admitted pool on N physical worker threads.
     assert_eq!(report.workers_used, 2);
     assert!(report.cpu_parallel_execution);
     assert_eq!(report.unique_solution_count, 4);
@@ -4208,6 +4224,8 @@ fn typed_pc_tiling_one_root_keeps_the_product_neutral_coordinator() {
 
 #[test]
 fn typed_pc_tiling_one_root_finishes_a_valid_empty_solution_family() {
+    use clearra_pc_graph::request::WorkerPolicy;
+
     let _resource_guard = typed_pc_distributed_test_guard();
     let runtime = WasmCommandRuntime::default()
         .with_host_capabilities(WasmHostCapabilities::new(12, false, false));
@@ -4215,7 +4233,26 @@ fn typed_pc_tiling_one_root_finishes_a_valid_empty_solution_family() {
                    --backend auto --allow-backend-fallback --workers 11 \
                    --cpu-warmup --gpu-warmup";
 
-    let distributed = run_distributed_cpu(&runtime, command);
+    #[cfg(target_family = "wasm")]
+    let hardware_limit = 12;
+    #[cfg(not(target_family = "wasm"))]
+    let hardware_limit = 12.min(WorkerPolicy::hardware_worker_limit());
+    let expected_workers =
+        WorkerPolicy::Fixed(11).effective_for_hardware_limit(false, hardware_limit);
+    if expected_workers < 2 {
+        assert!(matches!(
+            WasmDistributedCoordinator::prepare(&runtime, command)
+                .expect("empty one-root typed PC tiling preparation"),
+            WasmDistributedPreparation::Serial
+        ));
+        return;
+    }
+    let coordinator = completed_distributed_cpu_source(&runtime, command);
+    assert_eq!(coordinator.worker_count(), expected_workers);
+    assert!(coordinator.root_task_parallel());
+    // Preserve the helper's two-role protocol simulation separately from
+    // the admitted pool width checked above; it does not spawn N threads.
+    let distributed = finish_distributed_cpu_source(coordinator, 2);
     let response = distributed.app_response();
     assert_eq!(response.status(), AppStatus::Success, "{response:?}");
     let report = distributed

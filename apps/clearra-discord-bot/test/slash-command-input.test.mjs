@@ -1048,6 +1048,84 @@ test("automatic PC targets use field blocks and the exact required piece window"
   );
 });
 
+test("typed PC automatic targets count an occupied Hold without changing the finite next source", () => {
+  const products = ["tiling", "path", "chance", "minimals", "failed-queue", "score", "score-minimals", "score-finder"];
+  const fullHeightTargets = [2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24];
+  for (const product of products) {
+    const command = findSlashCommand("pc").subcommands[product];
+    for (const queueLength of [14, 15, 60]) {
+      const queue = "O".repeat(queueLength);
+      for (const hold of ["disabled", "empty", "O"]) {
+        const options = [
+          { name: "field", value: "grid:__________" },
+          { name: "next", value: queue },
+          { name: "hold", value: hold },
+        ];
+        const plan = buildSlashCommandArgumentPlan(command, options);
+        const expected = queueLength === 60
+          ? fullHeightTargets
+          : queueLength === 14 && hold !== "O" ? [2, 4] : [2, 4, 6];
+        assert.equal(plan.automaticPcTargets, true);
+        assert.deepEqual(
+          plan.argumentSets.map(args => Number(args[args.indexOf("--lines") + 1])),
+          expected,
+          `${product}: queue ${queueLength}, hold ${hold}`,
+        );
+        for (const args of plan.argumentSets) {
+          assert.equal(args[args.indexOf("--queue") + 1], queue, "Hold must not prepend or consume next");
+          assert.equal(args.includes("--no-hold"), hold === "disabled");
+          if (hold !== "disabled") assert.equal(args[args.indexOf("--hold") + 1], hold);
+          const explicit = buildSlashCommandArgumentPlan(command, [
+            ...options,
+            { name: "lines", value: Number(args[args.indexOf("--lines") + 1]) },
+          ]);
+          assert.equal(explicit.automaticPcTargets, false);
+          assert.deepEqual(explicit.argumentSets, [args]);
+        }
+      }
+    }
+  }
+});
+
+test("occupied Hold completes a five-lock automatic target but does not invent missing supply", () => {
+  for (const product of ["tiling", "path", "chance", "minimals", "failed-queue", "score", "score-minimals", "score-finder"]) {
+    const command = findSlashCommand("pc").subcommands[product];
+    const options = [
+      { name: "field", value: "grid:__________" },
+      { name: "next", value: "OOOO" },
+      { name: "hold", value: "o" },
+    ];
+    const automatic = buildSlashCommandArgumentPlan(command, options);
+    assert.equal(automatic.automaticPcTargets, true);
+    assert.equal(automatic.argumentSets.length, 1);
+    const args = automatic.argumentSets[0];
+    assert.equal(args[args.indexOf("--lines") + 1], "2");
+    assert.equal(args[args.indexOf("--pieces") + 1], "5");
+    assert.equal(args[args.indexOf("--queue") + 1], "OOOO");
+    assert.equal(args[args.indexOf("--hold") + 1], "O");
+    assert.deepEqual(buildSlashCommandArgumentPlan(command, [
+      ...options, { name: "lines", value: 2 },
+    ]).argumentSets, [args]);
+    for (const hold of ["disabled", "empty"]) {
+      assert.throws(() => buildSlashCommandArgumentPlan(command, [
+        ...options.filter(option => option.name !== "hold"), { name: "hold", value: hold },
+      ]), /no valid automatic/u);
+    }
+    assert.throws(() => buildSlashCommandArgumentPlan(command, [
+      ...options.filter(option => option.name !== "next"), { name: "next", value: "OOO" },
+    ]), /no valid automatic/u);
+    // Explicit targets continue through the shared compiler's supply checks;
+    // planning must not change their requested target or manufacture a piece.
+    const explicitInsufficient = buildSlashCommandArgumentPlan(command, [
+      ...options.filter(option => option.name !== "next"),
+      { name: "next", value: "OOO" }, { name: "lines", value: 2 },
+    ]);
+    assert.equal(explicitInsufficient.automaticPcTargets, false);
+    assert.equal(explicitInsufficient.argumentSets[0][explicitInsufficient.argumentSets[0].indexOf("--pieces") + 1], "5");
+    assert.equal(explicitInsufficient.argumentSets[0][explicitInsufficient.argumentSets[0].indexOf("--queue") + 1], "OOO");
+  }
+});
+
 test("native PC slash inputs compact completed rows without shrinking explicit lines", () => {
   const pc = findSlashCommand("pc");
   const field = "grid:########__/##########";

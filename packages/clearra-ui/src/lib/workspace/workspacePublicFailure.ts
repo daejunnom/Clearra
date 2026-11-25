@@ -10,6 +10,9 @@ export type WorkspacePublicFailureCode =
   | 'worker-lease-expired'
   | 'runtime-trap'
   | 'invalid-input'
+  | 'supply-too-short'
+  | 'supply-window-conflict'
+  | 'queue-knowledge-incompatible'
   | 'unsupported'
   | 'resource-limit'
   | 'result-incomplete'
@@ -62,6 +65,9 @@ const PUBLIC_FAILURE_MESSAGE_KEYS: Record<WorkspacePublicFailureCode, WorkspaceM
   'worker-lease-expired': 'workspaceFailureLeaseExpired',
   'runtime-trap': 'workspaceFailureRuntimeTrap',
   'invalid-input': 'workspaceFailureInvalidInput',
+  'supply-too-short': 'workspaceFailureSupplyTooShort',
+  'supply-window-conflict': 'workspaceFailureSupplyWindowConflict',
+  'queue-knowledge-incompatible': 'workspaceFailureQueueKnowledge',
   unsupported: 'workspaceFailureUnsupported',
   'resource-limit': 'workspaceFailureResourceLimit',
   'result-incomplete': 'workspaceFailureIncomplete',
@@ -108,7 +114,7 @@ export function projectWorkspacePublicFailure(
     const reportedSeverity = diagnostic.severity.toLowerCase();
     if (reportedSeverity !== 'warning' && reportedSeverity !== 'error') continue;
     const severity = reportedSeverity;
-    const runtimeFailure = knownRuntimeFailure(diagnostic.message);
+    const runtimeFailure = knownRequestFailure(diagnostic.code) ?? knownRuntimeFailure(diagnostic.message);
     const code = runtimeFailure ?? classifyDiagnosticCode(diagnostic.code, severity);
     const generic = code === 'execution-failed' || code === 'execution-warning';
     add(code, runtimeFailure ? 4 : generic ? 1 : 3, severity);
@@ -176,6 +182,8 @@ function classifyDiagnosticCode(
 // Runtime wrappers often carry a generic code. Recognize only stable failure
 // classes in their evidence; never echo raw messages, fields, IDs or paths.
 function knownRuntimeFailure(message: string): WorkspacePublicFailureCode | null {
+  const requestFailure = knownRequestFailure(message);
+  if (requestFailure) return requestFailure;
   const tablebase = knownTablebaseFailure(message.toLowerCase());
   if (tablebase) return tablebase;
   if (/(?:lease[-_ ]expired|heartbeat lease expired)/iu.test(message)) {
@@ -189,6 +197,22 @@ function knownRuntimeFailure(message: string): WorkspacePublicFailureCode | null
   }
   if (/replay does not terminate at the requested cleared field/iu.test(message)) {
     return 'result-invalid';
+  }
+  return null;
+}
+
+// Match the stable compiler/validation reasons rather than exposing their
+// Debug payloads. Each category describes an option the caller can correct;
+// the original wrapped messages remain in developerEvidence.
+function knownRequestFailure(value: string): WorkspacePublicFailureCode | null {
+  if (/(?:\bSupplyWindowTooShort\b|\bscenario_piece_window_exceeds_queue\b|PC scenario piece window cannot exceed the remaining queue)/iu.test(value)) {
+    return 'supply-too-short';
+  }
+  if (/\bSupplyWindowConflictsWithConcreteQueue\b/iu.test(value)) {
+    return 'supply-window-conflict';
+  }
+  if (/(?:visible-seven-minimum-cover-unsupported|\bVisibleSevenMinimumCoverUnsupported\b|minimum-cover is unavailable with visible-7 queue knowledge|requires full-queue oracle knowledge|visible-7 queue knowledge is unavailable with tiling-only Build semantics)/iu.test(value)) {
+    return 'queue-knowledge-incompatible';
   }
   return null;
 }

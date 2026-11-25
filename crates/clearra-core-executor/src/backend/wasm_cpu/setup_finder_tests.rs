@@ -259,16 +259,109 @@ fn visible_policy_target_workers_preserve_the_exact_setup_report() {
 
 #[test]
 #[cfg(not(target_family = "wasm"))]
+fn visible_policy_ready_worker_runs_before_slow_peer_initializes() {
+    use std::sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        Arc, Condvar, Mutex,
+    };
+    let caller = std::thread::current().id();
+    let control = ExecutionControl::new(ExecutionCancellationToken::new()).with_parallelism(2);
+    let initialized = AtomicUsize::new(0);
+    let progress = (Mutex::new(false), Condvar::new());
+    let result = super::run_setup_observation_worker_jobs(
+        2,
+        16,
+        Arc::new(AtomicBool::new(false)),
+        &control,
+        None,
+        |worker| {
+            assert_ne!(std::thread::current().id(), caller);
+            if worker == 0 {
+                let ready = progress.0.lock().unwrap();
+                let (ready, timeout) = progress
+                    .1
+                    .wait_timeout_while(ready, std::time::Duration::from_secs(10), |ready| !*ready)
+                    .unwrap();
+                assert!(
+                    *ready && !timeout.timed_out(),
+                    "the ready worker must run without a full initialization barrier"
+                );
+            }
+            initialized.fetch_add(1, Ordering::SeqCst);
+            Ok(worker)
+        },
+        |worker, state, ordinal| {
+            assert_ne!(std::thread::current().id(), caller);
+            assert_eq!(worker, *state);
+            if worker == 1 {
+                *progress.0.lock().unwrap() = true;
+                progress.1.notify_all();
+            }
+            Ok(ordinal)
+        },
+    );
+    assert_eq!(initialized.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        result,
+        Ok((0..16).map(|ordinal| (ordinal, ordinal)).collect())
+    );
+    let first = control.compute_budget().try_acquire_worker().unwrap();
+    let second = control.compute_budget().try_acquire_worker().unwrap();
+    assert!(control.compute_budget().try_acquire_worker().is_none());
+    drop((first, second));
+}
+
+#[test]
+#[cfg(not(target_family = "wasm"))]
+fn visible_policy_initializer_failure_and_panic_release_compute_owners() {
+    use std::sync::{atomic::AtomicBool, Arc};
+    for panic in [false, true] {
+        let control = ExecutionControl::new(ExecutionCancellationToken::new()).with_parallelism(2);
+        let result = super::run_setup_observation_worker_jobs(
+            2,
+            16,
+            Arc::new(AtomicBool::new(false)),
+            &control,
+            None,
+            |worker| {
+                if worker == 0 {
+                    assert!(!panic, "injected setup initializer panic");
+                    return Err(super::WasmExactSearchError::InvalidProblem(
+                        "injected_setup_initializer_failure",
+                    ));
+                }
+                Ok(())
+            },
+            |_, _, ordinal| Ok(ordinal),
+        );
+        assert_eq!(
+            result,
+            Err(super::WasmExactSearchError::InvalidProblem(if panic {
+                "setup_observation_parallel_worker_panicked"
+            } else {
+                "injected_setup_initializer_failure"
+            }))
+        );
+        let first = control.compute_budget().try_acquire_worker().unwrap();
+        let second = control.compute_budget().try_acquire_worker().unwrap();
+        assert!(control.compute_budget().try_acquire_worker().is_none());
+        drop((first, second));
+    }
+}
+
+#[test]
+#[cfg(not(target_family = "wasm"))]
 fn visible_policy_parallel_cancellation_joins_all_workers() {
     let pre_cancelled = ExecutionCancellationToken::new();
     pre_cancelled.handle().cancel();
     let pre_control = ExecutionControl::new(pre_cancelled);
     let pre_result = super::run_setup_observation_worker_jobs(
-        vec![(); 4],
+        4,
         16,
         std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         &pre_control,
         None,
+        |_| Ok(()),
         |_, _, ordinal| Ok::<_, super::WasmExactSearchError>(ordinal),
     );
     assert_eq!(pre_result, Err(super::WasmExactSearchError::Cancelled));
@@ -293,11 +386,12 @@ fn visible_policy_parallel_cancellation_joins_all_workers() {
         handle.cancel();
     });
     let result = super::run_setup_observation_worker_jobs(
-        vec![(); 4],
+        4,
         16,
         std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         &control,
         Some(std::sync::Arc::clone(&test_hook)),
+        |_| Ok(()),
         |_, _, ordinal| Ok::<_, super::WasmExactSearchError>(ordinal),
     );
     canceller.join().expect("cancellation observer");
@@ -312,11 +406,12 @@ fn visible_policy_parallel_panic_fails_closed_and_joins_peers() {
         super::ObservationParallelTestHook::new(super::ObservationParallelTestInjection::Panic, 4);
     let control = ExecutionControl::new(ExecutionCancellationToken::new());
     let result = super::run_setup_observation_worker_jobs(
-        vec![(); 4],
+        4,
         16,
         std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         &control,
         Some(std::sync::Arc::clone(&test_hook)),
+        |_| Ok(()),
         |_, _, ordinal| Ok::<_, super::WasmExactSearchError>(ordinal),
     );
     assert_eq!(
@@ -342,11 +437,12 @@ fn visible_policy_parallel_test_hook_is_per_invocation() {
             start.wait();
             let control = ExecutionControl::new(ExecutionCancellationToken::new());
             super::run_setup_observation_worker_jobs(
-                vec![(); 4],
+                4,
                 16,
                 std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 &control,
                 Some(panic_hook),
+                |_| Ok(()),
                 |_, _, ordinal| Ok::<_, super::WasmExactSearchError>(ordinal),
             )
         })
@@ -357,11 +453,12 @@ fn visible_policy_parallel_test_hook_is_per_invocation() {
             start.wait();
             let control = ExecutionControl::new(ExecutionCancellationToken::new());
             super::run_setup_observation_worker_jobs(
-                vec![(); 4],
+                4,
                 16,
                 std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 &control,
                 None,
+                |_| Ok(()),
                 |_, _, ordinal| Ok::<_, super::WasmExactSearchError>(ordinal),
             )
         })

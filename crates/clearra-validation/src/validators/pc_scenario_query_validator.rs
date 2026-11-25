@@ -155,16 +155,22 @@ fn validate_scenario_piece_window(query: &PcScenarioQuery, report: &mut Diagnost
             "scenario_piece_window_empty",
         ));
     }
+    // The piece window counts locks. An enabled, occupied initial hold supplies
+    // one of those locks without consuming a piece from the remaining queue,
+    // just as the problem compiler's supply-window projection does.
+    let initial_hold_pieces =
+        usize::from(query.allow_hold() && query.hold_state().piece().is_some());
+    let required_queue_pieces = max_pieces.saturating_sub(initial_hold_pieces);
     if matches!(
         query.remaining_queue(),
         PcQueueInput::FixedSequence(_)
             | PcQueueInput::BagAlignedPattern(_)
             | PcQueueInput::PatternExpression(_)
-    ) && max_pieces > query.remaining_queue().len()
+    ) && required_queue_pieces > query.remaining_queue().len()
     {
         report.push(invalid_pc_query(
             "pc.scenario.piece_window",
-            "PC scenario piece window cannot exceed the remaining queue length",
+            "PC scenario piece window cannot exceed the remaining queue plus an enabled initial held piece",
             "scenario_piece_window_exceeds_queue",
         ));
     }

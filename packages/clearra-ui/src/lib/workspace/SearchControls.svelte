@@ -53,7 +53,7 @@
 <WorkspaceControlPanel ariaLabel={label('search')}>
   <section class="workspace-control-section">
     <h2 class="workspace-control-heading"><Database size={16} strokeWidth={1.8} />{label('source')}</h2>
-    <WorkspaceSupplyInput value={request.queue} {language} maximumLength={64}
+    <WorkspaceSupplyInput value={request.queue} {language}
       on:value={(event) => patch({ queue: event.detail })} />
     <QueuePatternHelp {language} />
 

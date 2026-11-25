@@ -35,6 +35,8 @@
     decodePcSolverPath,
     DEFAULT_PC_SOLVER_LINK_STATE,
     encodePcSolverPath,
+    pcSolverAutomaticTargetLines,
+    pcSolverDisplayHeight,
     type PcSolverLinkState
   } from './pcSolverLinkState';
   import QueuePatternHelp from './QueuePatternHelp.svelte';
@@ -48,6 +50,7 @@
     createDefaultWorkspaceRequest,
     trimBoardMask,
     workspaceValidationCodes,
+    WORKSPACE_PC_MAX_LINES,
     type RuleProfile,
     type SolverWorkspaceRequest,
     type WorkspaceValidationCode
@@ -82,7 +85,6 @@
     { value: 'srs-x', label: 'SRS-X' },
     { value: 'jstris-180', label: 'Jstris 180' }
   ];
-  const MAX_PC_SOLVER_LINES = 4;
 
   let request = withAutomaticTarget(requestFromLinkState(decodedLinkState ?? DEFAULT_PC_SOLVER_LINK_STATE));
   let language: WorkspaceLanguage = 'en';
@@ -221,23 +223,22 @@
   function withAutomaticTarget(next: SolverWorkspaceRequest): SolverWorkspaceRequest {
     return {
       ...next,
-      lines: automaticPcTargetLines(next.boardMask, next.queue, MAX_PC_SOLVER_LINES)
-        ?? MAX_PC_SOLVER_LINES,
-      boardMask: trimBoardMask(next.boardMask, MAX_PC_SOLVER_LINES)
+      lines: pcSolverAutomaticTargetLines(next),
+      boardMask: trimBoardMask(next.boardMask, WORKSPACE_PC_MAX_LINES)
     };
   }
 
   function standaloneValidationCodes(value: SolverWorkspaceRequest): WorkspaceValidationCode[] {
-    const normalized = clearCompletedRows(value.boardMask, MAX_PC_SOLVER_LINES);
+    const normalized = clearCompletedRows(value.boardMask, WORKSPACE_PC_MAX_LINES);
     const inferredLines = automaticPcTargetLines(
       normalized.boardMask,
       value.queue,
-      MAX_PC_SOLVER_LINES
+      WORKSPACE_PC_MAX_LINES
     );
     const codes = workspaceValidationCodes(
       {
         ...value,
-        lines: inferredLines ?? MAX_PC_SOLVER_LINES,
+        lines: inferredLines ?? pcSolverDisplayHeight(value),
         boardMask: normalized.boardMask
       },
       'web'
@@ -248,11 +249,12 @@
     return [...new Set(codes)];
   }
 
-  function setBoardMask(boardMask: bigint) {
+  function setBoardMask(boardMask: bigint, lines = request.lines) {
     completedRowsWarning = 0;
     updateRequest({
       ...request,
-      boardMask: trimBoardMask(boardMask, MAX_PC_SOLVER_LINES)
+      lines,
+      boardMask: trimBoardMask(boardMask, WORKSPACE_PC_MAX_LINES)
     });
   }
 
@@ -263,11 +265,11 @@
 
   function run() {
     if (active || validationCodes.length) return;
-    const normalized = clearCompletedRows(request.boardMask, MAX_PC_SOLVER_LINES);
+    const normalized = clearCompletedRows(request.boardMask, WORKSPACE_PC_MAX_LINES);
     const targetLines = automaticPcTargetLines(
       normalized.boardMask,
       request.queue,
-      MAX_PC_SOLVER_LINES
+      WORKSPACE_PC_MAX_LINES
     );
     if (targetLines === null) return;
     const executionRequest = {
@@ -432,11 +434,12 @@
         <BoardEditor
           {request}
           {language}
-          displayHeight={MAX_PC_SOLVER_LINES}
+          displayHeight={pcSolverDisplayHeight(request)}
           showImport={false}
           showStats={false}
           showToolbar={false}
           on:change={(event) => setBoardMask(event.detail)}
+          on:import={(event) => setBoardMask(event.detail.boardMask, event.detail.lines)}
         />
       </div>
 

@@ -1953,10 +1953,9 @@ impl WasmDistributedCoordinator {
                     "wasm_pc_root_set_empty",
                 ));
             }
-            // The PC-root producer is a control-only source. Unlike the
-            // legacy candidate producer, it does not consume one of the
-            // admitted compute slots, so all requested slots may own roots.
-            let worker_count = worker_count.min(root_count);
+            // The PC-root producer is control-only. Keep every admitted
+            // compute slot even when only one root is currently available;
+            // active participation is reported separately from pool width.
             (
                 DistributedCandidateProducer::PcRoots(producer),
                 WasmDistributedMode::CpuMulti,
@@ -1987,7 +1986,9 @@ impl WasmDistributedCoordinator {
                     "wasm_tiling_root_set_empty",
                 ));
             }
-            let worker_count = worker_count.min(root_count);
+            // A one-root tiling still owns the requested parallel authority.
+            // Collapsing its pool to one and then selecting Serial would send
+            // a Fixed(N) request into a single-worker-only terminal session.
             (
                 DistributedCandidateProducer::Tiling(producer),
                 WasmDistributedMode::CpuMulti,
@@ -3692,8 +3693,9 @@ impl DistributedCandidateProducer {
             // may leave a real slot idle, but must not rewrite its admission.
             Self::FullHeightPc(_) => (None, true),
             Self::FullHeightTiling(_) => (None, false),
-            Self::PcRoots(producer) => (Some(producer.root_count() as u128), false),
-            Self::Tiling(producer) => (Some(producer.root_count() as u128), false),
+            // Root producers are management-only; their N compute slots are
+            // already admitted independently of how many roots can be active.
+            Self::PcRoots(_) | Self::Tiling(_) => (None, false),
             Self::BuildProbability(producer) => (producer.progress().candidate_family_count, true),
             Self::Forward(_) | Self::Setup(_) | Self::Recovery(_) => (None, true),
             Self::SpinStructure(_) => (None, false),

@@ -481,11 +481,7 @@ impl ExtendedBuildProbabilitySession {
         self.new_shared_family_verifier_with_resources(memory_bound, None)
     }
 
-    fn new_shared_family_verifier_with_resources(
-        &self,
-        memory_bound: ExecutionMemoryBound,
-        private_memory_owner: Option<ExecutionMemoryOwner>,
-    ) -> Result<Self, WasmExactSearchError> {
+    fn shared_family_verifier_creation_bytes(&self) -> Result<(u128, u128), WasmExactSearchError> {
         let universe = self.problem.piece_source().materialized_universe().ok_or(
             WasmExactSearchError::InvalidProblem("wasm_piece_source_not_materialized"),
         )?;
@@ -510,6 +506,23 @@ impl ExtendedBuildProbabilitySession {
                 "extended_build_verifier_creation_projection_overflow",
             ),
         )?;
+        Ok((bitmap_creation, creation))
+    }
+
+    fn new_shared_family_verifier_with_resources(
+        &self,
+        memory_bound: ExecutionMemoryBound,
+        private_memory_owner: Option<ExecutionMemoryOwner>,
+    ) -> Result<Self, WasmExactSearchError> {
+        let (bitmap_creation, creation) = self.shared_family_verifier_creation_bytes()?;
+        let pattern_count = self
+            .problem
+            .piece_source()
+            .materialized_universe()
+            .ok_or(WasmExactSearchError::InvalidProblem(
+                "wasm_piece_source_not_materialized",
+            ))?
+            .pattern_count();
         if let Some(owner) = private_memory_owner.as_ref() {
             owner
                 .ensure(creation)

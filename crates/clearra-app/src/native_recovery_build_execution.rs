@@ -71,34 +71,59 @@ pub(crate) fn run_native_recovery_build(
     if control.is_cancelled() {
         return Err(RecoveryBuildError::Cancelled.into());
     }
-    if workers <= 1 {
-        let result = std::sync::Mutex::new(None);
-        try_for_each_chunk(
-            control,
-            1,
-            1,
-            || Ok::<_, Error>(()),
-            |_, _| {
-                let report = query.search(control)?;
-                *result
-                    .lock()
-                    .map_err(|_| Error::InvalidState("recovery result poisoned"))? = Some(report);
-                Ok(())
-            },
-        )
-        .map_err(|error| match error {
-            ParallelWorkError::Worker(error) => error,
-            ParallelWorkError::Cancelled => RecoveryBuildError::Cancelled.into(),
-            ParallelWorkError::ThreadSpawnFailed => {
-                Error::InvalidState("recovery worker spawn failed")
-            }
-            ParallelWorkError::WorkerPanicked => Error::InvalidState("recovery worker panicked"),
-        })?;
-        return result
-            .into_inner()
-            .map_err(|_| Error::InvalidState("recovery result poisoned"))?
-            .ok_or(Error::InvalidState("recovery result missing"));
-    }
+    // Preparation and the final diagram/weighted-measure reduction also own
+    // compute. Direct callers only wait; an existing same-budget compute owner
+    // can reuse its slot. The pool below suspends that slot until every worker
+    // has joined, so management never adds an (N + 1)th compute participant.
+    on_recovery_compute_worker(control, || {
+        if workers <= 1 {
+            return query.search(control).map_err(Error::from);
+        }
+        run_parallel_recovery_build(query, workers, control)
+    })
+}
+
+fn on_recovery_compute_worker<T: Send>(
+    control: &ExecutionControl,
+    operation: impl FnOnce() -> Result<T, Error> + Send,
+) -> Result<T, Error> {
+    let operation = std::sync::Mutex::new(Some(operation));
+    let result = std::sync::Mutex::new(None);
+    try_for_each_chunk(
+        control,
+        1,
+        1,
+        || Ok::<_, Error>(()),
+        |_, _| {
+            let operation = operation
+                .lock()
+                .map_err(|_| Error::InvalidState("recovery operation poisoned"))?
+                .take()
+                .ok_or(Error::InvalidState("recovery operation missing"))?;
+            let report = operation()?;
+            *result
+                .lock()
+                .map_err(|_| Error::InvalidState("recovery result poisoned"))? = Some(report);
+            Ok(())
+        },
+    )
+    .map_err(|error| match error {
+        ParallelWorkError::Worker(error) => error,
+        ParallelWorkError::Cancelled => RecoveryBuildError::Cancelled.into(),
+        ParallelWorkError::ThreadSpawnFailed => Error::InvalidState("recovery worker spawn failed"),
+        ParallelWorkError::WorkerPanicked => Error::InvalidState("recovery worker panicked"),
+    })?;
+    result
+        .into_inner()
+        .map_err(|_| Error::InvalidState("recovery result poisoned"))?
+        .ok_or(Error::InvalidState("recovery result missing"))
+}
+
+fn run_parallel_recovery_build(
+    query: RecoveryBuildQuery,
+    workers: usize,
+    control: &ExecutionControl,
+) -> Result<RecoveryBuildPopulation, Error> {
     let coordinator = Coordinator::new_with_control(query, workers, control)?;
     let init = coordinator.shared_worker_initialization();
     if control.is_cancelled() {
@@ -328,6 +353,71 @@ mod tests {
             rule_profile: RuleProfileId::SrsPlus,
             spin_profile: SpinProfileId::AllSpinPlus,
         }
+    }
+
+    #[test]
+    fn preparation_and_finish_use_compute_owner_and_manager_releases_all_slots() {
+        let caller = thread::current().id();
+        for workers in [1, 2, 8] {
+            let control = ExecutionControl::default().with_parallelism(workers);
+            on_recovery_compute_worker(&control, || {
+                assert_ne!(thread::current().id(), caller);
+                let mut spare = Vec::new();
+                while let Some(permit) = control.compute_budget().try_acquire_worker() {
+                    spare.push(permit);
+                }
+                assert_eq!(spare.len(), workers - 1, "preparation owns one slot");
+                drop(spare);
+                with_compute_coordinator(&control, || {
+                    let mut pool = Vec::new();
+                    while let Some(permit) = control.compute_budget().try_acquire_worker() {
+                        pool.push(permit);
+                    }
+                    assert_eq!(pool.len(), workers, "manager reserves no compute slot");
+                });
+                let mut spare = Vec::new();
+                while let Some(permit) = control.compute_budget().try_acquire_worker() {
+                    spare.push(permit);
+                }
+                assert_eq!(spare.len(), workers - 1, "finish resumes its one slot");
+                Ok(())
+            })
+            .unwrap();
+            let mut returned = Vec::new();
+            while let Some(permit) = control.compute_budget().try_acquire_worker() {
+                returned.push(permit);
+            }
+            assert_eq!(returned.len(), workers, "every compute owner drained");
+        }
+    }
+
+    #[test]
+    fn bound_recovery_owner_preserves_budget_and_initializer_panic_drains() {
+        let control = ExecutionControl::default().with_parallelism(2);
+        let caller = thread::current().id();
+        let serial = query().search(&ExecutionControl::default()).unwrap();
+        on_recovery_compute_worker(&control, || {
+            let owner = thread::current().id();
+            assert_ne!(owner, caller);
+            assert_eq!(run_native_recovery_build(query(), 8, &control)?, serial);
+            assert_eq!(thread::current().id(), owner);
+            let spare = control.compute_budget().try_acquire_worker().unwrap();
+            assert!(control.compute_budget().try_acquire_worker().is_none());
+            drop(spare);
+            Ok(())
+        })
+        .unwrap();
+        let failed: Result<(), Error> = on_recovery_compute_worker(&control, || {
+            panic!("injected recovery preparation failure")
+        });
+        assert!(matches!(
+            failed,
+            Err(Error::InvalidState("recovery worker panicked"))
+        ));
+        let first = control.compute_budget().try_acquire_worker().unwrap();
+        let second = control.compute_budget().try_acquire_worker().unwrap();
+        assert!(control.compute_budget().try_acquire_worker().is_none());
+        drop((first, second));
     }
 
     #[test]
