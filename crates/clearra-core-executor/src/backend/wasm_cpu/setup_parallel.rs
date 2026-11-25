@@ -6,15 +6,13 @@ use std::sync::Arc;
 
 #[cfg(not(target_family = "wasm"))]
 use std::{
-    collections::VecDeque,
     panic::{catch_unwind, AssertUnwindSafe},
-    sync::{
-        mpsc::{self, SyncSender, TryRecvError},
-        Condvar, Mutex,
-    },
+    sync::Mutex,
 };
 
 use clearra_core_domain::execution_cancellation::ExecutionControl;
+#[cfg(not(target_family = "wasm"))]
+use clearra_core_domain::parallel_work::{try_for_each_chunk, ParallelWorkError};
 #[cfg(not(target_family = "wasm"))]
 use clearra_core_domain::solution::normalized_tiling_solution::StandardBoard64TilingIdentity;
 use clearra_coverage::pattern::weighted_pattern_set::WeightedPatternSet;
@@ -50,6 +48,8 @@ use super::{
 
 #[cfg(not(target_family = "wasm"))]
 use super::setup_finder::compile_setup_pattern_index;
+#[cfg(not(target_family = "wasm"))]
+use super::setup_graph_builder::replace_setup_graph_cache;
 
 const EMPTY_WORDS: [u64; COVERAGE_WORD_LANES] = [0; COVERAGE_WORD_LANES];
 const NO_WITNESS: u32 = u32::MAX;
@@ -114,7 +114,7 @@ impl WasmSetupParallelCoordinator {
         let task_count_hint = if builder.parallel_task_count_hint() < 2 {
             1
         } else {
-            worker_count.saturating_sub(1).max(2)
+            worker_count.max(2)
         };
         Ok(Self {
             builder: Some(builder),
@@ -600,84 +600,12 @@ struct NativeSetupTaskLease {
 }
 
 #[cfg(not(target_family = "wasm"))]
-enum NativeSetupWorkerMessage {
-    Result(SetupParallelTaskResult),
-    Finished(Result<(), WasmExactSearchError>),
-}
-
-#[cfg(not(target_family = "wasm"))]
-struct NativeSetupWorkerStart {
-    initialization: NativeSetupWorkerInitialization,
-    tasks: Arc<[SetupParallelTask]>,
-    task_queue: Arc<Mutex<VecDeque<NativeSetupTaskLease>>>,
-}
-
-#[cfg(not(target_family = "wasm"))]
-enum NativeSetupWorkerGateState {
-    Preparing,
-    Ready(Arc<NativeSetupWorkerStart>),
-    Aborted,
-}
-
-#[cfg(not(target_family = "wasm"))]
-struct NativeSetupWorkerGate {
-    state: Mutex<NativeSetupWorkerGateState>,
-    ready: Condvar,
-}
-
-#[cfg(not(target_family = "wasm"))]
-impl NativeSetupWorkerGate {
-    fn new() -> Self {
-        Self {
-            state: Mutex::new(NativeSetupWorkerGateState::Preparing),
-            ready: Condvar::new(),
-        }
-    }
-
-    fn publish(&self, start: Arc<NativeSetupWorkerStart>) -> Result<(), WasmExactSearchError> {
-        let mut state = self.state.lock().map_err(|_| {
-            WasmExactSearchError::InvalidProblem("setup_parallel_worker_gate_poisoned")
-        })?;
-        *state = NativeSetupWorkerGateState::Ready(start);
-        self.ready.notify_all();
-        Ok(())
-    }
-
-    fn abort(&self) {
-        if let Ok(mut state) = self.state.lock() {
-            *state = NativeSetupWorkerGateState::Aborted;
-            self.ready.notify_all();
-        }
-    }
-
-    fn wait(&self) -> Result<Option<Arc<NativeSetupWorkerStart>>, WasmExactSearchError> {
-        let mut state = self.state.lock().map_err(|_| {
-            WasmExactSearchError::InvalidProblem("setup_parallel_worker_gate_poisoned")
-        })?;
-        loop {
-            match &*state {
-                NativeSetupWorkerGateState::Preparing => {
-                    state = self.ready.wait(state).map_err(|_| {
-                        WasmExactSearchError::InvalidProblem("setup_parallel_worker_gate_poisoned")
-                    })?;
-                }
-                NativeSetupWorkerGateState::Ready(start) => {
-                    return Ok(Some(Arc::clone(start)));
-                }
-                NativeSetupWorkerGateState::Aborted => return Ok(None),
-            }
-        }
-    }
-}
-
-#[cfg(not(target_family = "wasm"))]
 pub(crate) fn execute_setup_parallel_native(
     query: &SetupSearchQuery,
     worker_count: usize,
     control: &ExecutionControl,
 ) -> Result<CoreExecutionResult, WasmExactSearchError> {
-    let coordinator = WasmSetupParallelCoordinator::new(query, worker_count)?;
-    execute_setup_parallel_native_coordinator(coordinator, worker_count, control)
+    execute_setup_parallel_native_owned(query, worker_count, None, control)
 }
 
 #[cfg(not(target_family = "wasm"))]
@@ -687,18 +615,77 @@ pub(crate) fn execute_setup_parallel_native_with_complete_candidates(
     candidates: Arc<[StandardBoard64TilingIdentity]>,
     control: &ExecutionControl,
 ) -> Result<CoreExecutionResult, WasmExactSearchError> {
-    let coordinator = WasmSetupParallelCoordinator::new_with_complete_candidates(
-        query,
-        worker_count,
-        candidates,
-    )?;
-    execute_setup_parallel_native_coordinator(coordinator, worker_count, control)
+    execute_setup_parallel_native_owned(query, worker_count, Some(candidates), control)
+}
+
+#[cfg(not(target_family = "wasm"))]
+fn execute_setup_parallel_native_owned(
+    query: &SetupSearchQuery,
+    worker_count: usize,
+    candidates: Option<Arc<[StandardBoard64TilingIdentity]>>,
+    control: &ExecutionControl,
+) -> Result<CoreExecutionResult, WasmExactSearchError> {
+    let control = control.clone().with_parallelism_if_unbound(worker_count);
+    let result = Mutex::new(None);
+    // The graph cache belongs to the caller's continuation, not the temporary
+    // OS worker. Transfer it in both directions, including failed execution.
+    let cache = Mutex::new(replace_setup_graph_cache(None));
+    // Preparation and final reduction are compute work too. A request caller
+    // owns no permit and only waits; a nested compute worker reuses its slot.
+    let execution = try_for_each_chunk(
+        &control,
+        1,
+        1,
+        || Ok::<_, WasmExactSearchError>(()),
+        |_, _| {
+            let incoming = cache
+                .lock()
+                .map_err(|_| native_setup_result_lock_error())?
+                .take();
+            let previous = replace_setup_graph_cache(incoming);
+            let completed = catch_unwind(AssertUnwindSafe(|| {
+                let coordinator = if let Some(candidates) = &candidates {
+                    WasmSetupParallelCoordinator::new_with_complete_candidates(
+                        query,
+                        control.parallelism(),
+                        Arc::clone(candidates),
+                    )?
+                } else {
+                    WasmSetupParallelCoordinator::new(query, control.parallelism())?
+                };
+                execute_setup_parallel_native_coordinator(coordinator, &control)
+            }))
+            .unwrap_or_else(|_| {
+                Err(WasmExactSearchError::InvalidProblem(
+                    "setup_parallel_worker_panicked",
+                ))
+            });
+            *cache.lock().map_err(|_| native_setup_result_lock_error())? =
+                replace_setup_graph_cache(previous);
+            let completed = completed?;
+            *result
+                .lock()
+                .map_err(|_| native_setup_result_lock_error())? = Some(completed);
+            Ok(())
+        },
+    );
+    replace_setup_graph_cache(
+        cache
+            .into_inner()
+            .map_err(|_| native_setup_result_lock_error())?,
+    );
+    execution.map_err(native_setup_parallel_error)?;
+    result
+        .into_inner()
+        .map_err(|_| native_setup_result_lock_error())?
+        .ok_or(WasmExactSearchError::InvalidProblem(
+            "setup_parallel_result_missing",
+        ))
 }
 
 #[cfg(not(target_family = "wasm"))]
 fn execute_setup_parallel_native_coordinator(
     mut coordinator: WasmSetupParallelCoordinator,
-    worker_count: usize,
     control: &ExecutionControl,
 ) -> Result<CoreExecutionResult, WasmExactSearchError> {
     prepare_native_setup_graph(&mut coordinator, control)?;
@@ -706,116 +693,42 @@ fn execute_setup_parallel_native_coordinator(
         control.report_progress("setup-finalize", 4, Some(4));
         return coordinator.finish_with_control(1, control);
     }
-    let tasks: Arc<[SetupParallelTask]> = Arc::from(coordinator.tasks.clone());
-    let workers_used = worker_count.max(1).min(tasks.len().max(1));
-    let task_queue = Arc::new(Mutex::new(
-        (0..tasks.len())
-            .map(|task_index| NativeSetupTaskLease {
-                task_index,
-                retry_count: 0,
-            })
-            .collect::<VecDeque<_>>(),
-    ));
-    let background_workers = workers_used.saturating_sub(1);
-    let channel_capacity = workers_used.saturating_mul(2).max(1);
-    let (sender, receiver) = mpsc::sync_channel(channel_capacity);
-    let worker_gate = Arc::new(NativeSetupWorkerGate::new());
-    let mut first_error = None;
-    std::thread::scope(|scope| {
-        for _ in 0..background_workers {
-            let worker_gate = Arc::clone(&worker_gate);
-            let worker_control = control.clone();
-            let worker_sender = sender.clone();
-            scope.spawn(move || {
-                let outcome = catch_unwind(AssertUnwindSafe(|| -> Result<_, _> {
-                    let Some(start) = worker_gate.wait()? else {
-                        return Ok(());
-                    };
-                    run_native_setup_worker(
-                        start.initialization.clone(),
-                        Arc::clone(&start.tasks),
-                        Arc::clone(&start.task_queue),
-                        &worker_control,
-                        &worker_sender,
-                    )
-                }))
-                .unwrap_or({
-                    Err(WasmExactSearchError::InvalidProblem(
-                        "setup_parallel_worker_panicked",
-                    ))
-                });
-                let _ = worker_sender.send(NativeSetupWorkerMessage::Finished(outcome));
-            });
-        }
-        drop(sender);
-
-        let mut completed_background_workers = 0;
-        let main_outcome =
-            catch_unwind(AssertUnwindSafe(|| -> Result<(), WasmExactSearchError> {
-                let initialization = native_setup_worker_initialization(&coordinator)?;
-                worker_gate.publish(Arc::new(NativeSetupWorkerStart {
-                    initialization: initialization.clone(),
-                    tasks: Arc::clone(&tasks),
-                    task_queue: Arc::clone(&task_queue),
-                }))?;
-                let mut main_worker = create_native_setup_worker(&initialization)?;
-                while first_error.is_none() {
-                    let Some(lease) = take_native_setup_task(&task_queue)? else {
-                        break;
-                    };
-                    match consume_native_setup_task(&mut main_worker, lease, &tasks, control) {
-                        NativeSetupTaskAttempt::Result(result) => {
-                            absorb_native_setup_result(&mut coordinator, result)?;
-                        }
+    let tasks = coordinator.tasks.clone();
+    let workers_used = control.parallelism().min(tasks.len());
+    let initialization = native_setup_worker_initialization(&coordinator)?;
+    let owner = Mutex::new(&mut coordinator);
+    try_for_each_chunk(
+        control,
+        tasks.len(),
+        1,
+        || create_native_setup_worker(&initialization),
+        |worker, range| {
+            for task_index in range {
+                let mut lease = NativeSetupTaskLease {
+                    task_index,
+                    retry_count: 0,
+                };
+                let result = loop {
+                    match consume_native_setup_task(worker, lease, &tasks, control) {
+                        NativeSetupTaskAttempt::Result(result) => break result,
                         NativeSetupTaskAttempt::Retry(retry) => {
-                            requeue_native_setup_task(&task_queue, retry)?;
-                            main_worker = create_native_setup_worker(&initialization)?;
-                            continue;
+                            lease = retry;
+                            *worker = create_native_setup_worker(&initialization)?;
                         }
                         NativeSetupTaskAttempt::Failed(error) => return Err(error),
                     }
-                    drain_native_setup_messages(
-                        &receiver,
-                        &mut coordinator,
-                        &mut completed_background_workers,
-                        &mut first_error,
-                    );
-                }
-                Ok(())
-            }))
-            .unwrap_or({
-                Err(WasmExactSearchError::InvalidProblem(
-                    "setup_parallel_main_worker_panicked",
-                ))
-            });
-        if let Err(error) = main_outcome {
-            worker_gate.abort();
-            first_error.get_or_insert(error);
-        }
-
-        if first_error.is_some() {
-            control.cancellation.handle().cancel();
-        }
-        while completed_background_workers < background_workers {
-            match receiver.recv() {
-                Ok(message) => apply_native_setup_message(
-                    message,
-                    &mut coordinator,
-                    &mut completed_background_workers,
-                    &mut first_error,
-                ),
-                Err(_) => {
-                    first_error.get_or_insert(WasmExactSearchError::InvalidProblem(
-                        "setup_parallel_worker_channel_disconnected",
-                    ));
-                    break;
-                }
+                };
+                // Reduce in original task order while holding a compute slot.
+                // This preserves streaming retirement without adding an N+1th
+                // calculating coordinator or retaining every result at once.
+                let mut owner = owner.lock().map_err(|_| native_setup_result_lock_error())?;
+                absorb_native_setup_result(&mut owner, result)?;
             }
-        }
-    });
-    if let Some(error) = first_error {
-        return Err(error);
-    }
+            Ok(())
+        },
+    )
+    .map_err(native_setup_parallel_error)?;
+    drop(owner);
 
     control.report_progress("setup-finalize", 4, Some(4));
     coordinator.next_task = coordinator.tasks.len();
@@ -907,37 +820,6 @@ fn native_setup_worker_initialization(
 }
 
 #[cfg(not(target_family = "wasm"))]
-fn run_native_setup_worker(
-    initialization: NativeSetupWorkerInitialization,
-    tasks: Arc<[SetupParallelTask]>,
-    task_queue: Arc<Mutex<VecDeque<NativeSetupTaskLease>>>,
-    control: &ExecutionControl,
-    sender: &SyncSender<NativeSetupWorkerMessage>,
-) -> Result<(), WasmExactSearchError> {
-    let mut worker = create_native_setup_worker(&initialization)?;
-    loop {
-        let Some(lease) = take_native_setup_task(&task_queue)? else {
-            return Ok(());
-        };
-        match consume_native_setup_task(&mut worker, lease, &tasks, control) {
-            NativeSetupTaskAttempt::Result(result) => {
-                if sender
-                    .send(NativeSetupWorkerMessage::Result(result))
-                    .is_err()
-                {
-                    return Ok(());
-                }
-            }
-            NativeSetupTaskAttempt::Retry(retry) => {
-                requeue_native_setup_task(&task_queue, retry)?;
-                worker = create_native_setup_worker(&initialization)?;
-            }
-            NativeSetupTaskAttempt::Failed(error) => return Err(error),
-        }
-    }
-}
-
-#[cfg(not(target_family = "wasm"))]
 enum NativeSetupTaskAttempt {
     Result(SetupParallelTaskResult),
     Retry(NativeSetupTaskLease),
@@ -954,28 +836,6 @@ fn create_native_setup_worker(
         initialization.shape_count,
         Arc::clone(&initialization.runtimes),
     )
-}
-
-#[cfg(not(target_family = "wasm"))]
-fn take_native_setup_task(
-    task_queue: &Mutex<VecDeque<NativeSetupTaskLease>>,
-) -> Result<Option<NativeSetupTaskLease>, WasmExactSearchError> {
-    task_queue
-        .lock()
-        .map_err(|_| WasmExactSearchError::InvalidProblem("setup_parallel_task_queue_poisoned"))
-        .map(|mut queue| queue.pop_front())
-}
-
-#[cfg(not(target_family = "wasm"))]
-fn requeue_native_setup_task(
-    task_queue: &Mutex<VecDeque<NativeSetupTaskLease>>,
-    lease: NativeSetupTaskLease,
-) -> Result<(), WasmExactSearchError> {
-    let mut queue = task_queue
-        .lock()
-        .map_err(|_| WasmExactSearchError::InvalidProblem("setup_parallel_task_queue_poisoned"))?;
-    queue.push_back(lease);
-    Ok(())
 }
 
 #[cfg(not(target_family = "wasm"))]
@@ -1006,55 +866,33 @@ fn consume_native_setup_task(
 }
 
 #[cfg(not(target_family = "wasm"))]
-fn drain_native_setup_messages(
-    receiver: &mpsc::Receiver<NativeSetupWorkerMessage>,
-    coordinator: &mut WasmSetupParallelCoordinator,
-    completed_workers: &mut usize,
-    first_error: &mut Option<WasmExactSearchError>,
-) {
-    loop {
-        match receiver.try_recv() {
-            Ok(message) => {
-                apply_native_setup_message(message, coordinator, completed_workers, first_error)
-            }
-            Err(TryRecvError::Empty | TryRecvError::Disconnected) => return,
-        }
-    }
-}
-
-#[cfg(not(target_family = "wasm"))]
-fn apply_native_setup_message(
-    message: NativeSetupWorkerMessage,
-    coordinator: &mut WasmSetupParallelCoordinator,
-    completed_workers: &mut usize,
-    first_error: &mut Option<WasmExactSearchError>,
-) {
-    match message {
-        NativeSetupWorkerMessage::Result(result) => {
-            if first_error.is_none() {
-                if let Err(error) = absorb_native_setup_result(coordinator, result) {
-                    *first_error = Some(error);
-                }
-            }
-        }
-        NativeSetupWorkerMessage::Finished(outcome) => {
-            *completed_workers = completed_workers.saturating_add(1);
-            if let Err(error) = outcome {
-                if first_error.is_none() {
-                    *first_error = Some(error);
-                }
-            }
-        }
-    }
-}
-
-#[cfg(not(target_family = "wasm"))]
 fn absorb_native_setup_result(
     coordinator: &mut WasmSetupParallelCoordinator,
     result: SetupParallelTaskResult,
 ) -> Result<(), WasmExactSearchError> {
     coordinator.absorb_result(result)?;
     coordinator.merge_ready_results()
+}
+
+#[cfg(not(target_family = "wasm"))]
+fn native_setup_result_lock_error() -> WasmExactSearchError {
+    WasmExactSearchError::InvalidProblem("setup_parallel_result_lock_poisoned")
+}
+
+#[cfg(not(target_family = "wasm"))]
+fn native_setup_parallel_error(
+    error: ParallelWorkError<WasmExactSearchError>,
+) -> WasmExactSearchError {
+    match error {
+        ParallelWorkError::Worker(error) => error,
+        ParallelWorkError::Cancelled => WasmExactSearchError::Cancelled,
+        ParallelWorkError::ThreadSpawnFailed => {
+            WasmExactSearchError::InvalidProblem("setup_parallel_worker_spawn_failed")
+        }
+        ParallelWorkError::WorkerPanicked => {
+            WasmExactSearchError::InvalidProblem("setup_parallel_worker_panicked")
+        }
+    }
 }
 
 struct SetupConditionMerge {
@@ -1292,7 +1130,7 @@ fn plan_parallel_tasks(
                     "setup_parallel_pattern_word_count_overflow",
                 ))
         })?;
-    let verifier_count = worker_count.saturating_sub(1).max(1);
+    let verifier_count = worker_count.max(1);
     let tasks_per_verifier = if verifier_count >= HIGH_CONCURRENCY_VERIFIER_THRESHOLD {
         HIGH_CONCURRENCY_TARGET_TASKS_PER_VERIFIER
     } else {

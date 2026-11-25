@@ -31,7 +31,7 @@ fn parallel_setup_defers_exact_task_metadata_until_graph_preparation_advances() 
 
     assert!(coordinator.tasks.is_empty());
     assert!(coordinator.pending_results.is_empty());
-    assert_eq!(coordinator.task_count(), 3);
+    assert_eq!(coordinator.task_count(), 4);
     assert!(matches!(
         coordinator
             .advance(1, 1, &ExecutionControl::default())
@@ -227,6 +227,54 @@ fn native_setup_progress_maps_graph_passes_to_stable_ui_phases() {
 
 #[cfg(not(target_family = "wasm"))]
 #[test]
+fn native_setup_preparation_keeps_the_request_caller_out_of_its_bound_compute_slot() {
+    use clearra_core_domain::execution_cancellation::{
+        ComputeBudget, ExecutionCancellationHandle, ExecutionProgress, ProgressSink,
+    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct OwnershipProbe {
+        caller: std::thread::ThreadId,
+        budget: Arc<ComputeBudget>,
+        cancellation: ExecutionCancellationHandle,
+        reports: AtomicUsize,
+    }
+
+    impl ProgressSink for OwnershipProbe {
+        fn report(&self, _: ExecutionProgress) {
+            assert_ne!(std::thread::current().id(), self.caller);
+            assert!(
+                self.budget.try_acquire_worker().is_none(),
+                "preparation must hold the existing one-worker request's slot"
+            );
+            self.reports.fetch_add(1, Ordering::Relaxed);
+            self.cancellation.cancel();
+        }
+    }
+
+    let control = ExecutionControl::default().with_parallelism(1);
+    let probe = Arc::new(OwnershipProbe {
+        caller: std::thread::current().id(),
+        budget: Arc::clone(control.compute_budget()),
+        cancellation: control.cancellation.handle(),
+        reports: AtomicUsize::new(0),
+    });
+    let control = control.with_progress_sink(probe.clone());
+    let result = execute_setup_parallel_native(
+        &SetupSearchQuery::default().with_tablebase_requested(false),
+        8,
+        &control,
+    );
+    assert!(matches!(result, Err(WasmExactSearchError::Cancelled)));
+    assert!(probe.reports.load(Ordering::Relaxed) > 0);
+    assert_eq!(control.parallelism(), 1);
+    let permit = control.compute_budget().try_acquire_worker().unwrap();
+    assert!(control.compute_budget().try_acquire_worker().is_none());
+    drop(permit);
+}
+
+#[cfg(not(target_family = "wasm"))]
+#[test]
 #[ignore = "full empty-4L serial/multiworker equivalence; run in the release acceptance suite"]
 fn native_multiworker_matches_serial_setup_result() {
     let limits = SetupLimits::new(32, 32, 32, 32, 2_000_000, 32).expect("bounded setup limits");
@@ -351,6 +399,30 @@ fn native_two_worker_cached_path_detail_matches_single_worker_result() {
     let single_worker = run_serial(&detail_query, &control);
     let two_workers = execute_setup_parallel_native(&detail_query, 2, &control)
         .expect("two-worker cached setup detail");
+
+    // The cache must return to this continuation after the temporary native
+    // worker exits. A nested invocation must reuse a held one-slot request
+    // rather than replacing its owner with the adapter's eight-worker hint.
+    let nested_control = control.clone().with_parallelism(1);
+    let permit = nested_control
+        .compute_budget()
+        .try_acquire_worker()
+        .unwrap();
+    let nested = clearra_core_domain::parallel_work::with_compute_worker(permit, || {
+        execute_setup_parallel_native(&detail_query, 8, &nested_control)
+            .expect("nested cached setup detail on the original compute owner")
+    });
+    assert_eq!(
+        nested.setup_finder_report().unwrap().hold_conditions(),
+        single_worker
+            .setup_finder_report()
+            .unwrap()
+            .hold_conditions()
+    );
+    assert!(nested_control
+        .compute_budget()
+        .try_acquire_worker()
+        .is_some());
 
     for field in [
         "normalized_solution_set_hash",

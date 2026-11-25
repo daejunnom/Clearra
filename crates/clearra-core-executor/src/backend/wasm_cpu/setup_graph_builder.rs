@@ -137,7 +137,7 @@ struct CachedSetupGraph {
     coverage: Option<Arc<[CompletedSetupCoverage]>>,
 }
 
-struct SetupGraphCacheEntry {
+pub(super) struct SetupGraphCacheEntry {
     query: SetupSearchQuery,
     graph: Option<Arc<PartialBuildGraph>>,
     coverage_graph: Option<Arc<SetupCoverageGraph>>,
@@ -153,6 +153,16 @@ thread_local! {
     static SETUP_GRAPH_CACHE: RefCell<Option<SetupGraphCacheEntry>> = const {
         RefCell::new(None)
     };
+}
+
+/// Move a request thread's derived graph ownership across a native compute
+/// handoff. Sharing the graph remains explicit through its existing Arcs;
+/// unrelated requests do not acquire a process-global cache.
+#[cfg(not(target_family = "wasm"))]
+pub(super) fn replace_setup_graph_cache(
+    cache: Option<SetupGraphCacheEntry>,
+) -> Option<SetupGraphCacheEntry> {
+    SETUP_GRAPH_CACHE.with(|current| current.replace(cache))
 }
 
 impl SetupGraphBuildSession {

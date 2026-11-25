@@ -166,6 +166,12 @@ impl ComputeBudget {
         self: &Arc<Self>,
         cancellation: &CancellationToken,
     ) -> Option<ComputePermit> {
+        if cancellation.is_cancelled() {
+            return None;
+        }
+        if let Some(permit) = self.try_acquire_worker() {
+            return Some(permit);
+        }
         let mut waiting = self
             .waiters
             .lock()
@@ -186,6 +192,13 @@ impl ComputeBudget {
     }
 
     pub(crate) fn release_worker_slot(&self) {
+        // Synchronize publication with the waiter's check-and-sleep boundary.
+        // An atomic count alone permits notify_one to land just before the
+        // waiter sleeps, leaving a free slot idle until its cancellation poll.
+        let _waiting = self
+            .waiters
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let old = self.available.fetch_add(1, Ordering::Release);
         debug_assert!(
             old < self.parallelism,
@@ -342,5 +355,50 @@ mod tests {
         let derived = ExecutionControl::default().with_parallelism_if_unbound(8);
         assert!(derived.has_parallelism_binding());
         assert_eq!(derived.parallelism(), 8);
+    }
+
+    #[test]
+    fn contended_worker_handoffs_wake_waiters_and_return_the_shared_slot() {
+        let control = ExecutionControl::default().with_parallelism(1);
+        let held = control.compute_budget().try_acquire_worker().unwrap();
+        let (started, starts) = std::sync::mpsc::channel();
+        let (finished, finishes) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                let control = &control;
+                let started = started.clone();
+                let finished = finished.clone();
+                scope.spawn(move || {
+                    started.send(()).unwrap();
+                    if let Some(permit) = control
+                        .compute_budget()
+                        .acquire_worker(&control.cancellation)
+                    {
+                        assert!(control.compute_budget().try_acquire_worker().is_none());
+                        drop(permit);
+                        finished.send(()).unwrap();
+                    }
+                });
+            }
+            for _ in 0..8 {
+                starts.recv().unwrap();
+            }
+            drop(held);
+            let complete = (0..8).all(|_| {
+                finishes
+                    .recv_timeout(std::time::Duration::from_secs(2))
+                    .is_ok()
+            });
+            if !complete {
+                control.cancellation.handle().cancel();
+            }
+            assert!(
+                complete,
+                "all waiting workers must receive the released request slot"
+            );
+        });
+        let permit = control.compute_budget().try_acquire_worker().unwrap();
+        assert!(control.compute_budget().try_acquire_worker().is_none());
+        drop(permit);
     }
 }
