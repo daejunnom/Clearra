@@ -1,4 +1,6 @@
 use clearra_core_domain::execution_cancellation::{ExecutionCancellationToken, ExecutionControl};
+#[cfg(not(target_family = "wasm"))]
+use clearra_host_contract::AppCommandKind;
 use clearra_host_contract::ResourceBudget;
 use clearra_i18n::LanguageId;
 use clearra_validation::diagnostic::{
@@ -154,6 +156,8 @@ impl AppContext {
                 .core_query()
                 .execution_policy()
                 .workers(),
+            #[cfg(not(target_family = "wasm"))]
+            crate::AppCommand::Continue(command) => command.native_worker_count(),
             _ => usize::from(resource_budget.workers()),
         };
         let product_control = execution_control
@@ -183,11 +187,25 @@ impl AppContext {
         execution_parts: AppExecutionParts,
         control: &ExecutionControl,
     ) -> AppResponse {
+        self.run_native_computation(execution_parts.0.kind(), control, || {
+            self.run_bound_execution_parts(execution_parts, control)
+        })
+    }
+
+    /// Run a whole native product source inside the same budget used by its
+    /// bulk stages. A composed source reuses its active compute slot, while
+    /// the public caller only waits for the response.
+    #[cfg(not(target_family = "wasm"))]
+    pub(crate) fn run_native_computation(
+        &self,
+        command_kind: AppCommandKind,
+        control: &ExecutionControl,
+        compute: impl FnOnce() -> AppResponse + Send,
+    ) -> AppResponse {
         use clearra_core_domain::parallel_work::{try_for_each_chunk, ParallelWorkError};
         use std::sync::Mutex;
 
-        let command_kind = execution_parts.0.kind();
-        let input = Mutex::new(Some(execution_parts));
+        let input = Mutex::new(Some(compute));
         let response = Mutex::new(None);
         let result = try_for_each_chunk(
             control,
@@ -195,12 +213,12 @@ impl AppContext {
             1,
             || Ok::<(), ()>(()),
             |_, _| {
-                let parts = input
+                let compute = input
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .take()
                     .ok_or(())?;
-                let completed = self.run_bound_execution_parts(parts, control);
+                let completed = compute();
                 *response
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(completed);

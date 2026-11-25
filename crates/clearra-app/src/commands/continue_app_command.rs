@@ -53,6 +53,14 @@ impl ContinueAppCommand {
         Self { token }
     }
 
+    /// Tokens contain search state, not an execution-policy override. Native
+    /// decoding restores this same host policy; reserve it before decoding so
+    /// admission and the resumed search share one compute owner.
+    #[cfg(not(target_family = "wasm"))]
+    pub(crate) fn native_worker_count(&self) -> usize {
+        PcExecutionPolicy::mvp_default().workers()
+    }
+
     /// Invalid input and errors during compilation stay on Continue's ordinary
     /// path, including its pre-execution cancellation behavior.
     pub(crate) fn compile_cooperative(

@@ -1055,6 +1055,23 @@ impl AppContext {
         request: AppRequest,
         control: &ExecutionControl,
     ) -> AppResponse {
+        let AppCommand::Continue(command) = request.command() else {
+            return self.run_with_execution_control(request, control);
+        };
+        let product_control = control
+            .clone()
+            .with_parallelism_if_unbound(command.native_worker_count());
+        self.run_native_computation(request.command().kind(), &product_control, || {
+            self.run_bound_native_cooperative_continue(request, &product_control)
+        })
+    }
+
+    #[cfg(all(feature = "parallel", not(target_family = "wasm")))]
+    fn run_bound_native_cooperative_continue(
+        &self,
+        request: AppRequest,
+        control: &ExecutionControl,
+    ) -> AppResponse {
         let prepared = match request.command() {
             AppCommand::Continue(command)
                 if self
