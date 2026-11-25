@@ -1,13 +1,16 @@
 //! Native host driver for the forward-search worker wire protocol.
 //!
-//! The browser owns the same coordinator/worker split in TypeScript. Native hosts keep the
-//! coordinator on the calling thread and dedicate all requested compute workers
-//! to persistent Rust threads. The coordinator is not a compute worker.
+//! Native hosts dedicate all requested compute workers to persistent Rust
+//! threads. Frontier production and ordered reduction move with their owner
+//! through that same pool; the management thread only routes messages.
 
 use std::{
-    collections::VecDeque,
-    sync::mpsc::{self, Receiver, SyncSender},
+    sync::{
+        mpsc::{self, Receiver, SyncSender},
+        Mutex,
+    },
     thread::{self, JoinHandle},
+    time::Duration,
 };
 
 use clearra_core_domain::{
@@ -143,11 +146,71 @@ impl From<ForwardParallelError> for NativeForwardExecutionError {
 
 enum WorkerRequest {
     Consume(Vec<u8>),
+    Produce {
+        coordinator: Box<ForwardParallelCoordinator>,
+        completed: Vec<(usize, Vec<u8>)>,
+    },
 }
 
-struct WorkerCompletion {
-    worker_index: usize,
-    result: Result<(usize, Vec<u8>), ForwardParallelError>,
+enum WorkerCompletion {
+    Consumed {
+        worker_index: usize,
+        result: Result<(usize, Vec<u8>), NativeForwardExecutionError>,
+    },
+    Produced {
+        worker_index: usize,
+        result: Result<ProducedForwardWork, NativeForwardExecutionError>,
+    },
+}
+
+struct ProducedForwardWork {
+    coordinator: Box<ForwardParallelCoordinator>,
+    status: ForwardParallelProduce,
+    batch: Vec<u8>,
+    progress: ForwardParallelProgress,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WorkerActivity {
+    Idle,
+    Consuming,
+    Producing,
+}
+
+fn on_forward_compute_worker<T: Send>(
+    control: &ExecutionControl,
+    operation: impl FnOnce() -> Result<T, NativeForwardExecutionError> + Send,
+) -> Result<T, NativeForwardExecutionError> {
+    let operation = Mutex::new(Some(operation));
+    let result = Mutex::new(None);
+    try_for_each_chunk(
+        control,
+        1,
+        1,
+        || Ok::<_, NativeForwardExecutionError>(()),
+        |_, _| {
+            let operation = operation
+                .lock()
+                .map_err(|_| NativeForwardExecutionError::WorkerPanicked)?
+                .take()
+                .ok_or(NativeForwardExecutionError::WorkerResultCountMismatch)?;
+            let completed = operation()?;
+            *result
+                .lock()
+                .map_err(|_| NativeForwardExecutionError::WorkerPanicked)? = Some(completed);
+            Ok(())
+        },
+    )
+    .map_err(|error| match error {
+        ParallelWorkError::Worker(error) => error,
+        ParallelWorkError::Cancelled => ForwardSearchError::Cancelled.into(),
+        ParallelWorkError::ThreadSpawnFailed => NativeForwardExecutionError::WorkerSpawn,
+        ParallelWorkError::WorkerPanicked => NativeForwardExecutionError::WorkerPanicked,
+    })?;
+    result
+        .into_inner()
+        .map_err(|_| NativeForwardExecutionError::WorkerPanicked)?
+        .ok_or(NativeForwardExecutionError::WorkerResultCountMismatch)
 }
 
 pub(crate) fn run_native_forward_search(
@@ -163,39 +226,20 @@ pub(crate) fn run_native_forward_search(
             ForwardSearchError::Cancelled,
         ));
     }
-    match NativeForwardExecutionPlan::for_query(&query, control.parallelism()) {
-        NativeForwardExecutionPlan::Serial => {
-            let result = std::sync::Mutex::new(None);
-            try_for_each_chunk(
-                &control,
-                1,
-                1,
-                || Ok::<_, NativeForwardExecutionError>(()),
-                |_, _| {
-                    let report =
-                        ForwardSearchSession::new(query.clone())?.run_to_completion(&control)?;
-                    *result
-                        .lock()
-                        .map_err(|_| NativeForwardExecutionError::WorkerPanicked)? = Some(report);
-                    Ok(())
-                },
-            )
-            .map_err(|error| match error {
-                ParallelWorkError::Worker(error) => error,
-                ParallelWorkError::Cancelled => ForwardSearchError::Cancelled.into(),
-                ParallelWorkError::ThreadSpawnFailed => NativeForwardExecutionError::WorkerSpawn,
-                ParallelWorkError::WorkerPanicked => NativeForwardExecutionError::WorkerPanicked,
-            })?;
-            result
-                .into_inner()
-                .map_err(|_| NativeForwardExecutionError::WorkerPanicked)?
-                .ok_or(NativeForwardExecutionError::WorkerResultCountMismatch)
+    // This owner covers initialization and terminal projection too, including
+    // direct callers and the one-worker path. Pool management suspends it only
+    // while the N persistent workers own the request's compute permits.
+    on_forward_compute_worker(&control, || {
+        match NativeForwardExecutionPlan::for_query(&query, control.parallelism()) {
+            NativeForwardExecutionPlan::Serial => ForwardSearchSession::new(query)?
+                .run_to_completion(&control)
+                .map_err(NativeForwardExecutionError::from),
+            NativeForwardExecutionPlan::Parallel {
+                total_workers,
+                worker_threads,
+            } => run_parallel_forward_search(query, total_workers, worker_threads, &control),
         }
-        NativeForwardExecutionPlan::Parallel {
-            total_workers,
-            worker_threads,
-        } => run_parallel_forward_search(query, total_workers, worker_threads, &control),
-    }
+    })
 }
 
 fn run_parallel_forward_search(
@@ -245,19 +289,20 @@ fn run_parallel_forward_search(
                                     worker_control,
                                 ),
                                 Err(error) => {
-                                    let _ = error_sender.send(WorkerCompletion {
+                                    let _ = error_sender.send(WorkerCompletion::Consumed {
                                         worker_index,
-                                        result: Err(error),
+                                        result: Err(error.into()),
                                     });
                                 }
                             }
                         }));
                         if result.is_err() {
-                            let _ = error_sender.send(WorkerCompletion {
+                            let _ = error_sender.send(WorkerCompletion::Consumed {
                                 worker_index,
                                 result: Err(ForwardParallelError::InvalidState(
                                     "forward_worker_panicked",
-                                )),
+                                )
+                                .into()),
                             });
                         }
                     });
@@ -275,12 +320,10 @@ fn run_parallel_forward_search(
         }
         drop(completion_sender);
 
-        let result = drive_parallel_coordinator(
-            coordinator,
-            &request_senders,
-            &completion_receiver,
-            control,
-        );
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            drive_parallel_coordinator(coordinator, &request_senders, &completion_receiver, control)
+        }))
+        .unwrap_or(Err(NativeForwardExecutionError::WorkerPanicked));
         if result.is_err() {
             control.cancellation.handle().cancel();
         }
@@ -298,71 +341,148 @@ fn run_parallel_forward_search(
 }
 
 fn drive_parallel_coordinator(
-    mut coordinator: ForwardParallelCoordinator,
+    coordinator: ForwardParallelCoordinator,
     request_senders: &[SyncSender<WorkerRequest>],
     completion_receiver: &Receiver<WorkerCompletion>,
     control: &ExecutionControl,
-) -> Result<ForwardParallelCoordinator, NativeForwardExecutionError> {
-    let mut available = (0..request_senders.len()).collect::<VecDeque<_>>();
-    let mut in_flight = 0_usize;
+) -> Result<Box<ForwardParallelCoordinator>, NativeForwardExecutionError> {
+    let mut coordinator = Some(Box::new(coordinator));
+    let mut activity = vec![WorkerActivity::Idle; request_senders.len()];
+    let mut completed = Vec::with_capacity(request_senders.len());
+    let mut waiting_for_results = false;
+    let mut next_completion = None;
     let mut last_progress = ForwardParallelProgress::default();
 
     loop {
-        let mut producer_complete = false;
-        while let Some(worker_index) = available.pop_front() {
-            let (status, batch) = coordinator.produce(FORWARD_BATCH_CAPACITY, control)?;
-            match status {
-                ForwardParallelProduce::Batch => {
-                    request_senders[worker_index]
-                        .send(WorkerRequest::Consume(batch))
-                        .map_err(|_| NativeForwardExecutionError::WorkerChannelClosed)?;
-                    in_flight = in_flight.saturating_add(1);
-                }
-                ForwardParallelProduce::Pending => {
-                    available.push_front(worker_index);
-                    break;
-                }
-                ForwardParallelProduce::Completed => {
-                    available.push_front(worker_index);
-                    producer_complete = true;
-                    break;
-                }
-                ForwardParallelProduce::Cancelled => {
-                    return Err(NativeForwardExecutionError::Search(
-                        ForwardSearchError::Cancelled,
-                    ));
-                }
-            }
-        }
-
-        report_progress(control, coordinator.progress(), &mut last_progress);
-        if producer_complete {
-            debug_assert_eq!(in_flight, 0);
-            return Ok(coordinator);
-        }
         if control.is_cancelled() {
             return Err(NativeForwardExecutionError::Search(
                 ForwardSearchError::Cancelled,
             ));
         }
-        if in_flight == 0 {
-            return Err(NativeForwardExecutionError::CoordinatorStalled);
+        // Drain ready completions before scheduling another production step.
+        // One owner carries the frontier through the pool, and each worker has
+        // at most one outstanding request. Pending result packets stay <= N.
+        let completion = match next_completion.take() {
+            Some(completion) => Some(completion),
+            None => match completion_receiver.try_recv() {
+                Ok(completion) => Some(completion),
+                Err(mpsc::TryRecvError::Empty) => None,
+                Err(mpsc::TryRecvError::Disconnected) if control.is_cancelled() => {
+                    return Err(ForwardSearchError::Cancelled.into());
+                }
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    return Err(NativeForwardExecutionError::WorkerChannelClosed);
+                }
+            },
+        };
+        if let Some(completion) = completion {
+            match completion {
+                WorkerCompletion::Consumed {
+                    worker_index,
+                    result,
+                } => {
+                    let packet = result?;
+                    if activity.get(worker_index) != Some(&WorkerActivity::Consuming)
+                        || completed.len() >= request_senders.len()
+                    {
+                        return Err(NativeForwardExecutionError::WorkerResultCountMismatch);
+                    }
+                    completed.push(packet);
+                    activity[worker_index] = WorkerActivity::Idle;
+                }
+                WorkerCompletion::Produced {
+                    worker_index,
+                    result,
+                } => {
+                    let produced = result?;
+                    if activity.get(worker_index) != Some(&WorkerActivity::Producing)
+                        || coordinator.is_some()
+                    {
+                        return Err(NativeForwardExecutionError::WorkerResultCountMismatch);
+                    }
+                    activity[worker_index] = WorkerActivity::Idle;
+                    report_progress(control, produced.progress, &mut last_progress);
+                    waiting_for_results =
+                        matches!(produced.status, ForwardParallelProduce::Pending);
+                    match produced.status {
+                        ForwardParallelProduce::Batch => {
+                            request_senders[worker_index]
+                                .send(WorkerRequest::Consume(produced.batch))
+                                .map_err(|_| NativeForwardExecutionError::WorkerChannelClosed)?;
+                            activity[worker_index] = WorkerActivity::Consuming;
+                        }
+                        ForwardParallelProduce::Completed => {
+                            if !completed.is_empty()
+                                || activity.iter().any(|state| *state != WorkerActivity::Idle)
+                            {
+                                return Err(NativeForwardExecutionError::WorkerResultCountMismatch);
+                            }
+                            return Ok(produced.coordinator);
+                        }
+                        ForwardParallelProduce::Cancelled => {
+                            return Err(ForwardSearchError::Cancelled.into());
+                        }
+                        ForwardParallelProduce::Pending => {}
+                    }
+                    coordinator = Some(produced.coordinator);
+                }
+            }
+            continue;
         }
 
-        let completion = completion_receiver
-            .recv()
-            .map_err(|_| NativeForwardExecutionError::WorkerChannelClosed)?;
-        in_flight = in_flight.saturating_sub(1);
-        let (actual_items, partial) = completion.result?;
-        // The coordinator owns task-id ordering. Absorb immediately so this worker can re-enter
-        // the ready queue without making fast workers wait behind an older in-flight batch.
+        if coordinator.is_some() && (!waiting_for_results || !completed.is_empty()) {
+            if let Some(worker_index) = activity
+                .iter()
+                .position(|state| *state == WorkerActivity::Idle)
+            {
+                request_senders[worker_index]
+                    .send(WorkerRequest::Produce {
+                        coordinator: coordinator.take().expect("checked coordinator owner"),
+                        completed: std::mem::take(&mut completed),
+                    })
+                    .map_err(|_| NativeForwardExecutionError::WorkerChannelClosed)?;
+                activity[worker_index] = WorkerActivity::Producing;
+            }
+        }
+        if activity.iter().all(|state| *state == WorkerActivity::Idle) {
+            return Err(NativeForwardExecutionError::CoordinatorStalled);
+        }
+        // Keep cancellation observable even if a worker has not returned its
+        // packet. Pool shutdown still drops requests and joins every owner.
+        next_completion = match completion_receiver.recv_timeout(Duration::from_millis(25)) {
+            Ok(completion) => Some(completion),
+            Err(mpsc::RecvTimeoutError::Timeout) => None,
+            Err(mpsc::RecvTimeoutError::Disconnected) if control.is_cancelled() => {
+                return Err(ForwardSearchError::Cancelled.into());
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                return Err(NativeForwardExecutionError::WorkerChannelClosed);
+            }
+        };
+    }
+}
+
+fn produce_forward_work(
+    mut coordinator: Box<ForwardParallelCoordinator>,
+    completed: Vec<(usize, Vec<u8>)>,
+    control: &ExecutionControl,
+) -> Result<ProducedForwardWork, NativeForwardExecutionError> {
+    for (actual_items, partial) in completed {
         let absorbed_items = coordinator.absorb(&partial, control)?;
         if absorbed_items != actual_items {
             return Err(NativeForwardExecutionError::WorkerResultCountMismatch);
         }
-        available.push_back(completion.worker_index);
-        report_progress(control, coordinator.progress(), &mut last_progress);
     }
+    // Both ordered frontier reduction and layered pattern report construction
+    // happen on the worker that owns this production request's compute permit.
+    let (status, batch) = coordinator.produce(FORWARD_BATCH_CAPACITY, control)?;
+    let progress = coordinator.progress();
+    Ok(ProducedForwardWork {
+        coordinator,
+        status,
+        batch,
+        progress,
+    })
 }
 
 fn forward_worker_main(
@@ -373,21 +493,37 @@ fn forward_worker_main(
     control: ExecutionControl,
 ) {
     while let Ok(request) = requests.recv() {
-        match request {
+        let (completion, failed) = match request {
             WorkerRequest::Consume(bytes) => {
-                let result = worker.consume(&bytes, &control);
+                let result = worker
+                    .consume(&bytes, &control)
+                    .map_err(NativeForwardExecutionError::from);
                 let failed = result.is_err();
-                if completions
-                    .send(WorkerCompletion {
+                (
+                    WorkerCompletion::Consumed {
                         worker_index,
                         result,
-                    })
-                    .is_err()
-                    || failed
-                {
-                    return;
-                }
+                    },
+                    failed,
+                )
             }
+            WorkerRequest::Produce {
+                coordinator,
+                completed,
+            } => {
+                let result = produce_forward_work(coordinator, completed, &control);
+                let failed = result.is_err();
+                (
+                    WorkerCompletion::Produced {
+                        worker_index,
+                        result,
+                    },
+                    failed,
+                )
+            }
+        };
+        if completions.send(completion).is_err() || failed {
+            return;
         }
     }
 }
@@ -434,14 +570,15 @@ mod tests {
     use clearra_host_contract::ResourceBudget;
     use clearra_rules::profile::rule_profile::RuleProfileId;
     use clearra_scoring::profile::SpinProfileId;
+    use clearra_supply::queue::queue_pattern_expression::QueuePatternExpression;
 
     use super::*;
     use crate::{
         AppCommand, AppContext, AppRenderModel, AppRequest, DamageAppCommand, SpinFinderAppCommand,
     };
     use clearra_forward_search::{
-        ForwardPathStep, ForwardSearchMode, ForwardSpinCategory, ForwardSpinGroup,
-        ForwardSpinTarget,
+        ForwardPathStep, ForwardPieceSource, ForwardSearchMode, ForwardSpinCategory,
+        ForwardSpinGroup, ForwardSpinTarget,
     };
 
     fn damage_query() -> ForwardSearchQuery {
@@ -476,6 +613,163 @@ mod tests {
 
     fn control() -> ExecutionControl {
         ExecutionControl::new(ExecutionCancellationToken::new())
+    }
+
+    #[test]
+    fn preparation_and_finish_owner_preserves_all_slots_without_using_caller() {
+        let caller = thread::current().id();
+        for workers in [1, 2, 8] {
+            let control = control().with_parallelism(workers);
+            on_forward_compute_worker(&control, || {
+                assert_ne!(thread::current().id(), caller);
+                let mut spare = Vec::new();
+                while let Some(permit) = control.compute_budget().try_acquire_worker() {
+                    spare.push(permit);
+                }
+                assert_eq!(spare.len(), workers - 1, "preparation owns one slot");
+                drop(spare);
+
+                with_compute_coordinator(&control, || {
+                    let mut pool = Vec::new();
+                    while let Some(permit) = control.compute_budget().try_acquire_worker() {
+                        pool.push(permit);
+                    }
+                    assert_eq!(pool.len(), workers, "management reserves no compute slot");
+                });
+
+                let mut spare = Vec::new();
+                while let Some(permit) = control.compute_budget().try_acquire_worker() {
+                    spare.push(permit);
+                }
+                assert_eq!(spare.len(), workers - 1, "finish reacquires its slot");
+                Ok(())
+            })
+            .unwrap();
+            let mut returned = Vec::new();
+            while let Some(permit) = control.compute_budget().try_acquire_worker() {
+                returned.push(permit);
+            }
+            assert_eq!(returned.len(), workers, "all owners drained");
+        }
+    }
+
+    #[test]
+    fn bound_compute_owner_reuses_budget_and_drains_nested_pool() {
+        let control = control().with_parallelism(2);
+        let caller = thread::current().id();
+        on_forward_compute_worker(&control, || {
+            let owner = thread::current().id();
+            assert_ne!(owner, caller);
+            let report = run_native_forward_search(damage_query(), 8, &control)?;
+            assert_eq!(
+                report.workers_used(),
+                2,
+                "bound parent owns worker authority"
+            );
+            assert_eq!(thread::current().id(), owner);
+            let spare = control.compute_budget().try_acquire_worker().unwrap();
+            assert!(control.compute_budget().try_acquire_worker().is_none());
+            drop(spare);
+            Ok(())
+        })
+        .unwrap();
+        let first = control.compute_budget().try_acquire_worker().unwrap();
+        let second = control.compute_budget().try_acquire_worker().unwrap();
+        assert!(control.compute_budget().try_acquire_worker().is_none());
+        drop((first, second));
+    }
+
+    #[test]
+    fn manager_delegates_unadvanced_frontier_and_preserves_producer_failure() {
+        let coordinator = ForwardParallelCoordinator::new(damage_query(), 2).unwrap();
+        let (requests, receiver) = mpsc::sync_channel(1);
+        let (completions, completed) = mpsc::channel();
+        thread::scope(|scope| {
+            let worker = scope.spawn(move || {
+                let WorkerRequest::Produce {
+                    coordinator,
+                    completed,
+                } = receiver.recv().unwrap()
+                else {
+                    panic!("manager must delegate production before any search batch");
+                };
+                assert_eq!(coordinator.progress().tasks_dispatched, 0);
+                assert!(completed.is_empty());
+                assert!(completions
+                    .send(WorkerCompletion::Produced {
+                        worker_index: 0,
+                        result: Err(NativeForwardExecutionError::WorkerResultCountMismatch),
+                    })
+                    .is_ok());
+            });
+            assert_eq!(
+                drive_parallel_coordinator(coordinator, &[requests], &completed, &control()).err(),
+                Some(NativeForwardExecutionError::WorkerResultCountMismatch)
+            );
+            worker.join().unwrap();
+        });
+    }
+
+    #[test]
+    fn manager_observes_cancellation_while_production_is_in_flight() {
+        let coordinator = ForwardParallelCoordinator::new(damage_query(), 2).unwrap();
+        let control = control();
+        let cancellation = control.cancellation.handle();
+        let (requests, receiver) = mpsc::sync_channel(1);
+        let (completions, completed) = mpsc::channel();
+        let (release, released) = mpsc::sync_channel(1);
+        thread::scope(|scope| {
+            let worker = scope.spawn(move || {
+                let request = receiver.recv().unwrap();
+                assert!(matches!(request, WorkerRequest::Produce { .. }));
+                cancellation.cancel();
+                // Keep the owner and completion channel live until management
+                // returns; cancellation must not depend on a result arriving.
+                released.recv_timeout(Duration::from_secs(5)).unwrap();
+                drop(request);
+                drop(completions);
+            });
+            let error = drive_parallel_coordinator(coordinator, &[requests], &completed, &control)
+                .err()
+                .expect("in-flight cancellation");
+            assert!(error.is_cancelled());
+            release.send(()).unwrap();
+            worker.join().unwrap();
+        });
+    }
+
+    #[test]
+    fn manager_fails_if_production_owner_loses_completion_channel() {
+        let coordinator = ForwardParallelCoordinator::new(damage_query(), 2).unwrap();
+        let (requests, receiver) = mpsc::sync_channel(1);
+        let (completions, completed) = mpsc::channel();
+        thread::scope(|scope| {
+            let worker = scope.spawn(move || {
+                let request = receiver.recv().unwrap();
+                assert!(matches!(request, WorkerRequest::Produce { .. }));
+                drop(request);
+                drop(completions);
+            });
+            assert_eq!(
+                drive_parallel_coordinator(coordinator, &[requests], &completed, &control()).err(),
+                Some(NativeForwardExecutionError::WorkerChannelClosed)
+            );
+            worker.join().unwrap();
+        });
+    }
+
+    #[test]
+    fn production_rejects_consumed_item_count_mismatch() {
+        let control = control();
+        let coordinator = ForwardParallelCoordinator::new(damage_query(), 2).unwrap();
+        let mut worker = ForwardParallelWorker::new(&coordinator.worker_initialization()).unwrap();
+        let produced = produce_forward_work(Box::new(coordinator), Vec::new(), &control).unwrap();
+        assert_eq!(produced.status, ForwardParallelProduce::Batch);
+        let (items, partial) = worker.consume(&produced.batch, &control).unwrap();
+        assert_eq!(
+            produce_forward_work(produced.coordinator, vec![(items + 1, partial)], &control).err(),
+            Some(NativeForwardExecutionError::WorkerResultCountMismatch)
+        );
     }
 
     fn assert_exact_search_semantics(serial: &ForwardSearchReport, parallel: &ForwardSearchReport) {
@@ -591,6 +885,27 @@ mod tests {
     }
 
     #[test]
+    fn layered_pattern_reduction_and_report_match_serial() {
+        let query = ForwardSearchQuery::new_with_source(
+            Board256Mask::EMPTY,
+            1,
+            ForwardPieceSource::pattern(QueuePatternExpression::parse("IIIIII", 8).unwrap()),
+            false,
+            RuleProfileId::SrsPlus,
+            SpinProfileId::AllMiniPlus,
+            None,
+            None,
+            ForwardSearchMode::SpinFinder(ForwardSpinTarget::new(None, ForwardSpinCategory::Other)),
+        );
+        let serial = run_native_forward_search(query.clone(), 1, &control()).unwrap();
+        let parallel = run_native_forward_search(query, 8, &control()).unwrap();
+        assert!(serial.visited_states() > 0);
+        assert!(serial.generated_locks() > 0);
+        assert_eq!(parallel.workers_used(), 8);
+        assert_exact_search_semantics(&serial, &parallel);
+    }
+
+    #[test]
     fn app_context_routes_forward_resource_budget_to_native_workers() {
         let response = AppContext::default().run(
             AppRequest::new(AppCommand::Damage(DamageAppCommand::new(damage_query())))
@@ -610,6 +925,68 @@ mod tests {
         fn report(&self, progress: ExecutionProgress) {
             self.0.lock().expect("progress lock").push(progress);
         }
+    }
+
+    struct CancellingProgressSink {
+        cancellation: ExecutionCancellationToken,
+    }
+
+    impl ProgressSink for CancellingProgressSink {
+        fn report(&self, progress: ExecutionProgress) {
+            if progress.stage == "forward-search" {
+                self.cancellation.handle().cancel();
+            }
+        }
+    }
+
+    #[test]
+    fn cancellation_during_parallel_progress_drains_every_compute_permit() {
+        let cancellation = ExecutionCancellationToken::new();
+        let control = ExecutionControl::new(cancellation.clone())
+            .with_parallelism(2)
+            .with_progress_sink(Arc::new(CancellingProgressSink { cancellation }));
+        let error = run_native_forward_search(damage_query(), 2, &control)
+            .expect_err("cancelled after real parallel progress");
+        assert!(error.is_cancelled());
+        let mut returned = Vec::new();
+        while let Some(permit) = control.compute_budget().try_acquire_worker() {
+            returned.push(permit);
+        }
+        assert_eq!(
+            returned.len(),
+            2,
+            "all worker and suspended owner permits returned"
+        );
+    }
+
+    struct PanickingProgressSink;
+
+    impl ProgressSink for PanickingProgressSink {
+        fn report(&self, progress: ExecutionProgress) {
+            if progress.stage == "forward-search" {
+                panic!("injected management progress failure");
+            }
+        }
+    }
+
+    #[test]
+    fn management_callback_panic_joins_pool_before_returning() {
+        let control = control()
+            .with_parallelism(2)
+            .with_progress_sink(Arc::new(PanickingProgressSink));
+        assert_eq!(
+            run_native_forward_search(damage_query(), 2, &control).err(),
+            Some(NativeForwardExecutionError::WorkerPanicked)
+        );
+        let mut returned = Vec::new();
+        while let Some(permit) = control.compute_budget().try_acquire_worker() {
+            returned.push(permit);
+        }
+        assert_eq!(
+            returned.len(),
+            2,
+            "panic drained both workers before return"
+        );
     }
 
     #[test]
