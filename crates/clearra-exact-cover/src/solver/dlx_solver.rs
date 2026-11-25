@@ -20,35 +20,47 @@ mod error {
 mod limits {
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     pub struct DlxSearchLimits {
-        max_solutions: usize,
-        max_nodes: usize,
+        max_solutions: Option<usize>,
+        max_nodes: Option<usize>,
     }
 
     impl DlxSearchLimits {
         pub const fn new(max_solutions: usize, max_nodes: usize) -> Self {
             Self {
-                max_solutions,
-                max_nodes,
+                max_solutions: Some(max_solutions),
+                max_nodes: Some(max_nodes),
+            }
+        }
+
+        /// Complete enumeration without an implicit development budget.
+        /// Counter/address-space overflow remains a hard execution boundary.
+        pub const fn unlimited() -> Self {
+            Self {
+                max_solutions: None,
+                max_nodes: None,
             }
         }
     }
     impl DlxSearchLimits {
         pub const fn max_solutions(self) -> usize {
-            self.max_solutions
+            match self.max_solutions {
+                Some(limit) => limit,
+                None => usize::MAX,
+            }
         }
     }
     impl DlxSearchLimits {
         pub const fn max_nodes(self) -> usize {
-            self.max_nodes
+            match self.max_nodes {
+                Some(limit) => limit,
+                None => usize::MAX,
+            }
         }
     }
 
     impl Default for DlxSearchLimits {
         fn default() -> Self {
-            Self {
-                max_solutions: 1024,
-                max_nodes: 1_000_000,
-            }
+            Self::unlimited()
         }
     }
 }

@@ -11,6 +11,7 @@ pub struct AssignmentCspLimits {
 }
 
 impl AssignmentCspLimits {
+    /// Zero requests complete enumeration; positive values are caller budgets.
     pub fn new(max_assignments: usize) -> Self {
         Self { max_assignments }
     }
@@ -23,9 +24,7 @@ impl AssignmentCspLimits {
 
 impl Default for AssignmentCspLimits {
     fn default() -> Self {
-        Self {
-            max_assignments: 1024,
-        }
+        Self { max_assignments: 0 }
     }
 }
 
@@ -64,7 +63,7 @@ impl AssignmentCsp {
         current: &mut Vec<AssignedSlot>,
         output: &mut Vec<SlotAssignment>,
     ) {
-        if output.len() >= self.limits.max_assignments() {
+        if self.limits.max_assignments() != 0 && output.len() >= self.limits.max_assignments() {
             return;
         }
 

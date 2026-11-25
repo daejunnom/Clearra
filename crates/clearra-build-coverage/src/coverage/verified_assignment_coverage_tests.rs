@@ -75,6 +75,36 @@ fn row(
 }
 
 #[test]
+fn verified_assignment_coverage_accepts_unlimited_defaults_and_preserves_explicit_budget() {
+    let original = query(&[0xf], &[PieceKind::I], 16);
+    let unbounded = BuildCoverageQuery::new(
+        original.template().clone(),
+        original.domains().to_vec(),
+        Vec::new(),
+        PATTERN_COUNT,
+        BuildCoverageLimits::default(),
+    );
+    let exact_row = row(identity(PieceKind::I, &[0xf]), &[0]);
+    let result = BuildCoverageExecution::from_verified_concrete_assignment_rows(
+        &unbounded,
+        scope(),
+        vec![exact_row.clone()],
+    )
+    .expect("no caller generation budget");
+    assert!(result.exact_cover_complete());
+    assert_eq!(result.assignments().len(), 1);
+    let bounded = query(&[0xf], &[PieceKind::I], 1);
+    assert_eq!(
+        BuildCoverageExecution::from_verified_concrete_assignment_rows(
+            &bounded,
+            scope(),
+            vec![exact_row],
+        ),
+        Err(Error::ConcreteAssignmentSearchIncomplete),
+    );
+}
+
+#[test]
 fn verified_assignment_rows_join_by_exact_identity_and_preserve_explicit_empty_rows() {
     let masks = [0xf];
     let query = query(&masks, &[PieceKind::I, PieceKind::O], 16);

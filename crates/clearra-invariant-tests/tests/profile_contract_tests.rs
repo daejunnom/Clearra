@@ -70,8 +70,9 @@ fn standard_piece_set_contains_seven_unique_pieces() {
 fn mvp1_defaults_expose_runtime_budget_values() {
     let defaults = SearchDefaults::MVP1;
 
-    assert_eq!(defaults.setup_max_results(), 256);
-    assert_eq!(defaults.build_max_patterns(), 4096);
+    assert_eq!(defaults.setup_max_results(), 0);
+    assert_eq!(defaults.build_max_assignments(), 0);
+    assert_eq!(defaults.build_max_patterns(), 0);
     assert_eq!(defaults.scenario_retained_trace_limit(), 64);
     assert_eq!(defaults.max_nodes(), 0);
     assert_eq!(defaults.max_seconds(), 0);

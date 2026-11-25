@@ -15,6 +15,8 @@ pub struct SetupLimits {
 }
 
 impl SetupLimits {
+    /// Zero leaves a generation dimension unbounded. The replay retention
+    /// limit remains positive because it controls saved witness storage.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         max_shape_families: usize,
@@ -24,21 +26,6 @@ impl SetupLimits {
         max_patterns: usize,
         post_pc_retained_trace_limit: usize,
     ) -> Result<Self, SetupLimitsError> {
-        if max_shape_families == 0 {
-            return Err(SetupLimitsError::ZeroMaxShapeFamilies);
-        }
-        if max_tiling_variants_per_family == 0 {
-            return Err(SetupLimitsError::ZeroMaxTilingVariantsPerFamily);
-        }
-        if max_build_variants_per_tiling == 0 {
-            return Err(SetupLimitsError::ZeroMaxBuildVariantsPerTiling);
-        }
-        if max_results == 0 {
-            return Err(SetupLimitsError::ZeroMaxResults);
-        }
-        if max_patterns == 0 {
-            return Err(SetupLimitsError::ZeroMaxPatterns);
-        }
         if post_pc_retained_trace_limit == 0 {
             return Err(SetupLimitsError::ZeroPostPcRetainedTraceLimit);
         }
@@ -131,6 +118,18 @@ mod tests {
         assert_eq!(
             SetupLimits::default().max_patterns(),
             SETUP_FINDER_DEFAULT_MAX_PATTERNS
+        );
+        assert_eq!(SetupLimits::default().max_results(), 0);
+    }
+
+    #[test]
+    fn zero_generation_limits_leave_positive_witness_retention_intact() {
+        let limits = SetupLimits::new(0, 0, 0, 0, 0, 64).expect("complete generation");
+        assert_eq!(limits.max_patterns(), 0);
+        assert_eq!(limits.post_pc_retained_trace_limit(), 64);
+        assert_eq!(
+            SetupLimits::new(0, 0, 0, 0, 0, 0),
+            Err(SetupLimitsError::ZeroPostPcRetainedTraceLimit)
         );
     }
 }

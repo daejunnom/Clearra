@@ -3,6 +3,33 @@ use crate::model::ExactCoverCandidate;
 use super::*;
 
 #[test]
+fn default_dlx_enumeration_is_not_truncated_at_the_old_development_solution_count() {
+    let columns = 11;
+    let candidates = (0..columns)
+        .flat_map(|column| {
+            [
+                ExactCoverCandidate::new(2 * column, vec![column]),
+                ExactCoverCandidate::new(2 * column + 1, vec![column]),
+            ]
+        })
+        .collect();
+    let problem = ExactCoverProblem::new(columns, candidates);
+    let report = DlxSolver::solve_all(&problem).expect("complete enumeration");
+    assert!(report.complete());
+    assert_eq!(report.solution_count(), 1 << columns);
+    assert_eq!(report.truncated_reason(), None);
+
+    let bounded = DlxSolver::solve_all_limited(&problem, DlxSearchLimits::new(1024, usize::MAX))
+        .expect("explicit development fixture budget");
+    assert!(!bounded.complete());
+    assert_eq!(bounded.solution_count(), 1024);
+    assert_eq!(
+        bounded.truncated_reason(),
+        Some(DlxTruncatedReason::MaxSolutions)
+    );
+}
+
+#[test]
 fn dlx_solver_enumerates_all_exact_covers_with_complete_report() {
     let problem = ExactCoverProblem::new(
         4,

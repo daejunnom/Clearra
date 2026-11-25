@@ -81,7 +81,7 @@ fn o_cover_query(board: BoardSize, pattern_count: usize, concrete: bool) -> Buil
         domains,
         Vec::new(),
         pattern_count,
-        BuildCoverageLimits::new(64, 8),
+        BuildCoverageLimits::default(),
     )
 }
 

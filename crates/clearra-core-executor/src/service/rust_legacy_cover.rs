@@ -257,8 +257,7 @@ pub(crate) fn execute(
         return Err(unavailable("rust_legacy_cover_authority_mismatch"));
     }
     if pattern_count == 0
-        || pattern_count > limits.max_patterns()
-        || limits.max_assignments() == 0
+        || (limits.max_patterns() != 0 && pattern_count > limits.max_patterns())
         || selected.is_some_and(|ordinal| ordinal >= pattern_count)
     {
         return Err(CoreExecutionError::Cover(

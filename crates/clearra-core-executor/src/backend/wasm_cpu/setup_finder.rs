@@ -1295,7 +1295,7 @@ impl SetupPatternIndexCompileSession {
                     compatible &= qb_compatible;
                     compatible_count =
                         compatible_count.saturating_add(compatible.count_ones() as usize);
-                    if compatible_count > self.max_patterns {
+                    if self.max_patterns != 0 && compatible_count > self.max_patterns {
                         return Err(WasmExactSearchError::InvalidProblem(
                             "setup_terminal_supply_compatible_pattern_limit_exceeded",
                         ));
@@ -1527,7 +1527,7 @@ fn compile_setup_pattern_index_legacy(
         };
         compatible &= qb_compatible;
         compatible_count = compatible_count.saturating_add(compatible.count_ones() as usize);
-        if compatible_count > condition.max_patterns() {
+        if condition.max_patterns() != 0 && compatible_count > condition.max_patterns() {
             return Err(WasmExactSearchError::InvalidProblem(
                 "setup_terminal_supply_compatible_pattern_limit_exceeded",
             ));

@@ -206,7 +206,8 @@ fn four_line_legacy_problem_and_exact_identity() -> (SearchProblem, StandardBoar
         domains,
         Vec::new(),
         1,
-        BuildCoverageLimits::default(),
+        // This witness deliberately retains the old bounded source prefix.
+        BuildCoverageLimits::new(1024, 4096),
     );
     assert!(
         !clearra_validation::validators::build_query_validator::validate_build_coverage_query(

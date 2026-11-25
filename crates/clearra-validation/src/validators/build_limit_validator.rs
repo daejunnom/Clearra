@@ -15,15 +15,7 @@ pub(crate) fn validate_limits(query: &BuildCoverageQuery, report: &mut Diagnosti
         ));
     }
 
-    if query.limits().max_assignments() == 0 {
-        report.push(invalid_build_query(
-            "build.limits",
-            "build coverage assignment limit must be greater than zero",
-            "zero_build_limit",
-        ));
-    }
-
-    if query.pattern_count() > query.limits().max_patterns() {
+    if query.limits().max_patterns() != 0 && query.pattern_count() > query.limits().max_patterns() {
         report.push(
             invalid_build_query(
                 "build.patterns",

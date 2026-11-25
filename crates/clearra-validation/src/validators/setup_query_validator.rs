@@ -165,7 +165,10 @@ fn validate_queue_based_input(query: &SetupSearchQuery, report: &mut DiagnosticR
     if query
         .queue()
         .as_pattern_expression()
-        .is_some_and(|expression| expression.pattern_count() > query.limits().max_patterns())
+        .is_some_and(|expression| {
+            query.limits().max_patterns() != 0
+                && expression.pattern_count() > query.limits().max_patterns()
+        })
     {
         report.push(invalid_setup_query(
             "setup.queue",

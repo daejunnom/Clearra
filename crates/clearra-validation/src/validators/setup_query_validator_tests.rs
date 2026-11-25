@@ -77,7 +77,7 @@ fn setup_query_validator_rejects_a_selected_hold_missing_from_inventory() {
 }
 
 #[test]
-fn setup_query_validator_rejects_outside_mvp_target_and_board() {
+fn setup_finder_rejects_board_and_target_outside_its_fixed_four_line_preset() {
     let query = SetupSearchQuery::default();
     let query = SetupSearchQuery::new(
         BoardSize::new(12, 20).expect("board"),
@@ -94,7 +94,16 @@ fn setup_query_validator_rejects_outside_mvp_target_and_board() {
 
     assert!(report.has_errors());
     assert!(report.contains_code(DiagnosticCode::EBoardUnsupportedMvp));
-    assert!(report.contains_code(DiagnosticCode::EPcTargetUnsupportedMvp));
+    // Eight lines are valid for general PC search, while this Setup finder
+    // specifically owns the empty 10x4 family and its ten-placement capacity.
+    assert!(report.contains_code(DiagnosticCode::IPcTargetMvpSupported));
+    assert!(!report.contains_code(DiagnosticCode::EPcTargetUnsupportedMvp));
+    assert!(report.diagnostics().iter().any(|diagnostic| {
+        diagnostic.code() == DiagnosticCode::ESetupQueryInvalid
+            && diagnostic
+                .location()
+                .is_some_and(|location| location.path() == "setup.target")
+    }));
 }
 
 #[test]
@@ -118,6 +127,17 @@ fn valid_setup_query_reports_supported_mvp_contract() {
 
     assert!(!report.has_errors());
     assert!(report.contains_code(DiagnosticCode::ISetupQueryMvpSupported));
+}
+
+#[test]
+fn setup_generation_defaults_do_not_restrict_larger_explicit_budgets() {
+    for limits in [
+        SetupLimits::new(0, 0, 0, 0, 0, 64).expect("complete generation"),
+        SetupLimits::new(8192, 2048, 2048, 512, 8_467_200, 128).expect("explicit caller budgets"),
+    ] {
+        let query = SetupSearchQuery::default().with_limits(limits);
+        assert!(!SetupQueryValidator::validate(&query).has_errors());
+    }
 }
 
 #[test]

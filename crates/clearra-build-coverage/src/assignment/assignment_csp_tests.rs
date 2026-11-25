@@ -8,6 +8,19 @@ use crate::{
 use super::*;
 
 #[test]
+fn default_assignment_enumeration_has_no_implicit_development_budget() {
+    let domains: Vec<_> = (0..11)
+        .map(|slot| SlotDomain::new(BuildSlotId::new(slot), vec![PieceKind::I, PieceKind::O]))
+        .collect();
+    let complete =
+        AssignmentCsp::new(domains.clone(), Vec::new(), AssignmentCspLimits::default()).solve();
+    assert_eq!(complete.len(), 2048);
+    let bounded = AssignmentCsp::new(domains, Vec::new(), AssignmentCspLimits::new(1024)).solve();
+    assert_eq!(bounded.len(), 1024);
+    assert_eq!(bounded, complete[..1024]);
+}
+
+#[test]
 fn csp_enumerates_assignments_with_constraints() {
     let slot_a = BuildSlotId::new(1);
     let slot_b = BuildSlotId::new(2);

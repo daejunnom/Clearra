@@ -205,7 +205,9 @@ fn queue_based_pattern(
     if expression.sequence_len() + query.residue().remaining_count() > 11 {
         return Err(SetupConditionCompileError::QueueBasedObservedPieceCountInvalid);
     }
-    if expression.pattern_count() > query.limits().max_patterns() {
+    if query.limits().max_patterns() != 0
+        && expression.pattern_count() > query.limits().max_patterns()
+    {
         return Err(SetupConditionCompileError::QueueBasedPatternLimitExceeded);
     }
     Ok(expression)
@@ -334,7 +336,10 @@ fn compile_condition(
         queue_based_expression.map_or(expression.pattern_count(), |qb| {
             conditioned_pattern_count(queue_remainder.len(), sequence_len, qb).unwrap_or(usize::MAX)
         });
-    if probability_pattern_count == 0 || probability_pattern_count > query.limits().max_patterns() {
+    if probability_pattern_count == 0
+        || (query.limits().max_patterns() != 0
+            && probability_pattern_count > query.limits().max_patterns())
+    {
         return Err(SetupConditionCompileError::QueueBasedPatternLimitExceeded);
     }
     let scenario = PcScenarioQuery::new(
@@ -477,7 +482,39 @@ fn falling_factorial(value: usize, count: usize) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::query::SetupLimits;
     use clearra_rules::profile::builtin_rules::srs_x;
+
+    #[test]
+    fn zero_setup_pattern_budget_preserves_the_full_conditioned_domain() {
+        let query = SetupSearchQuery::default()
+            .with_remaining_pieces(vec![PieceKind::I])
+            .with_queue_based_pieces(PieceKind::STANDARD_TETROMINOES.to_vec());
+        let complete = compile_setup_search_conditions(&query)
+            .expect("default full-domain preset")
+            .remove(0);
+        let unbounded = query
+            .clone()
+            .with_limits(SetupLimits::new(0, 0, 0, 0, 0, 64).expect("no generation budgets"));
+        let restored = compile_setup_search_conditions(&unbounded)
+            .expect("unlimited conditioned source")
+            .remove(0);
+        assert_eq!(
+            restored.probability_pattern_count(),
+            complete.probability_pattern_count()
+        );
+        assert_eq!(restored.pattern_expression(), complete.pattern_expression());
+        assert_eq!(restored.max_patterns(), 0);
+        assert!(complete.probability_pattern_count() > 1);
+        let bounded = query.with_limits(
+            SetupLimits::new(0, 0, 0, 0, complete.probability_pattern_count() - 1, 64)
+                .expect("explicit caller budget"),
+        );
+        assert!(matches!(
+            compile_setup_search_conditions(&bounded),
+            Err(SetupConditionCompileError::QueueBasedPatternLimitExceeded)
+        ));
+    }
 
     #[test]
     fn unique_residue_defaults_to_one_empty_hold_condition() {

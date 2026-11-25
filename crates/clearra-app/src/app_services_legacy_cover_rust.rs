@@ -37,7 +37,6 @@ use clearra_pc_graph::request::{
     PcSolutionProbabilityPolicy, PieceWindow,
 };
 use clearra_problem::{ProblemCompiler, SearchProblem};
-use clearra_profiles::search::search_defaults::SearchDefaults;
 use clearra_supply::{
     piece_source::{PieceSourceKind, SupplyTruncationReason},
     queue::fixed_sequence::FixedSequence,
@@ -370,7 +369,6 @@ fn validate_canonical_authority(
     let board = template.board_size();
     let slot_count = template.slots().len();
     let limits = query.limits();
-    let defaults = SearchDefaults::MVP1;
     let admitted_shape = match authority {
         OriginalSupplyAuthority::CompleteAuthority | OriginalSupplyAuthority::CompleteObserved => {
             slot_count <= COMPLETE_AUTHORITY_MAX_SLOTS
@@ -381,7 +379,8 @@ fn validate_canonical_authority(
     };
     let admitted_pattern_count = match authority {
         OriginalSupplyAuthority::CompleteObserved => {
-            (1..=limits.max_patterns()).contains(&query.pattern_count())
+            query.pattern_count() != 0
+                && (limits.max_patterns() == 0 || query.pattern_count() <= limits.max_patterns())
         }
         _ => query.pattern_count() == REQUESTED_PATTERN_COUNT,
     };
@@ -394,8 +393,6 @@ fn validate_canonical_authority(
         || bridge.template().slot_count() != template.slots().len()
         || bridge.limits().max_assignments() != limits.max_assignments()
         || bridge.limits().max_patterns() != limits.max_patterns()
-        || !(1..=defaults.build_max_patterns()).contains(&limits.max_patterns())
-        || !(1..=defaults.build_max_assignments()).contains(&limits.max_assignments())
         || !admitted_shape
         || legacy.initial_board().occupied_mask() != 0
         || legacy.supply().hold_enabled()
