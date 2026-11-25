@@ -2,6 +2,31 @@
 
 ## Unreleased
 
+## 0.9.2 - 2026-11-26
+
+- Preserve long queue and multi-bag inputs, occupied Hold supply, and full-height
+  fields across combined PC, Build, Setup, and Recovery options.
+- Keep the admitted compute-worker capacity for small root sets, partition
+  undersupplied PC and tiling roots, and distinguish admitted workers from
+  finished workers in progress reports.
+- Initialize native extended-search and Setup workspaces on compute workers,
+  and keep Recovery preparation and final reduction under its compute budget.
+- Preserve Discord Setup text inputs and automatic target selection through
+  the shared product request contract.
+- Exercise long-input boundaries with bounded one-lock and paged four-line
+  fixtures instead of adding expensive full six-line regression searches.
+- Retry transient Pages status reads within the existing deployment lease
+  without repeating publication dispatches.
+- Separate streaming Web source computation from its dispatch and durable
+  result manager while retaining the requested compute budget, live WASM
+  state, progressive worker startup, and cancellation ownership.
+- Support compact native PC Tiling with explicit parallel workers through
+  the existing exact-family execution and resource-admission path.
+- Keep native Continue preparation, cooperative search and finalization on
+  compute workers while preserving an already-bound parent worker budget.
+- Honor disabled incremental compilation across managed CI build boundaries
+  so one-shot builds stay within the existing storage limits.
+
 ## 0.9.1 - 2026-11-24
 
 - Remove the dependency pre-analysis beta controls and unused GUI GPU setup
