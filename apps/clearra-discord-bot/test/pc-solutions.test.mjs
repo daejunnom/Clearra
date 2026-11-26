@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { stat } from "node:fs/promises";
@@ -149,9 +149,11 @@ test("solution presentation keeps colored native keys and rejects probability, t
 });
 
 test("tiny real native Unique search uses identical public argv and produces colored solution keys", {
-  skip: !process.env.CLEARRA_PARITY_EXECUTABLE,
-}, async () => {
+  skip: !process.env.CLEARRA_PARITY_EXECUTABLE, timeout: 25_000,
+}, async (t) => {
   const executable = process.env.CLEARRA_PARITY_EXECUTABLE;
+  const sourceCommit = process.env.CLEARRA_PARITY_SOURCE_COMMIT;
+  assert.match(sourceCommit ?? "", /^[0-9a-f]{40}$/u);
   const metadata = await stat(executable);
   assert.ok(metadata.isFile() && metadata.size > 0 && metadata.size < 256 * 1024 ** 2);
   const digest = createHash("sha256");
@@ -159,21 +161,44 @@ test("tiny real native Unique search uses identical public argv and produces col
   assert.equal(digest.digest("hex"), process.env.CLEARRA_PARITY_EXECUTABLE_SHA256);
   const raw = [option("field", "grid:######____"), option("next", "I"), option("lines", 1),
     option("hold", "disabled"), option("kicktable", "srs-plus")];
-  const argv = prepareClearraArguments(buildSlashCommandArguments(solutions, raw), execution);
-  const output = execFileSync(executable, argv, { encoding: "utf8", timeout: 5000,
-    maxBuffer: 1024 * 1024, env: { ...process.env, CLEARRA_EXPECTED_VCPUS: "8" },
-    stdio: ["ignore", "pipe", "pipe"] });
-  const native = JSON.parse(output);
-  if (process.env.CLEARRA_PARITY_SOURCE_COMMIT !== undefined) {
-    assert.match(process.env.CLEARRA_PARITY_SOURCE_COMMIT, /^[0-9a-f]{40}$/u);
-    assert.equal(native.runtime_identity?.source_commit, process.env.CLEARRA_PARITY_SOURCE_COMMIT);
-    assert.equal(native.runtime_identity?.engine_build_id, process.env.CLEARRA_PARITY_SOURCE_COMMIT);
-  }
-  assert.equal(validDiscordPcSolutionsResult(native), true);
-  assert.equal(native.summary.normalized_unique_solution_count, 1);
-  assert.equal(native.summary.buildability_verified, true);
-  assert.equal(value(argv, "--auto-workers"), "8");
-  assert.equal(native.summary.workers_requested, "auto");
-  assert.ok(native.summary.workers_used >= 1 && native.summary.workers_used <= 8);
-  assert.equal(buildCtk3Result(native).pageCount, 1);
+  const nativeEnv = { ...process.env };
+  // Probe the actual packaged-binary host instead of declaring Cloud Run's
+  // eight-vCPU allocation on a smaller CI runner.
+  delete nativeEnv.CLEARRA_EXPECTED_VCPUS;
+  const runSolutions = (workers, logicalProcessors = workers) => {
+    const argv = prepareClearraArguments(buildSlashCommandArguments(solutions, raw), {
+      ...execution, workers, logicalProcessors,
+    });
+    assert.equal(value(argv, "--auto-workers"), String(workers));
+    assert.equal(argv.includes("--use-all-cpu-threads"), true);
+    const run = spawnSync(executable, argv, { encoding: "utf8", timeout: 5000,
+      maxBuffer: 1024 * 1024, env: nativeEnv, stdio: ["ignore", "pipe", "pipe"] });
+    const context = `Unique/${workers}: argv=${JSON.stringify(argv)} status=${run.status} signal=${run.signal}`
+      + `\nstdout=${run.stdout?.slice(0, 4096) ?? ""}\nstderr=${run.stderr?.slice(0, 4096) ?? ""}`;
+    assert.equal(run.error, undefined, context);
+    assert.equal(run.signal, null, context);
+    assert.equal(run.status, 0, context);
+    let native;
+    assert.doesNotThrow(() => { native = JSON.parse(run.stdout); }, context);
+    assert.equal(native.runtime_identity?.source_commit, sourceCommit);
+    assert.equal(native.runtime_identity?.engine_build_id, sourceCommit);
+    assert.equal(validDiscordPcSolutionsResult(native), true);
+    assert.equal(native.summary.normalized_unique_solution_count, 1);
+    assert.equal(native.summary.buildability_verified, true);
+    assert.equal(native.summary.workers_requested, "auto");
+    assert.equal(String(native.summary.all_cpu_threads_requested), "true");
+    assert.ok(native.summary.workers_used >= 1 && native.summary.workers_used <= workers);
+    assert.equal(buildCtk3Result(native).pageCount, 1);
+    return native;
+  };
+  const serial = runSolutions(1);
+  const hardwareLimit = Number(serial.summary.logical_processor_count);
+  assert.ok(Number.isSafeInteger(hardwareLimit) && hardwareLimit >= 2,
+    `the native parallel regression requires at least two admitted processors; got ${serial.summary.logical_processor_count}`);
+  const parallelWorkers = Math.min(8, hardwareLimit);
+  t.diagnostic(`native_hard_limit=${hardwareLimit} requested_parallel_workers=${parallelWorkers}`);
+  const parallel = runSolutions(parallelWorkers, hardwareLimit);
+  assert.equal(Number(parallel.summary.logical_processor_count), hardwareLimit);
+  assert.deepEqual(parallel.runtime_identity, serial.runtime_identity);
+  assert.deepEqual(parallel.contract.artifacts.solution_keys, serial.contract.artifacts.solution_keys);
 });

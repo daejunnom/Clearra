@@ -157,7 +157,7 @@ test("Chance never silently ignores an inactive spin profile or changes the requ
   }
 });
 
-test("tiny real native Chance retains exact serial probability with eight public workers", {
+test("tiny real native Chance retains exact serial probability with public parallel workers", {
   skip: !process.env.CLEARRA_PARITY_EXECUTABLE, timeout: 25_000,
 }, async (t) => {
   const executable = process.env.CLEARRA_PARITY_EXECUTABLE;
@@ -169,6 +169,10 @@ test("tiny real native Chance retains exact serial probability with eight public
   const digest = createHash("sha256");
   for await (const bytes of createReadStream(executable)) digest.update(bytes);
   assert.equal(digest.digest("hex"), process.env.CLEARRA_PARITY_EXECUTABLE_SHA256);
+  const nativeEnv = { ...process.env };
+  // This packaged-binary test runs on the CI host, not the eight-vCPU service.
+  // Let the native runtime report its real affinity/cgroup admission limit.
+  delete nativeEnv.CLEARRA_EXPECTED_VCPUS;
 
   // Both fixtures succeeded serially in v0.9.2 but lost complete coverage-row
   // evidence on its native parallel route. The second also guards a proper
@@ -187,20 +191,22 @@ test("tiny real native Chance retains exact serial probability with eight public
     assert.equal(plan.automaticPcTargets, false);
     assert.equal(plan.argumentSets.length, 1);
     assertPhysicalChance(plan.argumentSets[0], input);
-    const results = [];
-    for (const workers of [1, 8]) {
+    const runChance = (workers, logicalProcessors = workers) => {
       const argv = prepareClearraArguments(plan.argumentSets[0], {
-        ...execution, workers, logicalProcessors: workers,
+        ...execution, workers, logicalProcessors,
       });
       assert.equal(optionValue(argv, "--auto-workers"), String(workers));
       assert.equal(argv.includes("--use-all-cpu-threads"), true);
       const run = spawnSync(executable, argv, { encoding: "utf8", timeout: 5000,
-        maxBuffer: 1024 * 1024, env: { ...process.env, CLEARRA_EXPECTED_VCPUS: String(workers) },
+        maxBuffer: 1024 * 1024, env: nativeEnv,
         stdio: ["ignore", "pipe", "pipe"] });
-      assert.ifError(run.error);
-      assert.equal(run.signal, null);
-      const native = JSON.parse(run.stdout);
-      assert.equal(run.status, 0, `${fixture.name}/${workers}: ${JSON.stringify(native.error)}`);
+      const context = `${fixture.name}/${workers}: argv=${JSON.stringify(argv)} status=${run.status} signal=${run.signal}`
+        + `\nstdout=${run.stdout?.slice(0, 4096) ?? ""}\nstderr=${run.stderr?.slice(0, 4096) ?? ""}`;
+      assert.equal(run.error, undefined, context);
+      assert.equal(run.signal, null, context);
+      assert.equal(run.status, 0, context);
+      let native;
+      assert.doesNotThrow(() => { native = JSON.parse(run.stdout); }, context);
       assert.equal(native.kind, "pc-probability.v2");
       assert.equal(native.contract?.command?.kind, native.kind);
       assert.equal(native.runtime_identity?.source_commit, sourceCommit);
@@ -208,6 +214,7 @@ test("tiny real native Chance retains exact serial probability with eight public
       const summary = native.summary;
       assert.equal(summary.workers_requested, "auto");
       assert.equal(summary.workers_used, workers);
+      assert.equal(String(summary.all_cpu_threads_requested), "true");
       assert.equal(String(summary.cpu_parallel_execution), String(workers > 1));
       assert.equal(summary.objective, "unique");
       assert.equal(summary.search_output_policy, "coverage-summary");
@@ -224,12 +231,20 @@ test("tiny real native Chance retains exact serial probability with eight public
       }
       assert.equal(native.resource_report?.truncated, false);
       assert.equal(native.resource_report?.probability_complete, true);
-      results.push(native);
       caseTest.diagnostic(`workers=${workers} covered=1/${fixture.patternCount} probability=${summary.coverage_probability}`);
-    }
-    assert.deepEqual(results[1].runtime_identity, results[0].runtime_identity);
-    assert.equal(results[1].summary.coverage_probability, results[0].summary.coverage_probability);
-    assert.equal(results[1].summary.covered_pattern_count, results[0].summary.covered_pattern_count);
+      return native;
+    };
+    const serial = runChance(1);
+    const hardwareLimit = Number(serial.summary.logical_processor_count);
+    assert.ok(Number.isSafeInteger(hardwareLimit) && hardwareLimit >= 2,
+      `the native parallel regression requires at least two admitted processors; got ${serial.summary.logical_processor_count}`);
+    const parallelWorkers = Math.min(8, hardwareLimit);
+    caseTest.diagnostic(`native_hard_limit=${hardwareLimit} requested_parallel_workers=${parallelWorkers}`);
+    const parallel = runChance(parallelWorkers, hardwareLimit);
+    assert.equal(Number(parallel.summary.logical_processor_count), hardwareLimit);
+    assert.deepEqual(parallel.runtime_identity, serial.runtime_identity);
+    assert.equal(parallel.summary.coverage_probability, serial.summary.coverage_probability);
+    assert.equal(parallel.summary.covered_pattern_count, serial.summary.covered_pattern_count);
   });
-  t.diagnostic(`source=${sourceCommit} cli_sha256=${process.env.CLEARRA_PARITY_EXECUTABLE_SHA256} tiny_cases=2 workers=1,8`);
+  t.diagnostic(`source=${sourceCommit} cli_sha256=${process.env.CLEARRA_PARITY_EXECUTABLE_SHA256} tiny_cases=2 native_capacity_source=serial-result`);
 });
