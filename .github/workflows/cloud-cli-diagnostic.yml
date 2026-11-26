@@ -1,4 +1,4 @@
-name: Read Discord Runtime Operations
+name: Diagnose Discord Runtime
 
 # This is the diagnostic workflow already named by the protected WIF policy.
 # Do not move it to another entrypoint or broaden provider trust for a log read.
@@ -6,8 +6,16 @@ name: Read Discord Runtime Operations
 on:
   workflow_dispatch:
     inputs:
+      mode:
+        description: Read bounded operations or verify one public P7P4 solutions request
+        required: true
+        default: read-logs
+        type: choice
+        options:
+          - read-logs
+          - p7p4-solutions
       expected_main:
-        description: Exact trusted main commit running this read-only diagnostic
+        description: Exact trusted main commit running this diagnostic
         required: true
         type: string
       revision:
@@ -15,12 +23,20 @@ on:
         required: true
         type: string
       since:
-        description: Inclusive UTC start (ISO 8601), at most 24 hours before until
-        required: true
+        description: Read-logs only - inclusive UTC start, at most 24 hours before until
+        required: false
         type: string
       until:
-        description: Inclusive UTC end (ISO 8601)
-        required: true
+        description: Read-logs only - inclusive UTC end (ISO 8601)
+        required: false
+        type: string
+      image_digest:
+        description: P7P4 only - full immutable registry image reference from the accepted deployment
+        required: false
+        type: string
+      cli_sha256:
+        description: P7P4 only - SHA-256 of the accepted Linux CLI
+        required: false
         type: string
 
 permissions:
@@ -28,7 +44,7 @@ permissions:
 
 jobs:
   operations:
-    if: github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/main' && inputs.mode == 'read-logs'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     environment: discord-path-confirmation
@@ -67,4 +83,49 @@ jobs:
           name: discord-runtime-operations-${{ github.run_id }}-${{ github.run_attempt }}
           path: _local/artifacts/diagnostics/cloud-runtime/${{ github.run_id }}-${{ github.run_attempt }}/operations.json
           if-no-files-found: error
+          retention-days: 7
+
+  p7p4-solutions:
+    if: github.ref == 'refs/heads/main' && inputs.mode == 'p7p4-solutions'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: discord-path-confirmation
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+      CLEARRA_DIAGNOSTIC_MODE: p7p4-solutions
+      CLEARRA_DIAGNOSTIC_EXPECTED_MAIN: ${{ inputs.expected_main }}
+      CLEARRA_DIAGNOSTIC_REVISION: ${{ inputs.revision }}
+      CLEARRA_DIAGNOSTIC_IMAGE_DIGEST: ${{ inputs.image_digest }}
+      CLEARRA_DIAGNOSTIC_CLI_SHA256: ${{ inputs.cli_sha256 }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.23.2
+      - name: Verify bounded request, readback, and ownership contracts
+        run: node --test scripts/release/cloud/p7p4-solutions-http-diagnostic.test.mjs scripts/release/collect-cloud-runtime-operations.test.mjs
+      - name: Validate exact main and immutable deployment identity before authentication
+        run: node scripts/release/cloud/p7p4-solutions-http-diagnostic.mjs --validate-only
+      - name: Authenticate the existing protected runtime diagnostic identity
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
+      - uses: google-github-actions/setup-gcloud@v2
+      - name: Verify one P7P4 solutions request through the deployed HTTP executor
+        id: probe
+        run: node scripts/release/cloud/p7p4-solutions-http-diagnostic.mjs
+      - name: Preserve the bounded P7P4 result and runtime readback
+        if: ${{ !cancelled() && steps.probe.outcome != 'skipped' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: discord-p7p4-solutions-${{ github.run_id }}-${{ github.run_attempt }}
+          path: _local/artifacts/diagnostics/p7p4-solutions/${{ github.run_id }}-${{ github.run_attempt }}/result.json
+          if-no-files-found: warn
           retention-days: 7

@@ -9,6 +9,8 @@
   materialization for ordinary constrained Build searches.
 - Match compact standard-bag admission to its actual index-free source
   representation while retaining requested coverage and worker reservations.
+- Preserve valid include-mirror Build requests on asymmetric fields when
+  native workers share the original preparation.
 - Preserve structured execution failures across Web manager and verifier
   workers, and show the corresponding localized cause in Web and desktop.
 - Keep Discord job responses alive during computation without extending the
@@ -18,16 +20,20 @@
 - Carry complete PC chance coverage evidence through native parallel reduction,
   apply requested B2B/spin constraints before probability coverage, and bind
   filtered rows to the complete request before public result projection.
+- Keep constrained full-height chance and minimum-cover results on their own
+  validation contracts so valid requests finish without a mismatched rejection.
 - Reuse the exact standard-bag language product for eligible full-height PC
   searches and retain typed chance rows under the existing worker-window budget.
-- Bind P7P4 diagnostics to the public Path command, original queue universe,
-  requested CPU policy, native result identity, and actual spawned arguments.
+- Bind explicit replay diagnostics to the public Path command, original queue
+  universe, requested CPU policy, native result identity, and spawned arguments.
 - Reuse exact replay counts for source-verified queues that differ only after
   every reachable draw, while retaining all original manifest entries.
 - Add bounded P7P7 preparation, option-combination, serial/distributed parity,
   and pending HTTP response regressions without full six-line enumeration.
 - Add a protected read-only diagnostic for bounded, sanitized Cloud Run
   operation timing and HTTP status evidence.
+- Add a separate bounded P7P4 solutions check through the public Discord request
+  and deployed HTTP executor, with exact runtime, worker, and CTK3 readback.
 
 ## 0.9.2 - 2026-11-26
 

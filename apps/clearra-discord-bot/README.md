@@ -31,7 +31,7 @@ the probability of a preserving solution. A spin profile without preservation
 is rejected as inactive input; the unfiltered probability route keeps its
 existing default.
 
-The registered slash commands are `/render-file`, `/path`, `/percent`, `/chance`, `/minimals`,
+The registered slash commands are `/pc`, `/render-file`, `/path`, `/percent`, `/chance`, `/minimals`,
 `/score`, `/score-minimals`, `/saves`, `/best-save`, `/cover`, `/setup`,
 `/congruent`, `/congruent-cover`, `/setup-cover`, `/cover-percent`,
 `/special-cover`, `/spin-cover`, `/spin`, `/spin-structure`, `/score-finder`, `/damage`, `/pc-setup`,

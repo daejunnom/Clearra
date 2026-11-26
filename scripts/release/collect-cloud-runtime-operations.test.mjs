@@ -82,9 +82,13 @@ test("collector accepts structured text and rejects unrelated or malformed metad
   assert.throws(() => sanitizeRuntimeOperations(Array(1001).fill(entry), authority));
 });
 
-test("diagnostic workflow retains the protected main-only boundary without Oracle credentials or mutation", () => {
-  const source = readFileSync(new URL("../../.github/workflows/cloud-cli-diagnostic.yml", import.meta.url), "utf8");
-  assert.match(source, /if: github\.ref == 'refs\/heads\/main'/);
+test("log-reading mode retains the protected main-only boundary without Oracle credentials or mutation", () => {
+  const workflow = readFileSync(new URL("../../.github/workflows/cloud-cli-diagnostic.yml", import.meta.url), "utf8");
+  const boundary = workflow.indexOf("\n  p7p4-solutions:\n");
+  assert.ok(boundary > workflow.indexOf("\n  operations:\n"));
+  const source = workflow.slice(0, boundary);
+  assert.match(source, /default: read-logs/);
+  assert.match(source, /if: github\.ref == 'refs\/heads\/main' && inputs\.mode == 'read-logs'/);
   assert.match(source, /timeout-minutes: 5/);
   assert.match(source, /environment: discord-path-confirmation/);
   assert.match(source, /service_account: \$\{\{ vars\.GCP_DEPLOY_SERVICE_ACCOUNT \}\}/);
@@ -92,6 +96,28 @@ test("diagnostic workflow retains the protected main-only boundary without Oracl
   assert.match(source, /collect-cloud-runtime-operations\.mjs --validate-only/);
   assert.doesNotMatch(source, /secrets\.|ORACLE|ssh|update-traffic|run deploy|run jobs execute|write-all/);
   assert.ok(source.indexOf("--validate-only") < source.indexOf("google-github-actions/auth"));
+});
+
+test("P7P4 diagnostics require an explicit protected mode and immutable accepted runtime inputs", () => {
+  const workflow = readFileSync(new URL("../../.github/workflows/cloud-cli-diagnostic.yml", import.meta.url), "utf8");
+  const source = workflow.slice(workflow.indexOf("\n  p7p4-solutions:\n"));
+  assert.match(source, /if: github\.ref == 'refs\/heads\/main' && inputs\.mode == 'p7p4-solutions'/);
+  assert.match(source, /timeout-minutes: 20/);
+  assert.match(source, /environment: discord-path-confirmation/);
+  assert.match(source, /contents: read/);
+  assert.match(source, /ref: \$\{\{ github\.sha \}\}/);
+  assert.match(source, /persist-credentials: false/);
+  for (const [name, input] of [["EXPECTED_MAIN", "expected_main"], ["REVISION", "revision"],
+    ["IMAGE_DIGEST", "image_digest"], ["CLI_SHA256", "cli_sha256"]]) {
+    assert.ok(source.includes(`CLEARRA_DIAGNOSTIC_${name}: \${{ inputs.${input} }}`));
+  }
+  assert.match(source, /CLEARRA_DIAGNOSTIC_MODE: p7p4-solutions/);
+  const validate = source.indexOf("p7p4-solutions-http-diagnostic.mjs --validate-only");
+  assert.ok(validate > 0 && validate < source.indexOf("google-github-actions/auth"));
+  assert.match(source, /service_account: \$\{\{ vars\.GCP_DEPLOY_SERVICE_ACCOUNT \}\}/);
+  assert.match(source, /path: _local\/artifacts\/diagnostics\/p7p4-solutions\/\$\{\{ github\.run_id \}\}-\$\{\{ github\.run_attempt \}\}\/result\.json/);
+  assert.doesNotMatch(source, /secrets\.|ORACLE|ssh|update-traffic|run deploy|write-all|contents: write/);
+  assert.doesNotMatch(source, /run:.*\$\{\{ inputs\./);
 });
 
 test("read-only workflow uses the existing intended WIF diagnostic entrypoint", () => {
