@@ -1,6 +1,114 @@
 //! Admission for diagnostic timing. Keep it separate from the uninstrumented
 //! benchmark and from the strict-prefix experiment's different execution path.
 
+pub(super) const CANCEL_DIAGNOSTIC_ENV: &str = "CLEARRA_SEARCH_DIAGNOSTIC_CANCEL_MS";
+const MAX_CANCEL_DIAGNOSTIC_MS: u64 = 60_000;
+
+/// A finite, explicitly requested diagnostic deadline. Missing is different
+/// from zero; zero must not accidentally turn a bounded diagnostic unbounded.
+pub(super) fn parse_cancel_diagnostic_ms(value: Option<&str>) -> Result<Option<u64>, String> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let millis = (!value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()))
+        .then(|| value.parse::<u64>().ok())
+        .flatten()
+        .filter(|millis| (1..=MAX_CANCEL_DIAGNOSTIC_MS).contains(millis))
+        .ok_or_else(|| {
+            format!(
+                "{CANCEL_DIAGNOSTIC_ENV} must be an integer from 1 to {MAX_CANCEL_DIAGNOSTIC_MS}"
+            )
+        })?;
+    Ok(Some(millis))
+}
+
+pub(super) fn validate_cancel_diagnostic(
+    cancel_ms: Option<u64>,
+    diagnostic: Option<SearchStageDiagnostic>,
+    summary_requested: bool,
+    captures_coverage: bool,
+) -> Result<(), String> {
+    if cancel_ms.is_some()
+        && (!summary_requested
+            || captures_coverage
+            || !diagnostic.is_some_and(SearchStageDiagnostic::is_product))
+    {
+        return Err(format!(
+            "{CANCEL_DIAGNOSTIC_ENV} requires --summary and the ordinary source-bound CLEARRA_SEARCH_STAGE_PROFILE=1 route without coverage capture"
+        ));
+    }
+    Ok(())
+}
+
+/// The timer owns only a cancellation handle. Stopping or dropping the guard
+/// wakes and joins it, so a completed/failed diagnostic never leaves a timer
+/// that can act on a later request. The search itself stays on its caller.
+#[cfg(any(test, feature = "wasm-stage-profiling"))]
+pub(super) struct DiagnosticCancellation {
+    stop: Option<std::sync::mpsc::Sender<()>>,
+    worker: Option<std::thread::JoinHandle<()>>,
+    fired: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[cfg(any(test, feature = "wasm-stage-profiling"))]
+impl DiagnosticCancellation {
+    pub(super) fn arm(
+        control: &clearra_core_domain::execution_cancellation::ExecutionControl,
+        millis: u64,
+    ) -> Result<Self, String> {
+        use std::sync::{atomic::Ordering, mpsc, Arc};
+
+        if !(1..=MAX_CANCEL_DIAGNOSTIC_MS).contains(&millis) {
+            return Err("diagnostic cancellation deadline is outside its finite range".into());
+        }
+        let handle = control.cancellation.handle();
+        let fired = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let observed = Arc::clone(&fired);
+        let (stop, receive) = mpsc::channel();
+        let worker = std::thread::Builder::new()
+            .name("clearra-diagnostic-cancel".to_owned())
+            .spawn(move || {
+                if matches!(
+                    receive.recv_timeout(std::time::Duration::from_millis(millis)),
+                    Err(mpsc::RecvTimeoutError::Timeout)
+                ) {
+                    observed.store(true, Ordering::Release);
+                    handle.cancel();
+                }
+            })
+            .map_err(|error| format!("cannot start diagnostic cancellation timer: {error}"))?;
+        Ok(Self {
+            stop: Some(stop),
+            worker: Some(worker),
+            fired,
+        })
+    }
+
+    pub(super) fn finish(mut self) -> Result<bool, String> {
+        self.stop_and_join()?;
+        Ok(self.fired.load(std::sync::atomic::Ordering::Acquire))
+    }
+
+    fn stop_and_join(&mut self) -> Result<(), String> {
+        if let Some(stop) = self.stop.take() {
+            let _ = stop.send(());
+        }
+        if let Some(worker) = self.worker.take() {
+            worker
+                .join()
+                .map_err(|_| "diagnostic cancellation timer panicked".to_owned())?;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(any(test, feature = "wasm-stage-profiling"))]
+impl Drop for DiagnosticCancellation {
+    fn drop(&mut self) {
+        let _ = self.stop_and_join();
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum SearchStageDiagnostic {
     ProductDefault,
@@ -246,11 +354,90 @@ pub(super) fn validate_product_memo_observation(
 #[cfg(test)]
 mod tests {
     use super::{
-        validate_product_memo_environment, validate_product_memo_observation,
+        parse_cancel_diagnostic_ms, validate_cancel_diagnostic, validate_product_memo_environment,
+        validate_product_memo_observation, DiagnosticCancellation,
         SearchStageDiagnostic::{
             self, LegacyUpper, OptimizedUpper, ProductCutoffExperiment, ProductDefault, Reference,
         },
     };
+
+    #[test]
+    fn cancellation_diagnostic_deadline_is_strict_and_finite() {
+        assert_eq!(parse_cancel_diagnostic_ms(None), Ok(None));
+        for (input, expected) in [("1", 1), ("20000", 20_000), ("60000", 60_000)] {
+            assert_eq!(parse_cancel_diagnostic_ms(Some(input)), Ok(Some(expected)));
+        }
+        for input in [
+            "",
+            "0",
+            "60001",
+            "-1",
+            "+1",
+            " 20",
+            "20 ",
+            "1.5",
+            "NaN",
+            "18446744073709551616",
+        ] {
+            assert!(
+                parse_cancel_diagnostic_ms(Some(input)).is_err(),
+                "accepted {input:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn cancellation_diagnostic_admission_requires_ordinary_profiled_summary() {
+        assert!(validate_cancel_diagnostic(None, None, false, true).is_ok());
+        for diagnostic in [
+            ProductDefault,
+            ProductCutoffExperiment,
+            ProductDefault.with_geometry_experiments(true, false),
+            ProductDefault.with_geometry_experiments(false, true),
+        ] {
+            assert!(
+                validate_cancel_diagnostic(Some(20_000), Some(diagnostic), true, false).is_ok()
+            );
+            assert!(
+                validate_cancel_diagnostic(Some(20_000), Some(diagnostic), false, false).is_err()
+            );
+            assert!(
+                validate_cancel_diagnostic(Some(20_000), Some(diagnostic), true, true).is_err()
+            );
+        }
+        for diagnostic in [
+            None,
+            Some(Reference),
+            Some(OptimizedUpper),
+            Some(LegacyUpper),
+        ] {
+            assert!(validate_cancel_diagnostic(Some(20_000), diagnostic, true, false).is_err());
+        }
+    }
+
+    #[test]
+    fn cancellation_timer_fires_and_joins_without_a_search() {
+        let control = clearra_core_domain::execution_cancellation::ExecutionControl::default();
+        let mut timer = DiagnosticCancellation::arm(&control, 1).unwrap();
+        // Wait only for the finite one-millisecond timer, not a solver task.
+        timer.worker.take().unwrap().join().unwrap();
+        assert!(timer.finish().unwrap());
+        assert!(control.is_cancelled());
+    }
+
+    #[test]
+    fn cancellation_timer_stops_on_finish_and_drop() {
+        let control = clearra_core_domain::execution_cancellation::ExecutionControl::default();
+        assert!(!DiagnosticCancellation::arm(&control, 60_000)
+            .unwrap()
+            .finish()
+            .unwrap());
+        assert!(!control.is_cancelled());
+        drop(DiagnosticCancellation::arm(&control, 60_000).unwrap());
+        assert!(!control.is_cancelled());
+        assert!(DiagnosticCancellation::arm(&control, 0).is_err());
+        assert!(DiagnosticCancellation::arm(&control, 60_001).is_err());
+    }
 
     #[test]
     fn strict_profiles_keep_their_execution_route_and_cannot_capture_proof_output() {

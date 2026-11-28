@@ -10,6 +10,9 @@
 //! verifier; CLEARRA_APDP_PARENT_RECHECK=1 restores the redundant APDP reference.
 //! Both axes default to 0 and are labeled separately from the product route.
 //! Diagnostic reports cannot serve as uninstrumented timing adoption evidence.
+//! With --summary and ordinary stage profiling, setting
+//! CLEARRA_SEARCH_DIAGNOSTIC_CANCEL_MS to 1..60000 emits a separate, bounded
+//! diagnostic report even when cooperative cancellation interrupts the search.
 
 #[cfg(not(all(feature = "parallel", feature = "local-search-ab")))]
 fn main() {
@@ -59,8 +62,11 @@ mod run {
         self, CoverageComparison, CoverageUniverse, CoverageWriter, P7_INITIAL,
     };
     use super::solution_coverage_spool::{CoverageFragment, CoverageSpool, CoverageSpoolLimits};
+    #[cfg(feature = "wasm-stage-profiling")]
+    use super::stage_diagnostic::DiagnosticCancellation;
     use super::stage_diagnostic::{
-        validate_product_memo_environment, validate_product_memo_observation, SearchStageDiagnostic,
+        parse_cancel_diagnostic_ms, validate_cancel_diagnostic, validate_product_memo_environment,
+        validate_product_memo_observation, SearchStageDiagnostic, CANCEL_DIAGNOSTIC_ENV,
     };
 
     use clearra_core_domain::{
@@ -83,7 +89,9 @@ mod run {
         CoreExecutionResult, WasmCpuSearchBackend,
     };
     #[cfg(feature = "wasm-stage-profiling")]
-    use clearra_core_executor::{ExecutorSearchProfileSession, ExecutorSearchProfileStage};
+    use clearra_core_executor::{
+        ExecutorSearchProfileSession, ExecutorSearchProfileStage, WasmCpuSearchError,
+    };
     use clearra_objectives::policy::objective_policy::ObjectivePolicy;
     use clearra_pc_graph::request::{
         OpeningPcSearchQuery, PcCountPolicy, PcExecutionPolicy, PcHoldPolicy, PcQueueInput,
@@ -317,6 +325,13 @@ mod run {
         }
         let (fixture, coverage_slot) = parse_fixture(&args)?;
         let summary_requested = args.as_slice() == ["--summary"];
+        let diagnostic_cancel_ms = match std::env::var(CANCEL_DIAGNOSTIC_ENV) {
+            Ok(value) => parse_cancel_diagnostic_ms(Some(&value))?,
+            Err(std::env::VarError::NotPresent) => None,
+            Err(std::env::VarError::NotUnicode(_)) => {
+                return Err(format!("{CANCEL_DIAGNOSTIC_ENV} must be a Unicode integer"));
+            }
+        };
         if ((fixture != Fixture::OneI && !fixture.is_grounded_o()) || coverage_slot.is_some())
             && (std::env::var("CLEARRA_RUNTIME_SUPERVISED").as_deref() != Ok("1")
                 || std::env::var("CLEARRA_RUNTIME_PROFILE").as_deref() != Ok("benchmark-search"))
@@ -454,6 +469,12 @@ mod run {
                 apdp_parent_recheck_mode == "1",
             )
         });
+        validate_cancel_diagnostic(
+            diagnostic_cancel_ms,
+            stage_diagnostic,
+            summary_requested,
+            coverage_slot.is_some(),
+        )?;
         if stage_diagnostic.is_some_and(SearchStageDiagnostic::is_product) {
             validate_product_memo_environment(|name| std::env::var(name))?;
         }
@@ -603,6 +624,98 @@ mod run {
             .map_err(|error| format!("cannot start search stage profile: {error:?}"))?;
         let search_started = Instant::now();
         let control = ExecutionControl::default();
+        #[cfg(feature = "wasm-stage-profiling")]
+        if let Some(cancel_ms) = diagnostic_cancel_ms {
+            // This branch never enters result/proof validation or the normal
+            // benchmark schema. Profile ownership stays on the submitting
+            // thread; workers publish their existing TLS totals when joined,
+            // including when the backend returns Cancelled.
+            let diagnostic = stage_diagnostic
+                .ok_or("bounded cancellation diagnostic lost its admitted stage profile")?;
+            let timer = DiagnosticCancellation::arm(&control, cancel_ms)?;
+            let execute = || WasmCpuSearchBackend::execute_with_control(&problem, &control);
+            #[cfg(target_os = "linux")]
+            let (outcome, memory_observation) = if memory_profile {
+                let (outcome, observation) =
+                    clearra_core_executor::backend::observe_native_pc_memory(execute).map_err(
+                        |error| format!("cannot finish cancellation memory diagnostic: {error}"),
+                    )?;
+                (outcome, Some(observation))
+            } else {
+                (execute(), None)
+            };
+            #[cfg(not(target_os = "linux"))]
+            let (outcome, memory_observation) = (execute(), None::<Value>);
+            let search_ms = search_started.elapsed().as_secs_f64() * 1000.0;
+            let cancellation_requested = timer.finish()?;
+            let (caller, workers) = stage_profile
+                .ok_or("bounded cancellation diagnostic has no profiler session")?
+                .finish_partitioned();
+            let (status, execution_error) = match &outcome {
+                Ok(_) => ("completed", None),
+                Err(WasmCpuSearchError::Cancelled) => ("cancelled", None),
+                Err(error) => ("failed", Some(format!("{error:?}"))),
+            };
+            let row_stack = clearra_core_executor::backend::row_stack_experiment_totals();
+            let output = join_report_sections([
+                json!({
+                    "schema": "clearra.placement-graph-cancel-diagnostic.v1",
+                    "diagnostic_only": true,
+                    "timing_adoption_authority": false,
+                    "solution_parity_checked": false,
+                    "search_result_validated": false,
+                    "search_status": status,
+                    "execution_error": execution_error,
+                    "cancellation_requested": cancellation_requested,
+                    "cancel_after_ms": cancel_ms,
+                    "cancellation_scope": "cooperative backend cancellation; the finite outer supervisor remains the hard execution bound",
+                    "case": fixture.name(),
+                    "input": fixture.input(),
+                    "binary_sha256": binary_sha,
+                    "compiled_source_commit": option_env!("CLEARRA_SOURCE_COMMIT"),
+                    "supervisor_run_id": std::env::var("CLEARRA_RUNTIME_RUN_ID").ok(),
+                    "search_output_policy": format!("{:?}", problem.output_policy()),
+                    "requested_geometry_candidate_domain": if row_stack_geometry_mode == "1" { "row-stack-noncrossing" } else { "raw" },
+                    "row_stack_geometry_mode": row_stack_geometry_mode,
+                    "apdp_parent_recheck_mode": apdp_parent_recheck_mode,
+                    "minimum_domain_cutoff_mode": minimum_domain_cutoff_mode,
+                    "cpu": { "hard_limit": capacity.hard_limit(), "worker_policy": "auto", "use_all_logical_processors": true },
+                    "timing_ms": { "problem_compile": compile_ms, "observed_search": search_ms },
+                    "result_scope": "completed means the backend returned before cancellation; no solution, coverage, parity, or uninstrumented timing result is exported or validated by this diagnostic",
+                }),
+                diagnostic.report(
+                    caller,
+                    workers,
+                    reachability_visited_first_mode == "1",
+                    standard_bag_global_saturation_mode == "1",
+                    physical_prefix_pruning_mode == "1",
+                    candidate_ilc_pruning_mode == "1",
+                    standard_bag_boolean_membership_mode == "1",
+                    standard_bag_shared_saturation_mode == "1",
+                ),
+                json!({ "row_stack_geometry": {
+                    "scope": "dispatch counters are published at dispatch; expanded_nodes and emitted_candidates count only completed generator partitions, excluding every still-live or cancelled partition",
+                    "dispatch_searches": row_stack.dispatch_searches,
+                    "dispatch_private_bytes": row_stack.dispatch_private_bytes,
+                    "dispatch_private_bytes_scope": "sum of private generator backing at dispatch; excludes shared catalog, targets and verifier; not an RSS peak",
+                    "completed_searches": row_stack.completed_searches,
+                    "expanded_nodes_completed_partitions_only": row_stack.expanded_nodes,
+                    "emitted_candidates_completed_partitions_only": row_stack.emitted_candidates,
+                }}),
+                memory_observation.map_or_else(
+                    || json!({}),
+                    |observation| json!({ "product_memory_profile": observation }),
+                ),
+            ])?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&output).map_err(|error| error.to_string())?
+            );
+            if status == "failed" {
+                return Err("bounded search diagnostic failed; see diagnostic JSON".into());
+            }
+            return Ok(());
+        }
         let execute = || -> Result<_, String> {
             if let Some((dir, universe)) = &capture {
                 let universe = *universe;
