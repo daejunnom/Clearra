@@ -41,7 +41,8 @@ row is not a clear event. See
 [extended_board.rs](../../crates/clearra-core-executor/src/backend/wasm_cpu/extended_board.rs).
 
 An actual restriction to one final clear event and no earlier clear is much
-stronger. A standard tetromino can complete at most four rows in that event.
+stronger. Starting without any already complete rows, a standard tetromino can
+complete at most four rows in that event.
 If it leaves the board empty, then
 
 ```text
@@ -137,6 +138,7 @@ For a small fixed target set, that substitution would exaggerate the target
 term. A generalized dense `d`-word board adds its word cost to skeleton tests;
 removing the fixed projection-work budget would also require a separate
 projection-convolution term. These are upper bounds for the stated loops,
+using the customary expected/amortized hash-table model where applicable,
 not tight bounds or measured costs for every domain invocation.
 
 ## 3. APDP parent rechecking is an identity in the changed branch
