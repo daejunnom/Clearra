@@ -194,8 +194,8 @@ impl GeometrySearch {
                 ))?;
         let row_targets = targets_for_search(targets)?;
         // More root partitions than workers lets the existing worker queue
-        // absorb uneven subtrees. Every partition cuts before row 1, never by
-        // discarding complete leaves after repeating the whole search.
+        // absorb uneven subtrees. Ownership is decided after at most two
+        // first-row piece starts, before the remaining row/permutation work.
         let partition_count =
             requested_workers
                 .checked_mul(4)

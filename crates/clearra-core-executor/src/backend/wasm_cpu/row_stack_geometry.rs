@@ -28,6 +28,7 @@ const MAX_WIDTH: usize = 10;
 const MAX_HEIGHT: usize = 24;
 const MAX_PIECES: usize = 64;
 const DISTINCT_SHAPES: usize = 19;
+const ROOT_PARTITION_PIECES: usize = 2;
 const NO_ROW: u32 = u32::MAX;
 
 /// The generator borrows the same immutable catalog as the verifier. Mapping
@@ -115,6 +116,7 @@ pub(super) enum RowStackGeometryAdvance {
 struct RowShape {
     piece: PieceKind,
     rows: [u16; 4],
+    columns: [u8; 4],
     width: u8,
     height: u8,
 }
@@ -159,6 +161,7 @@ struct RowFrame {
     endpoint_limits: [u8; MAX_WIDTH + 1],
     permutation_used: u16,
     permutation_depth: u8,
+    root_anchor: Option<u8>,
     target_cursor: usize,
     stage: FrameStage,
 }
@@ -183,6 +186,7 @@ impl RowFrame {
             endpoint_limits: [0; MAX_WIDTH + 1],
             permutation_used: 0,
             permutation_depth: 0,
+            root_anchor: None,
             target_cursor: 0,
             stage: FrameStage::Close,
         }
@@ -206,6 +210,9 @@ pub(super) struct RowStackGeometrySearch {
     open: Vec<u8>,
     frames: Vec<RowFrame>,
     used_counts: [u8; 7],
+    // Starting a fixed profile commits all of its column cells, including
+    // fragments on future rows. Inverse row gaps never change their x values.
+    remaining_columns: [u8; MAX_WIDTH],
     expanded_nodes: usize,
     emitted_candidates: usize,
     root_partition_index: usize,
@@ -268,8 +275,16 @@ impl RowStackGeometrySearch {
         }
 
         let mut required_rows = reserved_vec(usize::from(height))?;
+        let mut remaining_columns = [0; MAX_WIDTH];
         for row in 0..height {
-            required_rows.push(required.row_bits(width, row));
+            let bits = required.row_bits(width, row);
+            required_rows.push(bits);
+            for (x, remaining) in remaining_columns[..usize::from(width)]
+                .iter_mut()
+                .enumerate()
+            {
+                *remaining += u8::from(bits & (1_u16 << x) != 0);
+            }
         }
         let mut owned_targets = reserved_vec(targets.len())?;
         owned_targets.extend_from_slice(targets);
@@ -291,6 +306,7 @@ impl RowStackGeometrySearch {
             open,
             frames,
             used_counts: [0; 7],
+            remaining_columns,
             expanded_nodes: 0,
             emitted_candidates: 0,
             root_partition_index: 0,
@@ -299,9 +315,10 @@ impl RowStackGeometrySearch {
         })
     }
 
-    /// Split at complete first-row decisions, before exploring any later row.
-    /// Every worker repeats only the bounded-width first-row construction;
-    /// later subtrees are owned once, rather than filtered after enumeration.
+    /// Split after the first two canonical piece starts, or an earlier filled
+    /// first row. A worker repeats only this small prefix, not every first-row
+    /// fill and outgoing permutation. All descendants of a claimed prefix
+    /// belong to that worker until backtracking removes an anchor piece.
     pub fn set_root_partition(&mut self, index: usize, count: usize) -> Result<(), &'static str> {
         if count == 0 || index >= count {
             return Err("wasm_row_stack_partition_invalid");
@@ -382,6 +399,21 @@ impl RowStackGeometrySearch {
                 }
             }
             FrameStage::Fill => {
+                let depth = self.pieces.len() - usize::from(frame.piece_base);
+                if frame.row == 0
+                    && frame.root_anchor.is_none()
+                    && (depth >= ROOT_PARTITION_PIECES || frame.remaining == 0)
+                {
+                    // Decide ownership before completing the rest of the row
+                    // or exploring its outgoing permutations. Empty and short
+                    // first rows still have exactly one owner per prefix.
+                    if !self.owns_next_root() {
+                        self.backtrack_fill(&mut frame);
+                        self.frames.push(frame);
+                        return None;
+                    }
+                    frame.root_anchor = Some(depth as u8);
+                }
                 if frame.remaining == 0 {
                     if self.prepare_outgoing(&mut frame) {
                         frame.stage = FrameStage::Permute;
@@ -389,7 +421,6 @@ impl RowStackGeometrySearch {
                         self.backtrack_fill(&mut frame);
                     }
                 } else {
-                    let depth = self.pieces.len() - usize::from(frame.piece_base);
                     let next = usize::from(frame.next_shapes[depth]);
                     if next == self.shapes.len() {
                         self.backtrack_fill(&mut frame);
@@ -441,10 +472,6 @@ impl RowStackGeometrySearch {
             }
             FrameStage::Descend => {
                 frame.stage = FrameStage::AfterChild;
-                if frame.row == 0 && !self.owns_next_root() {
-                    self.frames.push(frame);
-                    return None;
-                }
                 for &index in &frame.permutation[..usize::from(frame.outgoing_count)] {
                     self.open.push(frame.outgoing[usize::from(index)]);
                 }
@@ -455,6 +482,10 @@ impl RowStackGeometrySearch {
                     return None;
                 }
                 if self.open.is_empty() && self.pieces.len() == usize::from(self.target_depth) {
+                    debug_assert!(self
+                        .remaining_columns
+                        .iter()
+                        .all(|&remaining| remaining == 0));
                     frame.stage = FrameStage::Emit;
                     frame.target_cursor = 0;
                 }
@@ -592,6 +623,13 @@ impl RowStackGeometrySearch {
         if fragment & !frame.remaining != 0 {
             return false;
         }
+        if shape.columns[..usize::from(shape.width)]
+            .iter()
+            .enumerate()
+            .any(|(local_x, &needed)| self.remaining_columns[usize::from(x) + local_x] < needed)
+        {
+            return false;
+        }
         let mut next_counts = self.used_counts;
         next_counts[piece_index(shape.piece)] += 1;
         if !self.targets.iter().any(|target| {
@@ -620,6 +658,9 @@ impl RowStackGeometrySearch {
             progress: 1,
         });
         self.used_counts = next_counts;
+        for (local_x, &needed) in shape.columns[..usize::from(shape.width)].iter().enumerate() {
+            self.remaining_columns[usize::from(x) + local_x] -= needed;
+        }
         frame.remaining &= !fragment;
         true
     }
@@ -688,7 +729,15 @@ impl RowStackGeometrySearch {
             let shape = self.shapes[usize::from(piece.shape)];
             debug_assert_eq!(piece.progress, 1);
             self.used_counts[piece_index(shape.piece)] -= 1;
+            for (local_x, &needed) in shape.columns[..usize::from(shape.width)].iter().enumerate() {
+                self.remaining_columns[usize::from(piece.x) + local_x] += needed;
+            }
             frame.remaining |= shape.rows[0] << piece.x;
+            if frame.root_anchor.is_some_and(|anchor| {
+                self.pieces.len() - usize::from(frame.piece_base) < usize::from(anchor)
+            }) {
+                frame.root_anchor = None;
+            }
             frame.stage = FrameStage::Fill;
         } else {
             for &id in frame.incoming[..usize::from(frame.incoming_count)]
@@ -708,6 +757,7 @@ impl RowStackGeometrySearch {
                 self.open.push(id);
             }
             frame.incoming_count = 0;
+            frame.root_anchor = None;
             frame.stage = FrameStage::Close;
         }
     }
@@ -743,12 +793,15 @@ fn compile_shapes() -> Result<Vec<RowShape>, WasmExactSearchError> {
         for rotation in RotationState::ALL {
             let shape = definition.shape(rotation);
             let mut rows = [0_u16; 4];
+            let mut columns = [0_u8; 4];
             for cell in shape.cells() {
                 rows[cell.y() as usize] |= 1_u16 << cell.x();
+                columns[cell.x() as usize] += 1;
             }
             let shape = RowShape {
                 piece,
                 rows,
+                columns,
                 width: shape.width(),
                 height: shape.height(),
             };
@@ -815,6 +868,7 @@ mod tests {
             search.set_root_partition(index, count).unwrap();
         }
         let retained = search.retained_bytes();
+        let initial_columns = search.remaining_columns;
         let bound = RowStackGeometrySearch::checked_retained_upper_bound(
             targets.len(),
             (catalog.required_cells().count_ones() / 4) as usize,
@@ -846,6 +900,12 @@ mod tests {
             );
         }
         assert_eq!(search.emitted_candidates(), candidates.len());
+        assert_eq!(
+            search.remaining_columns, initial_columns,
+            "column budget was not restored"
+        );
+        assert_eq!(search.used_counts, [0; 7]);
+        assert!(search.pieces.is_empty());
         (candidates, search.expanded_nodes())
     }
 
@@ -994,6 +1054,91 @@ mod tests {
     }
 
     #[test]
+    fn row_stack_partitions_cover_empty_and_single_piece_first_rows() {
+        let fixtures = [
+            // No target cells in row zero: its empty prefix has one owner.
+            (4, 3, 0xff0, all_targets(2)),
+            // A single O fragment fills row zero; an I starts on row two.
+            (
+                4,
+                3,
+                0xf33,
+                vec![RowStackTarget {
+                    counts: [1, 1, 0, 0, 0, 0, 0],
+                    target_index: 3,
+                }],
+            ),
+            // The first row is also the final row.
+            (
+                4,
+                1,
+                0xf,
+                vec![RowStackTarget {
+                    counts: [1, 0, 0, 0, 0, 0, 0],
+                    target_index: 5,
+                }],
+            ),
+        ];
+        for (width, height, required, targets) in fixtures {
+            let catalog = compact(width, height, required);
+            let whole = collect(&catalog, &targets, 1, None).0;
+            assert!(!whole.is_empty());
+            assert_eq!(whole, reference(&catalog, &targets));
+            let mut merged = BTreeSet::new();
+            for index in 0..4 {
+                let partition = collect(&catalog, &targets, 7, Some((index, 4))).0;
+                if index != 0 {
+                    assert!(partition.is_empty(), "a short root prefix has one owner");
+                }
+                for candidate in partition {
+                    assert!(merged.insert(candidate), "partitions overlap");
+                }
+            }
+            assert_eq!(merged, whole);
+        }
+    }
+
+    #[test]
+    fn row_stack_column_budget_rejects_excess_future_cells_and_restores_on_backtrack() {
+        // A T at the left, a horizontal I at the right, and an O above it.
+        // The first fragment of a vertical I fits column zero, but its four
+        // committed cells exceed that column's one target cell.
+        let required =
+            0b111_u64 | (0b1111_u64 << 6) | (1_u64 << 11) | (0b11_u64 << 17) | (0b11_u64 << 27);
+        let catalog = compact(10, 4, required);
+        let targets = [RowStackTarget {
+            counts: [1, 1, 1, 0, 0, 0, 0],
+            target_index: 11,
+        }];
+        let mut search = RowStackGeometrySearch::new(&catalog, &targets).unwrap();
+        let columns = search.remaining_columns;
+        let vertical_i = search
+            .shapes
+            .iter()
+            .position(|shape| shape.piece == PieceKind::I && shape.width == 1 && shape.height == 4)
+            .unwrap();
+        let mut frame = RowFrame::new(0, 0, 0);
+        frame.remaining = search.required_rows[0];
+        assert_eq!(columns[0], 1);
+        assert!(frame.remaining & 1 != 0);
+        assert!(!search.start_piece(&catalog, &mut frame, vertical_i));
+        assert_eq!(search.remaining_columns, columns);
+        assert_eq!(frame.remaining, search.required_rows[0]);
+        assert!(search.pieces.is_empty());
+
+        let expected = reference(&catalog, &targets);
+        assert!(!expected.is_empty());
+        assert_eq!(collect(&catalog, &targets, 1, None).0, expected);
+        let mut merged = BTreeSet::new();
+        for index in 0..4 {
+            for candidate in collect(&catalog, &targets, 17, Some((index, 4))).0 {
+                assert!(merged.insert(candidate), "partitions overlap");
+            }
+        }
+        assert_eq!(merged, expected);
+    }
+
+    #[test]
     fn row_stack_equal_deadlines_do_not_enumerate_factorial_root_orders() {
         // Ten vertical I pieces can all start on row zero. Their next row is
         // forced to row one, leaving one canonical outgoing order rather than
@@ -1011,6 +1156,20 @@ mod tests {
         assert!(
             nodes < 200_000,
             "same-deadline permutations were not pruned: {nodes}"
+        );
+        let mut merged = BTreeSet::new();
+        let mut partition_nodes = 0;
+        for index in 0..4 {
+            let (candidates, visited) = collect(&catalog, &targets, 29, Some((index, 4)));
+            partition_nodes += visited;
+            for candidate in candidates {
+                assert!(merged.insert(candidate), "partitions overlap");
+            }
+        }
+        assert_eq!(merged, expected);
+        assert!(
+            partition_nodes < nodes + 10_000,
+            "partitions repeated first-row permutation work: serial={nodes}, total={partition_nodes}"
         );
     }
 

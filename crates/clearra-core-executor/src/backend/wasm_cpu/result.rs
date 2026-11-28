@@ -2216,7 +2216,12 @@ impl WasmExactSearchSession {
                 Ok(None)
             }
             ParallelSearchDecision::Completed(outcome) => {
-                self.parallel_decision_reason = "parallel-immutable-family-queue";
+                self.parallel_decision_reason =
+                    if outcome.geometry.candidate_domain() == "row-stack-noncrossing" {
+                        "parallel-row-stack-prefix-queue"
+                    } else {
+                        "parallel-immutable-family-queue"
+                    };
                 // Workers start useful work immediately; the shared budget
                 // does not run the old independent pool's startup barrier.
                 self.cpu_warmup_performed = false;
@@ -5581,7 +5586,11 @@ impl WasmExactSearchSession {
             ),
             field(
                 "cpu_parallel_task_granularity",
-                "immutable-family-traversal",
+                if self.geometry.candidate_domain() == "row-stack-noncrossing" {
+                    "row-stack-prefix-buckets"
+                } else {
+                    "immutable-family-traversal"
+                },
             ),
             field("parallel_active_workers", self.parallel_active_workers),
             field(
@@ -5632,7 +5641,14 @@ impl WasmExactSearchSession {
                 "search_output_policy",
                 self.problem.output_policy().as_str(),
             ),
-            field("search_traversal", "canonical-skeleton-exact-cover"),
+            field(
+                "search_traversal",
+                if self.geometry.candidate_domain() == "row-stack-noncrossing" {
+                    "original-row-stack-noncrossing"
+                } else {
+                    "canonical-skeleton-exact-cover"
+                },
+            ),
             field(
                 "pc_placement_dependency_selected",
                 super::uses_pc_placement_dependency(&self.problem),
