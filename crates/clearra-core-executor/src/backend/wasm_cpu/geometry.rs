@@ -35,6 +35,12 @@ mod prefix_pruning;
 #[path = "geometry_prefix_pruning_tests.rs"]
 mod prefix_pruning_tests;
 
+#[cfg(feature = "local-search-ab")]
+#[path = "geometry_row_stack.rs"]
+mod row_stack;
+#[cfg(feature = "local-search-ab")]
+pub use row_stack::{row_stack_experiment_totals, RowStackExperimentTotals};
+
 const PHYSICAL_PREFIX_WORK_QUANTUM: usize = 4_096;
 const PREFIX_DEPENDENCY_VERIFIED: u8 = 1;
 const PREFIX_FIRST_CLEAR_VERIFIED: u8 = 2;
@@ -3465,6 +3471,10 @@ pub(super) struct GeometrySearch {
     retain_terminal_targets: bool,
     resource_authoritative: bool,
     prefix: PhysicalPrefixSummary,
+    #[cfg(feature = "local-search-ab")]
+    row_stack: Option<row_stack::RowStackOwner>,
+    #[cfg(feature = "local-search-ab")]
+    row_stack_enabled: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -4106,6 +4116,10 @@ impl GeometrySearch {
             retain_terminal_targets: false,
             resource_authoritative: false,
             prefix: PhysicalPrefixSummary::default(),
+            #[cfg(feature = "local-search-ab")]
+            row_stack: None,
+            #[cfg(feature = "local-search-ab")]
+            row_stack_enabled: false,
         }
     }
 
@@ -4226,6 +4240,10 @@ impl GeometrySearch {
             retain_terminal_targets: false,
             resource_authoritative: memory_limit.is_some(),
             prefix: PhysicalPrefixSummary::default(),
+            #[cfg(feature = "local-search-ab")]
+            row_stack: None,
+            #[cfg(feature = "local-search-ab")]
+            row_stack_enabled: false,
         })
     }
 
@@ -4252,6 +4270,10 @@ impl GeometrySearch {
             retain_terminal_targets: false,
             resource_authoritative: false,
             prefix: PhysicalPrefixSummary::default(),
+            #[cfg(feature = "local-search-ab")]
+            row_stack: None,
+            #[cfg(feature = "local-search-ab")]
+            row_stack_enabled: false,
         }
     }
 
@@ -4281,6 +4303,10 @@ impl GeometrySearch {
             retain_terminal_targets: false,
             resource_authoritative: true,
             prefix: PhysicalPrefixSummary::default(),
+            #[cfg(feature = "local-search-ab")]
+            row_stack: None,
+            #[cfg(feature = "local-search-ab")]
+            row_stack_enabled: false,
         })
     }
 
@@ -4366,6 +4392,10 @@ impl GeometrySearch {
             retain_terminal_targets: false,
             resource_authoritative: memory_limit.is_some(),
             prefix: PhysicalPrefixSummary::default(),
+            #[cfg(feature = "local-search-ab")]
+            row_stack: None,
+            #[cfg(feature = "local-search-ab")]
+            row_stack_enabled: false,
         })
     }
 
@@ -4389,6 +4419,10 @@ impl GeometrySearch {
             retain_terminal_targets: false,
             resource_authoritative: false,
             prefix: PhysicalPrefixSummary::default(),
+            #[cfg(feature = "local-search-ab")]
+            row_stack: None,
+            #[cfg(feature = "local-search-ab")]
+            row_stack_enabled: false,
         }
     }
 
@@ -4396,11 +4430,25 @@ impl GeometrySearch {
         self.advance_internal(catalog, None, None)
     }
 
+    pub fn candidate_domain(&self) -> &'static str {
+        #[cfg(feature = "local-search-ab")]
+        if self.row_stack_enabled {
+            return "row-stack-noncrossing";
+        }
+        "raw"
+    }
+
     pub fn advance_partitioned(
         &mut self,
         catalog: &GeometryCatalog,
         partition: &mut GeometryCandidatePartition,
     ) -> GeometryAdvance {
+        // These partitions promise ordinals in the complete raw family.
+        // Noncrossing generation is a separate, explicitly labeled domain.
+        #[cfg(feature = "local-search-ab")]
+        if !partition.initialized && self.row_stack.is_none() {
+            self.row_stack_enabled = false;
+        }
         if partition.initialized {
             return self.advance(catalog);
         }
@@ -4527,6 +4575,10 @@ impl GeometrySearch {
             }
             None => None,
         };
+        #[cfg(feature = "local-search-ab")]
+        if let Some(advance) = self.advance_row_stack(catalog, internal_limit) {
+            return advance;
+        }
         if let Some(compiler) = self.compiler.as_mut() {
             if internal_limit.is_some_and(|limit| !compiler.set_retained_limit_bytes(limit)) {
                 return GeometryAdvance::ResourceIncomplete(
@@ -4685,6 +4737,10 @@ impl GeometrySearch {
                 }
             }
         }
+        #[cfg(feature = "local-search-ab")]
+        if self.row_stack.is_some() {
+            return self.prepare_row_stack_parallel(catalog, requested_workers);
+        }
         let balanced_workers = self
             .candidate_family_count
             .map_or(requested_workers, |count| {
@@ -4832,6 +4888,10 @@ impl GeometrySearch {
                 external_targets: None,
                 retain_terminal_targets: false,
                 resource_authoritative: false,
+                #[cfg(feature = "local-search-ab")]
+                row_stack: None,
+                #[cfg(feature = "local-search-ab")]
+                row_stack_enabled: false,
             });
         }
         Ok(ParallelGeometryPlan {
@@ -4860,6 +4920,10 @@ impl GeometrySearch {
         geometry.parallel_family_dispatch_bytes = shared_family_bytes;
         geometry.candidate_family_count = Some(0);
         for search in searches {
+            #[cfg(feature = "local-search-ab")]
+            {
+                geometry.row_stack_enabled |= search.row_stack_enabled;
+            }
             let prefix = search.prefix_summary();
             geometry.prefix.mode = prefix.mode;
             geometry.prefix.stats.add(prefix.stats);
@@ -5057,6 +5121,13 @@ impl GeometrySearch {
         if let Some(preparation) = self.target_preparation.as_ref() {
             return preparation.retained_upper_bound_bytes();
         }
+        #[cfg(feature = "local-search-ab")]
+        let row_stack_bytes = self
+            .row_stack
+            .as_ref()
+            .map_or(0, |owner| owner.search.retained_bytes());
+        #[cfg(not(feature = "local-search-ab"))]
+        let row_stack_bytes = 0;
         let current_target_nested_bytes = self
             .compiler
             .as_ref()
@@ -5077,6 +5148,7 @@ impl GeometrySearch {
                 ) * usize::MAX
             });
         current_target_nested_bytes
+            + row_stack_bytes
             + self
                 .compiler
                 .as_ref()

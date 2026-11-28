@@ -1852,6 +1852,8 @@ impl WasmExactSearchSession {
         }
         if !external_geometry && !parent_authorized {
             let mode = physical_pc_prefix_mode(problem.as_ref(), &catalog);
+            #[cfg(feature = "local-search-ab")]
+            geometry.enable_row_stack_experiment(mode != PhysicalPrefixMode::Disabled);
             #[cfg(any(test, feature = "local-search-ab"))]
             let mode = if std::env::var("CLEARRA_PHYSICAL_PREFIX_PRUNING").as_deref() == Ok("0") {
                 PhysicalPrefixMode::Disabled
@@ -5731,7 +5733,7 @@ impl WasmExactSearchSession {
                 self.geometry.parallel_family_dispatch_bytes(),
             ),
             field("packing_candidate_count", self.packing_candidate_count),
-            field("packing_candidate_domain", "raw"),
+            field("packing_candidate_domain", self.geometry.candidate_domain()),
             field(
                 "physical_prefix_pruning_active",
                 self.geometry.physical_prefix_mode() != PhysicalPrefixMode::Disabled,

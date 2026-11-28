@@ -537,6 +537,9 @@ fn execute_plan(
     initialize_span.finish(branch_count as u64);
     let work_span = SearchStageSpan::begin(ExecutorSearchStage::WasmParallelWorkAndWait);
     let slots: Vec<_> = (0..workers_used).map(|_| Mutex::new(None)).collect();
+    // Capture request TLS on the submitting thread. Pool threads have no
+    // active profile until this token installs the request's accumulator.
+    let worker_profile = WorkerSearchProfile::capture();
     clearra_core_domain::parallel_work::try_for_each_chunk(
         &inputs.control,
         workers_used,
@@ -544,7 +547,7 @@ fn execute_plan(
         || Ok::<_, WasmExactSearchError>(()),
         |_, range| {
             for _worker_index in range {
-                let profile = WorkerSearchProfile::capture();
+                let profile = worker_profile.clone();
                 let result = catch_unwind(AssertUnwindSafe(|| {
                     profile.measure(|| {
                         run_branch_worker(

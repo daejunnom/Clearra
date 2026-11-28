@@ -152,6 +152,7 @@ impl ExtendedPcTilingSession {
             .try_reserve_exact(workers)
             .map_err(|_| pool_error())?;
         results.resize_with(workers, || Mutex::new(None));
+        let worker_profile = WorkerSearchProfile::capture();
         clearra_core_domain::parallel_work::try_for_each_chunk(
             &worker_control,
             workers,
@@ -159,7 +160,7 @@ impl ExtendedPcTilingSession {
             || Ok::<_, WasmExactSearchError>(()),
             |_, indices| {
                 for index in indices {
-                    let profile = WorkerSearchProfile::capture();
+                    let profile = worker_profile.clone();
                     let result = catch_unwind(AssertUnwindSafe(|| {
                         profile.measure(|| {
                             run_worker(

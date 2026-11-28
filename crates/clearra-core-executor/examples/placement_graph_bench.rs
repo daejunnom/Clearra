@@ -6,6 +6,9 @@
 //! Product diagnostics also require CLEARRA_STANDARD_BAG_UNION_MEMO=compact;
 //! minimum-domain cutoff remains opt-in (default 0); the visited-first and
 //! complete-global-union optimizations default to 1 with independent off arms.
+//! CLEARRA_ROW_STACK_GEOMETRY=1 selects experimental geometry with the ordinary
+//! verifier; CLEARRA_APDP_PARENT_RECHECK=1 restores the redundant APDP reference.
+//! Both axes default to 0 and are labeled separately from the product route.
 //! Diagnostic reports cannot serve as uninstrumented timing adoption evidence.
 
 #[cfg(not(all(feature = "parallel", feature = "local-search-ab")))]
@@ -289,6 +292,16 @@ mod run {
         Ok(())
     }
 
+    fn validate_row_stack_fixture(fixture: Fixture, row_stack: bool) -> Result<(), String> {
+        if row_stack && fixture.is_grounded_o() {
+            return Err(
+                "row-stack geometry is not qualified for grounded O fixtures: they request per-solution probabilities, and CountAll is also outside the experimental scope"
+                    .into(),
+            );
+        }
+        Ok(())
+    }
+
     pub fn main() -> Result<(), String> {
         let args: Vec<String> = std::env::args().skip(1).collect();
         if args.first().is_some_and(|arg| arg == "--compare") {
@@ -336,6 +349,9 @@ mod run {
         let incremental_domain_mode = experiment_mode("CLEARRA_INCREMENTAL_DOMAIN")?;
         let minimum_domain_cutoff_mode = experiment_mode("CLEARRA_MINIMUM_DOMAIN_CUTOFF")?;
         let minimum_domain_work_mode = experiment_mode("CLEARRA_MINIMUM_DOMAIN_WORK")?;
+        let row_stack_geometry_mode = experiment_mode("CLEARRA_ROW_STACK_GEOMETRY")?;
+        let apdp_parent_recheck_mode = experiment_mode("CLEARRA_APDP_PARENT_RECHECK")?;
+        validate_row_stack_fixture(fixture, row_stack_geometry_mode == "1")?;
         let reachability_visited_first_mode =
             experiment_mode_with_default("CLEARRA_REACHABILITY_VISITED_FIRST", "1")?;
         let standard_bag_global_saturation_mode =
@@ -412,7 +428,10 @@ mod run {
         // The ordinary physical-path diagnostic can ablate the two product
         // optimizations independently. The minimum-support cutoff remains an
         // opt-in experiment after its measured end-to-end regression.
-        let other_axis_enabled = auxiliary_axis_enabled || minimum_domain_cutoff_mode != "0";
+        let other_axis_enabled = auxiliary_axis_enabled
+            || minimum_domain_cutoff_mode != "0"
+            || row_stack_geometry_mode != "0"
+            || apdp_parent_recheck_mode != "0";
         let product_optimization_enabled =
             reachability_visited_first_mode != "0" || standard_bag_global_saturation_mode != "0";
         let stage_diagnostic = SearchStageDiagnostic::select_product(
@@ -428,7 +447,13 @@ mod run {
             cfg!(feature = "wasm-stage-profiling"),
             valid_experiment_source(option_env!("CLEARRA_SOURCE_COMMIT")),
             minimum_domain_cutoff_mode == "1",
-        )?;
+        )?
+        .map(|diagnostic| {
+            diagnostic.with_geometry_experiments(
+                row_stack_geometry_mode == "1",
+                apdp_parent_recheck_mode == "1",
+            )
+        });
         if stage_diagnostic.is_some_and(SearchStageDiagnostic::is_product) {
             validate_product_memo_environment(|name| std::env::var(name))?;
         }
@@ -489,6 +514,15 @@ mod run {
             geometric_edge_reuse_arm,
             grounded_o_other_axes,
         )?;
+        if fixture.is_grounded_o()
+            && geometric_edge_reuse_arm.is_some()
+            && (row_stack_geometry_mode == "1" || apdp_parent_recheck_mode == "1")
+        {
+            return Err(
+                "grounded geometric-edge reuse arms require row-stack geometry and APDP parent recheck disabled"
+                    .into(),
+            );
+        }
         if fixture == Fixture::EmptyTenI
             && [
                 &mode,
@@ -510,7 +544,7 @@ mod run {
             .into_iter()
             .any(|mode| mode != "0")
         {
-            return Err("--empty-ten-i isolates the minimum-domain cutoff and work modes".into());
+            return Err("--empty-ten-i isolates minimum-domain, row-stack geometry and APDP parent-recheck axes".into());
         }
         let binary_sha = file_sha(&std::env::current_exe().map_err(|e| e.to_string())?)?;
         let capacity = CpuCapacity::current();
@@ -683,6 +717,7 @@ mod run {
         let structural_totals =
             clearra_core_executor::backend::structural_order_experiment_totals();
         let geometry_domains = clearra_core_executor::backend::geometry_domain_experiment_totals();
+        let row_stack_totals = clearra_core_executor::backend::row_stack_experiment_totals();
         let geometric_edges =
             clearra_core_executor::backend::geometric_edge_reuse_experiment_totals();
         let evidence_started = Instant::now();
@@ -696,8 +731,27 @@ mod run {
                 same_tile_reuse: same_tile_parent_reuse_mode == "1",
                 minimum_cutoff: minimum_domain_cutoff_mode == "1",
                 minimum_work: minimum_domain_work_mode == "1",
+                row_stack_geometry: row_stack_geometry_mode == "1",
             },
         );
+        if row_stack_geometry_mode == "1" && fixture == Fixture::P7P4 {
+            if row_stack_totals.dispatch_searches == 0
+                || row_stack_totals.completed_searches != row_stack_totals.dispatch_searches
+            {
+                errors
+                    .push("P7P4 row-stack must complete every dispatched generator search".into());
+            }
+            if result
+                .usize_field("packing_candidate_count")
+                .and_then(|count| u64::try_from(count).ok())
+                != Some(row_stack_totals.emitted_candidates)
+            {
+                errors.push(
+                    "P7P4 row-stack emitted candidates must match the reported packing count"
+                        .into(),
+                );
+            }
+        }
         let union_storage = std::env::var("CLEARRA_STANDARD_BAG_UNION_MEMO").ok();
         if stage_diagnostic.is_some_and(SearchStageDiagnostic::is_product) {
             if let Err(error) = validate_product_memo_observation(
@@ -812,7 +866,9 @@ mod run {
             "structural_mode": structural_mode,
             "static_influence_mode": static_influence_mode,
             "translation_interval_mode": translation_interval_mode,
-            "variant": format!("{},movement_clear={movement_clear_certificates_mode},incremental_domain={incremental_domain_mode},first_kick={first_kick_interval_mode},ordered_kick={ordered_kick_interval_mode},ordered_kick_guard_reuse={ordered_kick_guard_reuse_mode},geometric_edge_reuse={geometric_edge_reuse_mode},ilc_lazy_frame={ilc_lazy_frame_mode},no_entry_components={no_entry_components_mode},same_tile_parent_reuse={same_tile_parent_reuse_mode},conditional_order={conditional_order_mode},terminal_identity_move={terminal_identity_move_mode},minimum_domain_cutoff={minimum_domain_cutoff_mode},minimum_domain_work={minimum_domain_work_mode}",
+            "requested_geometry_candidate_domain": if row_stack_geometry_mode == "1" { "row-stack-noncrossing" } else { "raw" },
+            "observed_geometry_candidate_domain": result.field("packing_candidate_domain"),
+            "variant": format!("{},movement_clear={movement_clear_certificates_mode},incremental_domain={incremental_domain_mode},first_kick={first_kick_interval_mode},ordered_kick={ordered_kick_interval_mode},ordered_kick_guard_reuse={ordered_kick_guard_reuse_mode},geometric_edge_reuse={geometric_edge_reuse_mode},ilc_lazy_frame={ilc_lazy_frame_mode},no_entry_components={no_entry_components_mode},same_tile_parent_reuse={same_tile_parent_reuse_mode},conditional_order={conditional_order_mode},terminal_identity_move={terminal_identity_move_mode},minimum_domain_cutoff={minimum_domain_cutoff_mode},minimum_domain_work={minimum_domain_work_mode},row_stack_geometry={row_stack_geometry_mode},apdp_parent_recheck={apdp_parent_recheck_mode}",
                 variant(&mode, &structural_mode, &static_influence_mode, &translation_interval_mode)),
         });
         let follow_on_axes = json!({
@@ -820,6 +876,8 @@ mod run {
             "incremental_domain_mode": incremental_domain_mode,
             "minimum_domain_cutoff_mode": minimum_domain_cutoff_mode,
             "minimum_domain_work_mode": minimum_domain_work_mode,
+            "row_stack_geometry_mode": row_stack_geometry_mode,
+            "apdp_parent_recheck_mode": apdp_parent_recheck_mode,
             "reachability_visited_first_mode": reachability_visited_first_mode,
             "standard_bag_global_saturation_mode": standard_bag_global_saturation_mode,
             "physical_prefix_pruning_mode": physical_prefix_pruning_mode,
@@ -1044,6 +1102,17 @@ mod run {
         );
         #[cfg(not(feature = "wasm-stage-profiling"))]
         let diagnostic_section = json!({});
+        let row_stack_metrics = json!({
+            "row_stack_geometry": {
+                "scope": "process-lifetime counters for this one-search process; published at partition dispatch/completion, without hot-path atomics",
+                "dispatch_searches": row_stack_totals.dispatch_searches,
+                "dispatch_private_bytes": row_stack_totals.dispatch_private_bytes,
+                "dispatch_private_bytes_scope": "sum of private generator backing at dispatch; excludes shared catalog, targets and verifier; not an RSS peak",
+                "completed_searches": row_stack_totals.completed_searches,
+                "expanded_nodes": row_stack_totals.expanded_nodes,
+                "emitted_candidates": row_stack_totals.emitted_candidates,
+            }
+        });
         let output = join_report_sections([
             metadata,
             follow_on_axes,
@@ -1055,6 +1124,7 @@ mod run {
             operation_mask_section,
             strict_prefix_section,
             diagnostic_section,
+            row_stack_metrics,
             memory_observation.map_or_else(
                 || json!({}),
                 |observation| json!({ "product_memory_profile": observation }),
@@ -1114,22 +1184,26 @@ mod run {
                 (key): {
                     "diagnostic_only": true,
                     "timing_adoption_authority": false,
-                    "execution_route": if self.is_product() { "ordinary-product" } else { "strict-prefix-experiment" },
+                    "execution_route": self.execution_route(),
                     "configuration": match self {
                         Self::ProductDefault if reachability_visited_first && standard_bag_global_saturation && physical_prefix_pruning && candidate_ilc_pruning && standard_bag_boolean_membership && standard_bag_shared_saturation => "product-default",
                         Self::ProductDefault => "product-ablation",
                         Self::ProductCutoffExperiment => "product-cutoff-experiment",
+                        Self::ProductRowStackExperiment { .. } => "product-row-stack-experiment",
+                        Self::ProductApdpReference { .. } => "product-apdp-reference",
                         Self::Reference => "strict-reference",
                         Self::OptimizedUpper => "strict-optimized-upper",
                         Self::LegacyUpper => "strict-legacy-upper",
                     },
                     "upper_strategy": match self {
-                        Self::ProductDefault | Self::ProductCutoffExperiment | Self::Reference => "not-applicable",
+                        Self::ProductDefault | Self::ProductCutoffExperiment | Self::ProductRowStackExperiment { .. } | Self::ProductApdpReference { .. } | Self::Reference => "not-applicable",
                         Self::OptimizedUpper => "optimized",
                         Self::LegacyUpper => "legacy",
                     },
                     "product_optimizations": self.is_product().then(|| json!({
-                        "minimum_domain_cutoff": self == Self::ProductCutoffExperiment,
+                        "minimum_domain_cutoff": self.minimum_domain_cutoff(),
+                        "row_stack_geometry": self.row_stack_geometry(),
+                        "apdp_parent_recheck": self.apdp_parent_recheck(),
                         "reachability_visited_first": reachability_visited_first,
                         "standard_bag_global_saturation": standard_bag_global_saturation,
                         "physical_prefix_pruning": physical_prefix_pruning,
@@ -1137,7 +1211,8 @@ mod run {
                         "standard_bag_boolean_membership": standard_bag_boolean_membership,
                         "standard_bag_shared_saturation": standard_bag_shared_saturation,
                     })),
-                    "scope": "sampled accumulated elapsed stage time; caller can execute a worker; stage spans may nest and must not be summed as wall time",
+                    "geometry_domain_scope": if self.row_stack_geometry() { "bypassed-by-row-stack; minimum-domain and APDP parent-recheck settings are not exercised" } else { "residual-domain" },
+                    "scope": "submitting-thread and pool-worker accumulated stage times; spans may nest; do not sum as wall time",
                     "sampling": "*_ns and *_invocations include sample expansion; *_measured_ns and *_measured_samples contain only observed spans; neither is end-to-end wall time",
                     "stages": stages,
                 },
@@ -1754,6 +1829,7 @@ mod run {
         same_tile_reuse: bool,
         minimum_cutoff: bool,
         minimum_work: bool,
+        row_stack_geometry: bool,
     }
 
     fn validate_empty_minimum_work(
@@ -1854,6 +1930,14 @@ mod run {
         modes: DomainValidationModes,
     ) -> Vec<String> {
         let mut errors = Vec::new();
+        if modes.row_stack_geometry
+            && result.field("packing_candidate_domain") != Some("row-stack-noncrossing")
+        {
+            errors.push(format!(
+                "row-stack geometry was requested but the result reported packing_candidate_domain={:?}",
+                result.field("packing_candidate_domain"),
+            ));
+        }
         for key in ["count_complete", "probability_complete"] {
             if result.bool_field(key) != Some(true) {
                 errors.push(format!("{key} must be true"));
@@ -1936,6 +2020,18 @@ mod run {
                 errors.push(format!(
                     "{label} must report an actual worker count within the Auto cap"
                 ));
+            }
+            if modes.row_stack_geometry {
+                // Identity, coverage and worker-topology checks above still
+                // apply. Only residual-domain work is absent in this route.
+                if geometry.minimum_compiles != 0
+                    || geometry.advanced_full_compiles != 0
+                    || geometry.advanced_incremental_compiles != 0
+                {
+                    errors
+                        .push("row-stack geometry must bypass residual-domain compilation".into());
+                }
+                return errors;
             }
             if fixture == Fixture::EmptyTenI {
                 validate_empty_minimum_work(
@@ -2086,6 +2182,90 @@ mod run {
         Ok(())
     }
 
+    fn report_experiment_mode<'a>(report: &'a Value, key: &str) -> Result<&'a str, String> {
+        match report.get(key) {
+            None => Ok("0"),
+            Some(value) => value
+                .as_str()
+                .filter(|value| matches!(*value, "0" | "1"))
+                .ok_or_else(|| format!("{key} must be a string containing 0 or 1")),
+        }
+    }
+
+    fn report_candidate_domain(report: &Value) -> Result<&str, String> {
+        fn domain_field(value: &Value) -> Result<Option<&str>, String> {
+            if value.is_null() {
+                Ok(None)
+            } else {
+                value.as_str().map(Some).ok_or_else(|| {
+                    "packing candidate domain must be a string when present".to_owned()
+                })
+            }
+        }
+        let summary = domain_field(&report["summary"]["packing_candidate_domain"])?;
+        let observed = domain_field(&report["observed_geometry_candidate_domain"])?;
+        if summary
+            .zip(observed)
+            .is_some_and(|(left, right)| left != right)
+        {
+            return Err(
+                "packing candidate domain disagrees with observed geometry metadata".into(),
+            );
+        }
+        // Old reports predate this axis and therefore describe the raw family.
+        // A declared row-stack arm must provide observed noncrossing evidence.
+        let domain = summary.or(observed).unwrap_or("raw");
+        let row_stack = report_experiment_mode(report, "row_stack_geometry_mode")?;
+        match (domain, row_stack) {
+            ("raw", "0") | ("row-stack-noncrossing", "1") => Ok(domain),
+            _ => Err(format!(
+                "declared row-stack mode {row_stack} does not match packing candidate domain {domain}"
+            )),
+        }
+    }
+
+    fn comparable_candidate_domains(first: &Value, other: &Value) -> Result<bool, String> {
+        if report_candidate_domain(first)? == report_candidate_domain(other)? {
+            return Ok(true);
+        }
+        validate_isolated_row_stack_axes(first, other)?;
+        Ok(false)
+    }
+
+    fn validate_isolated_row_stack_axes(first: &Value, other: &Value) -> Result<(), String> {
+        // Changing the candidate universe is legitimate only for an isolated,
+        // declared row-stack switch. APDP-only A/B keeps exact raw comparison.
+        for key in [
+            "mode",
+            "structural_mode",
+            "static_influence_mode",
+            "translation_interval_mode",
+            "movement_clear_certificates_mode",
+            "incremental_domain_mode",
+            "minimum_domain_cutoff_mode",
+            "minimum_domain_work_mode",
+            "apdp_parent_recheck_mode",
+            "first_kick_interval_mode",
+            "ordered_kick_interval_mode",
+            "ordered_kick_guard_reuse_mode",
+            "geometric_edge_reuse_mode",
+            "ilc_lazy_frame_mode",
+            "no_entry_components_mode",
+            "same_tile_parent_reuse_mode",
+            "conditional_order_mode",
+            "terminal_identity_move_mode",
+            "operation_mask_mode",
+            "strict_prefix_mode",
+        ] {
+            if report_experiment_mode(first, key)? != report_experiment_mode(other, key)? {
+                return Err(format!(
+                    "different candidate domains require only the declared row-stack axis to change; {key} also changed"
+                ));
+            }
+        }
+        Ok(())
+    }
+
     fn compare(paths: &[String]) -> Result<(), String> {
         if paths.len() < 2 {
             return Err("--compare requires at least two result files".into());
@@ -2098,6 +2278,7 @@ mod run {
             })
             .collect::<Result<_, String>>()?;
         let first = &reports[0];
+        let mut candidate_domains_differ = false;
         let operation_mask_comparison = reports
             .iter()
             .any(|report| report.get("operation_mask_mode").is_some());
@@ -2125,7 +2306,6 @@ mod run {
             "probability_complete",
             "solution_probability_complete",
             "resource_truncated",
-            "packing_candidate_set_digest",
         ];
         for (index, report) in reports.iter().enumerate() {
             if report["valid"] != true {
@@ -2149,6 +2329,15 @@ mod run {
             for key in summary_keys {
                 if report["summary"][key] != first["summary"][key] {
                     differences.push(format!("{}: summary.{key} mismatch", paths[index]));
+                }
+            }
+            let same_candidate_domain = comparable_candidate_domains(first, report)?;
+            candidate_domains_differ |= !same_candidate_domain;
+            if same_candidate_domain {
+                for key in ["packing_candidate_count", "packing_candidate_set_digest"] {
+                    if report["summary"][key] != first["summary"][key] {
+                        differences.push(format!("{}: summary.{key} mismatch", paths[index]));
+                    }
                 }
             }
             if rectangle_fixture || grounded_o_fixture {
@@ -2238,6 +2427,13 @@ mod run {
                 }
             }
         }
+        if candidate_domains_differ {
+            // Do not admit an additional APDP or other treatment merely
+            // because that report shares the first report's raw domain.
+            for report in &reports {
+                validate_isolated_row_stack_axes(first, report)?;
+            }
+        }
         // Missing experimental axes in old reports mean disabled. Keep their
         // original grouping when every report predates that axis. A binary
         // mismatch remains a parity error, even for otherwise compatible JSON.
@@ -2312,17 +2508,13 @@ mod run {
             if !ms.is_finite() || ms <= 0.0 {
                 return Err("search time must be finite and positive".into());
             }
-            let extra_mode = |key: &str| match report.get(key) {
-                None => Ok("0"),
-                Some(value) => value
-                    .as_str()
-                    .filter(|v| matches!(*v, "0" | "1"))
-                    .ok_or("extra result mode flags must be 0 or 1"),
-            };
+            let extra_mode = |key: &str| report_experiment_mode(report, key);
             let movement = extra_mode("movement_clear_certificates_mode")?;
             let incremental = extra_mode("incremental_domain_mode")?;
             let minimum_domain_cutoff = extra_mode("minimum_domain_cutoff_mode")?;
             let minimum_domain_work = extra_mode("minimum_domain_work_mode")?;
+            let row_stack_geometry = extra_mode("row_stack_geometry_mode")?;
+            let apdp_parent_recheck = extra_mode("apdp_parent_recheck_mode")?;
             let first_kick = extra_mode("first_kick_interval_mode")?;
             let ordered_kick = extra_mode("ordered_kick_interval_mode")?;
             let ordered_kick_guard_reuse = extra_mode("ordered_kick_guard_reuse_mode")?;
@@ -2333,7 +2525,7 @@ mod run {
             let conditional = extra_mode("conditional_order_mode")?;
             let terminal_move = extra_mode("terminal_identity_move_mode")?;
             let mut all_axes = format!(
-                "{mode},movement_clear={movement},incremental_domain={incremental},first_kick={first_kick},ordered_kick={ordered_kick},ordered_kick_guard_reuse={ordered_kick_guard_reuse},geometric_edge_reuse={geometric_edge_reuse},ilc_lazy_frame={ilc_lazy_frame},no_entry_components={no_entry_components},same_tile_parent_reuse={same_tile_parent_reuse},conditional_order={conditional},terminal_identity_move={terminal_move},minimum_domain_cutoff={minimum_domain_cutoff},minimum_domain_work={minimum_domain_work}"
+                "{mode},movement_clear={movement},incremental_domain={incremental},first_kick={first_kick},ordered_kick={ordered_kick},ordered_kick_guard_reuse={ordered_kick_guard_reuse},geometric_edge_reuse={geometric_edge_reuse},ilc_lazy_frame={ilc_lazy_frame},no_entry_components={no_entry_components},same_tile_parent_reuse={same_tile_parent_reuse},conditional_order={conditional},terminal_identity_move={terminal_move},minimum_domain_cutoff={minimum_domain_cutoff},minimum_domain_work={minimum_domain_work},row_stack_geometry={row_stack_geometry},apdp_parent_recheck={apdp_parent_recheck}"
             );
             if operation_mask_comparison {
                 let op = extra_mode("operation_mask_mode")?;
@@ -2346,6 +2538,8 @@ mod run {
                     incremental,
                     minimum_domain_cutoff,
                     minimum_domain_work,
+                    row_stack_geometry,
+                    apdp_parent_recheck,
                     first_kick,
                     ordered_kick,
                     ordered_kick_guard_reuse,
@@ -2379,6 +2573,8 @@ mod run {
                 && incremental == "0"
                 && minimum_domain_cutoff == "0"
                 && minimum_domain_work == "0"
+                && row_stack_geometry == "0"
+                && apdp_parent_recheck == "0"
                 && first_kick == "0"
                 && ordered_kick == "0"
                 && ordered_kick_guard_reuse == "0"
@@ -2476,6 +2672,7 @@ mod run {
         let mut comparison = json!({
             "schema": "clearra.placement-graph-comparison.v1", "files": paths,
             "equivalent": differences.is_empty(), "differences": differences,
+            "raw_candidate_comparison": if candidate_domains_differ { "not-equivalent-domains" } else { "exact-matching-domain" },
             "mode_grouping": if legacy_modes { "dependency-only (legacy reports)" }
                 else if has_translation_interval_mode { "dependency-structural-static-influence-translation-interval" }
                 else if has_static_influence_mode { "dependency-structural-static-influence" }
@@ -2549,7 +2746,65 @@ mod run {
         use super::*;
 
         #[test]
-        fn product_diagnostic_p7_and_small_admit_both_cutoff_arms() {
+        fn candidate_comparison_requires_observed_domains_and_an_isolated_row_stack_switch() {
+            let raw = json!({
+                "row_stack_geometry_mode": "0",
+                "apdp_parent_recheck_mode": "0",
+                "summary": {"packing_candidate_domain": "raw"},
+            });
+            let row_stack = json!({
+                "row_stack_geometry_mode": "1",
+                "apdp_parent_recheck_mode": "0",
+                "observed_geometry_candidate_domain": "row-stack-noncrossing",
+                "summary": {"packing_candidate_domain": "row-stack-noncrossing"},
+            });
+            assert_eq!(comparable_candidate_domains(&raw, &row_stack), Ok(false));
+            let mut apdp_reference = raw.clone();
+            apdp_reference["apdp_parent_recheck_mode"] = json!("1");
+            assert_eq!(
+                comparable_candidate_domains(&raw, &apdp_reference),
+                Ok(true)
+            );
+            assert!(comparable_candidate_domains(&apdp_reference, &row_stack).is_err());
+            assert!(validate_isolated_row_stack_axes(&raw, &apdp_reference).is_err());
+
+            let mut undeclared = row_stack.clone();
+            undeclared["row_stack_geometry_mode"] = json!("0");
+            assert!(report_candidate_domain(&undeclared).is_err());
+            let mut unobserved = raw.clone();
+            unobserved["row_stack_geometry_mode"] = json!("1");
+            assert!(report_candidate_domain(&unobserved).is_err());
+            let mut inconsistent = row_stack.clone();
+            inconsistent["observed_geometry_candidate_domain"] = json!("raw");
+            assert!(report_candidate_domain(&inconsistent).is_err());
+            assert_eq!(report_candidate_domain(&json!({})), Ok("raw"));
+            for invalid in [json!("yes"), json!(2), json!(true), Value::Null] {
+                let report = json!({"row_stack_geometry_mode": invalid});
+                assert!(report_experiment_mode(&report, "row_stack_geometry_mode").is_err());
+            }
+        }
+
+        #[test]
+        fn row_stack_admission_rejects_unqualified_grounded_probability_fixtures() {
+            for fixture in [
+                Fixture::GroundedOTwoLinesAll,
+                Fixture::GroundedOTwoLinesUnique,
+            ] {
+                assert!(validate_row_stack_fixture(fixture, true).is_err());
+                assert!(validate_row_stack_fixture(fixture, false).is_ok());
+            }
+            for fixture in [
+                Fixture::OneI,
+                Fixture::P7P4,
+                Fixture::NonemptyEightI,
+                Fixture::EmptyTenI,
+            ] {
+                assert!(validate_row_stack_fixture(fixture, true).is_ok());
+            }
+        }
+
+        #[test]
+        fn product_diagnostic_p7_and_small_admit_labeled_geometry_arms() {
             for flag in ["--p7", "--small"] {
                 let args = vec![flag.to_owned()];
                 let (fixture, capture) = parse_fixture(&args).unwrap();
@@ -2585,6 +2840,17 @@ mod run {
                         }
                     })
                     .is_ok());
+                    for row_stack in [false, true] {
+                        for apdp_recheck in [false, true] {
+                            let labeled = diagnostic.map(|diagnostic| {
+                                diagnostic.with_geometry_experiments(row_stack, apdp_recheck)
+                            });
+                            assert!(validate_fixture_diagnostic_route(
+                                fixture, labeled, None, cutoff, None, false,
+                            )
+                            .is_ok());
+                        }
+                    }
                 }
             }
             assert!(
@@ -2722,6 +2988,8 @@ mod run {
                     profile["product_optimizations"],
                     json!({
                         "minimum_domain_cutoff": false,
+                        "row_stack_geometry": false,
+                        "apdp_parent_recheck": false,
                         "reachability_visited_first": visited_first,
                         "standard_bag_global_saturation": global_saturation,
                         "physical_prefix_pruning": physical_prefix,
@@ -2731,6 +2999,63 @@ mod run {
                     })
                 );
                 assert_eq!(profile["timing_adoption_authority"], false);
+            }
+        }
+
+        #[cfg(feature = "wasm-stage-profiling")]
+        #[test]
+        fn row_stack_and_apdp_reference_reports_label_the_actual_geometry_route() {
+            for cutoff in [false, true] {
+                for row_stack in [false, true] {
+                    for apdp_recheck in [false, true] {
+                        let diagnostic = SearchStageDiagnostic::select_product(
+                            true, None, false, false, true, true, cutoff,
+                        )
+                        .unwrap()
+                        .unwrap()
+                        .with_geometry_experiments(row_stack, apdp_recheck);
+                        let report = diagnostic.report(
+                            Vec::new(),
+                            Vec::new(),
+                            true,
+                            true,
+                            true,
+                            true,
+                            true,
+                            true,
+                        );
+                        let profile = &report["product_stage_profile"];
+                        assert!(report.get("strict_stage_profile").is_none());
+                        assert_eq!(profile["execution_route"], diagnostic.execution_route());
+                        assert_eq!(
+                            profile["product_optimizations"]["minimum_domain_cutoff"],
+                            cutoff
+                        );
+                        assert_eq!(
+                            profile["product_optimizations"]["row_stack_geometry"],
+                            row_stack
+                        );
+                        assert_eq!(
+                            profile["product_optimizations"]["apdp_parent_recheck"],
+                            apdp_recheck
+                        );
+                        assert_eq!(profile["timing_adoption_authority"], false);
+                        assert_eq!(profile["upper_strategy"], "not-applicable");
+                        assert!(profile["scope"]
+                            .as_str()
+                            .unwrap()
+                            .contains("submitting-thread and pool-worker"));
+                        if row_stack {
+                            assert_eq!(profile["configuration"], "product-row-stack-experiment");
+                            assert!(profile["geometry_domain_scope"]
+                                .as_str()
+                                .unwrap()
+                                .starts_with("bypassed-by-row-stack"));
+                        } else if apdp_recheck {
+                            assert_eq!(profile["configuration"], "product-apdp-reference");
+                        }
+                    }
+                }
             }
         }
 

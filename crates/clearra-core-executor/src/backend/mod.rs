@@ -46,6 +46,8 @@ pub use wasm_cpu::{geometric_edge_reuse_experiment_totals, GeometricEdgeReuseMet
 #[cfg(feature = "local-search-ab")]
 pub use wasm_cpu::{geometry_domain_experiment_totals, GeometryDomainExperimentTotals};
 #[cfg(feature = "local-search-ab")]
+pub use wasm_cpu::{row_stack_experiment_totals, RowStackExperimentTotals};
+#[cfg(feature = "local-search-ab")]
 pub use wasm_cpu::{
     run_conditional_ordered_work, structural_order_experiment_totals, ConditionalOrderedWorkMode,
     StructuralOrderMetrics,

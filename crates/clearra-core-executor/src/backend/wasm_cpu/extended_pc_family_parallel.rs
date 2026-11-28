@@ -492,6 +492,7 @@ impl ExtendedBuildProbabilitySession {
             .map_err(|_| storage_error())?;
         completed.resize_with(workers, || Mutex::new(None));
         let worker_control = control.clone().with_parallelism_if_unbound(workers);
+        let worker_profile = WorkerSearchProfile::capture();
         clearra_core_domain::parallel_work::try_for_each_chunk(
             &worker_control,
             workers,
@@ -504,7 +505,7 @@ impl ExtendedBuildProbabilitySession {
                         .map_err(|_| contract_error())?
                         .take()
                         .ok_or_else(contract_error)?;
-                    let result = WorkerSearchProfile::capture().measure(|| {
+                    let result = worker_profile.clone().measure(|| {
                         caught_worker(
                             self,
                             private_memory.owner(index),
@@ -1260,6 +1261,7 @@ pub(in crate::backend::wasm_cpu) mod cooperative {
                 .map_err(|_| pool_error())?;
             completed.resize_with(active, || Mutex::new(None));
             let worker_control = control.clone().with_parallelism_if_unbound(width);
+            let worker_profile = WorkerSearchProfile::capture();
             clearra_core_domain::parallel_work::try_for_each_chunk(
                 &worker_control,
                 active,
@@ -1272,7 +1274,7 @@ pub(in crate::backend::wasm_cpu) mod cooperative {
                             .map_err(|_| contract_error())?
                             .take()
                             .ok_or_else(contract_error)?;
-                        let profile = WorkerSearchProfile::capture();
+                        let profile = worker_profile.clone();
                         let result = profile
                             .measure(|| shared.clone().run(cursor, credit, worker_control.clone()));
                         *completed[ordinal].lock().map_err(|_| contract_error())? =

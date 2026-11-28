@@ -510,6 +510,7 @@ thread_local! {
 /// Measure only the job body, and publish its completion after this returns.
 /// A pooled thread then leaves with no residual state from the request.
 #[cfg(feature = "parallel")]
+#[derive(Clone)]
 pub(crate) struct WorkerSearchProfile {
     #[cfg(all(
         not(target_family = "wasm"),
@@ -880,6 +881,36 @@ mod tests {
             .iter()
             .find(|stage| stage.name == STAGE.name())
             .expect("fixed stage")
+    }
+
+    #[cfg(feature = "local-search-ab")]
+    #[test]
+    fn submitting_profile_reaches_real_parallel_chunk_workers() {
+        use clearra_core_domain::{
+            execution_cancellation::ExecutionControl, parallel_work::try_for_each_chunk,
+        };
+
+        let session = ExecutorSearchProfileSession::start().expect("caller profile");
+        let profile = WorkerSearchProfile::capture();
+        try_for_each_chunk(
+            &ExecutionControl::default(),
+            4,
+            1,
+            || Ok::<_, ()>(()),
+            |_, range| {
+                for _ in range {
+                    profile
+                        .clone()
+                        .measure(|| SearchStageSpan::begin(STAGE).finish(7));
+                }
+                Ok(())
+            },
+        )
+        .expect("parallel work");
+        let (caller, pool) = session.finish_partitioned();
+        assert_eq!(stage(&caller).invocation_count, 0);
+        assert_eq!(stage(&pool).invocation_count, 4);
+        assert_eq!(stage(&pool).work_item_count, 28);
     }
 
     #[test]

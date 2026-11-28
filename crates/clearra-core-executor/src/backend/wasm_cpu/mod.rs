@@ -55,6 +55,8 @@ mod kick_profiles;
 mod parallel_coverage;
 #[cfg(all(feature = "local-search-ab", feature = "parallel", target_os = "linux"))]
 mod parallel_memory_peak;
+#[cfg(any(test, feature = "local-search-ab"))]
+mod row_stack_geometry;
 #[cfg(all(feature = "local-search-ab", feature = "parallel", target_os = "linux"))]
 pub use parallel_memory_peak::observe_native_pc_memory;
 #[cfg(feature = "parallel")]
@@ -171,6 +173,8 @@ pub use buildup::{geometric_edge_reuse_experiment_totals, GeometricEdgeReuseMetr
 pub use buildup::{with_operation_mask_experiment, OperationMaskExperimentReport};
 #[cfg(feature = "local-search-ab")]
 pub use geometry::{geometry_domain_experiment_totals, GeometryDomainExperimentTotals};
+#[cfg(feature = "local-search-ab")]
+pub use geometry::{row_stack_experiment_totals, RowStackExperimentTotals};
 #[cfg(feature = "local-search-ab")]
 pub use structural_order::{
     run_conditional_ordered_work, structural_order_experiment_totals, ConditionalOrderedWorkMode,

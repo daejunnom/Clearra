@@ -291,6 +291,8 @@ impl ExtendedInverseCatalog {
 
         let cell_count = usize::from(width) * usize::from(height);
         let mut by_cell = (0..cell_count).map(|_| Vec::new()).collect::<Vec<_>>();
+        // Increasing row IDs and one visit per set bit already make each
+        // support list strictly increasing, without sorting or deduplication.
         for (row_id, row) in skeletons.iter().enumerate() {
             for cell in row.cells.cells() {
                 by_cell[cell as usize].push(row_id as u32);
@@ -299,9 +301,7 @@ impl ExtendedInverseCatalog {
         let mut support_offsets = Vec::with_capacity(cell_count + 1);
         let mut support_rows = Vec::new();
         support_offsets.push(0);
-        for mut rows in by_cell {
-            rows.sort_unstable();
-            rows.dedup();
+        for rows in by_cell {
             support_rows.extend(rows);
             support_offsets.push(support_rows.len() as u32);
         }
@@ -497,6 +497,20 @@ fn occupied_rows(width: u8, cells: ExtendedBoard) -> impl Iterator<Item = u8> {
     (0..32).filter(move |row| rows & (1_u32 << row) != 0)
 }
 
+fn deleted_row_interval_mask(first_deleted: u8, next_target_row: u8) -> u32 {
+    debug_assert!(next_target_row <= u32::BITS as u8);
+    if first_deleted >= next_target_row {
+        return 0;
+    }
+    // The exclusive endpoint may be 32; lower_row_mask must never shift by 32.
+    let below_target = if next_target_row == u32::BITS as u8 {
+        u32::MAX
+    } else {
+        lower_row_mask(next_target_row)
+    };
+    below_target & !lower_row_mask(first_deleted)
+}
+
 #[cfg(test)]
 mod bounded_tests {
     use super::*;
@@ -525,6 +539,94 @@ mod bounded_tests {
         assert_eq!(bounded.skeletons(), reference.skeletons());
         assert_eq!(bounded.realizations, reference.realizations);
         assert!(bounded.retained_bytes() <= 32 * 1024 + 2048 * 1024);
+    }
+
+    #[test]
+    fn deleted_row_intervals_match_scalar_loop_at_all_u32_boundaries() {
+        for first_deleted in 0..=32 {
+            for next_target_row in 0..=32 {
+                let mut expected = 0_u32;
+                for row in first_deleted..next_target_row {
+                    expected |= 1_u32 << row;
+                }
+                assert_eq!(
+                    deleted_row_interval_mask(first_deleted, next_target_row),
+                    expected,
+                    "interval {first_deleted}..{next_target_row}"
+                );
+            }
+        }
+        assert_eq!(deleted_row_interval_mask(0, 32), u32::MAX);
+        assert_eq!(deleted_row_interval_mask(31, 32), 1_u32 << 31);
+        assert_eq!(deleted_row_interval_mask(32, 32), 0);
+        assert_eq!(deleted_row_interval_mask(23, 24), 1_u32 << 23);
+    }
+
+    #[test]
+    fn catalog_support_and_deleted_rows_match_scalar_references() {
+        for height in [8_u8, 24] {
+            let rows: &[u16] = if height == 8 {
+                &[0, 1, 2, 3, 4, 5, 6, 7]
+            } else {
+                &[0, 1, 6, 7, 14, 15, 22, 23]
+            };
+            let mut holes = Board256Mask::EMPTY;
+            for &row in rows {
+                for x in [4_u16, 5] {
+                    holes = holes.union(Board256Mask::singleton(row * 10 + x).unwrap());
+                }
+            }
+            let cell_count = u16::from(height) * 10;
+            let base = Board256Mask::all_cells(cell_count).unwrap().without(holes);
+            let field = BuildProbabilityField::from_words_preserving_height(
+                height,
+                base.words(),
+                holes.words(),
+            )
+            .unwrap();
+            let catalog = ExtendedInverseCatalog::compile_bounded(field, 16 * 1024).unwrap();
+            assert!(!catalog.skeletons.is_empty());
+            assert_eq!(catalog.support_rows.len(), 4 * catalog.skeletons.len());
+            assert!((0..cell_count).any(|cell| catalog.support(cell).len() > 1));
+            for cell in 0..cell_count {
+                let expected = catalog
+                    .skeletons
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(row_id, row)| row.cells.contains(cell).then_some(row_id as u32))
+                    .collect::<Vec<_>>();
+                assert_eq!(catalog.support(cell), expected.as_slice());
+            }
+
+            for realization in &catalog.realizations {
+                let shape = standard_tetromino_registry()
+                    .get(realization.piece)
+                    .unwrap()
+                    .shape(realization.rotation);
+                let mut local_rows = shape
+                    .cells()
+                    .into_iter()
+                    .map(|cell| cell.y() as u8)
+                    .collect::<Vec<_>>();
+                local_rows.sort_unstable();
+                local_rows.dedup();
+                let target_rows = (0..height)
+                    .filter(|&row| {
+                        (0..10).any(|x| realization.cells.contains(u16::from(row) * 10 + x))
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(target_rows.len(), local_rows.len());
+                let mut expected = 0_u32;
+                for index in 1..local_rows.len() {
+                    let local_gap = local_rows[index] - local_rows[index - 1];
+                    let first_deleted = target_rows[index - 1] + local_gap;
+                    for row in first_deleted..target_rows[index] {
+                        expected |= 1_u32 << row;
+                    }
+                }
+                assert_eq!(realization.required_deleted_rows, expected);
+            }
+        }
     }
 }
 
@@ -566,9 +668,7 @@ fn enumerate_row_projections(
         for index in 1..local_rows.len() {
             let local_gap = local_rows[index] - local_rows[index - 1];
             let first_deleted = target_rows[index - 1] + local_gap;
-            for row in first_deleted..target_rows[index] {
-                required_deleted_rows |= 1_u32 << row;
-            }
+            required_deleted_rows |= deleted_row_interval_mask(first_deleted, target_rows[index]);
         }
         if !clear_rows.allows_required_rows(required_deleted_rows) {
             return Ok(());

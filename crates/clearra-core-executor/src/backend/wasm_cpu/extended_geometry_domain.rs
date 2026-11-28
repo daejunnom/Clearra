@@ -4,6 +4,7 @@ use super::{
     extended_board::ExtendedBoard,
     extended_inverse_catalog::{ExtendedInverseCatalog, ExtendedSkeletonRow},
     geometry_apdp::{APDP_ARM, APDP_ELBOW},
+    geometry_domain::ApdpParentRecheckMode,
     geometry_projection::ProjectionReachabilityCache,
     mix_digest, piece_index,
 };
@@ -171,6 +172,25 @@ impl ExtendedDomainWorkspace {
         targets: &[[u8; 7]],
         depth: usize,
     ) -> ExtendedDomainResult {
+        self.compile_with_apdp_mode(
+            catalog,
+            remaining,
+            used_counts,
+            targets,
+            depth,
+            ApdpParentRecheckMode::from_experiment(),
+        )
+    }
+
+    fn compile_with_apdp_mode(
+        &mut self,
+        catalog: &ExtendedInverseCatalog,
+        remaining: ExtendedBoard,
+        used_counts: [u8; 7],
+        targets: &[[u8; 7]],
+        depth: usize,
+        apdp_recheck: ApdpParentRecheckMode,
+    ) -> ExtendedDomainResult {
         let feasible_piece_mask = feasible_piece_mask(targets, used_counts);
         if feasible_piece_mask == 0 {
             return ExtendedDomainResult::Empty;
@@ -273,7 +293,8 @@ impl ExtendedDomainWorkspace {
             propagation.bumper_cell = cell;
         }
 
-        if crate::search_prune_policy::apdp_enabled()
+        if apdp_recheck.enabled()
+            && crate::search_prune_policy::apdp_enabled()
             && propagation.pivot_required_cells.count_ones() == 3
             && partial_shape_kind(catalog.width(), propagation.pivot_required_cells) != 0
             && apdp_domain_is_complete(
@@ -375,12 +396,19 @@ impl ExtendedDomainPropagation {
         {
             return false;
         }
-        (self.bumper_cell == NO_CELL
-            || bumper_row_compatible(catalog, remaining, self.bumper_cell, row.cells))
-            && (self.apdp_required_cells.is_empty()
-                || catalog
-                    .apdp_index()
-                    .row_supports(row_id, self.apdp_required_cells))
+        if self.bumper_cell != NO_CELL
+            && !bumper_row_compatible(catalog, remaining, self.bumper_cell, row.cells)
+        {
+            return false;
+        }
+        if !self.apdp_required_cells.is_empty()
+            && !catalog
+                .apdp_index()
+                .row_supports(row_id, self.apdp_required_cells)
+        {
+            return false;
+        }
+        true
     }
 }
 
@@ -639,4 +667,187 @@ fn union_cells(parents: &mut [u16; 256], left: u16, right: u16) {
         core::mem::swap(&mut left_root, &mut right_root);
     }
     parents[usize::from(right_root)] = left_root;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clearra_core_domain::{
+        board::standard_pc_board::Board256Mask, piece::piece_kind::PieceKind,
+    };
+    use clearra_problem::BuildProbabilityField;
+
+    fn mask(cells: &[u16]) -> ExtendedBoard {
+        let mut result = ExtendedBoard::EMPTY;
+        for &cell in cells {
+            result.insert(cell);
+        }
+        result
+    }
+
+    fn catalog() -> ExtendedInverseCatalog {
+        // A four-column chamber crosses the first u64 boundary. The six
+        // occupied columns allow every original row to clear, so both static
+        // and inverse-clear parents belong to the actual pruned catalog.
+        let mut target = Board256Mask::EMPTY;
+        for row in 0..8 {
+            for x in 0..4 {
+                target = target.union(Board256Mask::singleton(row * 10 + x).unwrap());
+            }
+        }
+        let base = Board256Mask::all_cells(80).unwrap().without(target);
+        let field =
+            BuildProbabilityField::from_words_preserving_height(8, base.words(), target.words())
+                .unwrap();
+        ExtendedInverseCatalog::compile(field).unwrap()
+    }
+
+    #[test]
+    fn apdp_parent_recheck_preserves_extended_static_and_inverse_clear_parents() {
+        let catalog = catalog();
+        let full = catalog.required_cells();
+        let i_only = 1 << piece_index(PieceKind::I);
+        let o_only = 1 << piece_index(PieceKind::O);
+        let vertical = mask(&[0, 10, 20]);
+        let gap_parent = mask(&[0, 10, 20, 40]);
+        let cases = [
+            (mask(&[70, 71, 72]), full, i_only, true),
+            (mask(&[60, 61, 70]), mask(&[60, 61, 70, 71]), o_only, true),
+            (vertical, full, i_only, false),
+            (vertical, gap_parent, i_only, false),
+            (vertical, full, 0, false),
+            (vertical, vertical, i_only, false),
+        ];
+        for (required, remaining, piece_mask, complete) in cases {
+            let parents: Vec<_> = catalog
+                .skeletons()
+                .iter()
+                .enumerate()
+                .filter(|(_, row)| {
+                    required.is_subset_of(row.cells)
+                        && row.cells.is_subset_of(remaining)
+                        && piece_mask & (1 << piece_index(row.piece)) != 0
+                })
+                .map(|(row_id, _)| row_id as u32)
+                .collect();
+            assert_eq!(
+                apdp_domain_is_complete(&catalog, remaining, piece_mask, required),
+                complete,
+            );
+            let (count, pieces) = exact_parent_rows(&catalog, remaining, piece_mask, required);
+            assert_eq!(count, parents.len());
+            let mut product = ExtendedDomainPropagation::empty();
+            product.pivot_required_cells = required;
+            product.pivot_cell = required.cells().next().unwrap();
+            product.pivot_support_count = count;
+            product.pivot_piece_mask = pieces;
+            let mut reference = product;
+            if complete {
+                reference.apdp_required_cells = required;
+            }
+            for domain in [product, reference] {
+                let allowed: Vec<_> = (0..catalog.skeletons().len())
+                    .map(|row_id| row_id as u32)
+                    .filter(|&row_id| domain.row_allowed(&catalog, row_id, remaining, piece_mask))
+                    .collect();
+                assert_eq!(allowed, parents);
+            }
+        }
+        let gap_id = catalog
+            .skeletons()
+            .iter()
+            .position(|row| row.piece == PieceKind::I && row.cells == gap_parent)
+            .expect("extended inverse-clear I parent") as u32;
+        assert!(!catalog.apdp_row_is_static_exact(gap_id));
+        assert!(!catalog.apdp_index().row_supports(gap_id, vertical));
+        assert!(exact_parent_rows(&catalog, full, i_only, vertical).0 >= 2);
+    }
+
+    #[test]
+    fn apdp_parent_recheck_modes_preserve_extended_domains_and_allowed_rows() {
+        let catalog = catalog();
+        let full = catalog.required_cells();
+        let mut i_target = [0; 7];
+        i_target[piece_index(PieceKind::I)] = 8;
+        let mut o_target = [0; 7];
+        o_target[piece_index(PieceKind::O)] = 8;
+        let mut one_i_used = [0; 7];
+        one_i_used[piece_index(PieceKind::I)] = 1;
+        let mut one_o_used = [0; 7];
+        one_o_used[piece_index(PieceKind::O)] = 1;
+        let mut seven_i_used = [0; 7];
+        seven_i_used[piece_index(PieceKind::I)] = 7;
+        let cases = [
+            (full, [0; 7]),
+            (full.without(mask(&[0, 1, 2, 3])), one_i_used),
+            (full.without(mask(&[0, 1, 10, 11])), one_o_used),
+            (mask(&[0, 10, 20, 40]), seven_i_used),
+            (mask(&[0]), [0; 7]),
+            (ExtendedBoard::EMPTY, i_target),
+        ];
+        let mut product_workspace = ExtendedDomainWorkspace::new();
+        let mut reference_workspace = ExtendedDomainWorkspace::new();
+        // Separate workspaces also exercise restoration after changing the
+        // remaining field and exhausted/available piece kinds between calls.
+        for targets in [
+            vec![i_target],
+            vec![o_target],
+            vec![i_target, o_target],
+            vec![],
+        ] {
+            for (remaining, used) in cases {
+                let product = product_workspace.compile_with_apdp_mode(
+                    &catalog,
+                    remaining,
+                    used,
+                    &targets,
+                    0,
+                    ApdpParentRecheckMode::Skip,
+                );
+                let reference = reference_workspace.compile_with_apdp_mode(
+                    &catalog,
+                    remaining,
+                    used,
+                    &targets,
+                    0,
+                    ApdpParentRecheckMode::Reference,
+                );
+                match (product, reference) {
+                    (
+                        ExtendedDomainResult::Supported(product),
+                        ExtendedDomainResult::Supported(reference),
+                    ) => {
+                        assert_eq!(product.pivot_required_cells, reference.pivot_required_cells);
+                        assert_eq!(product.pivot_cell, reference.pivot_cell);
+                        assert_eq!(product.pivot_piece_mask, reference.pivot_piece_mask);
+                        assert_eq!(product.pivot_support_count, reference.pivot_support_count);
+                        assert_eq!(product.bumper_cell, reference.bumper_cell);
+                        assert!(product.apdp_required_cells.is_empty());
+                        let piece_mask = feasible_piece_mask(&targets, used);
+                        for row_id in 0..catalog.skeletons().len() {
+                            assert_eq!(
+                                product.row_allowed(&catalog, row_id as u32, remaining, piece_mask),
+                                reference.row_allowed(
+                                    &catalog,
+                                    row_id as u32,
+                                    remaining,
+                                    piece_mask
+                                ),
+                            );
+                        }
+                    }
+                    (ExtendedDomainResult::Empty, ExtendedDomainResult::Empty)
+                    | (
+                        ExtendedDomainResult::HallImpossible,
+                        ExtendedDomainResult::HallImpossible,
+                    )
+                    | (
+                        ExtendedDomainResult::ProjectionImpossible,
+                        ExtendedDomainResult::ProjectionImpossible,
+                    ) => {}
+                    _ => panic!("APDP parent recheck changed the residual domain"),
+                }
+            }
+        }
+    }
 }

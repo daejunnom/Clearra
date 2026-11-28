@@ -6,6 +6,43 @@ const BUMPER_DOMAIN_MAX_RESIDUAL_CELLS: u32 = 24;
 
 const ALL_STANDARD_PIECES: u8 = 0x7f;
 
+/// SameTile already supplies the complete feasible full-parent domain V(q).
+/// The historical APDP pass first proves V(q) is contained in its static
+/// support set, then intersects V(q) with that same set. This cannot remove a
+/// parent. Keep that work only as an explicit, same-binary A/B reference.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum ApdpParentRecheckMode {
+    Skip,
+    #[cfg(any(feature = "local-search-ab", test))]
+    Reference,
+}
+
+impl ApdpParentRecheckMode {
+    pub fn from_experiment() -> Self {
+        #[cfg(feature = "local-search-ab")]
+        {
+            static MODE: std::sync::OnceLock<ApdpParentRecheckMode> = std::sync::OnceLock::new();
+            *MODE.get_or_init(|| {
+                if std::env::var("CLEARRA_APDP_PARENT_RECHECK").as_deref() == Ok("1") {
+                    Self::Reference
+                } else {
+                    Self::Skip
+                }
+            })
+        }
+        #[cfg(not(feature = "local-search-ab"))]
+        Self::Skip
+    }
+
+    pub const fn enabled(self) -> bool {
+        match self {
+            Self::Skip => false,
+            #[cfg(any(feature = "local-search-ab", test))]
+            Self::Reference => true,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct DomainPropagation {
     pub pivot_required_cells: u64,
@@ -269,6 +306,24 @@ impl DomainPropagation {
         remaining: u64,
         feasible_piece_mask: u8,
         same_tile_parents: SameTileParentMode,
+        support_for: impl FnMut(u8) -> CellSupport,
+    ) -> DomainCompilation {
+        Self::compile_with_support_and_apdp_mode(
+            catalog,
+            remaining,
+            feasible_piece_mask,
+            same_tile_parents,
+            ApdpParentRecheckMode::from_experiment(),
+            support_for,
+        )
+    }
+
+    fn compile_with_support_and_apdp_mode(
+        catalog: &GeometryCatalog,
+        remaining: u64,
+        feasible_piece_mask: u8,
+        same_tile_parents: SameTileParentMode,
+        apdp_recheck: ApdpParentRecheckMode,
         mut support_for: impl FnMut(u8) -> CellSupport,
     ) -> DomainCompilation {
         let mut result = Self {
@@ -432,7 +487,8 @@ impl DomainPropagation {
             result.bumper_cell = cell;
         }
 
-        let apdp_candidate = crate::search_prune_policy::apdp_enabled()
+        let apdp_candidate = apdp_recheck.enabled()
+            && crate::search_prune_policy::apdp_enabled()
             && result.pivot_required_cells.count_ones() == 3
             && partial_shape_kind(catalog.width(), result.pivot_required_cells) != 0;
         #[cfg(any(feature = "local-search-ab", test))]
@@ -641,8 +697,12 @@ impl DomainPropagation {
         {
             return false;
         }
-        self.apdp_required_cells == 0
-            || apdp_row_supports(catalog, row_id, self.apdp_required_cells)
+        if self.apdp_required_cells != 0
+            && !apdp_row_supports(catalog, row_id, self.apdp_required_cells)
+        {
+            return false;
+        }
+        true
     }
 }
 
@@ -877,6 +937,140 @@ mod tests {
     const REMAINING: u64 = LEFT | RIGHT;
     const LEFT_O: u64 = 0x03 | (0x03 << 10);
     const RIGHT_O: u64 = LEFT_O << 6;
+
+    #[test]
+    fn apdp_parent_recheck_is_identity_for_static_and_inverse_clear_parents() {
+        const WIDTH: u8 = 4;
+        const HEIGHT: u8 = 5;
+        let full = (1_u64 << (WIDTH * HEIGHT)) - 1;
+        let catalog =
+            GeometryCatalog::compile_for_required_cells_on_dimensions(WIDTH, HEIGHT, 0, full)
+                .unwrap();
+        let i_only = 1 << piece_index(PieceKind::I);
+        let o_only = 1 << piece_index(PieceKind::O);
+        let horizontal = 0b111;
+        let vertical = 1 | (1 << WIDTH) | (1 << (2 * WIDTH));
+        let elbow = 0b11 | (1 << WIDTH);
+        let square = elbow | (1 << (WIDTH + 1));
+        let gap_parent = vertical | (1 << (4 * WIDTH));
+        let cases = [
+            (horizontal, full, i_only, true),
+            (elbow, square, o_only, true),
+            (vertical, full, i_only, false),
+            (vertical, gap_parent, i_only, false),
+            (horizontal, full, 0, false),
+            (elbow, elbow, ALL_STANDARD_PIECES, false),
+        ];
+        for (required, remaining, piece_mask, complete) in cases {
+            // This oracle scans every skeleton, independently of the reverse
+            // incidence and static APDP indexes used by the old recheck.
+            let parents: Vec<_> = (0..catalog.skeleton_count())
+                .map(|row_id| row_id as u32)
+                .filter(|&row_id| {
+                    let row = catalog.skeleton(row_id);
+                    row.cells & required == required
+                        && row.cells & remaining == row.cells
+                        && piece_mask & (1 << piece_index(row.piece)) != 0
+                })
+                .collect();
+            assert_eq!(
+                apdp_domain_is_complete(&catalog, remaining, piece_mask, required),
+                complete,
+            );
+            let unfiltered = exact_parent_rows(&catalog, remaining, piece_mask, required, false);
+            assert_eq!(unfiltered.0, parents.len());
+            if complete {
+                assert_eq!(
+                    exact_parent_rows(&catalog, remaining, piece_mask, required, true),
+                    unfiltered,
+                );
+            }
+
+            let mut product = DomainPropagation::empty();
+            product.pivot_required_cells = required;
+            product.pivot_cell = required.trailing_zeros() as u8;
+            product.pivot_support_count = unfiltered.0;
+            product.pivot_piece_mask = unfiltered.1;
+            let mut reference = product;
+            if complete {
+                reference.apdp_required_cells = required;
+            }
+            for domain in [product, reference] {
+                let allowed: Vec<_> = (0..catalog.skeleton_count())
+                    .map(|row_id| row_id as u32)
+                    .filter(|&row_id| domain.row_allowed(&catalog, row_id, remaining, piece_mask))
+                    .collect();
+                assert_eq!(allowed, parents);
+            }
+        }
+
+        // Same-kind parents are separate alternatives. In particular, lack
+        // of static APDP support must not discard the I that spans a deleted
+        // original row while retaining only its contiguous sibling.
+        let gap_id = (0..catalog.skeleton_count())
+            .map(|row_id| row_id as u32)
+            .find(|&row_id| {
+                let row = catalog.skeleton(row_id);
+                row.piece == PieceKind::I && row.cells == gap_parent
+            })
+            .expect("inverse-clear I parent");
+        assert!(!catalog.apdp_row_is_static_exact(gap_id));
+        assert!(!catalog.apdp_index().row_supports(gap_id, vertical));
+        assert!(exact_parent_rows(&catalog, full, i_only, vertical, false).0 >= 2);
+    }
+
+    #[test]
+    fn apdp_parent_recheck_modes_preserve_domains_and_allowed_rows() {
+        const WIDTH: u8 = 4;
+        const HEIGHT: u8 = 5;
+        let full = (1_u64 << (WIDTH * HEIGHT)) - 1;
+        let square = 0b11 | (0b11 << WIDTH);
+        let gap_i = 1 | (1 << WIDTH) | (1 << (2 * WIDTH)) | (1 << (4 * WIDTH));
+        let catalog =
+            GeometryCatalog::compile_for_required_cells_on_dimensions(WIDTH, HEIGHT, 0, full)
+                .unwrap();
+        let i_only = 1 << piece_index(PieceKind::I);
+        let o_only = 1 << piece_index(PieceKind::O);
+        for remaining in [full, full & !square, square, gap_i, 1, 0] {
+            for piece_mask in [ALL_STANDARD_PIECES, i_only, o_only, i_only | o_only, 0] {
+                for same_tile_mode in [SameTileParentMode::Scan, SameTileParentMode::Reuse] {
+                    let compile = |mode| {
+                        DomainPropagation::compile_with_support_and_apdp_mode(
+                            &catalog,
+                            remaining,
+                            piece_mask,
+                            same_tile_mode,
+                            mode,
+                            |cell| exhaustive_cell_support(&catalog, cell, remaining, piece_mask),
+                        )
+                    };
+                    let product = compile(ApdpParentRecheckMode::Skip);
+                    let reference = compile(ApdpParentRecheckMode::Reference);
+                    assert_eq!(product.status, reference.status);
+                    assert_eq!(product.propagation, reference.propagation);
+                    assert_eq!(product.cell_piece_masks, reference.cell_piece_masks);
+                    assert!(!product.observation.apdp_static_check);
+                    assert!(!reference.observation.apdp_pivot_tightened);
+                    for row_id in 0..catalog.skeleton_count() {
+                        assert_eq!(
+                            product.propagation.row_allowed(
+                                &catalog,
+                                row_id as u32,
+                                remaining,
+                                piece_mask,
+                            ),
+                            reference.propagation.row_allowed(
+                                &catalog,
+                                row_id as u32,
+                                remaining,
+                                piece_mask,
+                            ),
+                        );
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn same_tile_parent_reuse_requires_a_single_member_to_prove_the_group() {

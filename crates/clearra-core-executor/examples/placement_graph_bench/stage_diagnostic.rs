@@ -5,6 +5,13 @@
 pub(super) enum SearchStageDiagnostic {
     ProductDefault,
     ProductCutoffExperiment,
+    ProductRowStackExperiment {
+        minimum_domain_cutoff: bool,
+        apdp_parent_recheck: bool,
+    },
+    ProductApdpReference {
+        minimum_domain_cutoff: bool,
+    },
     Reference,
     OptimizedUpper,
     LegacyUpper,
@@ -12,7 +19,79 @@ pub(super) enum SearchStageDiagnostic {
 
 impl SearchStageDiagnostic {
     pub(super) const fn is_product(self) -> bool {
-        matches!(self, Self::ProductDefault | Self::ProductCutoffExperiment)
+        matches!(
+            self,
+            Self::ProductDefault
+                | Self::ProductCutoffExperiment
+                | Self::ProductRowStackExperiment { .. }
+                | Self::ProductApdpReference { .. }
+        )
+    }
+
+    /// These axes retain the ordinary verifier but change geometry work.
+    /// Keep the selection explicit even when row-stack bypasses the domain
+    /// where an enabled APDP reference would otherwise run.
+    pub(super) const fn with_geometry_experiments(
+        self,
+        row_stack_geometry: bool,
+        apdp_parent_recheck: bool,
+    ) -> Self {
+        if !self.is_product() {
+            return self;
+        }
+        let minimum_domain_cutoff = self.minimum_domain_cutoff();
+        if row_stack_geometry {
+            Self::ProductRowStackExperiment {
+                minimum_domain_cutoff,
+                apdp_parent_recheck,
+            }
+        } else if apdp_parent_recheck {
+            Self::ProductApdpReference {
+                minimum_domain_cutoff,
+            }
+        } else if minimum_domain_cutoff {
+            Self::ProductCutoffExperiment
+        } else {
+            Self::ProductDefault
+        }
+    }
+
+    pub(super) const fn minimum_domain_cutoff(self) -> bool {
+        match self {
+            Self::ProductCutoffExperiment => true,
+            Self::ProductRowStackExperiment {
+                minimum_domain_cutoff,
+                ..
+            }
+            | Self::ProductApdpReference {
+                minimum_domain_cutoff,
+            } => minimum_domain_cutoff,
+            _ => false,
+        }
+    }
+
+    pub(super) const fn row_stack_geometry(self) -> bool {
+        matches!(self, Self::ProductRowStackExperiment { .. })
+    }
+
+    pub(super) const fn apdp_parent_recheck(self) -> bool {
+        match self {
+            Self::ProductApdpReference { .. } => true,
+            Self::ProductRowStackExperiment {
+                apdp_parent_recheck,
+                ..
+            } => apdp_parent_recheck,
+            _ => false,
+        }
+    }
+
+    pub(super) const fn execution_route(self) -> &'static str {
+        match self {
+            Self::ProductDefault | Self::ProductCutoffExperiment => "ordinary-product",
+            Self::ProductRowStackExperiment { .. } => "row-stack-experiment",
+            Self::ProductApdpReference { .. } => "ordinary-product-apdp-reference",
+            _ => "strict-prefix-experiment",
+        }
     }
 
     pub(super) const fn schema(diagnostic: Option<Self>) -> &'static str {
@@ -70,7 +149,7 @@ impl SearchStageDiagnostic {
         }
         if strict_diagnostic.is_some() || has_experiment || captures_coverage {
             return Err(
-                "CLEARRA_SEARCH_STAGE_PROFILE requires the ordinary global-only product route; only labeled product optimizations and the minimum-domain cutoff may vary"
+                "CLEARRA_SEARCH_STAGE_PROFILE requires the ordinary global-only verifier; only labeled product optimizations, minimum-domain cutoff, row-stack geometry and APDP parent recheck may vary"
                     .into(),
             );
         }
@@ -236,6 +315,40 @@ mod tests {
     }
 
     #[test]
+    fn ordinary_verifier_geometry_axes_preserve_explicit_experiment_labels() {
+        for cutoff in [false, true] {
+            let base =
+                SearchStageDiagnostic::select_product(true, None, false, false, true, true, cutoff)
+                    .unwrap()
+                    .unwrap();
+            for row_stack in [false, true] {
+                for apdp_recheck in [false, true] {
+                    let diagnostic = base.with_geometry_experiments(row_stack, apdp_recheck);
+                    assert!(diagnostic.is_product());
+                    assert_eq!(diagnostic.minimum_domain_cutoff(), cutoff);
+                    assert_eq!(diagnostic.row_stack_geometry(), row_stack);
+                    assert_eq!(diagnostic.apdp_parent_recheck(), apdp_recheck);
+                    assert_eq!(
+                        diagnostic.execution_route(),
+                        if row_stack {
+                            "row-stack-experiment"
+                        } else if apdp_recheck {
+                            "ordinary-product-apdp-reference"
+                        } else {
+                            "ordinary-product"
+                        },
+                    );
+                }
+            }
+        }
+        for strict in [Reference, OptimizedUpper, LegacyUpper] {
+            assert_eq!(strict.with_geometry_experiments(true, true), strict);
+            assert!(!strict.is_product());
+            assert_eq!(strict.execution_route(), "strict-prefix-experiment");
+        }
+    }
+
+    #[test]
     fn product_memo_environment_requires_exact_defaults_without_mutation() {
         let validate = |entries: &[(&str, &str)]| {
             validate_product_memo_environment(|name| {
@@ -337,6 +450,13 @@ mod tests {
         for diagnostic in [
             ProductDefault,
             ProductCutoffExperiment,
+            SearchStageDiagnostic::ProductRowStackExperiment {
+                minimum_domain_cutoff: false,
+                apdp_parent_recheck: false,
+            },
+            SearchStageDiagnostic::ProductApdpReference {
+                minimum_domain_cutoff: false,
+            },
             Reference,
             OptimizedUpper,
             LegacyUpper,
