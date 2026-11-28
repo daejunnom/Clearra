@@ -97,13 +97,7 @@ impl ExtendedBoard {
     }
 
     pub fn row_bits(self, width: u8, row: u8) -> u16 {
-        let mut bits = 0_u16;
-        for x in 0..width {
-            if self.contains(u16::from(row) * u16::from(width) + u16::from(x)) {
-                bits |= 1_u16 << x;
-            }
-        }
-        bits
+        super::candidate_row_projection::row_bits(&self.words, width, row)
     }
 }
 
@@ -134,24 +128,7 @@ pub(super) fn place_and_clear(
     height: u8,
     board: ExtendedBoard,
 ) -> (ExtendedBoard, u32, u8) {
-    let full_row = (1_u16 << width) - 1;
-    let mut compacted = ExtendedBoard::EMPTY;
-    let mut cleared = 0_u32;
-    let mut output_row = 0_u8;
-    for input_row in 0..height {
-        let row = board.row_bits(width, input_row);
-        if row == full_row {
-            cleared |= 1_u32 << input_row;
-            continue;
-        }
-        for x in 0..width {
-            if row & (1_u16 << x) != 0 {
-                compacted.insert(u16::from(output_row) * u16::from(width) + u16::from(x));
-            }
-        }
-        output_row += 1;
-    }
-    (compacted, cleared, cleared.count_ones() as u8)
+    super::candidate_row_projection::place_and_clear(width, height, board)
 }
 
 pub(super) fn compact_logical_board(
@@ -160,21 +137,7 @@ pub(super) fn compact_logical_board(
     board: ExtendedBoard,
     deleted_rows: u32,
 ) -> ExtendedBoard {
-    let mut compacted = ExtendedBoard::EMPTY;
-    let mut output_row = 0_u8;
-    for logical_row in 0..height {
-        if deleted_rows & (1_u32 << logical_row) != 0 {
-            continue;
-        }
-        let row = board.row_bits(width, logical_row);
-        for x in 0..width {
-            if row & (1_u16 << x) != 0 {
-                compacted.insert(u16::from(output_row) * u16::from(width) + u16::from(x));
-            }
-        }
-        output_row += 1;
-    }
-    compacted
+    super::candidate_row_projection::compact_rows(width, height, board, deleted_rows)
 }
 
 pub(super) fn merge_deleted_rows(height: u8, previous: u32, current_physical: u32) -> Option<u32> {

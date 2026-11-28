@@ -27,6 +27,7 @@ use super::{
     geometry::{
         GeometryAdvance, GeometryCandidate, GeometrySearch, PhysicalPrefixMode, TargetGroup,
     },
+    ordered_candidate_digest::OrderedCandidateDigest,
     parallel_coverage::SharedCoverage,
     reachability::{ReachabilityMetrics, SharedReachabilityTemplates},
     result::retains_buildable_identity_evidence,
@@ -133,7 +134,7 @@ pub(super) struct BranchSearchOutcome {
 /// candidate adds no evidence and can be replaced by the identical scalar fold.
 pub(super) enum CandidateDigestEvidence {
     Disabled,
-    Ordered(Vec<u64>),
+    Ordered(OrderedCandidateDigest),
     Multiset(u64),
 }
 
@@ -144,7 +145,7 @@ impl CandidateDigestEvidence {
         } else if order_independent {
             Self::Multiset(0)
         } else {
-            Self::Ordered(Vec::new())
+            Self::Ordered(OrderedCandidateDigest::default())
         }
     }
 
@@ -152,12 +153,11 @@ impl CandidateDigestEvidence {
         match self {
             Self::Disabled => {}
             Self::Ordered(hashes) => {
-                hashes.try_reserve(1).map_err(|_| {
+                hashes.try_push(hash).map_err(|_| {
                     WasmExactSearchError::InvalidProblem(
                         "wasm_parallel_candidate_digest_storage_unavailable",
                     )
                 })?;
-                hashes.push(hash);
             }
             Self::Multiset(digest) => {
                 *digest = super::mix_order_independent_candidate_digest(*digest, hash);
@@ -189,7 +189,7 @@ impl CandidateDigestEvidence {
 
     pub fn retained_bytes(&self) -> usize {
         match self {
-            Self::Ordered(hashes) => hashes.capacity() * core::mem::size_of::<u64>(),
+            Self::Ordered(hashes) => hashes.retained_bytes(),
             Self::Disabled | Self::Multiset(_) => 0,
         }
     }

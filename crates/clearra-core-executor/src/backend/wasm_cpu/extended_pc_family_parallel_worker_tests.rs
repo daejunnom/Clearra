@@ -24,6 +24,86 @@ const WORKERS: usize = 2;
 const HEIGHT: u8 = 7;
 
 #[test]
+fn huge_branch_digest_reservation_is_metadata_only_and_cancel_remains_observable() {
+    let query = PcScenarioQuery::new(
+        PcScenarioBoard::standard_10(HEIGHT.into(), 0),
+        PcQueueInput::fixed_sequence(FixedSequence::new(vec![PieceKind::I; 2])),
+        PieceWindow::new(2),
+    )
+    .with_exact_pieces(Some(2))
+    .with_allow_hold(false);
+    let problem = ProblemCompiler::compile_scenario_pc(&query).unwrap();
+    let field =
+        BuildProbabilityField::from_words_preserving_height(HEIGHT, [0; 4], [0x3c0f, 0, 0, 0])
+            .unwrap();
+    let mut root = ExtendedBuildProbabilitySession::new(
+        &problem,
+        field,
+        clearra_problem::BuildProbabilityAggregation::Buildability,
+    )
+    .unwrap();
+    for _ in 0..10_000 {
+        if !root.geometry.is_compiling() {
+            break;
+        }
+        assert!(matches!(
+            root.advance_geometry_bounded().unwrap(),
+            ExtendedGeometryAdvance::Pending
+        ));
+    }
+    assert!(!root.geometry.is_compiling());
+    let live = root.checked_retained_bytes().unwrap();
+    let mut plan = root
+        .geometry
+        .take_parallel_plan(1, root.memory_bound, live)
+        .unwrap()
+        .unwrap();
+    let mut branch = plan.branches.pop().unwrap();
+    // The cardinality header must not be an allocation instruction. Its
+    // value cannot even be represented as a Vec length on this machine.
+    branch.candidate_count = u128::MAX;
+    let fixed = root.checked_retained_bytes().unwrap()
+        + plan.shared_retained_bytes() as u128
+        + plan.branch_retained_bytes() as u128;
+    let aggregate = SharedExecutionMemoryBudget::new(root.memory_bound, fixed, 1).unwrap();
+    let engine = root
+        .new_shared_family_verifier_with_resources(root.memory_bound, Some(aggregate.owner(0)))
+        .unwrap();
+    let mut worker = WorkerResult {
+        engine,
+        digests: Vec::new(),
+        private_peak_bytes: 0,
+        bounded_rows: None,
+        terminal_base: None,
+    };
+    let index = worker.reserve_branch::<false>(&branch).unwrap();
+    assert_eq!(worker.digests[index].first_ordinal, branch.first_ordinal);
+    assert_eq!(worker.digests[index].values.len(), 0);
+    assert_eq!(worker.digests[index].values.retained_bytes(), 0);
+    assert_eq!(worker.engine.processed_candidate_count, 0);
+    assert_eq!(
+        worker.checked_auxiliary_retained_bytes::<false>().unwrap(),
+        (worker.digests.capacity() * size_of::<DigestSegment>()) as u128
+    );
+
+    let token = ExecutionCancellationToken::new();
+    token.handle().cancel();
+    let queue = Mutex::new(Vec::new());
+    assert!(matches!(
+        run_worker(
+            worker.engine,
+            Some(branch),
+            &queue,
+            &aggregate.owner(0),
+            &AtomicBool::new(false),
+            &AtomicUsize::new(0),
+            &ExecutionControl::new(token),
+        ),
+        Err(WasmExactSearchError::Cancelled)
+    ));
+}
+
+#[test]
 fn symbolic_worker_finalization_keeps_digest_bytes_in_aggregate_admission() {
     let query = PcScenarioQuery::new(
         PcScenarioBoard::standard_10(8, 0),
@@ -46,11 +126,15 @@ fn symbolic_worker_finalization_keeps_digest_bytes_in_aggregate_admission() {
     )
     .unwrap();
     assert!(engine.standard_bag_coverage.is_some());
+    let mut values = OrderedCandidateDigest::default();
+    for _ in 0..4_096 {
+        values.try_push(0).unwrap();
+    }
     let mut worker = WorkerResult {
         engine,
         digests: vec![DigestSegment {
             first_ordinal: 0,
-            values: vec![0; 4_096],
+            values,
         }],
         private_peak_bytes: 0,
         bounded_rows: None,
@@ -298,7 +382,7 @@ fn extended_pc_native_cooperative_worker_waves_preserve_exact_family_and_drain()
     let (mut digest, mut ordinal) = (0, 0_u128);
     for segment in segments {
         assert_eq!(segment.first_ordinal, ordinal);
-        for value in segment.values {
+        for &value in segment.values.iter() {
             ordinal += 1;
             digest = mix_digest(digest, value);
         }

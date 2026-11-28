@@ -1,16 +1,19 @@
 use clearra_core_domain::piece::{piece_kind::PieceKind, rotation::RotationState};
 use clearra_piece_registry::standard::tetromino_registry::standard_tetromino_registry;
 use clearra_replay::{RotationRequest, ScoringLockEvidence};
-use clearra_rules::kicks::{
-    normalized_kick_delta, KickTableProfile, KickTableProfileId, KickTransition,
-};
+use clearra_rules::kicks::{KickTableProfileId, KickTransition};
 
 use super::{
-    extended_board::ExtendedBoard, extended_inverse_catalog::ExtendedInstantiation,
-    kick_profiles::builtin_kick_profile, piece_index,
+    extended_board::ExtendedBoard,
+    extended_inverse_catalog::ExtendedInstantiation,
+    kick_profiles::builtin_kick_profile,
+    movement_topology::{
+        compile_rotations, compile_translations, lock_anchor_contains, lock_anchor_insert,
+        normalized_kick_deltas, source_ceiling, state_from_index, state_index, PoseValidity, State,
+        INVALID_STATE_INDEX as INVALID_STATE,
+    },
+    piece_index,
 };
-
-const INVALID_STATE: u16 = u16::MAX;
 
 /// A translation-only membership proof for catalog-instantiated locks.
 ///
@@ -81,22 +84,16 @@ fn shift_words_down(words: [u64; 4], shift: usize) -> [u64; 4] {
     })
 }
 
-#[derive(Clone, Copy)]
-struct State {
-    rotation: RotationState,
-    x: i8,
-    y: i8,
-}
-
 pub(super) struct ExtendedReachableLocks {
+    width: u8,
+    anchors: [u64; 16],
+    // Boolean membership never allocates this evidence-only payload.
     entries: Vec<((u8, i8, i8), ScoringLockEvidence)>,
 }
 
 impl ExtendedReachableLocks {
     pub fn contains(&self, rotation: RotationState, x: i8, y: i8) -> bool {
-        self.entries
-            .binary_search_by_key(&(rotation.quarter_turns(), x, y), |entry| entry.0)
-            .is_ok()
+        lock_anchor_contains(&self.anchors, self.width, rotation, x, y)
     }
 
     pub fn scoring_evidence(&self, rotation: RotationState, x: i8, y: i8) -> ScoringLockEvidence {
@@ -125,8 +122,6 @@ impl ReachabilityScratch {
     fn begin(&mut self, state_count: usize) -> u16 {
         if self.visited.len() < state_count {
             self.visited.resize(state_count, 0);
-            self.queue
-                .reserve(state_count.saturating_sub(self.queue.capacity()));
         }
         self.generation = self.generation.wrapping_add(1);
         if self.generation == 0 {
@@ -135,6 +130,11 @@ impl ReachabilityScratch {
             self.generation = 1;
         }
         self.queue.clear();
+        if self.queue.capacity() < state_count {
+            // reserve is relative to len, not capacity. With an empty queue
+            // this guarantees room for every state in one allocation.
+            self.queue.reserve(state_count);
+        }
         self.generation
     }
 
@@ -270,20 +270,54 @@ impl ExtendedReachabilityWorkspace {
         } else {
             0
         };
-        let scratch = states
-            .checked_mul(
-                (4 + if scoring {
-                    2 + core::mem::size_of::<(bool, bool, u8)>()
-                        + core::mem::size_of::<ScoringLockEvidence>()
-                } else {
-                    0
-                }) as u128,
-            )?
-            .checked_mul(2)?;
-        let lock_set = states
-            .checked_mul(core::mem::size_of::<((u8, i8, i8), ScoringLockEvidence)>() as u128)?
-            .checked_mul(2)?;
+        let mut scratch =
+            checked_scratch_growth::<u16>(self.scratch.visited.capacity(), states)?.checked_add(
+                checked_scratch_growth::<u16>(self.scratch.queue.capacity(), states)?,
+            )?;
+        if scoring {
+            scratch = scratch
+                .checked_add(checked_scratch_growth::<u16>(
+                    self.scratch.evidence_generations.capacity(),
+                    states,
+                )?)?
+                .checked_add(checked_scratch_growth::<(bool, bool, u8)>(
+                    self.scratch.evidence_ranks.capacity(),
+                    states,
+                )?)?
+                .checked_add(checked_scratch_growth::<ScoringLockEvidence>(
+                    self.scratch.evidence.capacity(),
+                    states,
+                )?)?;
+        }
+        // Anchors stay inline. Scoring projects their final evidence into one
+        // exactly-sized Vec after traversal; there is no intermediate lock
+        // index Vec or evidence allocation for a Boolean query.
+        let mut lock_set = core::mem::size_of::<ExtendedReachableLocks>() as u128;
+        if scoring {
+            lock_set = lock_set.checked_add(
+                4_u128
+                    .checked_mul(u128::from(self.width))?
+                    .checked_mul(u128::from(self.height))?
+                    .checked_mul(
+                        core::mem::size_of::<((u8, i8, i8), ScoringLockEvidence)>() as u128
+                    )?,
+            )?;
+        }
         template.checked_add(scratch)?.checked_add(lock_set)
+    }
+}
+
+fn checked_scratch_growth<T>(capacity: usize, states: u128) -> Option<u128> {
+    let capacity = capacity as u128;
+    if states <= capacity {
+        Some(0)
+    } else {
+        // Existing backing is already retained by the workspace. Charge the
+        // entire replacement while old/new allocations may coexist.
+        states
+            .max(capacity.checked_mul(2)?)
+            .max(4)
+            .checked_mul(core::mem::size_of::<T>() as u128)
     }
 }
 
@@ -340,31 +374,15 @@ impl ExtendedReachabilityTemplate {
             }
         }
 
-        let mut kick_deltas: [Vec<(i8, i8)>; 12] = std::array::from_fn(|_| Vec::new());
-        for from in RotationState::ALL {
-            for (slot, to) in [
-                from.clockwise(),
-                from.counter_clockwise(),
-                from.rotated_180(),
-            ]
-            .into_iter()
-            .enumerate()
-            {
-                if slot == 2 && !allow_180 {
-                    continue;
-                }
-                if let Some(sequence) = profile.sequence_for(KickTransition::new(piece, from, to)) {
-                    kick_deltas[from.quarter_turns() as usize * 3 + slot].extend(
-                        sequence.offsets().iter().map(|offset| {
-                            normalized_kick_delta(piece, from, to, offset.dx(), offset.dy())
-                        }),
-                    );
-                }
-            }
-        }
-        let (translations, sky_seeds) = compile_translations(width, height, ceiling, &valid_states);
-        let (rotation_offsets, rotation_targets, rotation_kick_indices) =
-            compile_rotations(width, ceiling, &valid_states, &kick_deltas);
+        let kick_deltas = normalized_kick_deltas(piece, allow_180, profile);
+        let valid = PoseValidity::FullHeightFlags(&valid_states);
+        let (translations, sky_seeds) = compile_translations(width, height, ceiling, valid);
+        let (rotation_offsets, rotation_targets, rotation_kick_indices) = compile_rotations(
+            width,
+            ceiling,
+            valid,
+            &kick_deltas.each_ref().map(Vec::as_slice),
+        );
         Self {
             width,
             height,
@@ -404,7 +422,11 @@ fn search_reachable_locks(
     for &seed in &template.sky_seeds {
         push_if_placeable(template, board, seed, scratch, generation);
     }
-    let mut locks = Vec::new();
+    let mut locks = ExtendedReachableLocks {
+        width: template.width,
+        anchors: [0; 16],
+        entries: Vec::new(),
+    };
     let mut cursor = 0usize;
     while cursor < scratch.queue.len() {
         let source = scratch.queue[cursor];
@@ -412,7 +434,13 @@ fn search_reachable_locks(
         let index = usize::from(source);
         let state = state_from_index(template.width, template.ceiling, index);
         if state.y < template.height as i8 && grounded(template, board, index) {
-            locks.push(source);
+            lock_anchor_insert(
+                &mut locks.anchors,
+                template.width,
+                state.rotation,
+                state.x,
+                state.y,
+            );
         }
         for &target in &template.translations[index] {
             if target != INVALID_STATE {
@@ -456,31 +484,43 @@ fn search_reachable_locks(
             }
         }
     }
-    let mut entries = locks
-        .into_iter()
-        .map(|index| {
-            let state = state_from_index(template.width, template.ceiling, usize::from(index));
-            let state_index = usize::from(index);
-            let evidence = if capture_scoring_evidence {
+    if capture_scoring_evidence {
+        let lock_count = locks
+            .anchors
+            .iter()
+            .map(|word| word.count_ones() as usize)
+            .sum();
+        let mut entries = Vec::with_capacity(lock_count);
+        for (word_index, mut word) in locks.anchors.iter().copied().enumerate() {
+            let rotation = RotationState::from_quarter_turns((word_index / 4) as u8)
+                .expect("four lock rotation planes");
+            while word != 0 {
+                let anchor = (word_index % 4) * 64 + word.trailing_zeros() as usize;
+                word &= word - 1;
+                let state = State {
+                    rotation,
+                    x: (anchor % usize::from(template.width)) as i8,
+                    y: (anchor / usize::from(template.width)) as i8,
+                };
+                let state_index = state_index(template.width, template.ceiling, state)
+                    .expect("reachable lock is in the compiled pose domain");
                 let evidence = if scratch.evidence_generations[state_index] == generation {
                     scratch.evidence[state_index]
                 } else {
                     ScoringLockEvidence::no_rotation(state.rotation)
                 };
-                evidence.with_immobile_before_clear(scoring_lock_is_immobile(
+                let evidence = evidence.with_immobile_before_clear(scoring_lock_is_immobile(
                     template,
                     board,
                     state_index,
-                ))
-            } else {
-                ScoringLockEvidence::no_rotation(state.rotation)
-            };
-            ((state.rotation.quarter_turns(), state.x, state.y), evidence)
-        })
-        .collect::<Vec<_>>();
-    entries.sort_unstable_by_key(|entry| entry.0);
-    entries.dedup_by_key(|entry| entry.0);
-    (ExtendedReachableLocks { entries }, cursor)
+                ));
+                entries.push(((state.rotation.quarter_turns(), state.x, state.y), evidence));
+            }
+        }
+        entries.sort_unstable_by_key(|entry| entry.0);
+        locks.entries = entries;
+    }
+    (locks, cursor)
 }
 
 fn push_if_placeable(
@@ -554,142 +594,222 @@ fn scoring_lock_is_immobile(
     translations_blocked && upward_blocked
 }
 
-fn compile_translations(
-    width: u8,
-    height: u8,
-    ceiling: i8,
-    valid: &[bool],
-) -> (Vec<[u16; 3]>, Vec<u16>) {
-    let mut translations = Vec::with_capacity(valid.len());
-    let mut seeds = Vec::new();
-    for source in 0..valid.len() {
-        let state = state_from_index(width, ceiling, source);
-        let candidates = [
-            State {
-                y: state.y - 1,
-                ..state
-            },
-            State {
-                x: state.x - 1,
-                ..state
-            },
-            State {
-                x: state.x + 1,
-                ..state
-            },
-        ];
-        let mut targets = [INVALID_STATE; 3];
-        for (slot, candidate) in candidates.into_iter().enumerate() {
-            if let Some(index) =
-                state_index(width, ceiling, candidate).filter(|index| valid[*index])
-            {
-                targets[slot] = u16::try_from(index).unwrap_or(INVALID_STATE);
-            }
-        }
-        translations.push(targets);
-        if state.y >= height as i8 && valid[source] {
-            if let Ok(source) = u16::try_from(source) {
-                seeds.push(source);
-            }
-        }
-    }
-    (translations, seeds)
-}
-
-fn compile_rotations(
-    width: u8,
-    ceiling: i8,
-    valid: &[bool],
-    kick_deltas: &[Vec<(i8, i8)>; 12],
-) -> (Vec<u32>, Vec<u16>, Vec<u8>) {
-    let mut offsets = Vec::with_capacity(valid.len() * 3 + 1);
-    let mut targets = Vec::new();
-    let mut kick_indices = Vec::new();
-    offsets.push(0);
-    for source in 0..valid.len() {
-        let state = state_from_index(width, ceiling, source);
-        for (slot, to) in [
-            state.rotation.clockwise(),
-            state.rotation.counter_clockwise(),
-            state.rotation.rotated_180(),
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            let transition = state.rotation.quarter_turns() as usize * 3 + slot;
-            for (kick_index, &(dx, dy)) in kick_deltas[transition].iter().enumerate() {
-                let candidate = State {
-                    rotation: to,
-                    x: state.x + dx,
-                    y: state.y + dy,
-                };
-                let Some(index) =
-                    state_index(width, ceiling, candidate).filter(|index| valid[*index])
-                else {
-                    continue;
-                };
-                if let Ok(index) = u16::try_from(index) {
-                    targets.push(index);
-                    kick_indices.push(kick_index as u8);
-                }
-            }
-            offsets.push(targets.len() as u32);
-        }
-    }
-    (offsets, targets, kick_indices)
-}
-
-fn state_index(width: u8, ceiling: i8, state: State) -> Option<usize> {
-    if state.x < 0 || state.x >= width as i8 || state.y < 0 || state.y > ceiling {
-        return None;
-    }
-    Some(
-        (state.rotation.quarter_turns() as usize * (ceiling as usize + 1) + state.y as usize)
-            * width as usize
-            + state.x as usize,
-    )
-}
-
-fn state_from_index(width: u8, ceiling: i8, index: usize) -> State {
-    let rotation_stride = (ceiling as usize + 1) * width as usize;
-    let rotation = RotationState::from_quarter_turns((index / rotation_stride) as u8)
-        .expect("compiled rotation is valid");
-    let remainder = index % rotation_stride;
-    State {
-        rotation,
-        x: (remainder % width as usize) as i8,
-        y: (remainder / width as usize) as i8,
-    }
-}
-
-fn source_ceiling(height: u8, piece: PieceKind, allow_180: bool, profile: &KickTableProfile) -> i8 {
-    let maximum_downward = profile
-        .entries()
-        .iter()
-        .filter(|entry| entry.transition().piece() == piece)
-        .filter(|entry| allow_180 || !entry.transition().is_180())
-        .flat_map(|entry| {
-            entry.sequence().offsets().iter().map(move |offset| {
-                normalized_kick_delta(
-                    piece,
-                    entry.transition().from(),
-                    entry.transition().to(),
-                    offset.dx(),
-                    offset.dy(),
-                )
-                .1
-            })
-        })
-        .filter(|dy| *dy < 0)
-        .map(|dy| -dy)
-        .max()
-        .unwrap_or(0);
-    height.saturating_add(maximum_downward as u8) as i8
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shared_topology_preserves_locks_across_field_heights_and_words() {
+        const WIDTH: u8 = 10;
+        const BASE_HEIGHT: u8 = 6;
+        let mut boards = [0_u64; 3];
+        for x in 0..WIDTH {
+            for y in 0..x % 4 {
+                boards[1] |= 1_u64 << (y * WIDTH + x);
+            }
+            if (2..8).contains(&x) {
+                boards[2] |= 1_u64 << (3 * WIDTH + x);
+            }
+        }
+        for y in 0..3 {
+            boards[2] |= 1_u64 << (y * WIDTH + 2);
+        }
+
+        for profile in [
+            KickTableProfileId::Srs90,
+            KickTableProfileId::SrsPlus,
+            KickTableProfileId::SrsX,
+            KickTableProfileId::Jstris180,
+            KickTableProfileId::NoKick,
+        ] {
+            let expected = PieceKind::STANDARD_TETROMINOES.map(|piece| {
+                boards.map(|board| {
+                    super::super::reachability::exact_spawn_lock_anchors(
+                        WIDTH,
+                        BASE_HEIGHT,
+                        board,
+                        piece,
+                        profile,
+                    )
+                    .unwrap()
+                })
+            });
+            for height in [6, 7, 13, 20, 24] {
+                let offset = height - BASE_HEIGHT;
+                let mut workspace = ExtendedReachabilityWorkspace::new(WIDTH, height, profile);
+                for (board_index, board) in boards.into_iter().enumerate() {
+                    // A solid floor translates the same playable six rows
+                    // across the compact boundary and every board word.
+                    let mut shifted = ExtendedBoard::EMPTY;
+                    for cell in 0..u16::from(offset) * u16::from(WIDTH) {
+                        shifted.insert(cell);
+                    }
+                    for cell in 0..BASE_HEIGHT * WIDTH {
+                        if board & (1_u64 << cell) != 0 {
+                            shifted.insert(u16::from(cell + offset * WIDTH));
+                        }
+                    }
+                    for (piece_index, piece) in
+                        PieceKind::STANDARD_TETROMINOES.into_iter().enumerate()
+                    {
+                        let locks = workspace.reachable_locks_with_scoring(shifted, piece, false);
+                        assert_eq!(
+                            locks.entries.capacity(),
+                            0,
+                            "Boolean locks allocate no evidence"
+                        );
+                        let scored = workspace.reachable_locks_with_scoring(shifted, piece, true);
+                        assert_eq!(locks.anchors, scored.anchors);
+                        assert_eq!(
+                            scored.entries.len(),
+                            locks
+                                .anchors
+                                .iter()
+                                .map(|word| word.count_ones() as usize)
+                                .sum::<usize>()
+                        );
+                        for rotation in RotationState::ALL {
+                            let anchors = expected[piece_index][board_index]
+                                [rotation.quarter_turns() as usize];
+                            for y in 0..height {
+                                for x in 0..WIDTH {
+                                    let expected_lock = y >= offset
+                                        && anchors & (1_u64 << ((y - offset) * WIDTH + x)) != 0;
+                                    assert_eq!(
+                                        locks.contains(rotation, x as i8, y as i8),
+                                        expected_lock,
+                                        "{profile:?} {piece:?} {rotation:?}, height={height}, board={board_index}, {x},{y}"
+                                    );
+                                    assert_eq!(
+                                        scored
+                                            .entries
+                                            .binary_search_by_key(
+                                                &(rotation.quarter_turns(), x as i8, y as i8),
+                                                |entry| entry.0,
+                                            )
+                                            .is_ok(),
+                                        expected_lock,
+                                        "scoring evidence has exactly the Boolean lock domain"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn full_height_lock_bitsets_preserve_triple_kick_evidence_and_warm_query_bounds() {
+        const WIDTH: u8 = 10;
+        let cavity: [(u8, u8); 14] = [
+            (0, 0),
+            (1, 0),
+            (0, 1),
+            (0, 2),
+            (3, 0),
+            (4, 0),
+            (2, 1),
+            (3, 1),
+            (3, 2),
+            (4, 2),
+            (2, 3),
+            (3, 3),
+            (4, 1),
+            (4, 3),
+        ];
+        let mut reference = None;
+        for offset in [0_u8, 18] {
+            let height = offset + 6;
+            let mut without_j = ExtendedBoard::EMPTY;
+            for y in 0..height {
+                for x in 0..WIDTH {
+                    if y < offset || x >= 5 {
+                        without_j.insert(u16::from(y) * u16::from(WIDTH) + u16::from(x));
+                    }
+                }
+            }
+            for (x, y) in cavity {
+                without_j.insert(u16::from(y + offset) * u16::from(WIDTH) + u16::from(x));
+            }
+            let mut with_j = without_j;
+            for (x, y) in [(0_u8, 3_u8), (0, 4), (0, 5), (1, 5)] {
+                with_j.insert(u16::from(y + offset) * u16::from(WIDTH) + u16::from(x));
+            }
+            let mut workspace =
+                ExtendedReachabilityWorkspace::new(WIDTH, height, KickTableProfileId::SrsPlus);
+            let target = (RotationState::Right, 1, offset as i8 + 1);
+            let without = workspace.reachable_locks_with_scoring(without_j, PieceKind::T, false);
+            assert!(!without.contains(target.0, target.1, target.2));
+            assert_eq!(without.entries.capacity(), 0);
+            assert_eq!(
+                workspace.checked_query_future_bytes(PieceKind::T, false),
+                Some(core::mem::size_of::<ExtendedReachableLocks>() as u128),
+                "warm Boolean queries have no future heap allocation"
+            );
+
+            let before = workspace.retained_bytes();
+            let future = workspace
+                .checked_query_future_bytes(PieceKind::T, true)
+                .unwrap();
+            let locks = workspace.reachable_locks_with_scoring(with_j, PieceKind::T, true);
+            let retained_growth = workspace.retained_bytes() - before
+                + core::mem::size_of::<ExtendedReachableLocks>()
+                + locks.entries.capacity()
+                    * core::mem::size_of::<((u8, i8, i8), ScoringLockEvidence)>();
+            assert!(retained_growth as u128 <= future);
+            assert!(locks.contains(target.0, target.1, target.2));
+            let evidence = locks.scoring_evidence(target.0, target.1, target.2);
+            assert!(evidence.last_action_was_rotation());
+            assert!(evidence.used_kick());
+            assert!(evidence.first_success_confirmed());
+
+            let shape = standard_tetromino_registry()
+                .get(PieceKind::T)
+                .unwrap()
+                .shape(target.0);
+            let can_translate = |dx, dy| {
+                shape.cells().iter().all(|cell| {
+                    let x = target.1 + dx + cell.x();
+                    let y = target.2 + dy + cell.y();
+                    x >= 0
+                        && x < WIDTH as i8
+                        && y >= 0
+                        && (y >= height as i8
+                            || !with_j.contains(y as u16 * u16::from(WIDTH) + x as u16))
+                })
+            };
+            assert_eq!(
+                evidence.immobile_before_clear(),
+                [(0, -1), (-1, 0), (1, 0), (0, 1)]
+                    .into_iter()
+                    .all(|(dx, dy)| !can_translate(dx, dy))
+            );
+            let (x, y) = evidence.predecessor();
+            let normalized = ScoringLockEvidence::rotation(
+                evidence.from_rotation(),
+                evidence.rotation_request(),
+                evidence.kick_index(),
+                evidence.kick_dx(),
+                evidence.kick_dy(),
+                x,
+                y - offset as i8,
+            )
+            .with_immobile_before_clear(evidence.immobile_before_clear());
+            if let Some(reference) = reference {
+                assert_eq!(
+                    normalized, reference,
+                    "high-word storage preserves evidence ranking and ties"
+                );
+            } else {
+                reference = Some(normalized);
+            }
+            let boolean = workspace.reachable_locks_with_scoring(with_j, PieceKind::T, false);
+            assert_eq!(boolean.anchors, locks.anchors);
+            assert_eq!(boolean.entries.capacity(), 0);
+        }
+    }
 
     #[test]
     fn extended_harddrop_proof_matches_swept_cells_and_full_search_across_words() {

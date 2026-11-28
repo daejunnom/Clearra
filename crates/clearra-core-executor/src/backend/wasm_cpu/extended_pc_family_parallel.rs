@@ -19,7 +19,10 @@ use crate::{
     resource::{ExecutionMemoryOwner, SharedExecutionMemoryBudget},
 };
 
-use super::super::extended_geometry::ExtendedParallelGeometryBranch;
+use super::super::{
+    extended_geometry::ExtendedParallelGeometryBranch,
+    ordered_candidate_digest::OrderedCandidateDigest,
+};
 use super::{
     mix_digest, Arc, BuildProbabilityAdvance, CoreExecutionResult, ExecutionControl,
     ExtendedBuildProbabilitySession, ExtendedFamilyPurpose, ExtendedGeometryAdvance, HashMap,
@@ -28,7 +31,7 @@ use super::{
 
 struct DigestSegment {
     first_ordinal: u128,
-    values: Vec<u64>,
+    values: OrderedCandidateDigest,
 }
 
 struct WorkerResult {
@@ -137,9 +140,7 @@ impl WorkerResult {
         let mut bytes =
             (self.digests.capacity() as u128).checked_mul(size_of::<DigestSegment>() as u128)?;
         for segment in &self.digests {
-            bytes = bytes.checked_add(
-                (segment.values.capacity() as u128).checked_mul(size_of::<u64>() as u128)?,
-            )?;
+            bytes = bytes.checked_add(segment.values.checked_retained_bytes()? as u128)?;
         }
         if RETAIN_ROWS {
             bytes = bytes.checked_add(self.bounded_rows.as_ref()?.retained)?;
@@ -189,15 +190,26 @@ impl WorkerResult {
         &mut self,
         branch: &ExtendedParallelGeometryBranch,
     ) -> Result<usize, WasmExactSearchError> {
-        let count = usize::try_from(branch.candidate_count).map_err(|_| projection_error())?;
-        let growth = (count as u128)
-            .checked_mul(size_of::<u64>() as u128)
-            .and_then(|bytes| {
-                bytes.checked_add(
-                    (self.digests.len() + 1) as u128 * 2 * size_of::<DigestSegment>() as u128,
-                )
-            })
-            .ok_or_else(projection_error)?;
+        // A compressed family may describe far more leaves than the request
+        // can visit. Admit only this segment's metadata; each evidence page
+        // is admitted immediately before its first concrete candidate.
+        let capacity = if self.digests.len() == self.digests.capacity() {
+            self.digests
+                .len()
+                .checked_add(1)
+                .and_then(|count| count.checked_mul(2))
+                .map(|count| count.max(4))
+                .ok_or_else(projection_error)?
+        } else {
+            self.digests.capacity()
+        };
+        let growth = if capacity > self.digests.capacity() {
+            (capacity as u128)
+                .checked_mul(size_of::<DigestSegment>() as u128)
+                .ok_or_else(projection_error)?
+        } else {
+            0
+        };
         let private = self
             .checked_retained_bytes::<RETAIN_ROWS>()
             .and_then(|bytes| bytes.checked_add(branch.private_retained_bytes() as u128))
@@ -208,35 +220,30 @@ impl WorkerResult {
             if std::env::var("CLEARRA_EXTENDED_PC_ADMISSION_DIAGNOSTIC").as_deref() == Ok("1") {
                 use std::io::Write as _;
 
-                // The checked growth calculation above already admitted
-                // this multiplication. Diagnostics never alter the claim.
-                let digest_payload_bytes = (count as u128) * size_of::<u64>() as u128;
                 let _ = writeln!(
                     std::io::stderr().lock(),
                     concat!(
                         "{{\"schema\":\"clearra.extended-pc-admission-diagnostic.v1\",",
-                        "\"stage\":\"branch-digest-preallocation\",",
+                        "\"stage\":\"branch-digest-metadata\",",
                         "\"first_ordinal\":{},\"candidate_count\":{},",
                         "\"digest_payload_bytes\":{},\"auxiliary_growth_bytes\":{},",
                         "\"private_claim_bytes\":{}}}"
                     ),
                     branch.first_ordinal,
                     branch.candidate_count,
-                    digest_payload_bytes,
+                    0,
                     growth,
                     private,
                 );
             }
             WasmExactSearchError::resource_admission(report)
         })?;
-        self.digests.try_reserve(1).map_err(|_| storage_error())?;
-        let mut values = Vec::new();
-        values
-            .try_reserve_exact(count)
+        self.digests
+            .try_reserve_exact(capacity - self.digests.len())
             .map_err(|_| storage_error())?;
         self.digests.push(DigestSegment {
             first_ordinal: branch.first_ordinal,
-            values,
+            values: OrderedCandidateDigest::default(),
         });
         Ok(self.digests.len() - 1)
     }
@@ -271,6 +278,13 @@ impl WorkerResult {
         let digest_future = (candidate.row_ids().len() as u128)
             .checked_mul(64)
             .and_then(|bytes| bytes.checked_add(128))
+            .and_then(|bytes| {
+                bytes.checked_add(
+                    self.digests[digest_index]
+                        .values
+                        .checked_next_growth_bytes()?,
+                )
+            })
             .ok_or_else(projection_error)?;
         self.memory_owner()?
             .ensure(
@@ -280,6 +294,10 @@ impl WorkerResult {
                     .ok_or_else(projection_error)?,
             )
             .map_err(WasmExactSearchError::resource_admission)?;
+        self.digests[digest_index]
+            .values
+            .try_reserve_next()
+            .map_err(|_| storage_error())?;
         let tiling = super::ExtendedTilingKey::from_candidate(&self.engine.catalog, &candidate);
         let digest = tiling.digest();
         let row_probe = RETAIN_ROWS.then_some(tiling);
@@ -320,7 +338,10 @@ impl WorkerResult {
                 .and_then(|bytes| bytes.checked_add(branch.private_retained_bytes() as u128))
                 .ok_or_else(projection_error)?;
         }
-        self.digests[digest_index].values.push(digest);
+        self.digests[digest_index]
+            .values
+            .push_reserved(digest)
+            .map_err(|_| contract_error())?;
         self.engine.ensure_memory_bound(0)?;
         let retained = self
             .checked_retained_bytes::<RETAIN_ROWS>()
@@ -616,7 +637,7 @@ impl ExtendedBuildProbabilitySession {
             if segment.first_ordinal != ordinal {
                 return Err(contract_error());
             }
-            for value in &segment.values {
+            for value in segment.values.iter() {
                 self.candidate_digest = mix_digest(self.candidate_digest, *value);
             }
             ordinal = ordinal

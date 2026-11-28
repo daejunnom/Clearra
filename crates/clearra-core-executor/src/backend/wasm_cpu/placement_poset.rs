@@ -23,21 +23,21 @@ use clearra_core_domain::piece::piece_kind::PieceKind;
 #[cfg(any(test, feature = "local-search-ab"))]
 use std::cell::OnceCell;
 
-use super::{
-    buildup::compact_target_board,
-    catalog::GeometryCatalog,
-    geometry::GeometryCandidate,
-    placement_conditions::{AtomicRowProjection, GroupedClearConditions},
-    MAX_BOARD64_PIECES,
-};
 #[cfg(any(test, feature = "local-search-ab"))]
 use super::{
     buildup::placement_is_grounded,
     catalog::InstantiatedRealization,
     placement_conditions::{
-        grounding_sources, vertical_entry_mask, GroundingSources, PlacementConditionCatalog,
-        PrecomputedOrderGuard,
+        grounding_sources, vertical_entry_mask, AtomicRowProjection, GroundingSources,
+        GroupedClearConditions, PlacementConditionCatalog, PrecomputedOrderGuard,
     },
+};
+use super::{
+    candidate_row_projection::{CandidateCells, CandidateRowProjection},
+    catalog::GeometryCatalog,
+    extended_board::ExtendedBoard,
+    geometry::GeometryCandidate,
+    MAX_BOARD64_PIECES,
 };
 
 const MAX_HEIGHT: usize = 6;
@@ -137,7 +137,9 @@ impl CertifiedPlacementPoset {
 }
 
 pub(super) struct CandidateGeometry {
+    #[cfg(any(test, feature = "local-search-ab"))]
     width: u8,
+    #[cfg(any(test, feature = "local-search-ab"))]
     height: u8,
     initial_board: u64,
     operation_count: usize,
@@ -145,6 +147,8 @@ pub(super) struct CandidateGeometry {
     all_operations: u16,
     pieces: [PieceKind; MAX_BOARD64_PIECES],
     cells: [u64; MAX_BOARD64_PIECES],
+    projection: CandidateRowProjection,
+    #[cfg(any(test, feature = "local-search-ab"))]
     clear_conditions: GroupedClearConditions,
 }
 
@@ -618,7 +622,9 @@ impl CandidateGeometry {
         )
     ))]
     pub(super) fn symbolic_clear_groups(&self) -> impl Iterator<Item = (u16, u16)> + '_ {
-        self.clear_conditions.groups()
+        self.projection
+            .groups()
+            .map(|(operations, rows)| (operations as u16, rows as u16))
     }
 
     #[cfg(any(
@@ -636,13 +642,18 @@ impl CandidateGeometry {
 
     #[cfg(feature = "placement-dependency-pc")]
     pub(super) fn symbolic_deleted_rows(&self, executed: u16) -> u16 {
-        self.clear_conditions.deleted_rows(executed)
+        self.projection.deleted_rows(u64::from(executed)) as u16
     }
 
     #[cfg(feature = "placement-dependency-pc")]
     pub(super) fn symbolic_physical_board(&self, executed: u16, deleted: u16) -> u64 {
         let board = board_for_operations(self.initial_board, &self.cells, executed);
-        self.row_projection(deleted).physical_board(board)
+        self.projection
+            .compact(
+                ExtendedBoard::from_words([board, 0, 0, 0]),
+                u32::from(deleted),
+            )
+            .words()[0]
     }
 
     /// Start only with small Boolean candidates with a geometric support
@@ -795,6 +806,7 @@ impl CandidateGeometry {
         (projection.physical_board(original), deleted)
     }
 
+    #[cfg(any(test, feature = "local-search-ab"))]
     fn row_projection(&self, deleted: u16) -> AtomicRowProjection {
         AtomicRowProjection::new(self.width, self.height, deleted)
             .expect("candidate geometry owns a validated compact row frame")
@@ -830,7 +842,6 @@ impl CandidateGeometry {
         }
         let mut pieces = [PieceKind::I; MAX_BOARD64_PIECES];
         let mut cells = [0_u64; MAX_BOARD64_PIECES];
-        let mut row_contributors = [0_u16; MAX_HEIGHT];
         let mut selected_cells = 0_u64;
         let row_mask = (1_u64 << width) - 1;
         for (operation, &row_id) in candidate.row_ids().iter().enumerate() {
@@ -845,33 +856,50 @@ impl CandidateGeometry {
             selected_cells |= row.cells;
             pieces[operation] = row.piece;
             cells[operation] = row.cells;
-            for original_row in 0..usize::from(height) {
-                if (row.cells >> (original_row * usize::from(width))) & row_mask != 0 {
-                    row_contributors[original_row] |= 1_u16 << operation;
-                }
-            }
         }
         if selected_cells != required_cells {
             return None;
         }
         let final_board = initial_board | selected_cells;
-        let mut completed_rows = 0_u16;
         for original_row in 0..usize::from(height) {
             let shift = original_row * usize::from(width);
             if (initial_board >> shift) & row_mask == row_mask {
                 // Preserve CandidateProjection's preclear-normalization gate.
                 return None;
             }
-            if (final_board >> shift) & row_mask == row_mask {
-                completed_rows |= 1_u16 << original_row;
-            }
         }
-        if compact_target_board(width, height, final_board, completed_rows) != expected_final_board
+        let projection = CandidateRowProjection::compile(
+            width,
+            height,
+            ExtendedBoard::from_words([final_board, 0, 0, 0]),
+            CandidateCells::Compact(&cells[..operation_count]),
+        );
+        let completed_rows = projection.completed_rows();
+        if projection
+            .compact(
+                ExtendedBoard::from_words([final_board, 0, 0, 0]),
+                completed_rows,
+            )
+            .words()[0]
+            != expected_final_board
         {
             return None;
         }
+        #[cfg(any(test, feature = "local-search-ab"))]
+        let clear_conditions = {
+            let mut contributors = [0_u16; MAX_HEIGHT];
+            for row in 0..height {
+                contributors[usize::from(row)] = projection.contributors(row) as u16;
+            }
+            GroupedClearConditions::from_completed_rows(
+                &contributors[..usize::from(height)],
+                completed_rows as u16,
+            )?
+        };
         Some(Self {
+            #[cfg(any(test, feature = "local-search-ab"))]
             width,
+            #[cfg(any(test, feature = "local-search-ab"))]
             height,
             initial_board,
             operation_count,
@@ -879,10 +907,9 @@ impl CandidateGeometry {
             all_operations: (1_u16 << operation_count) - 1,
             pieces,
             cells,
-            clear_conditions: GroupedClearConditions::from_completed_rows(
-                &row_contributors[..usize::from(height)],
-                completed_rows,
-            )?,
+            projection,
+            #[cfg(any(test, feature = "local-search-ab"))]
+            clear_conditions,
         })
     }
 
@@ -1024,14 +1051,19 @@ impl CandidateGeometry {
     }
 
     fn project_frame(&self, deleted: u16) -> (u64, [u64; MAX_BOARD64_PIECES]) {
-        let projection = self.row_projection(deleted);
-        let initial = projection.physical_board(self.initial_board);
+        let frame = self.projection.frame(u32::from(deleted));
+        let project = |board| {
+            frame
+                .compact(ExtendedBoard::from_words([board, 0, 0, 0]))
+                .words()[0]
+        };
+        let initial = project(self.initial_board);
         let mut physical_cells = [0_u64; MAX_BOARD64_PIECES];
         for (operation, physical) in physical_cells[..self.operation_count]
             .iter_mut()
             .enumerate()
         {
-            *physical = projection.physical_board(self.cells[operation]);
+            *physical = project(self.cells[operation]);
         }
         (initial, physical_cells)
     }

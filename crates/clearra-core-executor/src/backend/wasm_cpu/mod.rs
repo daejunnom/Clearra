@@ -12,6 +12,8 @@ pub use buildup::{
     CompactBuildUpTransitionMode, RustCompactBuildUpWorkspace,
 };
 mod catalog;
+mod candidate_row_projection;
+mod candidate_relation;
 mod compact_exact_u64_map;
 mod compact_kick_authority;
 #[cfg(test)]
@@ -68,7 +70,7 @@ mod pc_chance_constraints;
 mod piece_order_language;
 #[cfg(feature = "local-search-ab")]
 pub use piece_order_language::{count_distinct_no_hold_one_bag_poset, DistinctNoHoldOneBagCount};
-#[cfg(any(test, feature = "local-search-ab", feature = "placement-dependency-pc"))]
+#[cfg(any(test, feature = "local-search-ab"))]
 mod placement_conditions;
 #[cfg(any(test, feature = "local-search-ab"))]
 mod placement_dependency;
@@ -77,6 +79,10 @@ mod placement_dependency_integration_tests;
 #[cfg(any(test, feature = "local-search-ab", feature = "placement-dependency-pc"))]
 mod placement_poset;
 mod queue_observation_policy;
+mod prefix_dependency;
+mod movement_topology;
+#[cfg(feature = "parallel")]
+mod ordered_candidate_digest;
 mod reachability;
 mod realization_feasibility;
 mod result;
@@ -85,6 +91,7 @@ mod setup_coverage_graph;
 mod setup_finder;
 mod setup_graph_builder;
 mod setup_observation_language;
+mod subset_node_index;
 mod setup_parallel;
 mod setup_parallel_segmented;
 mod setup_parallel_wire;

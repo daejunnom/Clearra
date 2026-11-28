@@ -1271,6 +1271,19 @@ impl ExtendedBuildProbabilitySession {
             }
             self.buildable_tilings.insert(tiling.clone());
         }
+        // Apply the same negative-only ILC closure as compact physical-prefix
+        // pruning before allocating a full candidate order graph. Keep the
+        // complete geometry inventory, original ordinal and ordered digest;
+        // successful closure is never treated as movement or supply evidence.
+        if super::prefix_dependency::selected_full_height_prefix_stalls(
+            &self.catalog,
+            candidate.row_ids(),
+        ) {
+            if control.is_cancelled() {
+                return Err(WasmExactSearchError::Cancelled);
+            }
+            return Ok(());
+        }
         let execution_evidence_requested = self.aggregation.requests_spin_coverage()
             || self.problem.objective().score().requested()
             || (self.problem.objective().execution_constraints().requested()

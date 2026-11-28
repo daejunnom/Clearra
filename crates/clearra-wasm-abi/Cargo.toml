@@ -7,6 +7,9 @@ publish = false
 
 [features]
 default = []
+# The product GUI selects the CPU engine. Keep GPU kernels and their browser
+# bindings outside that artifact; experimental callers can opt in explicitly.
+webgpu-search = ["clearra-wasm/webgpu-search", "dep:wasm-bindgen-futures"]
 stage-profiling = ["clearra-wasm/stage-profiling"]
 minimum-hotfix-ab = ["dep:clearra-coverage", "clearra-coverage/minimum-hotfix-ab"]
 
@@ -16,11 +19,11 @@ clearra-pc-graph = { path = "../clearra-pc-graph" }
 clearra-accelerator-product-host = { path = "../clearra-accelerator-product-host" }
 clearra-core-executor = { path = "../clearra-core-executor" }
 clearra-rules = { path = "../clearra-rules" }
-clearra-wasm = { path = "../clearra-wasm", features = ["webgpu-search"] }
+clearra-wasm = { path = "../clearra-wasm" }
 serde_json = { workspace = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-wasm-bindgen-futures = "0.4"
+wasm-bindgen-futures = { version = "0.4", optional = true }
 
 [lib]
 name = "clearra_wasm"

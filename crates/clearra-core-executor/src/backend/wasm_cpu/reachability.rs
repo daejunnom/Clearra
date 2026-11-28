@@ -11,9 +11,9 @@ use clearra_core_domain::execution_cancellation::ExecutionControl;
 use clearra_core_domain::piece::{piece_kind::PieceKind, rotation::RotationState};
 use clearra_piece_registry::standard::tetromino_registry::standard_tetromino_registry;
 use clearra_replay::{RotationRequest, ScoringLockEvidence};
-use clearra_rules::kicks::{
-    normalized_kick_delta, KickTableProfile, KickTableProfileId, KickTransition,
-};
+#[cfg(test)]
+use clearra_rules::kicks::{normalized_kick_delta, KickTableProfile};
+use clearra_rules::kicks::{KickTableProfileId, KickTransition};
 use std::sync::{Arc, OnceLock};
 
 use crate::conditioned_local_product::LocalRelationProductLookup;
@@ -100,7 +100,13 @@ use symbolic_target::ReverseScratch;
 use super::{
     catalog::{GeometryCatalog, InstantiatedRealization},
     kick_profiles::builtin_kick_profile,
-    mix_digest, piece_index,
+    mix_digest,
+    movement_topology::{
+        compile_rotations, compile_translations, lock_anchor_contains, lock_anchor_insert,
+        normalized_kick_deltas, source_ceiling, state_from_index, state_index, PoseValidity, State,
+        INVALID_STATE_INDEX, INVALID_STATE_MASK,
+    },
+    piece_index,
 };
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -110,21 +116,11 @@ pub(super) struct ReachableLocks {
 
 impl ReachableLocks {
     pub fn insert(&mut self, width: u8, rotation: RotationState, x: i8, y: i8) {
-        if x < 0 || y < 0 || x >= width as i8 {
-            return;
-        }
-        let anchor = y as usize * width as usize + x as usize;
-        if anchor < 64 {
-            self.anchors[rotation.quarter_turns() as usize] |= 1_u64 << anchor;
-        }
+        lock_anchor_insert(&mut self.anchors, width, rotation, x, y);
     }
 
     pub fn contains(&self, width: u8, rotation: RotationState, x: i8, y: i8) -> bool {
-        if x < 0 || y < 0 || x >= width as i8 {
-            return false;
-        }
-        let anchor = y as usize * width as usize + x as usize;
-        anchor < 64 && self.anchors[rotation.quarter_turns() as usize] & (1_u64 << anchor) != 0
+        lock_anchor_contains(&self.anchors, width, rotation, x, y)
     }
 
     pub fn union_with(&mut self, other: Self) {
@@ -843,8 +839,11 @@ impl ReachabilityWorkspace {
         realization: InstantiatedRealization,
     ) -> bool {
         self.metrics.harddrop_queries = self.metrics.harddrop_queries.saturating_add(1);
-        let grounded =
-            realization.lock_y == 0 || board & (realization.lock_mask >> usize::from(width)) != 0;
+        let grounded = realization.lock_y == 0
+            || realization
+                .lock_mask
+                .checked_shr(u32::from(width))
+                .is_some_and(|below| board & below != 0);
         let reachable = grounded && board & harddrop_path_mask(realization.lock_mask, width) == 0;
         self.metrics.harddrop_hits = self
             .metrics
@@ -1262,6 +1261,7 @@ impl ReachabilityWorkspace {
             .with_immobile_before_clear(immobile)
     }
 
+    #[cfg(any(test, feature = "local-search-ab"))]
     #[allow(clippy::too_many_arguments)]
     pub fn lock_reachable_after_harddrop_miss_in_frame(
         &mut self,
@@ -2119,14 +2119,8 @@ pub(crate) fn exact_solver_local_relation_spawn_entries(
 }
 
 fn anchors_contain(anchors: [u64; 4], width: u8, rotation: RotationState, x: i8, y: i8) -> bool {
-    if x < 0 || y < 0 || x >= width as i8 {
-        return false;
-    }
-    let anchor = y as usize * width as usize + x as usize;
-    anchor < 64 && anchors[rotation.quarter_turns() as usize] & (1_u64 << anchor) != 0
+    lock_anchor_contains(&anchors, width, rotation, x, y)
 }
-
-const INVALID_STATE_MASK: u64 = u64::MAX;
 
 /// One execution-request owner, not a process-global/profile-only cache.
 /// First-success kick transitions and sky entries are immutable; board-dependent
@@ -2254,25 +2248,7 @@ impl ReachabilityTemplate {
             .expect("WASM reachability only compiles connected exact kick profiles");
         let allow_180 = profile.supports_180();
         let ceiling = source_ceiling(height, piece, allow_180, profile);
-        let mut kick_deltas: [Vec<(i8, i8)>; 12] = std::array::from_fn(|_| Vec::new());
-        for from in RotationState::ALL {
-            let targets = [
-                from.clockwise(),
-                from.counter_clockwise(),
-                from.rotated_180(),
-            ];
-            for (slot, to) in targets.into_iter().enumerate() {
-                if slot == 2 && !allow_180 {
-                    continue;
-                }
-                let index = rotation_transition_index(from, slot);
-                if let Some(sequence) = profile.sequence_for(KickTransition::new(piece, from, to)) {
-                    kick_deltas[index].extend(sequence.offsets().iter().map(|offset| {
-                        normalized_kick_delta(piece, from, to, offset.dx(), offset.dy())
-                    }));
-                }
-            }
-        }
+        let kick_deltas = normalized_kick_deltas(piece, allow_180, profile);
         Self::compile_normalized(
             width,
             height,
@@ -2337,10 +2313,10 @@ impl ReachabilityTemplate {
                 }
             }
         }
+        let valid = PoseValidity::CompactMasks(&state_masks);
         let (rotation_target_offsets, rotation_targets, rotation_kick_indices) =
-            compile_rotation_targets(width, ceiling, &state_masks, &kick_deltas);
-        let (translation_targets, sky_seeds) =
-            compile_translation_targets_and_seeds(width, height, ceiling, &state_masks);
+            compile_rotations(width, ceiling, valid, &kick_deltas);
+        let (translation_targets, sky_seeds) = compile_translations(width, height, ceiling, valid);
         let reverse_translation_sources = compile_reverse_translation_sources(&translation_targets);
         let sky_seed_words = compile_seed_words(state_count, &sky_seeds);
         let (reverse_rotation_offsets, reverse_rotation_sources) = compile_reverse_rotation_sources(
@@ -2408,13 +2384,6 @@ impl ReachabilityTemplate {
     fn is_sky_seed(&self, state_index: usize) -> bool {
         self.sky_seed_words[state_index / 64] & (1_u64 << (state_index % 64)) != 0
     }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct State {
-    rotation: RotationState,
-    x: i8,
-    y: i8,
 }
 
 #[derive(Clone, Copy)]
@@ -2554,8 +2523,7 @@ fn search_reachable_locks_from_seed_iter(
         let state = state_from_index(width, ceiling, state_index);
         queue_cursor += 1;
         if state.y < height as i8 && grounded_index(template, board, state_index) {
-            let anchor = state.y as usize * width as usize + state.x as usize;
-            locks.anchors[state.rotation.quarter_turns() as usize] |= 1_u64 << anchor;
+            locks.insert(width, state.rotation, state.x, state.y);
             let desired_reached = match desired {
                 Some(DesiredLocks::All(wanted)) => locks.contains_all(wanted),
                 Some(DesiredLocks::Any(wanted)) => {
@@ -3185,8 +3153,6 @@ fn reverse_rotation_prior_targets(
     &template.rotation_targets[prior_start..prior_end]
 }
 
-const INVALID_STATE_INDEX: u16 = u16::MAX;
-
 fn push_index_if_placeable(
     template: &ReachabilityTemplate,
     board: u64,
@@ -3204,17 +3170,6 @@ fn push_index_if_placeable(
         visited_generations[index] = generation;
         queue.push(state_index);
     }
-}
-
-fn state_index(width: u8, ceiling: i8, state: State) -> Option<usize> {
-    if state.x < 0 || state.y < 0 || state.x >= width as i8 || state.y > ceiling {
-        return None;
-    }
-    Some(
-        (state.rotation.quarter_turns() as usize * (ceiling as usize + 1) + state.y as usize)
-            * width as usize
-            + state.x as usize,
-    )
 }
 
 fn grounded_index(template: &ReachabilityTemplate, board: u64, state_index: usize) -> bool {
@@ -3241,58 +3196,15 @@ fn first_successful_kick(
         .copied()
 }
 
-fn compile_translation_targets_and_seeds(
-    width: u8,
-    height: u8,
-    ceiling: i8,
-    state_masks: &[u64],
-) -> (Vec<[u16; 3]>, Vec<u16>) {
-    let mut translations = Vec::with_capacity(state_masks.len());
-    let mut seeds = Vec::new();
-    for source in 0..state_masks.len() {
-        let state = state_from_index(width, ceiling, source);
-        let candidates = [
-            State {
-                y: state.y - 1,
-                ..state
-            },
-            State {
-                x: state.x - 1,
-                ..state
-            },
-            State {
-                x: state.x + 1,
-                ..state
-            },
-        ];
-        let mut targets = [INVALID_STATE_INDEX; 3];
-        for (slot, candidate) in candidates.into_iter().enumerate() {
-            let Some(target) = state_index(width, ceiling, candidate) else {
-                continue;
-            };
-            if state_masks[target] == INVALID_STATE_MASK {
-                continue;
-            }
-            targets[slot] = u16::try_from(target).unwrap_or(INVALID_STATE_INDEX);
-        }
-        translations.push(targets);
-        if state.y >= height as i8 && state_masks[source] != INVALID_STATE_MASK {
-            if let Ok(source) = u16::try_from(source) {
-                seeds.push(source);
-            }
-        }
-    }
-    (translations, seeds)
-}
-
 #[inline]
 pub(super) fn harddrop_path_mask(lock_mask: u64, width: u8) -> u64 {
-    let shift = u32::from(width);
+    let mut shift = u32::from(width);
     let mut path = lock_mask;
-    path |= path << shift;
-    path |= path << (shift * 2);
-    if shift * 4 < u64::BITS {
-        path |= path << (shift * 4);
+    // Cover the entire word for narrow/tall boards as well as the ordinary
+    // ten-column field. A full-width row has no higher row in this carrier.
+    while shift != 0 && shift < u64::BITS {
+        path |= path << shift;
+        shift *= 2;
     }
     path
 }
@@ -3310,49 +3222,6 @@ fn compile_reverse_translation_sources(forward: &[[u16; 3]]) -> Vec<[u16; 3]> {
         }
     }
     reverse
-}
-
-fn compile_rotation_targets(
-    width: u8,
-    ceiling: i8,
-    state_masks: &[u64],
-    kick_deltas: &[&[(i8, i8)]; 12],
-) -> (Vec<u32>, Vec<u16>, Vec<u8>) {
-    let mut offsets = Vec::with_capacity(state_masks.len() * 3 + 1);
-    let mut targets = Vec::new();
-    let mut kick_indices = Vec::new();
-    offsets.push(0);
-    for source in 0..state_masks.len() {
-        let state = state_from_index(width, ceiling, source);
-        let rotations = [
-            state.rotation.clockwise(),
-            state.rotation.counter_clockwise(),
-            state.rotation.rotated_180(),
-        ];
-        for (slot, to) in rotations.into_iter().enumerate() {
-            let transition = rotation_transition_index(state.rotation, slot);
-            for (kick_index, &(dx, dy)) in kick_deltas[transition].iter().enumerate() {
-                let candidate = State {
-                    rotation: to,
-                    x: state.x + dx,
-                    y: state.y + dy,
-                };
-                let Some(target) = state_index(width, ceiling, candidate) else {
-                    continue;
-                };
-                if state_masks[target] == INVALID_STATE_MASK {
-                    continue;
-                }
-                let Ok(target) = u16::try_from(target) else {
-                    continue;
-                };
-                targets.push(target);
-                kick_indices.push(u8::try_from(kick_index).unwrap_or(u8::MAX));
-            }
-            offsets.push(targets.len() as u32);
-        }
-    }
-    (offsets, targets, kick_indices)
 }
 
 fn compile_seed_words(state_count: usize, seeds: &[u16]) -> Vec<u64> {
@@ -3490,47 +3359,6 @@ fn global_kick_pruning_enabled() -> bool {
     true
 }
 
-fn state_from_index(width: u8, ceiling: i8, index: usize) -> State {
-    let rotation_stride = (ceiling as usize + 1) * width as usize;
-    let rotation = RotationState::from_quarter_turns((index / rotation_stride) as u8)
-        .expect("compiled reachability rotation is valid");
-    let remainder = index % rotation_stride;
-    State {
-        rotation,
-        x: (remainder % width as usize) as i8,
-        y: (remainder / width as usize) as i8,
-    }
-}
-
-fn rotation_transition_index(from: RotationState, transition_slot: usize) -> usize {
-    from.quarter_turns() as usize * 3 + transition_slot
-}
-
-fn source_ceiling(height: u8, piece: PieceKind, allow_180: bool, profile: &KickTableProfile) -> i8 {
-    let maximum_downward = profile
-        .entries()
-        .iter()
-        .filter(|entry| entry.transition().piece() == piece)
-        .filter(|entry| allow_180 || !entry.transition().is_180())
-        .flat_map(|entry| {
-            entry.sequence().offsets().iter().map(move |offset| {
-                normalized_kick_delta(
-                    piece,
-                    entry.transition().from(),
-                    entry.transition().to(),
-                    offset.dx(),
-                    offset.dy(),
-                )
-                .1
-            })
-        })
-        .filter(|dy| *dy < 0)
-        .map(|dy| -dy)
-        .max()
-        .unwrap_or(0);
-    height.saturating_add(maximum_downward as u8) as i8
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
@@ -3554,6 +3382,60 @@ mod tests {
     use crate::conditioned_reachability::ConditionedReachabilityEntryPose;
     use clearra_core_domain::piece::{piece_kind::PieceKind, rotation::RotationState};
     use clearra_rules::kicks::{KickTableProfileId, KickTransition};
+
+    #[test]
+    fn harddrop_path_mask_matches_cell_oracle_for_word_boundaries() {
+        // Independently enumerate the cells above each possible occupied cell.
+        // This includes both overflowing shift boundaries and paths taller
+        // than the former eight-row expansion.
+        for width in [1_u8, 2, 4, 10, 31, 32, 33, 63, 64] {
+            for source in 0..u64::BITS {
+                let expected = (source..u64::BITS)
+                    .filter(|cell| (cell - source) % u32::from(width) == 0)
+                    .fold(0_u64, |mask, cell| mask | (1_u64 << cell));
+                assert_eq!(
+                    super::harddrop_path_mask(1_u64 << source, width),
+                    expected,
+                    "width={width}, source={source}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn harddrop_lock_checks_word_boundaries_and_high_blockers() {
+        use super::super::catalog::InstantiatedRealization;
+
+        let mut workspace = ReachabilityWorkspace::default();
+        for (width, mask, rotation, y, board, expected) in [
+            (64, 0xf, RotationState::Zero, 0, 1_u64 << 63, true),
+            (64, 0xf, RotationState::Zero, 0, 1_u64 << 2, false),
+            (32, 0xf, RotationState::Zero, 0, 1_u64 << 32, false),
+            (32, 0xf, RotationState::Zero, 0, 1_u64 << 63, true),
+            (32, 0xf_u64 << 32, RotationState::Zero, 1, 1, true),
+            (32, 0xf_u64 << 32, RotationState::Zero, 1, 0, false),
+            (4, 0x1111, RotationState::Right, 0, 1_u64 << 60, false),
+            (4, 0x1111, RotationState::Right, 0, 1_u64 << 63, true),
+            (2, 0x55, RotationState::Right, 0, 1_u64 << 30, false),
+            (2, 0x55, RotationState::Right, 0, 1_u64 << 31, true),
+            (1, 0xf, RotationState::Right, 0, 1_u64 << 15, false),
+        ] {
+            assert_eq!(
+                workspace.lock_harddrop_reachable_instantiated(
+                    width,
+                    board,
+                    InstantiatedRealization {
+                        lock_mask: mask,
+                        rotation,
+                        x: 0,
+                        lock_y: y,
+                    },
+                ),
+                expected,
+                "width={width}, y={y}, board={board:#x}",
+            );
+        }
+    }
 
     #[test]
     fn v081_shared_reachability_templates_and_sky_entries_have_one_request_owner() {

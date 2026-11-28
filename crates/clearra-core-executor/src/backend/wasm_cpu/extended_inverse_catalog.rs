@@ -39,6 +39,29 @@ pub(super) struct ExtendedInstantiation {
     pub lock_y: i8,
 }
 
+pub(super) struct ExtendedInstantiationIter<'a> {
+    catalog: &'a ExtendedInverseCatalog,
+    realizations: core::slice::Iter<'a, ExtendedRealization>,
+    deleted_rows: u32,
+}
+
+impl Iterator for ExtendedInstantiationIter<'_> {
+    type Item = ExtendedInstantiation;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        for realization in self.realizations.by_ref() {
+            if let Some(pose) = self.catalog.instantiate(*realization, self.deleted_rows) {
+                return Some(pose);
+            }
+        }
+        None
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (0, Some(self.realizations.len()))
+    }
+}
+
 pub(super) struct ExtendedInverseCatalog {
     width: u8,
     height: u8,
@@ -382,24 +405,37 @@ impl ExtendedInverseCatalog {
         &self.skeletons
     }
 
+    pub fn skeleton_occupied_rows(&self, row_id: u32) -> u32 {
+        let mut rows = 0_u32;
+        for cell in self.skeleton(row_id).cells.cells() {
+            rows |= 1_u32 << (cell / u16::from(self.width));
+        }
+        rows
+    }
+
+    pub fn realization_requirement_is_satisfied(&self, row_id: u32, deleted_rows: u32) -> bool {
+        let row = self.skeleton(row_id);
+        let start = row.realization_start as usize;
+        self.realizations[start..start + row.realization_count as usize]
+            .iter()
+            .any(|realization| realization.required_deleted_rows & !deleted_rows == 0)
+    }
+
     pub fn support(&self, cell: u16) -> &[u32] {
         let start = self.support_offsets[cell as usize] as usize;
         let end = self.support_offsets[cell as usize + 1] as usize;
         &self.support_rows[start..end]
     }
 
-    pub fn instantiations(
-        &self,
-        row_id: u32,
-        deleted_rows: u32,
-    ) -> impl Iterator<Item = ExtendedInstantiation> + '_ {
+    pub fn instantiations(&self, row_id: u32, deleted_rows: u32) -> ExtendedInstantiationIter<'_> {
         let row = self.skeleton(row_id);
         let start = row.realization_start as usize;
         let end = start + row.realization_count as usize;
-        self.realizations[start..end]
-            .iter()
-            .copied()
-            .filter_map(move |realization| self.instantiate(realization, deleted_rows))
+        ExtendedInstantiationIter {
+            catalog: self,
+            realizations: self.realizations[start..end].iter(),
+            deleted_rows,
+        }
     }
 
     pub(super) fn realization_count(&self, row_id: u32) -> usize {

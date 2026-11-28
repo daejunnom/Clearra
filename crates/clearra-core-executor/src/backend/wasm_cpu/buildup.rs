@@ -62,9 +62,11 @@ use super::{
 };
 
 use super::{
+    candidate_row_projection::{CandidateCells, CandidateRowProjection},
     catalog::GeometryCatalog,
     coverage_product::CoverageProductEvaluator,
     exact_collections::ExactHashSet,
+    extended_board::ExtendedBoard,
     geometry::{GeometryCandidate, TargetGroup},
     piece_order_language::{CoverageCacheLookup, PieceOrderLanguageCache},
     queue_observation_policy::{
@@ -315,6 +317,328 @@ enum BuildPassAttempt {
     Complete(BuildPassOutput),
     #[cfg(any(test, feature = "local-search-ab"))]
     Conflict(BuildProofConflict),
+}
+
+/// Borrows the existing compact graph arenas and generation-stamped caches.
+/// The shared relation traversal owns expansion order and physical transition
+/// checks; this adapter only retains representation-specific storage and
+/// candidate-bound feasibility/LegalBoard decisions.
+pub(super) struct CompactRelationAdapter<'a> {
+    problem: &'a SearchProblem,
+    catalog: &'a GeometryCatalog,
+    rows: &'a [u32],
+    projection: &'a mut CandidateProjection,
+    workspace: &'a mut BuildUpWorkspace,
+    nodes: &'a mut Vec<BuildNode>,
+    edges: &'a mut Vec<BuildEdge>,
+    piece_edges: &'a mut Vec<BuildEdge>,
+    subset_queue: &'a mut Vec<u16>,
+    edge_scratch: &'a mut Vec<BuildEdge>,
+    graph_generation: u32,
+    all_placed: usize,
+    all_operations: u16,
+    completion: BuildCompletion,
+    feasibility: Option<RealizationFeasibility>,
+    partial_dependency_graph_active: bool,
+    legal_board_eligible: bool,
+    legal_admission_checked: bool,
+    share_piece_edges: bool,
+    single_pose_per_operation: bool,
+    b2b_policy: Option<BackToBackEdgePolicy>,
+    #[cfg(any(test, feature = "local-search-ab"))]
+    accepting_reached: &'a mut bool,
+}
+
+impl CompactRelationAdapter<'_> {
+    pub(super) fn begin_subset(
+        &mut self,
+        cursor: usize,
+    ) -> Result<super::candidate_relation::RelationSubsetStart, WasmExactSearchError> {
+        use super::candidate_relation::{RelationSubset, RelationSubsetStart};
+        let Some(&subset) = self.subset_queue.get(cursor) else {
+            return Ok(RelationSubsetStart::Exhausted);
+        };
+        let subset = usize::from(subset);
+        let node_index = self.workspace.graph_subset_node_ids[subset];
+        let node = &mut self.nodes[node_index as usize];
+        node.edge_start = self.edges.len() as u32;
+        node.piece_edge_start = if self.share_piece_edges {
+            self.edges.len() as u32
+        } else {
+            self.piece_edges.len() as u32
+        };
+        if subset == self.all_placed {
+            let accepting = self.completion.accepts(self.projection, subset);
+            node.accepting = accepting;
+            node.live = accepting;
+            #[cfg(any(test, feature = "local-search-ab"))]
+            {
+                *self.accepting_reached |= accepting;
+            }
+            return Ok(RelationSubsetStart::Terminal);
+        }
+        self.edge_scratch.clear();
+        let (board, deleted_rows) = self.projection.state(subset);
+        let permitted_operations =
+            self.feasibility
+                .map_or(self.all_operations & !(subset as u16), |proof| {
+                    self.workspace
+                        .realization_feasibility
+                        .permitted_operation_mask(proof, subset)
+                });
+        Ok(RelationSubsetStart::Expand(RelationSubset {
+            subset: subset as u64,
+            node_index,
+            board: ExtendedBoard::from_words([board, 0, 0, 0]),
+            deleted_rows: u32::from(deleted_rows),
+            permitted_operations: u64::from(permitted_operations),
+        }))
+    }
+
+    pub(super) fn begin_operation(
+        &mut self,
+        state: super::candidate_relation::RelationSubset,
+        operation: usize,
+        child: u64,
+    ) -> Result<bool, WasmExactSearchError> {
+        let child = child as usize;
+        if !self.partial_dependency_graph_active
+            && self.feasibility.is_some_and(|proof| {
+                self.workspace
+                    .realization_feasibility
+                    .proves_subset_infeasible(proof, child)
+            })
+        {
+            return Ok(false);
+        }
+        if self.legal_board_eligible
+            && self
+                .workspace
+                .legal_board_child_is_rejected(child, self.graph_generation)
+        {
+            return Ok(false);
+        }
+        self.legal_admission_checked = !self.legal_board_eligible
+            || self.workspace.graph_reachable_generations[child] == self.graph_generation;
+        // The compact scorer already distinguishes coarse necessary pruning
+        // from the later evidence-bearing constraint. Keep that exact scope.
+        let piece = self.catalog.skeleton(self.rows[operation]).piece;
+        if let Some(policy) = self.b2b_policy.filter(|policy| {
+            policy.before_spin_evidence(piece, 1, false) == BeforeSpinEvidenceDecision::Rejects
+        }) {
+            let (board, deleted) = self.projection.state(child);
+            let cleared = (u32::from(deleted) & !state.deleted_rows).count_ones() as u8;
+            if policy.before_spin_evidence(piece, cleared, cleared > 0 && board == 0)
+                == BeforeSpinEvidenceDecision::Rejects
+            {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    pub(super) fn projected_state(&mut self, child: u64) -> (ExtendedBoard, u32) {
+        let (board, deleted) = self.projection.state(child as usize);
+        (
+            ExtendedBoard::from_words([board, 0, 0, 0]),
+            u32::from(deleted),
+        )
+    }
+
+    pub(super) fn confirm_transition(
+        &mut self,
+        child: u64,
+        board: ExtendedBoard,
+        deleted: u32,
+    ) -> bool {
+        let words = board.words();
+        if words[1..].iter().any(|&word| word != 0) || deleted > u16::MAX as u32 {
+            return false;
+        }
+        self.projection
+            .confirm_transition(child as usize, words[0], deleted as u16)
+    }
+
+    pub(super) fn admit_child(&mut self, child: u64) -> bool {
+        if self.legal_admission_checked {
+            return true;
+        }
+        let allowed = self.workspace.legal_board_child_allows(
+            self.catalog,
+            self.problem.kick_profile().profile_id(),
+            self.projection,
+            child as usize,
+            self.graph_generation,
+        );
+        self.legal_admission_checked = true;
+        allowed
+    }
+
+    pub(super) fn prepare_realizations(
+        &mut self,
+        _state: super::candidate_relation::RelationSubset,
+        _piece: PieceKind,
+    ) {
+    }
+
+    pub(super) fn known_reachable(
+        &mut self,
+        _state: super::candidate_relation::RelationSubset,
+        _piece: PieceKind,
+        _realization: super::candidate_relation::RelationInstantiation,
+    ) -> Option<bool> {
+        None
+    }
+
+    pub(super) fn movement(
+        &mut self,
+        state: super::candidate_relation::RelationSubset,
+        piece: PieceKind,
+        realization: super::candidate_relation::RelationInstantiation,
+        capture_scoring: bool,
+    ) -> super::candidate_relation::RelationMovement {
+        let board = state.board.words()[0];
+        let reachable = self
+            .workspace
+            .reachability
+            .lock_reachable_instantiated_in_frame(
+                self.catalog,
+                board,
+                piece,
+                super::catalog::InstantiatedRealization {
+                    lock_mask: realization.lock_mask.words()[0],
+                    rotation: realization.rotation,
+                    x: realization.x,
+                    lock_y: realization.lock_y,
+                },
+                LocalRelationRowFrame::new(self.catalog.height(), state.deleted_rows as u16),
+            );
+        let evidence = (reachable && capture_scoring).then(|| {
+            self.workspace.reachability.scoring_lock_evidence(
+                self.catalog,
+                board,
+                piece,
+                realization.rotation,
+                realization.x,
+                realization.lock_y,
+            )
+        });
+        super::candidate_relation::RelationMovement {
+            reachable,
+            evidence,
+        }
+    }
+
+    pub(super) fn child_node_index(&mut self, child: u64) -> Result<u32, WasmExactSearchError> {
+        // Preserve the old canonical subset sort before assigning BFS node
+        // IDs. The final sink remaps these temporary destinations together.
+        u32::try_from(child).map_err(|_| {
+            WasmExactSearchError::InvalidProblem("wasm_build_order_node_index_overflow")
+        })
+    }
+
+    pub(super) fn emit_edge(
+        &mut self,
+        _child: u64,
+        edge: BuildEdge,
+        _scoring: Option<ScoringExecutionEdge>,
+        retain_build_edge: bool,
+    ) -> Result<(), WasmExactSearchError> {
+        if retain_build_edge {
+            try_push_build_edge(self.edge_scratch, edge)?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn finish_subset(
+        &mut self,
+        state: super::candidate_relation::RelationSubset,
+    ) -> Result<(), WasmExactSearchError> {
+        if self.single_pose_per_operation {
+            // Ascending operation bits already give strictly increasing
+            // child subsets. Preserve the old Boolean no-sort fast case.
+            debug_assert!(self
+                .edge_scratch
+                .windows(2)
+                .all(|pair| pair[0].to < pair[1].to));
+        } else {
+            self.edge_scratch.sort_unstable_by_key(|edge| {
+                (
+                    edge.to,
+                    edge.operation_index,
+                    edge.piece,
+                    edge.rotation,
+                    edge.x,
+                    edge.y,
+                    edge.cleared_lines,
+                )
+            });
+            self.edge_scratch.dedup();
+        }
+        for edge in self.edge_scratch.iter_mut() {
+            let child = edge.to as usize;
+            if self.workspace.graph_reachable_generations[child] != self.graph_generation
+                || self.workspace.graph_subset_node_ids[child] == LEGAL_BOARD_PENDING_NODE
+            {
+                let child_node = u32::try_from(self.subset_queue.len()).map_err(|_| {
+                    WasmExactSearchError::InvalidProblem("wasm_build_order_node_index_overflow")
+                })?;
+                self.subset_queue.try_reserve(1).map_err(|_| {
+                    WasmExactSearchError::InvalidProblem(
+                        "wasm_build_order_queue_storage_unavailable",
+                    )
+                })?;
+                self.nodes.try_reserve(1).map_err(|_| {
+                    WasmExactSearchError::InvalidProblem(
+                        "wasm_build_order_node_storage_unavailable",
+                    )
+                })?;
+                self.workspace.graph_reachable_generations[child] = self.graph_generation;
+                self.workspace.graph_subset_node_ids[child] = child_node;
+                debug_assert_eq!(self.nodes.len(), self.subset_queue.len());
+                self.nodes.push(BuildNode {
+                    edge_start: 0,
+                    edge_count: 0,
+                    piece_edge_start: 0,
+                    piece_edge_count: 0,
+                    depth: child.count_ones() as u8,
+                    live: false,
+                    accepting: false,
+                });
+                self.subset_queue.push(child as u16);
+            }
+            edge.to = self.workspace.graph_subset_node_ids[child];
+        }
+        if !self.share_piece_edges {
+            let mut previous = None;
+            for edge in self.edge_scratch.iter() {
+                let key = (edge.to, edge.piece);
+                if previous != Some(key) {
+                    self.piece_edges.try_reserve(1).map_err(|_| {
+                        WasmExactSearchError::InvalidProblem(
+                            "wasm_build_order_piece_edge_storage_unavailable",
+                        )
+                    })?;
+                    self.piece_edges.push(*edge);
+                    previous = Some(key);
+                }
+            }
+        }
+        self.edges
+            .try_reserve(self.edge_scratch.len())
+            .map_err(|_| {
+                WasmExactSearchError::InvalidProblem("wasm_build_order_edge_storage_unavailable")
+            })?;
+        self.edges.extend_from_slice(self.edge_scratch);
+        let node = &mut self.nodes[state.node_index as usize];
+        node.edge_count = self.edge_scratch.len() as u32;
+        node.piece_edge_count = if self.share_piece_edges {
+            node.edge_count
+        } else {
+            self.piece_edges.len() as u32 - node.piece_edge_start
+        };
+        Ok(())
+    }
 }
 
 #[cfg(any(test, feature = "local-search-ab"))]
@@ -1752,11 +2076,8 @@ pub(super) struct CandidateProjection {
     shared_row_conditions: Option<super::placement_conditions::GroupedClearConditions>,
     operation_cells: [u64; super::MAX_BOARD64_PIECES],
     operation_count: u8,
-    row_contributors: [u16; 16],
-    width: u8,
-    height: u8,
+    row_projection: CandidateRowProjection,
     initial_board: u64,
-    completed_target_rows: u16,
     deleted_rows: Vec<u16>,
     physical_boards: Vec<u64>,
     state_generations: Vec<u32>,
@@ -1865,31 +2186,9 @@ impl CandidateProjection {
         let all_placed = state_count - 1;
         let row_bits = full_row_mask(catalog.width());
         let mut operation_cells = [0_u64; super::MAX_BOARD64_PIECES];
-        let mut row_contributors = [0_u16; 16];
         for (operation_index, row_id) in candidate.row_ids().iter().copied().enumerate() {
-            let cells = catalog.skeleton(row_id).cells;
-            operation_cells[operation_index] = cells;
-            let mut occupied = occupied_rows(catalog.width(), cells);
-            while occupied != 0 {
-                let row = occupied.trailing_zeros() as usize;
-                occupied &= occupied - 1;
-                row_contributors[row] |= 1_u16 << operation_index;
-            }
+            operation_cells[operation_index] = catalog.skeleton(row_id).cells;
         }
-        for (row, &contributors) in row_contributors
-            .iter()
-            .enumerate()
-            .take(catalog.height() as usize)
-        {
-            let initial_row =
-                (catalog.initial_board() >> (row * catalog.width() as usize)) & row_bits;
-            if initial_row == row_bits && contributors == 0 {
-                return Err(WasmExactSearchError::InvalidProblem(
-                    "wasm_initial_full_row_requires_preclear_normalization",
-                ));
-            }
-        }
-        let mut completed_target_rows = 0_u16;
         let mut final_board = catalog.initial_board();
         #[cfg(any(test, feature = "local-search-ab"))]
         let mut group_admitted =
@@ -1903,10 +2202,20 @@ impl CandidateProjection {
             }
             final_board |= cells;
         }
-        for row in 0..catalog.height() as usize {
-            let target_row = (final_board >> (row * catalog.width() as usize)) & row_bits;
-            if target_row == row_bits {
-                completed_target_rows |= 1_u16 << row;
+        let row_projection = CandidateRowProjection::compile(
+            catalog.width(),
+            catalog.height(),
+            ExtendedBoard::from_words([final_board, 0, 0, 0]),
+            CandidateCells::Compact(&operation_cells[..operation_count]),
+        );
+        for row in 0..catalog.height() {
+            let initial_row = (catalog.initial_board()
+                >> (usize::from(row) * usize::from(catalog.width())))
+                & row_bits;
+            if initial_row == row_bits && row_projection.contributors(row) == 0 {
+                return Err(WasmExactSearchError::InvalidProblem(
+                    "wasm_initial_full_row_requires_preclear_normalization",
+                ));
             }
         }
 
@@ -1926,9 +2235,13 @@ impl CandidateProjection {
             // These facts belong to this exact candidate and operation
             // order. Group them directly instead of looking up every row
             // again and retaining a second copy of the selected IDs.
+            let mut row_contributors = [0_u16; 16];
+            for row in 0..catalog.height() {
+                row_contributors[usize::from(row)] = row_projection.contributors(row) as u16;
+            }
             super::placement_conditions::GroupedClearConditions::from_completed_rows(
                 &row_contributors[..usize::from(catalog.height())],
-                completed_target_rows,
+                row_projection.completed_rows() as u16,
             )
         } else {
             None
@@ -1950,11 +2263,8 @@ impl CandidateProjection {
             shared_row_conditions,
             operation_cells,
             operation_count: operation_count as u8,
-            row_contributors,
-            width: catalog.width(),
-            height: catalog.height(),
+            row_projection,
             initial_board: catalog.initial_board(),
-            completed_target_rows,
             deleted_rows,
             physical_boards,
             state_generations,
@@ -1983,8 +2293,13 @@ impl CandidateProjection {
                 logical_board |= self.operation_cells[operation_index];
             }
             self.deleted_rows[subset] = deleted;
-            self.physical_boards[subset] =
-                compact_target_board(self.width, self.height, logical_board, deleted);
+            self.physical_boards[subset] = self
+                .row_projection
+                .compact(
+                    ExtendedBoard::from_words([logical_board, 0, 0, 0]),
+                    u32::from(deleted),
+                )
+                .words()[0];
             self.state_generations[subset] = self.generation;
         }
         (self.physical_boards[subset], self.deleted_rows[subset])
@@ -1995,28 +2310,17 @@ impl CandidateProjection {
         if let Some(conditions) = &self.shared_row_conditions {
             return conditions.deleted_rows(subset as u16);
         }
-        let subset_bits = subset as u16;
-        let mut deleted = 0_u16;
-        for row in 0..usize::from(self.height) {
-            if self.completed_target_rows & (1_u16 << row) == 0 {
-                continue;
-            }
-            let contributors = self.row_contributors[row];
-            if contributors != 0 && contributors & !subset_bits == 0 {
-                deleted |= 1_u16 << row;
-            }
-        }
-        deleted
+        self.row_projection.deleted_rows(subset as u64) as u16
     }
 
     pub fn confirm_transition(&mut self, subset: usize, board: u64, deleted_rows: u16) -> bool {
         debug_assert!(subset <= self.all_placed);
-        if deleted_rows != self.expected_deleted_rows(subset) {
-            return false;
-        }
         if self.state_generations[subset] == self.generation {
             return self.deleted_rows[subset] == deleted_rows
                 && self.physical_boards[subset] == board;
+        }
+        if deleted_rows != self.expected_deleted_rows(subset) {
+            return false;
         }
         self.deleted_rows[subset] = deleted_rows;
         self.physical_boards[subset] = board;
@@ -5530,524 +5834,638 @@ impl BuildOrderGraph {
         let reuse_geometric_edges = geometric_edge_reuse::enabled();
         #[cfg(any(test, feature = "local-search-ab"))]
         let mut geometric_reuse_metrics = GeometricEdgeReuseMetrics::default();
-        let mut subset_cursor = 0usize;
-        #[allow(unused_labels)]
-        'build_subsets: while subset_cursor < subset_queue.len() {
-            let subset = usize::from(subset_queue[subset_cursor]);
-            subset_cursor += 1;
-            let node_index = workspace.graph_subset_node_ids[subset] as usize;
-            if materialize_graph {
-                nodes[node_index].edge_start = edges.len() as u32;
-                nodes[node_index].piece_edge_start = if share_piece_edges {
-                    edges.len() as u32
-                } else {
-                    piece_edges.len() as u32
-                };
-            }
-            if subset == all_placed {
-                let accepting = completion.accepts(projection, subset);
-                if materialize_graph {
-                    nodes[node_index].accepting = accepting;
-                    nodes[node_index].live = accepting;
-                }
-                #[cfg(any(test, all(feature = "local-search-ab", feature = "parallel")))]
-                if !materialize_graph {
-                    debug_assert_eq!(allowed_operations.len(), node_index);
-                    allowed_operations.push(0);
-                }
+        let single_pose_per_operation =
+            piece_language_projection_only && reachability_mode == BuildReachabilityMode::Existing;
+        let shared_relation = true;
+        #[cfg(any(test, feature = "local-search-ab"))]
+        let shared_relation = shared_relation
+            && materialize_graph
+            && !reuse_geometric_edges
+            && !_movement_proofs.enabled
+            && !_movement_proofs.first_kick_enabled
+            && !_movement_proofs.ordered_kick_enabled
+            && !_movement_proofs.kick_guard_reuse_enabled
+            && _movement_proofs.len == 0;
+        #[cfg(test)]
+        let shared_relation = shared_relation && _movement_proofs.conditional_fallback.is_none();
+        if shared_relation {
+            use super::candidate_relation::{
+                traverse_candidate_relation, CandidateRelationCatalog, CandidateRelationMode,
+                CandidateRelationOwner, RelationTraversalOutcome,
+            };
+            debug_assert!(materialize_graph);
+            let mut owner = CompactRelationAdapter {
+                problem,
+                catalog,
+                rows: candidate.row_ids(),
+                projection,
+                workspace,
+                nodes: &mut nodes,
+                edges: &mut edges,
+                piece_edges: &mut piece_edges,
+                subset_queue: &mut subset_queue,
+                edge_scratch: &mut edge_scratch,
+                graph_generation,
+                all_placed,
+                all_operations,
+                completion,
+                feasibility,
+                partial_dependency_graph_active,
+                legal_board_eligible,
+                legal_admission_checked: false,
+                share_piece_edges,
+                single_pose_per_operation,
+                b2b_policy,
                 #[cfg(any(test, feature = "local-search-ab"))]
-                {
-                    accepting_reached |= accepting;
-                }
-                continue;
+                accepting_reached: &mut accepting_reached,
+            };
+            let outcome = traverse_candidate_relation(
+                &mut CandidateRelationOwner::Compact(&mut owner),
+                CandidateRelationCatalog::Compact(catalog),
+                candidate.row_ids(),
+                CandidateRelationMode {
+                    geometric_only: reachability_mode != BuildReachabilityMode::Existing,
+                    grounded: reachability_mode != BuildReachabilityMode::GeometryOnly,
+                    // A fixed original footprint and deletion frame uniquely
+                    // fix both the physical lock mask and lock_y. Therefore
+                    // harddrop status is identical for every catalog pose:
+                    // first reachable preserves the old harddrop-first edge.
+                    visit_all_poses: !single_pose_per_operation,
+                    retain_all_build_poses: !single_pose_per_operation,
+                    capture_scoring: false,
+                    early_b2b: false,
+                    b2b_policy: chance_b2b_policy
+                        .filter(|_| reachability_mode == BuildReachabilityMode::Existing),
+                },
+            )?;
+            if outcome != RelationTraversalOutcome::Complete {
+                return Err(WasmExactSearchError::InvalidProblem(
+                    "wasm_compact_relation_incomplete_without_budget",
+                ));
             }
-            edge_scratch.clear();
-            let (board, deleted_rows) = projection.state(subset);
-            let mut permitted_operations =
-                feasibility.map_or(all_operations & !(subset as u16), |proof| {
-                    workspace
-                        .realization_feasibility
-                        .permitted_operation_mask(proof, subset)
-                });
-            while permitted_operations != 0 {
-                let operation_index = permitted_operations.trailing_zeros() as usize;
-                permitted_operations &= permitted_operations - 1;
-                let operation_bit = 1_usize << operation_index;
-                let child = subset | operation_bit;
-                if !partial_dependency_graph_active
-                    && feasibility.is_some_and(|proof| {
-                        workspace
-                            .realization_feasibility
-                            .proves_subset_infeasible(proof, child)
-                    })
-                {
-                    continue;
-                }
-                if legal_board_eligible
-                    && workspace.legal_board_child_is_rejected(child, graph_generation)
-                {
-                    continue;
-                }
-                // Reuse the stamped decision across all realizations and
-                // predecessors. Unseen children stay unseen when no concrete
-                // placement survives cheap physical/projection checks.
-                let mut legal_admission_checked = !legal_board_eligible
-                    || workspace.graph_reachable_generations[child] == graph_generation;
-                let row_id = candidate.row_ids()[operation_index];
-                let row = catalog.skeleton(row_id);
-                if let Some(policy) = b2b_policy.filter(|policy| {
-                    // Profiles admitting this piece's spins have no coarse
-                    // piece-only negative. Avoid eagerly materializing their
-                    // child projection just for a check that cannot reject it.
-                    policy.before_spin_evidence(row.piece, 1, false)
-                        == BeforeSpinEvidenceDecision::Rejects
-                }) {
-                    // Projection owns the exact board and deleted-original-row
-                    // frame for this subset. Every valid realization of this
-                    // operation must produce that same child. A rejected clear
-                    // therefore rejects all its poses, before reachability or
-                    // edge allocation. Never store this request predicate in
-                    // the shared physical reachability/feasibility caches.
-                    let (child_board, child_deleted_rows) = projection.state(child);
-                    let cleared_lines = (child_deleted_rows & !deleted_rows).count_ones() as u8;
-                    if policy.before_spin_evidence(
-                        row.piece,
-                        cleared_lines,
-                        cleared_lines > 0 && child_board == 0,
-                    ) == BeforeSpinEvidenceDecision::Rejects
-                    {
+        } else {
+            // The old traversal remains only as the local certificate and
+            // operation-mask experiment oracle, never in a product engine.
+            #[cfg(any(test, feature = "local-search-ab"))]
+            {
+                let mut subset_cursor = 0usize;
+                #[allow(unused_labels)]
+                'build_subsets: while subset_cursor < subset_queue.len() {
+                    let subset = usize::from(subset_queue[subset_cursor]);
+                    subset_cursor += 1;
+                    let node_index = workspace.graph_subset_node_ids[subset] as usize;
+                    if materialize_graph {
+                        nodes[node_index].edge_start = edges.len() as u32;
+                        nodes[node_index].piece_edge_start = if share_piece_edges {
+                            edges.len() as u32
+                        } else {
+                            piece_edges.len() as u32
+                        };
+                    }
+                    if subset == all_placed {
+                        let accepting = completion.accepts(projection, subset);
+                        if materialize_graph {
+                            nodes[node_index].accepting = accepting;
+                            nodes[node_index].live = accepting;
+                        }
+                        #[cfg(any(test, all(feature = "local-search-ab", feature = "parallel")))]
+                        if !materialize_graph {
+                            debug_assert_eq!(allowed_operations.len(), node_index);
+                            allowed_operations.push(0);
+                        }
+                        #[cfg(any(test, feature = "local-search-ab"))]
+                        {
+                            accepting_reached |= accepting;
+                        }
                         continue;
                     }
-                }
-                // This memo owns only this candidate, subset, operation and
-                // original deleted-row frame. It never stores an edge pose or
-                // substitutes one realization for another.
-                #[cfg(any(test, feature = "local-search-ab"))]
-                let mut prepared_footprint = None;
-                #[allow(unused_mut)]
-                let mut prepare_edge =
-                    |projection: &mut CandidateProjection,
-                     realization: super::catalog::InstantiatedRealization,
-                     needs_grounding: bool| {
-                        #[cfg(any(test, feature = "local-search-ab"))]
-                        if reuse_geometric_edges {
-                            return geometric_build_edge_with_reuse(
-                                catalog,
-                                projection,
-                                child,
-                                operation_index,
-                                row.piece,
-                                board,
-                                deleted_rows,
-                                realization,
-                                needs_grounding,
-                                &mut prepared_footprint,
-                                &mut geometric_reuse_metrics,
-                            );
-                        }
-                        if needs_grounding
-                            && !placement_is_grounded(catalog.width(), board, realization.lock_mask)
+                    edge_scratch.clear();
+                    let (board, deleted_rows) = projection.state(subset);
+                    let mut permitted_operations =
+                        feasibility.map_or(all_operations & !(subset as u16), |proof| {
+                            workspace
+                                .realization_feasibility
+                                .permitted_operation_mask(proof, subset)
+                        });
+                    while permitted_operations != 0 {
+                        let operation_index = permitted_operations.trailing_zeros() as usize;
+                        permitted_operations &= permitted_operations - 1;
+                        let operation_bit = 1_usize << operation_index;
+                        let child = subset | operation_bit;
+                        if !partial_dependency_graph_active
+                            && feasibility.is_some_and(|proof| {
+                                workspace
+                                    .realization_feasibility
+                                    .proves_subset_infeasible(proof, child)
+                            })
                         {
-                            return None;
+                            continue;
                         }
-                        geometric_build_edge(
-                            catalog,
-                            projection,
-                            child,
-                            operation_index,
-                            row.piece,
-                            board,
-                            deleted_rows,
-                            realization,
-                        )
-                    };
-                if reachability_mode != BuildReachabilityMode::Existing {
-                    // The product finesse preparation may keep floating
-                    // poses until movement annotation. The exact snapshot
-                    // contract, like the C geometry-only export, only
-                    // exposes grounded lock poses.
-                    let grounded = reachability_mode == BuildReachabilityMode::GroundedGeometryOnly;
-                    for realization in catalog.instantiations(row_id, deleted_rows) {
-                        if let Some(edge) = prepare_edge(projection, realization, grounded) {
-                            if !legal_admission_checked {
-                                if !workspace.legal_board_child_allows(
+                        if legal_board_eligible
+                            && workspace.legal_board_child_is_rejected(child, graph_generation)
+                        {
+                            continue;
+                        }
+                        // Reuse the stamped decision across all realizations and
+                        // predecessors. Unseen children stay unseen when no concrete
+                        // placement survives cheap physical/projection checks.
+                        let mut legal_admission_checked = !legal_board_eligible
+                            || workspace.graph_reachable_generations[child] == graph_generation;
+                        let row_id = candidate.row_ids()[operation_index];
+                        let row = catalog.skeleton(row_id);
+                        if let Some(policy) = b2b_policy.filter(|policy| {
+                            // Profiles admitting this piece's spins have no coarse
+                            // piece-only negative. Avoid eagerly materializing their
+                            // child projection just for a check that cannot reject it.
+                            policy.before_spin_evidence(row.piece, 1, false)
+                                == BeforeSpinEvidenceDecision::Rejects
+                        }) {
+                            // Projection owns the exact board and deleted-original-row
+                            // frame for this subset. Every valid realization of this
+                            // operation must produce that same child. A rejected clear
+                            // therefore rejects all its poses, before reachability or
+                            // edge allocation. Never store this request predicate in
+                            // the shared physical reachability/feasibility caches.
+                            let (child_board, child_deleted_rows) = projection.state(child);
+                            let cleared_lines =
+                                (child_deleted_rows & !deleted_rows).count_ones() as u8;
+                            if policy.before_spin_evidence(
+                                row.piece,
+                                cleared_lines,
+                                cleared_lines > 0 && child_board == 0,
+                            ) == BeforeSpinEvidenceDecision::Rejects
+                            {
+                                continue;
+                            }
+                        }
+                        // This memo owns only this candidate, subset, operation and
+                        // original deleted-row frame. It never stores an edge pose or
+                        // substitutes one realization for another.
+                        #[cfg(any(test, feature = "local-search-ab"))]
+                        let mut prepared_footprint = None;
+                        #[allow(unused_mut)]
+                        let mut prepare_edge =
+                            |projection: &mut CandidateProjection,
+                             realization: super::catalog::InstantiatedRealization,
+                             needs_grounding: bool| {
+                                #[cfg(any(test, feature = "local-search-ab"))]
+                                if reuse_geometric_edges {
+                                    return geometric_build_edge_with_reuse(
+                                        catalog,
+                                        projection,
+                                        child,
+                                        operation_index,
+                                        row.piece,
+                                        board,
+                                        deleted_rows,
+                                        realization,
+                                        needs_grounding,
+                                        &mut prepared_footprint,
+                                        &mut geometric_reuse_metrics,
+                                    );
+                                }
+                                if needs_grounding
+                                    && !placement_is_grounded(
+                                        catalog.width(),
+                                        board,
+                                        realization.lock_mask,
+                                    )
+                                {
+                                    return None;
+                                }
+                                geometric_build_edge(
                                     catalog,
-                                    problem.kick_profile().profile_id(),
                                     projection,
                                     child,
-                                    graph_generation,
-                                ) {
-                                    break;
-                                }
-                                legal_admission_checked = true;
-                            }
-                            try_push_build_edge(&mut edge_scratch, edge)?;
-                        }
-                    }
-                } else if piece_language_projection_only {
-                    let scratch_start = edge_scratch.len();
-                    let mut harddrop_edge = None;
-                    #[cfg(any(test, feature = "local-search-ab"))]
-                    // Retain the source until all hard-drop alternatives have
-                    // been considered, so the experiments count actual use.
-                    let mut certified_edge = None;
-                    for realization in catalog.instantiations(row_id, deleted_rows) {
-                        // A normal lock must touch the floor or an occupied
-                        // cell directly below it. This is the same necessary
-                        // physical predicate used by exact reachability; it
-                        // does not apply to GeometryOnly/finesse candidates.
-                        let Some(edge) = prepare_edge(projection, realization, true) else {
-                            continue;
-                        };
-                        if !legal_admission_checked {
-                            if !workspace.legal_board_child_allows(
-                                catalog,
-                                problem.kick_profile().profile_id(),
-                                projection,
-                                child,
-                                graph_generation,
-                            ) {
-                                break;
-                            }
-                            legal_admission_checked = true;
-                        }
-                        try_push_build_edge(&mut edge_scratch, edge)?;
-                        if workspace.reachability.lock_harddrop_reachable_instantiated(
-                            catalog.width(),
-                            board,
-                            realization,
-                        ) {
-                            harddrop_edge = Some(edge);
-                            break;
-                        }
-                        #[cfg(any(test, feature = "local-search-ab"))]
-                        let proof_answer =
-                            _movement_proofs.answer(row.piece, realization, deleted_rows, board);
-                        #[cfg(any(test, feature = "local-search-ab"))]
-                        if proof_answer == MovementProofAnswer::Conflict {
-                            proof_conflict = Some(BuildProofConflict::RetainedInterval);
-                            break 'build_subsets;
-                        }
-                        #[cfg(test)]
-                        if let Some(exclude) = _movement_proofs.fallback_pose(
-                            row_id,
-                            problem.kick_profile().profile_id(),
-                            catalog.height(),
-                            deleted_rows,
-                            realization,
-                            board,
-                            proof_answer,
-                        ) {
-                            if exclude {
-                                let _ = edge_scratch.pop();
-                                super::structural_order::record_conditional_fallback(|work| {
-                                    work.filtered_poses += 1;
-                                    work.root_filtered_poses += usize::from(subset == 0);
-                                });
-                            } else {
-                                super::structural_order::record_conditional_fallback(|work| {
-                                    work.conflicting_poses += 1
-                                });
-                            }
-                            continue;
-                        }
-                        #[cfg(any(test, feature = "local-search-ab"))]
-                        if (_movement_proofs.enabled
-                            || _movement_proofs.first_kick_enabled
-                            || _movement_proofs.ordered_kick_enabled
-                            || _movement_proofs.len != 0)
-                            && certified_edge.is_none()
-                        {
-                            match proof_answer {
-                                MovementProofAnswer::Exact(true, source) => {
-                                    match source {
-                                        MovementProofSource::Poset => {
-                                            movement_metrics.reused_positive_locks += 1;
-                                        }
-                                        MovementProofSource::ConditionalOrder => {
-                                            conditional_metrics.reused_pose_proofs += 1;
-                                        }
-                                    }
-                                    certified_edge = Some((edge, PositiveEdgeProof::Reused));
-                                }
-                                MovementProofAnswer::Exact(false, source) => {
-                                    match source {
-                                        MovementProofSource::Poset => {
-                                            movement_metrics.reused_closed_locks += 1;
-                                        }
-                                        MovementProofSource::ConditionalOrder => {
-                                            conditional_metrics.reused_pose_proofs += 1;
-                                        }
-                                    }
-                                    let _ = edge_scratch.pop();
-                                }
-                                MovementProofAnswer::Conflict => unreachable!("handled above"),
-                                MovementProofAnswer::Miss => {
-                                    let frame =
-                                        LocalRelationRowFrame::new(catalog.height(), deleted_rows);
-                                    let profile = problem.kick_profile().profile_id();
-                                    if let Some(frame) = frame {
-                                        use super::reachability::KickWitnessOrder;
-                                        for (enabled, order, metrics) in [
-                                            (
-                                                _movement_proofs.first_kick_enabled,
-                                                KickWitnessOrder::RawFirst,
-                                                &mut first_kick_metrics,
-                                            ),
-                                            (
-                                                _movement_proofs.ordered_kick_enabled,
-                                                KickWitnessOrder::LaterOnly,
-                                                &mut ordered_kick_metrics,
-                                            ),
-                                        ] {
-                                            if !enabled {
-                                                continue;
-                                            }
-                                            let proof = try_kick_interval_edge(
-                                                &mut workspace.reachability,
+                                    operation_index,
+                                    row.piece,
+                                    board,
+                                    deleted_rows,
+                                    realization,
+                                )
+                            };
+                        if reachability_mode != BuildReachabilityMode::Existing {
+                            // Existing local experiment oracle only. Product rich
+                            // traversal is shared with full-height candidates above.
+                            #[cfg(any(test, feature = "local-search-ab"))]
+                            {
+                                // The product finesse preparation may keep floating
+                                // poses until movement annotation. The exact snapshot
+                                // contract, like the C geometry-only export, only
+                                // exposes grounded lock poses.
+                                let grounded = reachability_mode
+                                    == BuildReachabilityMode::GroundedGeometryOnly;
+                                for realization in catalog.instantiations(row_id, deleted_rows) {
+                                    if let Some(edge) =
+                                        prepare_edge(projection, realization, grounded)
+                                    {
+                                        if !legal_admission_checked {
+                                            if !workspace.legal_board_child_allows(
                                                 catalog,
-                                                board,
-                                                row.piece,
-                                                profile,
-                                                realization,
-                                                frame,
-                                                order,
-                                                _movement_proofs,
-                                                &mut kick_guards,
-                                                metrics,
-                                                &mut kick_guard_metrics,
-                                            );
-                                            if kick_guards.conflicted {
-                                                proof_conflict =
-                                                    Some(BuildProofConflict::OrderedKickGuard);
-                                                break 'build_subsets;
-                                            }
-                                            if let Some(proof) = proof {
-                                                certified_edge = Some((edge, proof));
+                                                problem.kick_profile().profile_id(),
+                                                projection,
+                                                child,
+                                                graph_generation,
+                                            ) {
                                                 break;
                                             }
+                                            legal_admission_checked = true;
                                         }
-                                    }
-                                    if certified_edge.is_some() {
-                                        continue;
-                                    }
-                                    if _movement_proofs.enabled && deleted_rows != 0 {
-                                        movement_metrics.point_pose_attempts += 1;
-                                        if workspace
-                                            .reachability
-                                            .try_prove_lock_pose_unreachable_at_minimum(
-                                                catalog,
-                                                board,
-                                                row.piece,
-                                                profile,
-                                                realization,
-                                                frame,
-                                            )
-                                        {
-                                            movement_metrics.point_pose_proofs += 1;
-                                            let _ = edge_scratch.pop();
-                                        }
+                                        try_push_build_edge(&mut edge_scratch, edge)?;
                                     }
                                 }
                             }
-                        }
-                    }
-                    // Keep a valid hard-drop edge preferred. Otherwise a
-                    // positive proof can supply this Boolean operation edge.
-                    #[cfg(any(test, feature = "local-search-ab"))]
-                    let harddrop_edge = harddrop_edge.or_else(|| {
-                        certified_edge.map(|(edge, proof)| {
-                            match proof {
-                                PositiveEdgeProof::Reused => {}
-                                PositiveEdgeProof::FirstKick => {
-                                    first_kick_metrics.selected_locks += 1;
+                        } else if piece_language_projection_only {
+                            let scratch_start = edge_scratch.len();
+                            let mut harddrop_edge = None;
+                            #[cfg(any(test, feature = "local-search-ab"))]
+                            // Retain the source until all hard-drop alternatives have
+                            // been considered, so the experiments count actual use.
+                            let mut certified_edge = None;
+                            for realization in catalog.instantiations(row_id, deleted_rows) {
+                                // A normal lock must touch the floor or an occupied
+                                // cell directly below it. This is the same necessary
+                                // physical predicate used by exact reachability; it
+                                // does not apply to GeometryOnly/finesse candidates.
+                                let Some(edge) = prepare_edge(projection, realization, true) else {
+                                    continue;
+                                };
+                                if !legal_admission_checked {
+                                    if !workspace.legal_board_child_allows(
+                                        catalog,
+                                        problem.kick_profile().profile_id(),
+                                        projection,
+                                        child,
+                                        graph_generation,
+                                    ) {
+                                        break;
+                                    }
+                                    legal_admission_checked = true;
                                 }
-                                PositiveEdgeProof::OrderedKick => {
-                                    ordered_kick_metrics.selected_locks += 1;
-                                }
-                                PositiveEdgeProof::ReusedKickGuard => {
-                                    kick_guard_metrics.reused_selected += 1;
-                                }
-                            }
-                            edge
-                        })
-                    });
-                    let selected = if let Some(edge) = harddrop_edge {
-                        Some(edge)
-                    } else if edge_scratch.len() == scratch_start {
-                        // No grounded concrete edge (or verified negative):
-                        // do not initialize a template merely to visit none.
-                        None
-                    } else {
-                        workspace.reachability.prepare_template(catalog, row.piece);
-                        let mut reachable = None;
-                        for edge in edge_scratch[scratch_start..].iter().copied() {
-                            if workspace
-                                .reachability
-                                .lock_reachable_after_harddrop_miss_in_frame(
-                                    catalog,
+                                try_push_build_edge(&mut edge_scratch, edge)?;
+                                if workspace.reachability.lock_harddrop_reachable_instantiated(
+                                    catalog.width(),
                                     board,
-                                    row.piece,
-                                    edge.rotation,
-                                    edge.x,
-                                    edge.y,
-                                    LocalRelationRowFrame::new(catalog.height(), deleted_rows),
-                                )
-                            {
-                                reachable = Some(edge);
-                                break;
-                            }
-                        }
-                        reachable
-                    };
-                    edge_scratch.truncate(scratch_start);
-                    if let Some(edge) = selected {
-                        try_push_build_edge(&mut edge_scratch, edge)?;
-                    }
-                } else {
-                    for realization in catalog.instantiations(row_id, deleted_rows) {
-                        let Some(edge) = prepare_edge(projection, realization, true) else {
-                            continue;
-                        };
-                        if !legal_admission_checked {
-                            if !workspace.legal_board_child_allows(
-                                catalog,
-                                problem.kick_profile().profile_id(),
-                                projection,
-                                child,
-                                graph_generation,
-                            ) {
-                                break;
-                            }
-                            legal_admission_checked = true;
-                        }
-                        if workspace.reachability.lock_reachable_instantiated_in_frame(
-                            catalog,
-                            board,
-                            row.piece,
-                            realization,
-                            LocalRelationRowFrame::new(catalog.height(), deleted_rows),
-                        ) {
-                            if let Some(policy) = chance_b2b_policy {
-                                let perfect_clear =
-                                    edge.cleared_lines > 0 && projection.state(child).0 == 0;
-                                if !b2b_build_edge_allows(
-                                    catalog,
-                                    &mut workspace.reachability,
-                                    board,
-                                    edge,
-                                    perfect_clear,
-                                    policy,
+                                    realization,
                                 ) {
+                                    harddrop_edge = Some(edge);
+                                    break;
+                                }
+                                #[cfg(any(test, feature = "local-search-ab"))]
+                                let proof_answer = _movement_proofs.answer(
+                                    row.piece,
+                                    realization,
+                                    deleted_rows,
+                                    board,
+                                );
+                                #[cfg(any(test, feature = "local-search-ab"))]
+                                if proof_answer == MovementProofAnswer::Conflict {
+                                    proof_conflict = Some(BuildProofConflict::RetainedInterval);
+                                    break 'build_subsets;
+                                }
+                                #[cfg(test)]
+                                if let Some(exclude) = _movement_proofs.fallback_pose(
+                                    row_id,
+                                    problem.kick_profile().profile_id(),
+                                    catalog.height(),
+                                    deleted_rows,
+                                    realization,
+                                    board,
+                                    proof_answer,
+                                ) {
+                                    if exclude {
+                                        let _ = edge_scratch.pop();
+                                        super::structural_order::record_conditional_fallback(
+                                            |work| {
+                                                work.filtered_poses += 1;
+                                                work.root_filtered_poses +=
+                                                    usize::from(subset == 0);
+                                            },
+                                        );
+                                    } else {
+                                        super::structural_order::record_conditional_fallback(
+                                            |work| work.conflicting_poses += 1,
+                                        );
+                                    }
                                     continue;
                                 }
+                                #[cfg(any(test, feature = "local-search-ab"))]
+                                if (_movement_proofs.enabled
+                                    || _movement_proofs.first_kick_enabled
+                                    || _movement_proofs.ordered_kick_enabled
+                                    || _movement_proofs.len != 0)
+                                    && certified_edge.is_none()
+                                {
+                                    match proof_answer {
+                                        MovementProofAnswer::Exact(true, source) => {
+                                            match source {
+                                                MovementProofSource::Poset => {
+                                                    movement_metrics.reused_positive_locks += 1;
+                                                }
+                                                MovementProofSource::ConditionalOrder => {
+                                                    conditional_metrics.reused_pose_proofs += 1;
+                                                }
+                                            }
+                                            certified_edge =
+                                                Some((edge, PositiveEdgeProof::Reused));
+                                        }
+                                        MovementProofAnswer::Exact(false, source) => {
+                                            match source {
+                                                MovementProofSource::Poset => {
+                                                    movement_metrics.reused_closed_locks += 1;
+                                                }
+                                                MovementProofSource::ConditionalOrder => {
+                                                    conditional_metrics.reused_pose_proofs += 1;
+                                                }
+                                            }
+                                            let _ = edge_scratch.pop();
+                                        }
+                                        MovementProofAnswer::Conflict => {
+                                            unreachable!("handled above")
+                                        }
+                                        MovementProofAnswer::Miss => {
+                                            let frame = LocalRelationRowFrame::new(
+                                                catalog.height(),
+                                                deleted_rows,
+                                            );
+                                            let profile = problem.kick_profile().profile_id();
+                                            if let Some(frame) = frame {
+                                                use super::reachability::KickWitnessOrder;
+                                                for (enabled, order, metrics) in [
+                                                    (
+                                                        _movement_proofs.first_kick_enabled,
+                                                        KickWitnessOrder::RawFirst,
+                                                        &mut first_kick_metrics,
+                                                    ),
+                                                    (
+                                                        _movement_proofs.ordered_kick_enabled,
+                                                        KickWitnessOrder::LaterOnly,
+                                                        &mut ordered_kick_metrics,
+                                                    ),
+                                                ] {
+                                                    if !enabled {
+                                                        continue;
+                                                    }
+                                                    let proof = try_kick_interval_edge(
+                                                        &mut workspace.reachability,
+                                                        catalog,
+                                                        board,
+                                                        row.piece,
+                                                        profile,
+                                                        realization,
+                                                        frame,
+                                                        order,
+                                                        _movement_proofs,
+                                                        &mut kick_guards,
+                                                        metrics,
+                                                        &mut kick_guard_metrics,
+                                                    );
+                                                    if kick_guards.conflicted {
+                                                        proof_conflict = Some(
+                                                            BuildProofConflict::OrderedKickGuard,
+                                                        );
+                                                        break 'build_subsets;
+                                                    }
+                                                    if let Some(proof) = proof {
+                                                        certified_edge = Some((edge, proof));
+                                                        break;
+                                                    }
+                                                }
+                                            }
+                                            if certified_edge.is_some() {
+                                                continue;
+                                            }
+                                            if _movement_proofs.enabled && deleted_rows != 0 {
+                                                movement_metrics.point_pose_attempts += 1;
+                                                if workspace
+                                                    .reachability
+                                                    .try_prove_lock_pose_unreachable_at_minimum(
+                                                        catalog,
+                                                        board,
+                                                        row.piece,
+                                                        profile,
+                                                        realization,
+                                                        frame,
+                                                    )
+                                                {
+                                                    movement_metrics.point_pose_proofs += 1;
+                                                    let _ = edge_scratch.pop();
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
                             }
-                            try_push_build_edge(&mut edge_scratch, edge)?;
+                            // Keep a valid hard-drop edge preferred. Otherwise a
+                            // positive proof can supply this Boolean operation edge.
+                            #[cfg(any(test, feature = "local-search-ab"))]
+                            let harddrop_edge = harddrop_edge.or_else(|| {
+                                certified_edge.map(|(edge, proof)| {
+                                    match proof {
+                                        PositiveEdgeProof::Reused => {}
+                                        PositiveEdgeProof::FirstKick => {
+                                            first_kick_metrics.selected_locks += 1;
+                                        }
+                                        PositiveEdgeProof::OrderedKick => {
+                                            ordered_kick_metrics.selected_locks += 1;
+                                        }
+                                        PositiveEdgeProof::ReusedKickGuard => {
+                                            kick_guard_metrics.reused_selected += 1;
+                                        }
+                                    }
+                                    edge
+                                })
+                            });
+                            let selected = if let Some(edge) = harddrop_edge {
+                                Some(edge)
+                            } else if edge_scratch.len() == scratch_start {
+                                // No grounded concrete edge (or verified negative):
+                                // do not initialize a template merely to visit none.
+                                None
+                            } else {
+                                workspace.reachability.prepare_template(catalog, row.piece);
+                                let mut reachable = None;
+                                for edge in edge_scratch[scratch_start..].iter().copied() {
+                                    if workspace
+                                        .reachability
+                                        .lock_reachable_after_harddrop_miss_in_frame(
+                                            catalog,
+                                            board,
+                                            row.piece,
+                                            edge.rotation,
+                                            edge.x,
+                                            edge.y,
+                                            LocalRelationRowFrame::new(
+                                                catalog.height(),
+                                                deleted_rows,
+                                            ),
+                                        )
+                                    {
+                                        reachable = Some(edge);
+                                        break;
+                                    }
+                                }
+                                reachable
+                            };
+                            edge_scratch.truncate(scratch_start);
+                            if let Some(edge) = selected {
+                                try_push_build_edge(&mut edge_scratch, edge)?;
+                            }
+                        } else {
+                            #[cfg(any(test, feature = "local-search-ab"))]
+                            {
+                                for realization in catalog.instantiations(row_id, deleted_rows) {
+                                    let Some(edge) = prepare_edge(projection, realization, true)
+                                    else {
+                                        continue;
+                                    };
+                                    if !legal_admission_checked {
+                                        if !workspace.legal_board_child_allows(
+                                            catalog,
+                                            problem.kick_profile().profile_id(),
+                                            projection,
+                                            child,
+                                            graph_generation,
+                                        ) {
+                                            break;
+                                        }
+                                        legal_admission_checked = true;
+                                    }
+                                    if workspace.reachability.lock_reachable_instantiated_in_frame(
+                                        catalog,
+                                        board,
+                                        row.piece,
+                                        realization,
+                                        LocalRelationRowFrame::new(catalog.height(), deleted_rows),
+                                    ) {
+                                        if let Some(policy) = chance_b2b_policy {
+                                            let perfect_clear = edge.cleared_lines > 0
+                                                && projection.state(child).0 == 0;
+                                            if !b2b_build_edge_allows(
+                                                catalog,
+                                                &mut workspace.reachability,
+                                                board,
+                                                edge,
+                                                perfect_clear,
+                                                policy,
+                                            ) {
+                                                continue;
+                                            }
+                                        }
+                                        try_push_build_edge(&mut edge_scratch, edge)?;
+                                    }
+                                }
+                            }
                         }
                     }
-                }
-            }
-            if piece_language_projection_only
-                && reachability_mode == BuildReachabilityMode::Existing
-            {
-                // The exact one-edge-per-operation branch above emits in
-                // increasing operation-bit order. Before the BFS remap, each
-                // destination is subset | bit, with bit absent from subset:
-                // destinations are strictly increasing, so the sort's first
-                // key already fixes the order and no duplicate can exist.
-                debug_assert!(edge_scratch.windows(2).all(|pair| pair[0].to < pair[1].to));
-            } else {
-                // CountAll and geometry-only/finesse can retain several
-                // candidate realizations for the same operation.
-                edge_scratch.sort_unstable_by_key(|edge| {
-                    (
-                        edge.to,
-                        edge.operation_index,
-                        edge.piece,
-                        edge.rotation,
-                        edge.x,
-                        edge.y,
-                        edge.cleared_lines,
-                    )
-                });
-                edge_scratch.dedup();
-            }
-            #[cfg(any(test, all(feature = "local-search-ab", feature = "parallel")))]
-            let mut selected_operation_mask = 0_u16;
-            for edge in &mut edge_scratch {
-                let child_subset = edge.to as usize;
-                if workspace.graph_reachable_generations[child_subset] != graph_generation
-                    || workspace.graph_subset_node_ids[child_subset] == LEGAL_BOARD_PENDING_NODE
-                {
-                    workspace.graph_reachable_generations[child_subset] = graph_generation;
-                    let child_node = u32::try_from(subset_queue.len()).map_err(|_| {
-                        WasmExactSearchError::InvalidProblem("wasm_build_order_node_index_overflow")
-                    })?;
-                    workspace.graph_subset_node_ids[child_subset] = child_node;
-                    subset_queue.try_reserve(1).map_err(|_| {
+                    if piece_language_projection_only
+                        && reachability_mode == BuildReachabilityMode::Existing
+                    {
+                        // The exact one-edge-per-operation branch above emits in
+                        // increasing operation-bit order. Before the BFS remap, each
+                        // destination is subset | bit, with bit absent from subset:
+                        // destinations are strictly increasing, so the sort's first
+                        // key already fixes the order and no duplicate can exist.
+                        debug_assert!(edge_scratch.windows(2).all(|pair| pair[0].to < pair[1].to));
+                    } else {
+                        // CountAll and geometry-only/finesse can retain several
+                        // candidate realizations for the same operation.
+                        edge_scratch.sort_unstable_by_key(|edge| {
+                            (
+                                edge.to,
+                                edge.operation_index,
+                                edge.piece,
+                                edge.rotation,
+                                edge.x,
+                                edge.y,
+                                edge.cleared_lines,
+                            )
+                        });
+                        edge_scratch.dedup();
+                    }
+                    #[cfg(any(test, all(feature = "local-search-ab", feature = "parallel")))]
+                    let mut selected_operation_mask = 0_u16;
+                    for edge in &mut edge_scratch {
+                        let child_subset = edge.to as usize;
+                        if workspace.graph_reachable_generations[child_subset] != graph_generation
+                            || workspace.graph_subset_node_ids[child_subset]
+                                == LEGAL_BOARD_PENDING_NODE
+                        {
+                            workspace.graph_reachable_generations[child_subset] = graph_generation;
+                            let child_node = u32::try_from(subset_queue.len()).map_err(|_| {
+                                WasmExactSearchError::InvalidProblem(
+                                    "wasm_build_order_node_index_overflow",
+                                )
+                            })?;
+                            workspace.graph_subset_node_ids[child_subset] = child_node;
+                            subset_queue.try_reserve(1).map_err(|_| {
+                                WasmExactSearchError::InvalidProblem(
+                                    "wasm_build_order_queue_storage_unavailable",
+                                )
+                            })?;
+                            if materialize_graph {
+                                debug_assert_eq!(nodes.len(), subset_queue.len());
+                                nodes.try_reserve(1).map_err(|_| {
+                                    WasmExactSearchError::InvalidProblem(
+                                        "wasm_build_order_node_storage_unavailable",
+                                    )
+                                })?;
+                                nodes.push(BuildNode {
+                                    edge_start: 0,
+                                    edge_count: 0,
+                                    piece_edge_start: 0,
+                                    piece_edge_count: 0,
+                                    depth: child_subset.count_ones() as u8,
+                                    live: false,
+                                    accepting: false,
+                                });
+                            }
+                            subset_queue.push(child_subset as u16);
+                        }
+                        if materialize_graph {
+                            edge.to = workspace.graph_subset_node_ids[child_subset];
+                        }
+                        #[cfg(any(test, all(feature = "local-search-ab", feature = "parallel")))]
+                        if !materialize_graph {
+                            selected_operation_mask |= 1_u16 << edge.operation_index;
+                        }
+                    }
+                    #[cfg(any(test, all(feature = "local-search-ab", feature = "parallel")))]
+                    if !materialize_graph {
+                        debug_assert_eq!(allowed_operations.len(), node_index);
+                        allowed_operations.push(selected_operation_mask);
+                        selected_mask_edges += edge_scratch.len();
+                        continue;
+                    }
+                    if !share_piece_edges {
+                        let mut previous_piece_transition = None;
+                        for edge in &edge_scratch {
+                            let key = (edge.to, edge.piece);
+                            if previous_piece_transition != Some(key) {
+                                piece_edges.try_reserve(1).map_err(|_| {
+                                    WasmExactSearchError::InvalidProblem(
+                                        "wasm_build_order_piece_edge_storage_unavailable",
+                                    )
+                                })?;
+                                piece_edges.push(*edge);
+                                previous_piece_transition = Some(key);
+                            }
+                        }
+                    }
+                    edges.try_reserve(edge_scratch.len()).map_err(|_| {
                         WasmExactSearchError::InvalidProblem(
-                            "wasm_build_order_queue_storage_unavailable",
+                            "wasm_build_order_edge_storage_unavailable",
                         )
                     })?;
-                    if materialize_graph {
-                        debug_assert_eq!(nodes.len(), subset_queue.len());
-                        nodes.try_reserve(1).map_err(|_| {
-                            WasmExactSearchError::InvalidProblem(
-                                "wasm_build_order_node_storage_unavailable",
-                            )
-                        })?;
-                        nodes.push(BuildNode {
-                            edge_start: 0,
-                            edge_count: 0,
-                            piece_edge_start: 0,
-                            piece_edge_count: 0,
-                            depth: child_subset.count_ones() as u8,
-                            live: false,
-                            accepting: false,
-                        });
-                    }
-                    subset_queue.push(child_subset as u16);
-                }
-                if materialize_graph {
-                    edge.to = workspace.graph_subset_node_ids[child_subset];
-                }
-                #[cfg(any(test, all(feature = "local-search-ab", feature = "parallel")))]
-                if !materialize_graph {
-                    selected_operation_mask |= 1_u16 << edge.operation_index;
+                    edges.extend_from_slice(&edge_scratch);
+                    nodes[node_index].edge_count = edge_scratch.len() as u32;
+                    nodes[node_index].piece_edge_count = if share_piece_edges {
+                        nodes[node_index].edge_count
+                    } else {
+                        piece_edges.len() as u32 - nodes[node_index].piece_edge_start
+                    };
                 }
             }
-            #[cfg(any(test, all(feature = "local-search-ab", feature = "parallel")))]
-            if !materialize_graph {
-                debug_assert_eq!(allowed_operations.len(), node_index);
-                allowed_operations.push(selected_operation_mask);
-                selected_mask_edges += edge_scratch.len();
-                continue;
-            }
-            if !share_piece_edges {
-                let mut previous_piece_transition = None;
-                for edge in &edge_scratch {
-                    let key = (edge.to, edge.piece);
-                    if previous_piece_transition != Some(key) {
-                        piece_edges.try_reserve(1).map_err(|_| {
-                            WasmExactSearchError::InvalidProblem(
-                                "wasm_build_order_piece_edge_storage_unavailable",
-                            )
-                        })?;
-                        piece_edges.push(*edge);
-                        previous_piece_transition = Some(key);
-                    }
-                }
-            }
-            edges.try_reserve(edge_scratch.len()).map_err(|_| {
-                WasmExactSearchError::InvalidProblem("wasm_build_order_edge_storage_unavailable")
-            })?;
-            edges.extend_from_slice(&edge_scratch);
-            nodes[node_index].edge_count = edge_scratch.len() as u32;
-            nodes[node_index].piece_edge_count = if share_piece_edges {
-                nodes[node_index].edge_count
-            } else {
-                piece_edges.len() as u32 - nodes[node_index].piece_edge_start
-            };
         }
         #[cfg(any(test, feature = "local-search-ab"))]
         super::structural_order::record_movement_clear(movement_metrics);
@@ -6603,6 +7021,7 @@ pub(super) fn finesse_b2b_policy(problem: &SearchProblem) -> Option<BackToBackEd
         .then(|| BackToBackEdgePolicy::new(constraints.spin_profile()))
 }
 
+#[cfg(any(test, feature = "local-search-ab"))]
 fn b2b_build_edge_allows(
     catalog: &GeometryCatalog,
     reachability: &mut ReachabilityWorkspace,
@@ -7065,6 +7484,7 @@ fn t_corner_evidence(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(any(test, feature = "local-search-ab"))]
 fn geometric_build_edge(
     catalog: &GeometryCatalog,
     projection: &mut CandidateProjection,
@@ -7162,6 +7582,7 @@ fn geometric_build_edge_with_reuse(
     ))
 }
 
+#[cfg(any(test, feature = "local-search-ab"))]
 fn projected_line_clear(
     catalog: &GeometryCatalog,
     projection: &mut CandidateProjection,
@@ -7184,6 +7605,7 @@ fn projected_line_clear(
     )
 }
 
+#[cfg(any(test, feature = "local-search-ab"))]
 fn instantiated_geometric_edge(
     child: usize,
     operation_index: usize,
@@ -7544,46 +7966,18 @@ fn first_standard_bag_lookahead(sequence: &[PieceKind]) -> Option<PieceKind> {
     missing.next().is_none().then_some(piece)
 }
 
-fn target_row_for_current_row(height: u8, deleted_rows: u16, current_row: u8) -> Option<u8> {
-    let mut visible_row = 0_u8;
-    for target_row in 0..height {
-        if deleted_rows & (1_u16 << target_row) != 0 {
-            continue;
-        }
-        if visible_row == current_row {
-            return Some(target_row);
-        }
-        visible_row += 1;
-    }
-    None
-}
-
 pub(super) fn merge_deleted_rows(height: u8, previous: u16, current: u16) -> Option<u16> {
-    let mut original = 0_u16;
-    for current_row in 0..height {
-        if current & (1_u16 << current_row) == 0 {
-            continue;
-        }
-        original |= 1_u16 << target_row_for_current_row(height, previous, current_row)?;
-    }
-    Some(previous | original)
+    super::extended_board::merge_deleted_rows(height, u32::from(previous), u32::from(current))
+        .and_then(|rows| u16::try_from(rows).ok())
 }
 
 pub(super) fn place_and_clear(width: u8, height: u8, board: u64) -> (u64, u16, u8) {
-    let row_bits = full_row_mask(width);
-    let mut cleared = 0_u16;
-    let mut compacted = 0_u64;
-    let mut output_row = 0_u8;
-    for input_row in 0..height {
-        let row = (board >> (input_row as usize * width as usize)) & row_bits;
-        if row == row_bits {
-            cleared |= 1_u16 << input_row;
-        } else {
-            compacted |= row << (output_row as usize * width as usize);
-            output_row += 1;
-        }
-    }
-    (compacted, cleared, cleared.count_ones() as u8)
+    let (compacted, cleared, count) = super::candidate_row_projection::place_and_clear(
+        width,
+        height,
+        ExtendedBoard::from_words([board, 0, 0, 0]),
+    );
+    (compacted.words()[0], cleared as u16, count)
 }
 
 pub(super) fn placement_is_grounded(width: u8, board: u64, placement: u64) -> bool {
@@ -7600,28 +7994,13 @@ const fn full_row_mask(width: u8) -> u64 {
 }
 
 pub(super) fn compact_target_board(width: u8, height: u8, board: u64, deleted_rows: u16) -> u64 {
-    let row_bits = full_row_mask(width);
-    let mut compacted = 0_u64;
-    let mut output_row = 0_u8;
-    for target_row in 0..height {
-        if deleted_rows & (1_u16 << target_row) != 0 {
-            continue;
-        }
-        let row = (board >> (target_row as usize * width as usize)) & row_bits;
-        compacted |= row << (output_row as usize * width as usize);
-        output_row += 1;
-    }
-    compacted
-}
-
-fn occupied_rows(width: u8, mut cells: u64) -> u16 {
-    let mut rows = 0_u16;
-    while cells != 0 {
-        let cell = cells.trailing_zeros() as usize;
-        cells &= cells - 1;
-        rows |= 1_u16 << (cell / width as usize);
-    }
-    rows
+    super::candidate_row_projection::compact_rows(
+        width,
+        height,
+        ExtendedBoard::from_words([board, 0, 0, 0]),
+        u32::from(deleted_rows),
+    )
+    .words()[0]
 }
 
 #[cfg(test)]
@@ -8181,6 +8560,86 @@ mod v081_legal_child_admission_tests {
                 assert!(rejected_floating > 0);
             }
         }
+    }
+
+    #[test]
+    fn common_boolean_relation_matches_legacy_first_pose_across_kick_profiles() {
+        let initial = 0x3f0f_83f4;
+        let placements = [
+            (PieceKind::I, 0x00f0_0000),
+            (PieceKind::O, 0x0c03),
+            (PieceKind::T, 0x7008),
+        ];
+        let required = placements.iter().fold(0, |cells, (_, mask)| cells | mask);
+        let catalog =
+            GeometryCatalog::compile_for_required_cells_on_dimensions(10, 3, initial, required)
+                .unwrap();
+        let rows = placements
+            .iter()
+            .map(|&(piece, cells)| catalog.skeleton_id(piece, cells).unwrap())
+            .collect::<Vec<_>>();
+        let candidate = GeometryCandidate::from_rows(&catalog, 0, &rows).unwrap();
+        let mut exact_movement_states = 0;
+        for profile in PROFILES {
+            let problem = problem_for(profile);
+            let run = |legacy| {
+                geometric_edge_reuse::with_mode(legacy, || {
+                    let mut workspace = BuildUpWorkspace::default();
+                    workspace
+                        .reachability
+                        .configure_kick_profile(profile, false);
+                    let mut projection = CandidateProjection::compile(
+                        &catalog,
+                        &candidate,
+                        &mut workspace,
+                        BuildCompletion::ClearToEmpty,
+                    )
+                    .unwrap();
+                    let graph = BuildOrderGraph::build_with_legal_board_admission(
+                        &problem,
+                        &catalog,
+                        &candidate,
+                        &mut projection,
+                        &mut workspace,
+                        true,
+                        BuildCompletion::ClearToEmpty,
+                        None,
+                        BuildReachabilityMode::Existing,
+                        false,
+                        &CandidateMovementProofs::default(),
+                    )
+                    .unwrap();
+                    let nodes = graph
+                        .nodes
+                        .iter()
+                        .map(|node| {
+                            (
+                                node.depth,
+                                node.live,
+                                node.accepting,
+                                node.edge_count,
+                                node.piece_edge_count,
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    (
+                        nodes,
+                        graph.edges,
+                        graph.piece_edges,
+                        graph.reachability_states,
+                    )
+                })
+                .0
+            };
+            let common = run(false);
+            let legacy = run(true);
+            exact_movement_states += common.3;
+            assert_eq!(common, legacy, "{profile:?}");
+        }
+        assert!(
+            exact_movement_states > 0,
+            "fixture exercises exact movement after harddrop misses"
+        );
     }
 
     #[test]

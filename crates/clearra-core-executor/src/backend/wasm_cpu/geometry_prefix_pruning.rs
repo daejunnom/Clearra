@@ -5,68 +5,7 @@
 
 use super::{GeometryCatalog, MAX_BOARD64_PIECES};
 
-/// Each selected operation keeps every positive ILC requirement alternative.
-/// Unselected contributors are optimistically already placed. A completed
-/// target row therefore needs only its selected contributors to be deleted.
-/// Every physical selected subsequence is contained in this closure.
-pub(super) fn selected_prefix_stalls(catalog: &GeometryCatalog, rows: &[u32]) -> bool {
-    let height = usize::from(catalog.height());
-    let width = usize::from(catalog.width());
-    if rows.is_empty()
-        || rows.len() > MAX_BOARD64_PIECES
-        || height == 0
-        || height > 16
-        || width == 0
-        || width * height > 64
-    {
-        return false;
-    }
-    let mut contributors = [0_u16; 16];
-    for (operation, &row_id) in rows.iter().enumerate() {
-        if catalog.try_skeleton(row_id).is_none() {
-            return false;
-        }
-        let mut occupied = catalog.skeleton_occupied_rows(row_id);
-        while occupied != 0 {
-            let row = occupied.trailing_zeros() as usize;
-            occupied &= occupied - 1;
-            contributors[row] |= 1_u16 << operation;
-        }
-    }
-    let target = catalog.initial_board() | catalog.required_cells();
-    let row_mask = u64::MAX >> (64 - width);
-    let mut completed_rows = 0_u16;
-    for row in 0..height {
-        if (target >> (row * width)) & row_mask == row_mask {
-            completed_rows |= 1_u16 << row;
-        }
-    }
-    let all = u16::MAX >> (16 - rows.len());
-    let mut placed = 0_u16;
-    while placed != all {
-        let mut deleted = 0_u16;
-        for (row, contributors) in contributors[..height].iter().copied().enumerate() {
-            if completed_rows & (1 << row) != 0 && contributors & !placed == 0 {
-                deleted |= 1 << row;
-            }
-        }
-        let mut ready = 0_u16;
-        let mut remaining = all & !placed;
-        while remaining != 0 {
-            let operation = remaining.trailing_zeros() as usize;
-            let bit = 1_u16 << operation;
-            remaining &= remaining - 1;
-            if catalog.realization_requirement_is_satisfied(rows[operation], deleted) {
-                ready |= bit;
-            }
-        }
-        if ready == 0 {
-            return true;
-        }
-        placed |= ready;
-    }
-    false
-}
+pub(super) use super::super::prefix_dependency::selected_compact_prefix_stalls as selected_prefix_stalls;
 
 /// Before the first clear every lock has the original row frame. Give all
 /// unselected cells to the initial board and close selected locks under every

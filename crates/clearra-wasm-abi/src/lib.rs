@@ -7,11 +7,12 @@ use std::{
     sync::{Arc, Once},
 };
 
+use clearra_core_executor::backend::GpuSearchWarmupReport;
 use clearra_pc_graph::request::GpuDeviceSelection;
 mod accelerator_exports;
 mod accelerator_peer_exports;
 mod online_pc4_exports;
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(feature = "webgpu-search", target_arch = "wasm32"))]
 use clearra_wasm::prewarm_gpu_search_async;
 #[cfg(feature = "stage-profiling")]
 use clearra_wasm::ExecutorSearchProfileSession;
@@ -19,11 +20,11 @@ use clearra_wasm::{
     serialize_coverage_portfolio_advance_state, serialize_coverage_portfolio_load_advance_state,
     serialize_coverage_portfolio_retained_page, serialize_distributed_final_events,
     serialize_parity_report_exhausted, serialize_parity_report_page,
-    serialize_pc_replay_page_advance, GovernedWasmJson, GpuSearchWarmupReport,
-    PortfolioPageLoadState, ProductPageSourceOwner, ProductPageStore, TilingSolutionPageStore,
-    WasmCommandRuntimeError, WasmDistributedCompletionAdvance, WasmDistributedCompletionSession,
-    WasmDistributedCoordinator, WasmDistributedFallbackReason, WasmDistributedMode,
-    WasmDistributedPreparation, WasmDistributedProducerAdvance, WasmDistributedRequestedBackend,
+    serialize_pc_replay_page_advance, GovernedWasmJson, PortfolioPageLoadState,
+    ProductPageSourceOwner, ProductPageStore, TilingSolutionPageStore, WasmCommandRuntimeError,
+    WasmDistributedCompletionAdvance, WasmDistributedCompletionSession, WasmDistributedCoordinator,
+    WasmDistributedFallbackReason, WasmDistributedMode, WasmDistributedPreparation,
+    WasmDistributedProducerAdvance, WasmDistributedRequestedBackend,
     WasmDistributedVerifierRuntime, WasmHostCapabilities, WasmMinimumParallelWorker,
     WasmWorkerAdvanceStatus, WasmWorkerJobId, WasmWorkerJobRuntime,
 };
@@ -1005,7 +1006,7 @@ pub extern "C" fn clearra_wasm_gpu_warmup_advance() -> i32 {
     })
 }
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(feature = "webgpu-search", target_arch = "wasm32"))]
 fn start_gpu_warmup(device: GpuDeviceSelection, generation: u64) {
     wasm_bindgen_futures::spawn_local(async move {
         let report = prewarm_gpu_search_async(device).await;
@@ -1016,9 +1017,11 @@ fn start_gpu_warmup(device: GpuDeviceSelection, generation: u64) {
     });
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(feature = "webgpu-search"), not(target_arch = "wasm32")))]
 fn start_gpu_warmup(device: GpuDeviceSelection, generation: u64) {
-    let report = clearra_wasm::prewarm_gpu_search(device);
+    // CPU builds retain the stable exports and Core's unavailable report.
+    // Explicit native GPU builds keep the synchronous warmup path.
+    let report = clearra_core_executor::backend::prewarm_gpu_search(device);
     ABI_STATE.with(|state| {
         let mut state = state.borrow_mut();
         state.complete_gpu_warmup(generation, report);
@@ -4890,6 +4893,27 @@ mod tests {
             }
         }
         panic!("legacy worker job did not complete within the bounded advance loop");
+    }
+
+    #[cfg(not(feature = "webgpu-search"))]
+    #[test]
+    fn cpu_artifact_gpu_warmup_reports_unavailable_and_preserves_output_ownership() {
+        reset_abi_state_for_test();
+
+        assert_eq!(clearra_wasm_gpu_warmup_start(-1), ABI_OK);
+        assert_eq!(clearra_wasm_gpu_warmup_advance(), 2);
+        ABI_STATE.with(|state| {
+            let state = state.borrow();
+            assert_eq!(
+                state.output_bytes(),
+                b"connected=false device_index=none session_reused=false unavailable_reason=webgpu_search_not_connected"
+            );
+            assert!(state.output_outstanding);
+            assert!(state.gpu_warmup.is_none());
+        });
+        assert_eq!(clearra_wasm_gpu_warmup_cancel(), ABI_OUTPUT_NOT_RELEASED);
+        assert_eq!(clearra_wasm_output_release(), ABI_OK);
+        assert_eq!(clearra_wasm_gpu_warmup_cancel(), ABI_OK);
     }
 
     #[test]
