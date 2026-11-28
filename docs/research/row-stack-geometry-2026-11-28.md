@@ -2,6 +2,11 @@
 
 Date: 2026-11-28.
 
+**Current status: abandoned experiment.** The user's continuation decision on
+2026-11-28 excludes this generator from further optimization or adoption.
+This file retains the historical experiment and its evidence. Active work is
+documented in [the existing-path cost audit](search-cost-audit-2026-11-28.md).
+
 This note separates the guarantees of the new geometry generator from physical
 verification, supply coverage, and observed execution time. It also records two
 local simplifications whose exactness does not depend on the new generator.
@@ -677,10 +682,9 @@ finite and longer than the cooperative deadline. This diagnostic does not
 export or validate solutions, coverage, or parity even if the backend happens
 to finish before the timer.
 
-**Decision:** retain the row-stack implementation as an explicit research
-prototype. Do not promote it to the default engine or deployment on the basis
-of its asymptotic generator bound. The next algorithmic target is an exact,
-shared representation of deletion conditions and a bounded-cost physical
-certificate, with certification cost and queue semantics included in its
-proof. The proposed laminar condition graph remains unimplemented and does
-not yet establish polynomial-time general PC decision.
+**Historical decision, superseded:** the experiment initially remained an
+opt-in research prototype after its unsuccessful timing comparison. The user
+subsequently abandoned it. Further work evaluates the existing qualified
+paths, their verification and memory costs, and the separate damage/spin
+engines. The proposed laminar condition graph was not implemented and did not
+establish polynomial-time general PC decision.

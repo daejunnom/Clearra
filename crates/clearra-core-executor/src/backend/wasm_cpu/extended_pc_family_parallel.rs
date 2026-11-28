@@ -203,9 +203,32 @@ impl WorkerResult {
             .and_then(|bytes| bytes.checked_add(branch.private_retained_bytes() as u128))
             .and_then(|bytes| bytes.checked_add(growth))
             .ok_or_else(projection_error)?;
-        self.memory_owner()?
-            .ensure(private)
-            .map_err(WasmExactSearchError::resource_admission)?;
+        self.memory_owner()?.ensure(private).map_err(|report| {
+            #[cfg(all(feature = "local-search-ab", not(target_family = "wasm")))]
+            if std::env::var("CLEARRA_EXTENDED_PC_ADMISSION_DIAGNOSTIC").as_deref() == Ok("1") {
+                use std::io::Write as _;
+
+                // The checked growth calculation above already admitted
+                // this multiplication. Diagnostics never alter the claim.
+                let digest_payload_bytes = (count as u128) * size_of::<u64>() as u128;
+                let _ = writeln!(
+                    std::io::stderr().lock(),
+                    concat!(
+                        "{{\"schema\":\"clearra.extended-pc-admission-diagnostic.v1\",",
+                        "\"stage\":\"branch-digest-preallocation\",",
+                        "\"first_ordinal\":{},\"candidate_count\":{},",
+                        "\"digest_payload_bytes\":{},\"auxiliary_growth_bytes\":{},",
+                        "\"private_claim_bytes\":{}}}"
+                    ),
+                    branch.first_ordinal,
+                    branch.candidate_count,
+                    digest_payload_bytes,
+                    growth,
+                    private,
+                );
+            }
+            WasmExactSearchError::resource_admission(report)
+        })?;
         self.digests.try_reserve(1).map_err(|_| storage_error())?;
         let mut values = Vec::new();
         values
